@@ -34,6 +34,18 @@ eframe = { version = "0.36", default-features = false, features = [
 rfd = "0.17"
 image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 tempfile = "3"
+# HTTPS for GitHub's API (open pull requests), behind parterre-core's `github` feature: rustls
+# with ring, checking certificates against the operating system's trust store (so it works
+# behind proxies that inspect TLS with their own certificate authority), and no system TLS
+# library. Not ureq's default `rustls` feature, which bundles Mozilla's roots (webpki-roots,
+# CDLA-Permissive-2.0, a licence packaging/about.toml doesn't accept); `_ring` is how ureq
+# picks ring without them. About 20 crates and 2 MB.
+ureq = { version = "3.4", default-features = false, features = [
+    "rustls-no-provider",
+    "_ring",
+    "platform-verifier",
+] }
+serde_json = "1"
 
 [workspace.lints.rust]
 # "deny", not "forbid", so the one Windows console call in crates/parterre/src/console.rs can

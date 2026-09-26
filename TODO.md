@@ -5,7 +5,7 @@
 _Decisions I made on my own that you may want to overrule. Try them with `parterre` on
 `~/Source/repos/Cosmo/Apps`; most are one click in the toolbar or menus._
 
-_Numbers are never changed or reused, even after an item is deleted. Next number: 25._
+_Numbers are never changed or reused, even after an item is deleted. Next number: 26._
 
 1. **Default look: "Modern" or "Classic"?** *Settings → Appearance → Style* switches.
    - **Classic** is TortoiseGit: straight edges, every edge drawn separately, rows as wide as
@@ -322,6 +322,86 @@ _Numbers are never changed or reused, even after an item is deleted. Next number
     ([#27](https://github.com/aquamoth/parterre/issues/27)); the log query is shaped so these
     can be added as new fields and callers. Which searches, and when?
 
+25. **Pull requests on GitHub, slice 1** (research §12 and §14). Not in TortoiseGit. Tried on
+    a commits-only clone of `cli/cli`: 63 open pull requests, 25 of them from its own branches,
+    shown; the 38 from forks need slice 2. Calls you may want to overrule:
+    - **Asked for as t3code does** (your call of 2026-09-26, after looking at how t3code
+      gets its pull requests), so that many users don't weigh on GitHub:
+      - **Only signed in.** With the token of a signed-in `gh` (`gh auth token`), or not at
+        all: without one, GitHub is never asked. `GH_TOKEN` and `git credential fill` (§6) are
+        left for later.
+      - **Per branch, only fetched ones.** One GraphQL request per 100 branches of `origin`
+        fetched here, with a `pullRequests(headRefName:)` connection of 100 per branch on
+        `origin` and on its parent at once, and only the fields shown. As in t3code (`gh pr
+        list --head`), the branch name is matched by GitHub and the head repository here,
+        since another fork's `main` isn't ours. Only a fetched branch's pull request can be
+        shown, so nothing showable is missed. No branch fetched: no request. Your fork of
+        t3code: 1 request, 0.6 s, 1 point; asking the parent for all its open pull requests by
+        REST took 15 requests, 30 MB and 23 s. `cli/cli` (255 branches): 3 requests.
+      - **Cached per repository** for a minute when it had pull requests, five when not, as
+        t3code. Asked again only after that, and only when the repository is opened again
+        or its refs change (a fetch, a push). F5 and turning them on always ask. No polling
+        (t3code polls every 30 s).
+      - **Backing off after failures,** 20 s doubling to 15 min, keeping the last list shown.
+        The button's tooltip says what went wrong last.
+      - **A budget:** once fewer than a tenth of the hour's points are left (t3code's
+        reserve), or GitHub says to wait (`Retry-After`), nothing is asked until the limit
+        resets, for any repository.
+    - **On by default, and quiet** (your call of 2026-09-26): nothing in the status bar
+      unless you asked. §12 had the button greyed out until the list had loaded; instead:
+      - **`origin` not on GitHub** (git alone tells): the button and ☰ → *Show → Pull
+        requests* are greyed out, with a tooltip saying why. Never a message.
+      - **`gh` missing or not signed in:** on by default they fail quietly, and the button
+        looks off, as nothing can be shown; its tooltip says why. They appear by themselves
+        once `gh` is signed in, at the next opening or ref change.
+      - **You turn them on** (the button, the menu or *Settings → Graph*) **and it fails:** a
+        dialog says what is wrong and what to do: for a missing `gh` with a button to its
+        installation page, for signing in with one to copy `gh auth login`. It doesn't rely
+        on the status bar, which may be hidden. On success the status bar counts them.
+      - Loads parterre makes by itself (opening, refs changing, F5) never write to the
+        status bar, even on success; the tooltip keeps the last error.
+
+      Settings saved while they were off by default keep them off. On for one repository is
+      on for all, like the other settings. `--export` never asks GitHub.
+    - **Which repository:** `origin` only, as §12 says; gh's `gh-resolved` and remote ranking
+      (§7) aren't used. A renamed repository is followed under its new name.
+    - **Base branch shown** means: a remote-tracking branch of the base branch, in any remote
+      pointing at the pull request's repository, or a local branch whose upstream that is.
+      So with remote branches hidden, `main` tracking `origin/main` still counts.
+      A fork's own pull requests into its parent have their base branch in the parent, so
+      they show only if a remote (such as `upstream`) points at the parent: a clone with only
+      `origin` doesn't show them. Treating `origin/main` as the parent's `main` would be a
+      guess.
+    - **The label:** a row below the node's refs with the number right-aligned (your request
+      of 2026-09-26) after the pull-request glyph, pale blue, drafts pale grey (both
+      lightness-inverted in the dark theme). Hovering underlines the number, as a link. A
+      commit whose only label is a pull request shows no hash, as with a ref. Several on one
+      commit get a row each.
+    - **Clicking the number opens the pull request** and also selects the node; Ctrl or Shift
+      clicks only select, and a double-click opens it once and no log. Hovering shows a hand
+      cursor and the title, author, draft state and `branch into base` (`owner:branch` for a
+      fork's). The node menu gets *Open pull request #N* under *Show log*, greyed out on
+      nodes without one while pull requests are shown.
+    - **The browser** is started with `xdg-open`, `open` or `explorer.exe`, as §14 says, and
+      only for `https://github.com/` pages that parterre builds itself from the repository
+      and number (not the API's `html_url`). Not tried by hand on any platform.
+    - **Not in find or the log window:** find doesn't match pull requests' numbers or titles,
+      and the log shows no pull requests. Exports (SVG, PNG, WebP) draw the labels as shown,
+      glyph included.
+    - **Cost:** `ureq` with rustls and ring, plus `serde_json`: 19 crates on Linux (20 on
+      Windows, 23 on macOS) and 2.0 MB (the stripped Linux binary goes from 13.4 to 15.5 MB).
+      ureq is behind the `github` cargo feature, on by default; without it the button stays,
+      and loading says the build has no GitHub support. ring compiles C and assembly, so building
+      parterre (`cargo install` too) now needs a C compiler for the target: there already on
+      the CI runners, and on Linux almost always; the Windows cross-check from Linux needs
+      MinGW-w64 or `--no-default-features` (`docs/building.md`).
+    - **Certificates come from the system** (`rustls-platform-verifier`), not from Mozilla's
+      list bundled in, as ureq does by default. Same size, and it works behind company
+      proxies that inspect TLS with their own certificate authority. The bundled list is
+      licensed CDLA-Permissive-2.0, which `packaging/about.toml` doesn't accept. That file
+      now lists the release targets, as the platform verifier needs the list on wasm32 only.
+      Only tried on Linux.
+
 ## Planned
 
 - [ ] Reopen a repository at the zoom and position it last had, stored per repository like
@@ -385,11 +465,28 @@ _Numbers are never changed or reused, even after an item is deleted. Next number
       a bare binary, which gets the generic icon.
 - [ ] Open GitHub PRs in the graph (`docs/research/github-forks-and-pull-requests.md`, §12,
       §14). TortoiseGit has no such feature.
-  - [ ] Slice 1: PR-icon tags on nodes whose commit is a PR head, opening the PR in the browser;
+  - [x] Slice 1: PR-icon tags on nodes whose commit is a PR head, opening the PR in the browser;
         a toolbar toggle, disabled without a GitHub connection; only PRs of `origin` (plus
         the fork's own PRs into its parent) whose base branch is visible. No fetching.
   - [ ] Slice 2: fetch other PR heads commits-only into a private cache; greyed-out nodes,
         dashed edges.
+  - [ ] Low priority: check slice 1 by hand on macOS and Windows (only Linux was tried).
+        What is drawn is the same everywhere (egui draws it all); what runs outside it isn't:
+    - **macOS, likely a bug:** started from the Dock or Finder, parterre doesn't get the
+      shell's `PATH`, so a Homebrew `gh` (`/opt/homebrew/bin`, `/usr/local/bin` on Intel)
+      isn't found and pull requests say "GitHub CLI not found". Likely fix: also look in
+      those folders, as `git/program.rs` does for Git for Windows. Check: start from the
+      Dock with `gh` signed in, see the labels.
+    - **Windows:** no console window flashing when `gh auth token` runs (`CREATE_NO_WINDOW`
+      is set); a parterre started before `gh` was installed keeps the old `PATH` (the same
+      case `git/program.rs` handles for git); started from the Start menu and from Explorer's
+      *Revision Graph*.
+    - **Both:** clicking a number opens the browser (`open`, `explorer.exe`), and GitHub's
+      certificate is accepted through the system's store (Keychain, schannel) by
+      `rustls-platform-verifier`.
+  - [ ] Later, only when requested: pull requests of Azure DevOps origins. Findings and
+        estimate (about the core half of slice 1, no new crates; sign in through Git
+        Credential Manager with `git credential fill`): the research doc, §15.
 - [ ] Menus that overflow the window on Windows, like TortoiseGit's native ones: each menu (and
       submenu) as a borderless egui viewport placed in screen coordinates, kept on the monitor
       by sliding up from its bottom edge. Needs a Windows agent to build and try it; watch
@@ -422,7 +519,8 @@ _Numbers are never changed or reused, even after an item is deleted. Next number
 - [x] Draggable nodes with spider-web physics, in three models. The net's shape minimises
       spring and anchor energy over displacements; only the dragged node's neighbourhood is
       simulated. Pinning and reset.
-- [x] Windows type-check (`cargo check --target x86_64-pc-windows-gnu`).
+- [x] Windows type-check (`cargo check --target x86_64-pc-windows-gnu --no-default-features`;
+      with the `github` feature it needs MinGW-w64, see `docs/building.md`).
 - [x] Native Windows build (MSVC) with a statically linked C runtime; tests, clippy and
       screenshots pass on Windows.
 - [x] Terminal output from the Windows release build: attach to the parent console, release it
@@ -526,6 +624,9 @@ _Numbers are never changed or reused, even after an item is deleted. Next number
       and the drag net's neighbour lists are stored flat, which took the 100k-commit
       all-commits view from 900 to 740 MB and its layout from about 3 s to 2 s. What is left
       is mostly the drag net (about 170 bytes for each of 1.6M particles); question 11.
+- [x] Open pull requests on GitHub as labels on their head commits, slice 1 (question 25):
+      a toolbar toggle (☰ → *Show* and *Settings → Graph* too), click or the node menu to open
+      one in the browser, `--pull-requests`. Only commits already fetched; no fetching yet.
 - [x] PNG and WebP export (question 23): ☰ → *Export* → *PNG…* or *WebP…*, and
       `--export out.png` or `out.webp` (with `--zoom`). Drawn by the window's own painting
       code, rasterised without a GPU, so labels look as on screen. Every export now uses the

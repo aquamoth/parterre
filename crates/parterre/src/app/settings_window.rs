@@ -254,6 +254,11 @@ impl ParterreApp {
                     "Refs outside heads, remotes and tags, e.g. refs/pull/* or tool checkpoints.",
                     &mut s.graph.show_other_refs,
                 );
+                rows.switch(
+                    "Pull requests",
+                    super::toolbar::PULL_REQUESTS_TIP,
+                    &mut s.graph.show_pull_requests,
+                );
                 let tags = s.graph.show_tags;
                 rows.row(
                     "Tags make nodes",

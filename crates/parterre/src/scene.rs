@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use eframe::egui::{Color32, FontId, Pos2, Rect, Vec2, pos2, vec2};
+use parterre_core::forge::{PullRequest, PullRequests};
 use parterre_core::layout::{self, Layout, LayoutEdge, LayoutInput, LayoutOptions, Point};
 use parterre_core::physics::{DragModel, Net};
 use parterre_core::revgraph::{self, RevGraph};
@@ -20,13 +21,24 @@ pub const CORNER_RADIUS: f32 = 6.0;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowKind {
     Hash,
-    Ref { kind: RefKind, head: bool },
+    Ref {
+        kind: RefKind,
+        head: bool,
+    },
+    /// An open pull request whose head this commit is: [`Scene::pull_requests`]`[index]`. Its
+    /// label is the number, drawn after the pull-request glyph.
+    PullRequest {
+        index: usize,
+        draft: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub struct Row {
     pub label: String,
     pub kind: RowKind,
+    /// The label's width at 100%.
+    pub width: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +57,8 @@ pub struct Scene {
     pub visuals: Vec<NodeVisual>,
     pub net: Net,
     pub row_height: f32,
+    /// The open pull requests that may label nodes (see [`RowKind::PullRequest`]).
+    pub pull_requests: Vec<PullRequest>,
 }
 
 /// Everything needed to lay a scene out, prepared on the UI thread (which owns the fonts);
@@ -57,6 +71,7 @@ pub struct SceneInput {
     input: LayoutInput,
     options: LayoutOptions,
     row_height: f32,
+    pull_requests: Vec<PullRequest>,
 }
 
 impl SceneInput {
@@ -70,20 +85,29 @@ impl SceneInput {
             visuals: self.visuals,
             net,
             row_height: self.row_height,
+            pull_requests: self.pull_requests,
         }
     }
 }
 
 impl Scene {
-    /// Builds the graph for the current settings and measures its nodes. `text_width`
-    /// measures a string at [`FONT_SIZE`]; `text_height` is the height of one line of text.
+    /// Builds the graph for the current settings, with `pull_requests` if they are shown, and
+    /// measures its nodes. `text_width` measures a string at [`FONT_SIZE`]; `text_height` is the
+    /// height of one line of text.
     pub fn prepare(
         repo: &Arc<Repo>,
         settings: &Settings,
+        pull_requests: Option<&PullRequests>,
         text_width: &mut dyn FnMut(&str) -> f32,
         text_height: f32,
     ) -> SceneInput {
-        let graph = revgraph::build(repo, &settings.graph);
+        let (heads, pull_requests): (Vec<_>, Vec<_>) = pull_requests
+            .map(|p| p.heads(repo))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(head, pr)| (head, pr.clone()))
+            .unzip();
+        let graph = revgraph::build_with_pull_requests(repo, &settings.graph, &heads);
 
         let row_height = text_height + 2.0 * MARGIN_Y;
         // Commits without refs show their hash as long as git abbreviates it in this
@@ -94,30 +118,38 @@ impl Scene {
             .nodes
             .iter()
             .map(|node| {
-                let rows: Vec<Row> = if node.refs.is_empty() {
-                    vec![Row {
+                let refs = node.refs.iter().map(|&i| {
+                    let r = &repo.refs[i];
+                    Row {
+                        label: r.name.clone(),
+                        kind: RowKind::Ref {
+                            kind: r.kind,
+                            head: r.is_head,
+                        },
+                        width: 0.0,
+                    }
+                });
+                let pulls = node.pull_requests.iter().map(|&index| Row {
+                    label: pull_requests[index].number.to_string(),
+                    kind: RowKind::PullRequest {
+                        index,
+                        draft: pull_requests[index].draft,
+                    },
+                    width: 0.0,
+                });
+                let mut rows: Vec<Row> = refs.chain(pulls).collect();
+                // Like a ref, a pull request stands in for the hash.
+                if rows.is_empty() {
+                    rows.push(Row {
                         label: repo.commit(node.commit).oid.short(repo.abbrev_len),
                         kind: RowKind::Hash,
-                    }]
-                } else {
-                    node.refs
-                        .iter()
-                        .map(|&i| {
-                            let r = &repo.refs[i];
-                            Row {
-                                label: r.name.clone(),
-                                kind: RowKind::Ref {
-                                    kind: r.kind,
-                                    head: r.is_head,
-                                },
-                            }
-                        })
-                        .collect()
-                };
-                let widest = rows
-                    .iter()
-                    .map(|r| text_width(&r.label))
-                    .fold(hash_width, f32::max);
+                        width: 0.0,
+                    });
+                }
+                for row in &mut rows {
+                    row.width = text_width(&row.label);
+                }
+                let widest = rows.iter().map(|r| r.width).fold(hash_width, f32::max);
                 let size = vec2(widest + 2.0 * MARGIN_X, row_height * rows.len() as f32);
                 NodeVisual { rows, size }
             })
@@ -153,6 +185,7 @@ impl Scene {
             input,
             options: settings.layout.clone(),
             row_height,
+            pull_requests,
         }
     }
 
@@ -172,7 +205,7 @@ impl Scene {
                     .size()
                     .x
             };
-            Scene::prepare(repo, settings, &mut width, text_height)
+            Scene::prepare(repo, settings, None, &mut width, text_height)
         });
         input.lay_out()
     }
@@ -189,6 +222,22 @@ impl Scene {
     /// Current box of a node in world coordinates.
     pub fn node_rect(&self, node: usize) -> Rect {
         Rect::from_center_size(self.node_center(node), self.visuals[node].size)
+    }
+
+    /// The row of `node` at a world position inside its box.
+    pub fn row_at(&self, node: usize, world: Pos2) -> Option<&Row> {
+        let row = (world.y - self.node_rect(node).min.y) / self.row_height;
+        self.visuals[node].rows.get(row.max(0.0) as usize)
+    }
+
+    /// The pull request (an index into [`Scene::pull_requests`]) whose label is at a world
+    /// position, if any.
+    pub fn pull_request_at(&self, world: Pos2) -> Option<usize> {
+        let node = self.node_at(world)?;
+        match self.row_at(node, world)?.kind {
+            RowKind::PullRequest { index, .. } => Some(index),
+            _ => None,
+        }
     }
 
     /// Topmost node under a world position.
@@ -239,6 +288,7 @@ pub fn to_point(p: Pos2) -> Point {
 
 #[cfg(test)]
 mod tests {
+    use parterre_core::forge::{PullRequest, PullRequests, Remote};
     use parterre_core::{Commit, CommitIx, Head, Oid};
 
     use super::*;
@@ -267,6 +317,7 @@ mod tests {
         let input = Scene::prepare(
             &Arc::new(repo),
             &Settings::default(),
+            None,
             &mut |s| s.len() as f32,
             10.0,
         );
@@ -275,5 +326,102 @@ mod tests {
         assert_eq!(visual.rows[0].label, "abcdef0123ab");
         // The box is sized for that many digits.
         assert_eq!(visual.size.x, 12.0 + 2.0 * MARGIN_X);
+    }
+
+    #[test]
+    fn pull_requests_are_rows_below_the_refs() {
+        let commit = |n: u8, parents: Vec<CommitIx>| Commit {
+            oid: Oid::from_hex(&format!("{n:02x}").repeat(20)).unwrap(),
+            parents,
+            truncated: false,
+            empty_tree: false,
+            author_name: String::new(),
+            author_email: String::new(),
+            author_time: 0,
+            author_date: String::new(),
+            commit_time: n.into(),
+            subject: String::new(),
+        };
+        let git_ref = |full_name: &str, target: u32| {
+            let (kind, name) = parterre_core::git::classify_ref(full_name);
+            parterre_core::GitRef {
+                full_name: full_name.into(),
+                name,
+                kind,
+                target: CommitIx(target),
+                annotated: false,
+                is_head: false,
+            }
+        };
+        // Commit 2 (origin/main) is the child of 1, the child of 0.
+        let repo = Arc::new(Repo::new(
+            "/x".into(),
+            vec![
+                commit(2, vec![CommitIx(1)]),
+                commit(1, vec![CommitIx(2)]),
+                commit(0, Vec::new()),
+            ],
+            vec![git_ref("refs/remotes/origin/main", 0)],
+            Head::Detached(CommitIx(0)),
+        ));
+        let pull_request = |number: u64, head: u8, draft: bool| PullRequest {
+            number,
+            title: String::new(),
+            author: String::new(),
+            draft,
+            head: Oid::from_hex(&format!("{head:02x}").repeat(20)).unwrap(),
+            head_branch: "topic".into(),
+            head_repo: None,
+            base_branch: "main".into(),
+            base_repo: "o/r".into(),
+            url: String::new(),
+        };
+        let prs = PullRequests {
+            list: vec![pull_request(12, 2, false), pull_request(9, 1, true)],
+            remotes: vec![Remote {
+                name: "origin".into(),
+                repo: "o/r".into(),
+            }],
+            upstreams: Default::default(),
+        };
+        let mut settings = Settings::default();
+        settings.graph.show_pull_requests = true;
+        let input = Scene::prepare(&repo, &settings, Some(&prs), &mut |s| s.len() as f32, 10.0);
+        let rows = |i: usize| -> Vec<(String, RowKind)> {
+            input.visuals[i]
+                .rows
+                .iter()
+                .map(|r| (r.label.clone(), r.kind.clone()))
+                .collect()
+        };
+        let pr_row =
+            |number: &str, index, draft| (number.to_owned(), RowKind::PullRequest { index, draft });
+        // The ref first, then the pull request.
+        assert_eq!(
+            rows(0),
+            [
+                (
+                    "origin/main".to_owned(),
+                    RowKind::Ref {
+                        kind: RefKind::RemoteBranch,
+                        head: false
+                    }
+                ),
+                pr_row("12", 0, false)
+            ]
+        );
+        // A commit with no refs shows the pull request instead of its hash.
+        assert_eq!(rows(1), [pr_row("9", 1, true)]);
+        assert_eq!(input.pull_requests.len(), 2);
+
+        // Turned off, nothing of them shows.
+        settings.graph.show_pull_requests = false;
+        let input = Scene::prepare(&repo, &settings, Some(&prs), &mut |s| s.len() as f32, 10.0);
+        assert_eq!(input.visuals.len(), 2);
+        assert!(input.visuals.iter().all(|v| {
+            v.rows
+                .iter()
+                .all(|r| !matches!(r.kind, RowKind::PullRequest { .. }))
+        }));
     }
 }

@@ -21,6 +21,16 @@ accepted = [
     "Ubuntu-font-1.0",
 ]
 
+# The targets releases are built for (.github/workflows/release.yml); add any new one here.
+# Without the list, crates only other targets use would be listed too, and their licences
+# checked: rustls-platform-verifier needs webpki-root-certs (CDLA-Permissive-2.0) on wasm32.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+
 # Our own crates are covered by LICENSE and NOTICE. cargo-about skips workspace crates that
 # may only be published to the registries listed here, and ours say `publish = ["crates-io"]`.
 private = { ignore = true, registries = ["crates-io"] }

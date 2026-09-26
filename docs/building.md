@@ -55,11 +55,13 @@ tools. Its bundled `dlltool` needs an assembler (`as.exe`) that the toolchain do
 `windows-link` always uses `raw-dylib`, so the build fails with
 `error calling dlltool` / `CreateProcess` unless a full MinGW-w64 is on `PATH`.
 
-Cross-checking from Linux works without extra tools:
+Cross-checking from Linux works without extra tools once the `github` feature is left out:
+its TLS library, ring, compiles C for the target, which needs MinGW-w64's headers
+(`sudo apt install mingw-w64` for a check with it).
 
 ```sh
 rustup target add x86_64-pc-windows-gnu
-cargo check --workspace --target x86_64-pc-windows-gnu
+cargo check --workspace --target x86_64-pc-windows-gnu --no-default-features
 ```
 
 Producing a Windows `.exe` from Linux needs a linker. Options: `sudo apt install mingw-w64`

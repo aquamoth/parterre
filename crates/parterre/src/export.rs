@@ -8,12 +8,14 @@ use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, TextureId, Vec2, Vie
 
 use crate::raster::{self, PixelRect};
 use crate::render::{
-    ARROW_LEN, Marks, arrowhead_points, edge_path, node_rows, paint_scene, row_colors,
+    ARROW_LEN, Marks, arrowhead_points, edge_path, node_rows, paint_scene, pull_request_label,
+    row_colors,
 };
-use crate::scene::{CORNER_RADIUS, FONT_SIZE, MARGIN_X, Scene};
+use crate::scene::{CORNER_RADIUS, FONT_SIZE, MARGIN_X, RowKind, Scene};
 use crate::settings::Settings;
 use crate::theme::Palette;
 use crate::view::{MAX_ZOOM, MIN_ZOOM, View};
+use parterre_core::glyphs::{self, Glyph, Part};
 
 /// What a file is written as, chosen by its extension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,10 +166,19 @@ pub fn to_svg(scene: &Scene, settings: &Settings, palette: &Palette) -> String {
                 hex(fill),
                 hex(border)
             );
+            // Pull requests' numbers are right-aligned, after their glyph.
+            let (x, anchor) = match row.kind {
+                RowKind::PullRequest { .. } => {
+                    let (end, icon) = pull_request_label(row_rect, row.width, 1.0);
+                    svg.push_str(&svg_glyph(glyphs::PULL_REQUEST, icon, text));
+                    (end.x, "end")
+                }
+                _ => (row_rect.min.x + MARGIN_X, "start"),
+            };
             let _ = writeln!(
                 svg,
-                r#"<text x="{:.1}" y="{:.1}" dominant-baseline="central" fill="{}">{}</text>"#,
-                row_rect.min.x + MARGIN_X,
+                r#"<text x="{:.1}" y="{:.1}" text-anchor="{anchor}" dominant-baseline="central" fill="{}">{}</text>"#,
+                x,
                 row_rect.center().y,
                 hex(text),
                 escape(&row.label)
@@ -374,6 +385,49 @@ fn rounded_rect(r: Rect, c: CornerRadius) -> String {
     )
 }
 
+/// A toolbar glyph drawn into `rect` in `color`, as an SVG group. Its paths are SVG path data
+/// already.
+fn svg_glyph(glyph: Glyph, rect: Rect, color: Color32) -> String {
+    let color = hex(color);
+    let mut g = format!(
+        r#"<g transform="translate({:.1} {:.1}) scale({:.3})" fill="none" stroke="{color}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round">"#,
+        rect.min.x,
+        rect.min.y,
+        rect.width() / glyphs::SIZE,
+        glyphs::STROKE,
+    );
+    for part in glyph {
+        let _ = match *part {
+            Part::Path(d) => write!(g, r#"<path d="{d}"/>"#),
+            Part::Circle {
+                center: [x, y],
+                radius,
+                filled,
+            } => {
+                let fill = if filled { color.as_str() } else { "none" };
+                write!(
+                    g,
+                    r#"<circle cx="{x}" cy="{y}" r="{radius}" fill="{fill}"/>"#
+                )
+            }
+            Part::Rect {
+                min: [x, y],
+                size: [w, h],
+                radius,
+                filled,
+            } => {
+                let fill = if filled { color.as_str() } else { "none" };
+                write!(
+                    g,
+                    r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{radius}" fill="{fill}"/>"#
+                )
+            }
+        };
+    }
+    g.push_str("</g>\n");
+    g
+}
+
 fn hex(c: Color32) -> String {
     format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
 }
@@ -392,6 +446,16 @@ mod tests {
     #[test]
     fn escapes_markup() {
         assert_eq!(escape("a<b>&\"c\""), "a&lt;b&gt;&amp;&quot;c&quot;");
+    }
+
+    #[test]
+    fn glyphs_are_svg_groups() {
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::splat(12.0));
+        let g = svg_glyph(glyphs::PULL_REQUEST, rect, Color32::BLACK);
+        assert!(g.starts_with(r#"<g transform="translate(10.0 20.0) scale(0.500)""#));
+        assert!(g.contains(r#"<circle cx="5" cy="6" r="3" fill="none"/>"#));
+        assert!(g.contains(r#"<path d="M5 9v12"/>"#));
+        assert!(g.ends_with("</g>\n"));
     }
 
     #[test]

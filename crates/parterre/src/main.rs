@@ -5,6 +5,7 @@
 
 mod app;
 mod automation;
+mod browser;
 mod console;
 mod export;
 mod file_dialog;
@@ -93,6 +94,11 @@ struct Cli {
     /// Hide tags.
     #[arg(long)]
     no_tags: bool,
+
+    /// Show open pull requests from GitHub on the commits they propose, even if turned off in
+    /// the settings (needs a signed-in gh; not with --export).
+    #[arg(long)]
+    pull_requests: bool,
 
     /// Colour theme.
     #[arg(long, value_enum)]
@@ -417,6 +423,9 @@ fn apply_cli(cli: &Cli, s: &mut settings::Settings) {
     }
     if cli.no_tags {
         s.graph.show_tags = false;
+    }
+    if cli.pull_requests {
+        s.graph.show_pull_requests = true;
     }
     if let Some(mode) = cli.drag_mode {
         s.net.model = match mode {

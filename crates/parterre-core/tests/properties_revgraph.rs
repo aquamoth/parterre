@@ -4,7 +4,7 @@
 
 use parterre_core::layout::{self, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking};
 use parterre_core::pattern::BranchPatterns;
-use parterre_core::revgraph::{self, GraphOptions, Simplification};
+use parterre_core::revgraph::{self, GraphOptions, PullRequestHead, Simplification};
 use parterre_core::{Commit, CommitIx, GitRef, Head, Oid, RefKind, Repo};
 use std::collections::HashSet;
 
@@ -165,6 +165,7 @@ fn all_options() -> Vec<GraphOptions> {
                 show_other_refs: bits & 32 != 0,
                 first_parent_only: bits & 64 != 0,
                 current_branch_only: bits % 11 == 3,
+                show_pull_requests: bits % 4 != 1,
                 ref_filter: match bits % 5 {
                     0 => "r1".into(),
                     1 => "r2, r3".into(),
@@ -312,6 +313,47 @@ fn revgraph_invariants_random() {
             }
             if opts.simplification == Simplification::AllCommits {
                 assert_eq!(g.nodes.len(), g.visible_commits, "{what}");
+            }
+            // pull requests: a head is labelled exactly when it is visible and one of its base
+            // refs is shown; they change nothing else about what is visible
+            if n > 0 {
+                let mut pr_rng = Rng(0x5EED_0000 + (iter * 1000 + oi) as u64);
+                let heads: Vec<PullRequestHead> = (0..pr_rng.below(5))
+                    .map(|_| PullRequestHead {
+                        commit: CommitIx(pr_rng.below(n as u64) as u32),
+                        bases: (0..repo.refs.len())
+                            .filter(|_| pr_rng.chance(0.3))
+                            .collect(),
+                    })
+                    .collect();
+                let gp = revgraph::build_with_pull_requests(&repo, opts, &heads);
+                assert_eq!(gp.visible_commits, g.visible_commits, "{what}");
+                let mut seen = HashSet::new();
+                for node in &gp.nodes {
+                    assert!(seen.insert(node.commit), "{what}: duplicate node");
+                }
+                for e in &gp.edges {
+                    let (cc, pc) = (
+                        gp.nodes[e.child as usize].commit.ix(),
+                        gp.nodes[e.parent as usize].commit.ix(),
+                    );
+                    assert!(anc[cc].contains(&pc), "{what}: edge to non-ancestor");
+                }
+                for (k, h) in heads.iter().enumerate() {
+                    let base_shown = h.bases.iter().any(|&i| {
+                        let r = &repo.refs[i];
+                        (opts.shows(r.kind) || r.is_head) && visible[r.target.ix()]
+                    });
+                    let labelled = opts.show_pull_requests && visible[h.commit.ix()] && base_shown;
+                    let node = gp.node_of(h.commit);
+                    let has = node.is_some_and(|x| gp.nodes[x as usize].pull_requests.contains(&k));
+                    assert_eq!(has, labelled, "{what}: pull request {k} {h:?}");
+                }
+                let labels: usize = gp.nodes.iter().map(|x| x.pull_requests.len()).sum();
+                assert!(labels <= heads.len(), "{what}");
+                if !opts.show_pull_requests {
+                    assert_eq!(gp.nodes.len(), g.nodes.len(), "{what}");
+                }
             }
             // layout
             if oi % 13 == 0 {

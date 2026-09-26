@@ -9,6 +9,8 @@ use crate::scene::{CORNER_RADIUS, FONT_SIZE, MARGIN_X, Row, RowKind, Scene, to_p
 use crate::settings::{Arrows, EdgeStyle, Settings};
 use crate::theme::{Palette, text_on};
 use crate::view::View;
+use crate::widgets;
+use parterre_core::glyphs;
 
 /// Nodes and edges that get special emphasis.
 #[derive(Clone, Debug, Default)]
@@ -20,6 +22,9 @@ pub struct Marks {
     /// Per node: would move along if the hovered node were dragged.
     pub preview: Vec<bool>,
     pub selected_edge: Option<usize>,
+    /// The pull request (an index into [`Scene::pull_requests`]) whose label is under the
+    /// pointer: its number is underlined, as a link.
+    pub hovered_pull_request: Option<usize>,
     /// Per node: matches the current search.
     pub search_hits: Vec<bool>,
 }
@@ -112,7 +117,19 @@ pub fn paint_scene(
                 Stroke::new(1.0, border),
                 StrokeKind::Inside,
             );
-            if draw_text {
+            if !draw_text {
+                continue;
+            }
+            if let RowKind::PullRequest { index, .. } = row.kind {
+                let (end, icon) = pull_request_label(row_rect, row.width, zoom);
+                let number =
+                    painter.text(end, Align2::RIGHT_CENTER, &row.label, font.clone(), text);
+                widgets::paint_glyph(painter, icon, glyphs::PULL_REQUEST, text);
+                if marks.hovered_pull_request == Some(index) {
+                    let y = number.bottom() - zoom;
+                    painter.hline(number.x_range(), y, Stroke::new(zoom.max(1.0), text));
+                }
+            } else {
                 painter.text(
                     Pos2::new(row_rect.min.x + MARGIN_X * zoom, row_rect.center().y),
                     Align2::LEFT_CENTER,
@@ -470,14 +487,40 @@ pub fn node_rows(
     })
 }
 
+/// Space between the pull-request glyph and the number, at 100%.
+const PULL_REQUEST_GAP: f32 = 4.0;
+
+/// Where a pull request's label goes in its row, for a number `width` wide at 100%: the right
+/// end of the number, level with the row's middle, and the glyph's box just left of it. The
+/// number is right-aligned, so it stands apart from the ref names above it.
+pub fn pull_request_label(row: Rect, width: f32, zoom: f32) -> (Pos2, Rect) {
+    let end = Pos2::new(row.max.x - MARGIN_X * zoom, row.center().y);
+    let side = FONT_SIZE * zoom;
+    let icon = Rect::from_center_size(
+        Pos2::new(
+            end.x - (width + PULL_REQUEST_GAP) * zoom - side / 2.0,
+            end.y,
+        ),
+        Vec2::splat(side),
+    );
+    (end, icon)
+}
+
 /// Fill, border and text colour of a row.
 pub fn row_colors(row: &Row, palette: &Palette) -> (Color32, Color32, Color32) {
+    let fill = row_fill(row, palette);
     match &row.kind {
-        RowKind::Hash => (palette.plain_fill, palette.plain_border, palette.plain_text),
-        RowKind::Ref { kind, head } => {
-            let fill = palette.ref_fill(*kind, *head, &row.label);
-            (fill, fill, text_on(fill))
-        }
+        RowKind::Hash => (fill, palette.plain_border, palette.plain_text),
+        RowKind::Ref { .. } | RowKind::PullRequest { .. } => (fill, fill, text_on(fill)),
+    }
+}
+
+fn row_fill(row: &Row, palette: &Palette) -> Color32 {
+    match &row.kind {
+        RowKind::Hash => palette.plain_fill,
+        RowKind::Ref { kind, head } => palette.ref_fill(*kind, *head, &row.label),
+        RowKind::PullRequest { draft: false, .. } => palette.pull_request,
+        RowKind::PullRequest { draft: true, .. } => palette.draft_pull_request,
     }
 }
 
@@ -566,7 +609,7 @@ pub fn paint_overview(
         let row = &v.rows[0];
         let fill = match &row.kind {
             RowKind::Hash => palette.plain_border,
-            RowKind::Ref { kind, head } => palette.ref_fill(*kind, *head, &row.label),
+            _ => row_fill(row, palette),
         };
         painter.rect_filled(r, 0.0, fill);
     }
@@ -580,4 +623,26 @@ pub fn paint_overview(
         StrokeKind::Inside,
     );
     (world, scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pull_request_numbers_are_right_aligned_after_their_glyph() {
+        for zoom in [1.0, 2.0] {
+            let row = Rect::from_min_size(Pos2::new(100.0, 50.0), vec2(200.0, 22.0) * zoom);
+            let (number, icon) = pull_request_label(row, 35.0, zoom);
+            // The number ends where ref names would, a margin before the right edge.
+            assert_eq!(number.x, row.max.x - MARGIN_X * zoom);
+            assert_eq!(number.y, row.center().y);
+            // The glyph sits just left of it, as high as the text, inside the row.
+            assert!(icon.max.x < number.x - 35.0 * zoom);
+            assert!(icon.max.x > number.x - 35.0 * zoom - 8.0 * zoom);
+            assert_eq!(icon.height(), FONT_SIZE * zoom);
+            assert_eq!(icon.center().y, row.center().y);
+            assert!(row.contains_rect(icon));
+        }
+    }
 }

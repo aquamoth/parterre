@@ -16,6 +16,11 @@ crates/parterre-core   GUI-free; everything testable lives here
   text.rs              URLs in commit messages, paths cut at the start, thousands separators
   revgraph.rs          reduce the commit DAG to a revision graph (TortoiseGit's rules)
   pattern.rs           branch-name wildcards, for hiding and colouring branches
+  forge.rs             open pull requests: the model, where each is shown (head commit and
+                       base-branch refs), remotes and upstreams from git
+    github.rs          github.com remotes; one GraphQL request per 100 fetched branches of
+                       origin (and its parent), signed in with `gh auth token`, within a
+                       rate-limit budget; HTTPS through ureq behind the `github` feature
   recent.rs            the recently opened repositories
   watch.rs             fingerprint of the files git keeps refs in, for reloading by itself
   glyphs.rs            toolbar and menu icons as SVG path data, and a path flattener
@@ -37,6 +42,8 @@ crates/parterre        the binary (eframe/egui)
     toolbar.rs         the toolbar, its popovers and the ☰ menu
     settings_window.rs the settings: pages of rows, applied as you change them
     auto_reload.rs     a worker thread that reloads when the refs change
+    pull_requests.rs   loads open pull requests on a worker thread while they are shown, cached
+                       per repository, with back-off
     log_window.rs      the log window (Show log): an immediate viewport with three panes
                        (commits, details, changed files) that one of four fixed layouts
                        arranges, picked in its header; changed files come from git on a
@@ -51,6 +58,7 @@ crates/parterre        the binary (eframe/egui)
   theme.rs             TortoiseGit colours (light, and dark via lightness inversion)
   system_theme.rs      light or dark desktop preference on Linux (XDG portal)
   menu.rs              the look of menus and popovers, menu items
+  browser.rs           opens github.com pages with the platform's opener
   widgets.rs           icon buttons, segmented buttons, switches, text fields
   settings.rs          persisted settings and the Classic/Modern looks
   automation.rs        --screenshot / --demo-drag / --demo-menu / --demo-open / --demo-log
@@ -68,6 +76,10 @@ crates/parterre        the binary (eframe/egui)
    - Only refs that pass the filters start history. Branches matching the *Hide branches*
      wildcards don't, but they still label commits that other refs reach. So a hidden branch
      vanishes only if no shown branch contains it.
+   - Open pull requests, while shown, label their head commits the same way: they never
+     start history, and show only where one of their base branch's refs is shown. As labels
+     they make their heads nodes, like tags. They are loaded from GitHub on a worker thread
+     (`forge`), separately from the snapshot, which stays what git has.
    - *Labelled commits* reproduces `git log --simplify-by-decoration`, including
      `simplify_merges` (redundant parents dropped) and empty-tree roots (TREESAME).
      The node sets are identical on the 15k-commit Apps repository and on 400 random

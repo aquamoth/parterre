@@ -15,6 +15,9 @@ installed and logged in. "unauth" means no token was sent.
 **Feasible:** yes, and without `gh`, a new remote, or any write to the user's repository.
 
 **Decided scope (2026-09-26):** open PRs only, shown as PR-icon tags on nodes. See §12 and §14.
+**Built (slice 1):** differently from §3, §6 and §12.2, after looking at how t3code does it:
+signed in only, per fetched branch over GraphQL, cached, within a budget. See `TODO.md`,
+question 25.
 The points below cover everything that was investigated.
 
 - **PR heads come through git alone.** GitHub publishes `refs/pull/<N>/head` for every PR, open
@@ -654,3 +657,54 @@ label. It is not a new line and not a new node. Clicking the tag opens the PR in
   (§11). For Azure DevOps, the PR list is expected to give `sourceRefName`, `targetRefName` and
   `lastMergeSourceCommit` **(unverified)**.
 
+
+## 15. Azure DevOps origins (findings, 2026-09-26; not built)
+
+Parked until someone asks for it (`TODO.md`, Planned). What was found while estimating it:
+
+- **Reusable as is:** the model (`forge::PullRequest`, `Remote`, `PullRequests::heads`, which
+  places pull requests on commits and finds their base refs by remote and branch name), the
+  labels, clicking and the node menu, the HTTP client (ureq), and the app's cache, back-off
+  and error dialog (`app/pull_requests.rs`). `PullRequest::base_repo` and `Remote::repo` are
+  plain strings; for ADO they would hold `org/project/repo`.
+- **Needed:**
+  1. **Recognising the remote.** Forms: `https://dev.azure.com/{org}/{project}/_git/{repo}`
+     (also with `{org}@` before the host, as the human's Apps remote has),
+     `https://{org}.visualstudio.com/[DefaultCollection/]{project}/_git/{repo}`,
+     `git@ssh.dev.azure.com:v3/{org}/{project}/{repo}` and
+     `{org}@vs-ssh.visualstudio.com:v3/{org}/{project}/{repo}`. Project names can hold spaces,
+     percent-encoded in URLs **(unverified)**.
+  2. **A `Forge` choice** where `github::load` is called today: detect the forge from
+     `origin`'s URL, and name it in the wording ("on GitHub" in the status text, the
+     tooltips, the dialog, the legend).
+  3. **Asking ADO.** No GraphQL. `GET https://dev.azure.com/{org}/{project}/_apis/git/
+     repositories/{repo}/pullrequests?searchCriteria.status=active&api-version=7.1` (§8)
+     lists active pull requests with `pullRequestId`, `title`, `isDraft`, `createdBy`,
+     `sourceRefName`, `targetRefName` and `lastMergeSourceCommit.commitId` (the head).
+     `searchCriteria.sourceRefName` narrows it to one branch **(unverified)**, but the Apps
+     repository has about 160 branches, and ADO repositories tend to have few active pull
+     requests, so one listing call (with `$top`) is cheaper than a call per branch, unlike on
+     GitHub. The page to open is `https://dev.azure.com/{org}/{project}/_git/{repo}/
+     pullrequest/{id}` **(unverified)**; the browser's allow list (`browser.rs`) would take
+     `https://dev.azure.com/` and `https://{org}.visualstudio.com/` too.
+  4. **Signing in.** There is no `gh` for ADO. Two ways, both on the human's machine:
+     - **`git credential fill`** for `https://dev.azure.com/{org}/{project}/_git/{repo}`,
+       non-interactive as in §6 (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`). It reuses
+       Git Credential Manager, configured there for dev.azure.com with
+       `credential.https://dev.azure.com.usehttppath=true`, so the path must be passed. It is
+       git, so no new program (rule 1 of the roadmap). Whether ADO wants the token GCM hands
+       back as `Bearer` (an Entra ID token) or in Basic auth (a PAT) is **unverified**:
+       probably Bearer; a token starting `eyJ` is a JWT.
+     - **`az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798`**
+       (Azure DevOps's resource id) **(unverified here)**; `az` is installed there too, but
+       it would be a second program to rely on.
+  5. **Forks:** ADO has forks (`forkSource` in the list), but they are rare there; leave
+     them out, as the GitHub slice 1 leaves out other people's forks.
+- **Limits:** ADO throttles by "TSTUs" per user rather than a fixed hourly count
+  **(unverified)**; it sends `Retry-After` and `X-RateLimit-*` headers when it does, which the
+  budget code already understands for GitHub.
+- **Trying it:** the human's `Cosmo/Apps` has `origin` on dev.azure.com, and Git Credential
+  Manager and `az` are set up. A live test uses the human's own token against their own
+  organisation; ask first.
+- **Size:** about the core half of the GitHub slice (URL parsing, one REST call, JSON, sign-in,
+  tests), plus wording; no new crates.

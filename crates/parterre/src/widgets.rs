@@ -177,6 +177,30 @@ pub fn text_button(ui: &mut Ui, text: &str) -> Response {
     response
 }
 
+/// A dialog's main button: white text on the accent colour, at least `min_width` wide.
+pub fn primary_button(ui: &mut Ui, text: &str, min_width: f32) -> Response {
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        egui::TextStyle::Button.resolve(ui.style()),
+        Color32::WHITE,
+    );
+    let size = vec2((galley.size().x + 32.0).max(min_width), 30.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let accent = tones(ui).accent;
+    let fill = if response.is_pointer_button_down_on() {
+        accent.gamma_multiply(0.8)
+    } else if response.hovered() {
+        accent.gamma_multiply(0.9)
+    } else {
+        accent
+    };
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(8), fill.to_opaque());
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    response
+}
+
 /// A button that opens a popover (with [`egui::Popup::from_toggle_button_response`]), shown
 /// pressed while it is open. `glyph` of `None` makes it a narrow chevron.
 pub fn popover_button(ui: &mut Ui, id: Id, glyph: Option<Glyph>, on: bool) -> Response {

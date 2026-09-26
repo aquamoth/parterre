@@ -3,6 +3,7 @@
 
 pub mod changed_files;
 pub mod file_diff;
+pub mod forge;
 pub mod git;
 pub mod glyphs;
 pub mod icon;

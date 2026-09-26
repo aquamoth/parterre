@@ -85,6 +85,9 @@ pub struct Palette {
     pub tag: Color32,
     pub stash: Color32,
     pub other_ref: Color32,
+    /// Open pull requests, and draft ones. Not in TortoiseGit.
+    pub pull_request: Color32,
+    pub draft_pull_request: Color32,
     pub selection: Color32,
     pub search_hit: Color32,
     /// Colours by branch name, first match first; they override the ref-kind colours.
@@ -123,6 +126,9 @@ impl Palette {
             tag: Color32::from_rgb(255, 255, 0),
             stash: Color32::from_rgb(128, 128, 128),
             other_ref: Color32::from_rgb(224, 224, 224),
+            // Pale blue next to TortoiseGit's pale ref colours; drafts greyer.
+            pull_request: Color32::from_rgb(0xB6, 0xD9, 0xFF),
+            draft_pull_request: Color32::from_rgb(0xD2, 0xDA, 0xE2),
             selection: Color32::from_rgb(0, 120, 215),
             search_hit: Color32::from_rgb(255, 140, 0),
             branch_colors: Vec::new(),
@@ -145,6 +151,8 @@ impl Palette {
             tag: invert_lightness(l.tag),
             stash: invert_lightness(l.stash),
             other_ref: invert_lightness(l.other_ref),
+            pull_request: invert_lightness(l.pull_request),
+            draft_pull_request: invert_lightness(l.draft_pull_request),
             selection: Color32::from_rgb(80, 170, 255),
             search_hit: Color32::from_rgb(255, 160, 40),
             branch_colors: Vec::new(),

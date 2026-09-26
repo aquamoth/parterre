@@ -83,7 +83,7 @@ impl Git {
     }
 
     /// Runs git and returns stdout, failing on a non-zero exit status.
-    fn run(&self, args: &[&str]) -> Result<String, GitError> {
+    pub(crate) fn run(&self, args: &[&str]) -> Result<String, GitError> {
         let out = self.output(args)?;
         if !out.status.success() {
             return Err(GitError::Failed {
@@ -132,7 +132,7 @@ impl Git {
 
     /// Runs git and returns trimmed stdout, or `None` on a non-zero exit status (for queries
     /// such as `symbolic-ref -q` that signal "no" through the exit code).
-    fn query(&self, args: &[&str]) -> Result<Option<String>, GitError> {
+    pub(crate) fn query(&self, args: &[&str]) -> Result<Option<String>, GitError> {
         let out = self.output(args)?;
         Ok(out
             .status

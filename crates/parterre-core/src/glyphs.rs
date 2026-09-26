@@ -165,6 +165,14 @@ pub const LAYOUT_FILES_RIGHT: Glyph = &[
     rect(3.0, 4.0, 18.0, 16.0, 2.0, false),
     Part::Path("M14 4v16M3 14h11"),
 ];
+/// Pull requests: Lucide's git-pull-request-arrow. Also the label of a pull request in the
+/// graph.
+pub const PULL_REQUEST: Glyph = &[
+    ring(5.0, 6.0, 3.0),
+    Part::Path("M5 9v12"),
+    ring(19.0, 18.0, 3.0),
+    Part::Path("M15 9 12 6l3-3M12 6h5a2 2 0 0 1 2 2v7"),
+];
 /// Reset: Lucide's rotate-ccw.
 pub const RESET: Glyph = &[Part::Path(
     "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5",
@@ -201,7 +209,7 @@ pub const WHITESPACE_IGNORE_ALL: Glyph = &[Part::Path(
 )];
 
 /// Every glyph, for tests.
-pub const ALL: [Glyph; 33] = [
+pub const ALL: [Glyph; 34] = [
     MENU,
     SEARCH,
     PLUS,
@@ -227,6 +235,7 @@ pub const ALL: [Glyph; 33] = [
     LAYOUT_SIDE_BY_SIDE,
     LAYOUT_DETAILS_BELOW,
     LAYOUT_FILES_RIGHT,
+    PULL_REQUEST,
     RESET,
     DIFF_SIDE_BY_SIDE,
     DIFF_UNIFIED,

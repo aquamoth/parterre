@@ -79,6 +79,8 @@ pub struct GraphOptions {
     /// they vanish unless a shown ref's history contains them; there they keep their labels.
     /// Not in TortoiseGit.
     pub hide_branches: String,
+    /// Label the heads of open pull requests (see [`PullRequestHead`]). Not in TortoiseGit.
+    pub show_pull_requests: bool,
 }
 
 impl Default for GraphOptions {
@@ -95,6 +97,7 @@ impl Default for GraphOptions {
             current_branch_only: false,
             ref_filter: String::new(),
             hide_branches: String::new(),
+            show_pull_requests: true,
         }
     }
 }
@@ -142,6 +145,20 @@ pub struct RevNode {
     pub is_head: bool,
     /// True if the node has more than one parent edge.
     pub is_merge: bool,
+    /// Indices into the [`PullRequestHead`]s given to [`build_with_pull_requests`] of the pull
+    /// requests whose head this commit is, in the order given.
+    pub pull_requests: Vec<usize>,
+}
+
+/// Where an open pull request is shown: its head commit, if that is in the repository, and the
+/// refs of its base branch (indices into [`Repo::refs`]). It is shown, as a label on its head,
+/// only while one of those refs is, and its head is part of the graph anyway: like a hidden
+/// branch, it labels commits but doesn't start history. As a label it makes its head a node,
+/// as a tag does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestHead {
+    pub commit: CommitIx,
+    pub bases: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,6 +256,16 @@ const NO_REP: u32 = u32::MAX;
 
 /// Builds the revision graph for `repo` under `options`.
 pub fn build(repo: &Repo, options: &GraphOptions) -> RevGraph {
+    build_with_pull_requests(repo, options, &[])
+}
+
+/// Builds the revision graph for `repo` under `options`, with the heads of open pull requests
+/// as labels if [`GraphOptions::show_pull_requests`] is on.
+pub fn build_with_pull_requests(
+    repo: &Repo,
+    options: &GraphOptions,
+    pull_requests: &[PullRequestHead],
+) -> RevGraph {
     let n = repo.commits.len();
     let head = repo.head_commit().map(CommitIx::ix);
 
@@ -297,6 +324,22 @@ pub fn build(repo: &Repo, options: &GraphOptions) -> RevGraph {
                 && options.starts_history(r, &BranchPatterns::default())
         })
         .count();
+
+    // Pull requests into a shown branch label their heads where those are shown anyway.
+    let mut pulls_on: Vec<Vec<usize>> = vec![Vec::new(); n];
+    if options.show_pull_requests {
+        let base_shown = |i: usize| {
+            let r = &repo.refs[i];
+            (options.shows(r.kind) || r.is_head) && visible[r.target.ix()]
+        };
+        for (k, pr) in pull_requests.iter().enumerate() {
+            let c = pr.commit.ix();
+            if c < n && visible[c] && pr.bases.iter().any(|&i| base_shown(i)) {
+                pulls_on[c].push(k);
+                decorated[c] = true;
+            }
+        }
+    }
 
     // Child counts, merge children, and a parents-first order (reverse Kahn from the tips).
     let mut children = vec![0u32; n];
@@ -387,6 +430,7 @@ pub fn build(repo: &Repo, options: &GraphOptions) -> RevGraph {
             refs,
             is_head: Some(c) == head,
             is_merge: kept_edges[c].len() > 1,
+            pull_requests: std::mem::take(&mut pulls_on[c]),
         });
     }
 

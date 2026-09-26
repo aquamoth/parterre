@@ -17,6 +17,11 @@ categories = ["development-tools", "visualization"]
 name = "parterre"
 path = "src/main.rs"
 
+[features]
+default = ["github"]
+# Open pull requests from GitHub, shown on their head commits.
+github = ["parterre-core/github"]
+
 [dependencies]
 parterre-core.workspace = true
 anyhow.workspace = true

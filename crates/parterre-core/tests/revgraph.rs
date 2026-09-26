@@ -1,7 +1,7 @@
 mod common;
 
 use common::TestRepo;
-use parterre_core::revgraph::{self, GraphOptions, RevGraph, Simplification};
+use parterre_core::revgraph::{self, GraphOptions, PullRequestHead, RevGraph, Simplification};
 use parterre_core::{Head, RefKind, Repo};
 
 /// Subjects of the graph's nodes, sorted, for order-independent comparison.
@@ -535,5 +535,123 @@ fn notes_are_not_walked() {
         repo.refs
             .iter()
             .all(|r| !r.full_name.starts_with("refs/notes/"))
+    );
+}
+
+/// main: A - B - C           origin/main at C
+///            \
+/// feature:    D - E         origin/feature at E, a pull request's head at D
+fn pull_request_repo() -> TestRepo {
+    let mut r = TestRepo::new();
+    r.commit("A");
+    r.commit("B");
+    r.branch("feature");
+    r.commit("D");
+    r.commit("E");
+    r.checkout("main");
+    r.commit("C");
+    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    r.git(&["update-ref", "refs/remotes/origin/feature", "feature"]);
+    r.git(&["branch", "-D", "feature"]);
+    r
+}
+
+/// A pull request's head on the commit with `subject`, into the branch named `base`.
+fn pull_request_head(repo: &Repo, subject: &str, base: &str) -> PullRequestHead {
+    PullRequestHead {
+        commit: repo
+            .commits
+            .iter()
+            .position(|c| c.subject == subject)
+            .map(|i| parterre_core::CommitIx(i as u32))
+            .unwrap(),
+        bases: (0..repo.refs.len())
+            .filter(|&i| repo.refs[i].name == base)
+            .collect(),
+    }
+}
+
+/// Subjects of the nodes that carry pull requests, with the pull requests' indices.
+fn pull_request_nodes(repo: &Repo, g: &RevGraph) -> Vec<(String, Vec<usize>)> {
+    g.nodes
+        .iter()
+        .filter(|n| !n.pull_requests.is_empty())
+        .map(|n| {
+            (
+                repo.commit(n.commit).subject.clone(),
+                n.pull_requests.clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn pull_request_heads_label_commits_and_make_them_nodes() {
+    let repo = pull_request_repo().load();
+    let heads = [pull_request_head(&repo, "D", "origin/main")];
+    let mut opts = with_mode(Simplification::Decorated);
+    opts.show_pull_requests = true;
+    let g = revgraph::build_with_pull_requests(&repo, &opts, &heads);
+    // D was collapsed into the edge from E; as a pull request's head it is a node of its own.
+    assert_eq!(node_subjects(&repo, &g), ["A", "C", "D", "E"]);
+    assert_eq!(pull_request_nodes(&repo, &g), [("D".to_owned(), vec![0])]);
+    assert!(
+        g.nodes
+            .iter()
+            .all(|n| n.refs.iter().all(|&r| r < repo.refs.len()))
+    );
+
+    // Turned off, they are ignored.
+    opts.show_pull_requests = false;
+    let g = revgraph::build_with_pull_requests(&repo, &opts, &heads);
+    assert_eq!(node_subjects(&repo, &g), ["A", "C", "E"]);
+    assert!(pull_request_nodes(&repo, &g).is_empty());
+}
+
+#[test]
+fn pull_requests_need_a_visible_base_and_head() {
+    let repo = pull_request_repo().load();
+    let mut opts = with_mode(Simplification::Decorated);
+    opts.show_pull_requests = true;
+
+    // Into a branch that isn't in the repository, or not shown.
+    let unknown = [pull_request_head(&repo, "D", "origin/gone")];
+    let g = revgraph::build_with_pull_requests(&repo, &opts, &unknown);
+    assert!(pull_request_nodes(&repo, &g).is_empty());
+    let heads = [pull_request_head(&repo, "D", "origin/main")];
+    let g = revgraph::build_with_pull_requests(
+        &repo,
+        &GraphOptions {
+            show_remote_branches: false,
+            ..opts.clone()
+        },
+        &heads,
+    );
+    assert!(pull_request_nodes(&repo, &g).is_empty());
+
+    // A head that no shown branch reaches does not bring its history in: pull requests label
+    // commits, they don't start history.
+    let into_main = [pull_request_head(&repo, "E", "main")];
+    let g = revgraph::build_with_pull_requests(
+        &repo,
+        &GraphOptions {
+            current_branch_only: true,
+            ..opts.clone()
+        },
+        &into_main,
+    );
+    assert_eq!(node_subjects(&repo, &g), ["A", "C"]);
+    assert!(pull_request_nodes(&repo, &g).is_empty());
+
+    // Several on one commit, in the order given.
+    let two = [
+        pull_request_head(&repo, "C", "main"),
+        pull_request_head(&repo, "E", "main"),
+        pull_request_head(&repo, "C", "origin/main"),
+    ];
+    let g = revgraph::build_with_pull_requests(&repo, &opts, &two);
+    assert_eq!(
+        pull_request_nodes(&repo, &g),
+        [("C".to_owned(), vec![0, 2]), ("E".to_owned(), vec![1])]
     );
 }
