@@ -84,10 +84,7 @@ impl BlameWindows {
     ) {
         if let Some(w) = self.windows.iter_mut().find(|w| w.spec == spec) {
             w.repo = repo;
-            if spec.reads_working_tree() {
-                w.pending_scroll = Some(w.scroll);
-                w.load(ctx);
-            }
+            w.reload(ctx);
             if line.is_some() {
                 w.pending_line = line;
             }
@@ -268,13 +265,39 @@ impl BlameWindow {
         if let Load::Loading(rx) = &self.load
             && let Ok(result) = rx.try_recv()
         {
-            self.load = match result {
-                Ok(ready) => Load::Ready(Box::new(ready)),
-                Err(e) => Load::Failed(e),
-            };
+            match result {
+                Ok(ready) => self.loaded(ready),
+                Err(e) => self.load = Load::Failed(e),
+            }
         }
         if self.options != self.requested {
             // Keep the place: the lines stay, only their commits may change.
+            self.pending_scroll = Some(self.scroll);
+            self.load(ctx);
+        }
+    }
+
+    /// Shows a blame, keeping the chosen commit if it still owns lines (a reload), and the
+    /// chosen lines if the file still has them.
+    fn loaded(&mut self, ready: Ready) {
+        let blame = &ready.blame;
+        if let Some(commit) = self.chosen
+            && !blame.origins.iter().any(|o| o.commit == commit)
+        {
+            self.chosen = None;
+        }
+        if self
+            .selection
+            .is_some_and(|(a, b)| a.max(b) >= blame.lines.len())
+        {
+            self.selection = None;
+        }
+        self.load = Load::Ready(Box::new(ready));
+    }
+
+    /// F5: blames the working tree again, keeping the place. A blame at a commit can't change.
+    fn reload(&mut self, ctx: &egui::Context) {
+        if self.spec.reads_working_tree() {
             self.pending_scroll = Some(self.scroll);
             self.load(ctx);
         }
@@ -464,6 +487,10 @@ impl BlameWindow {
         if moves != self.options.moves {
             self.options.moves = moves;
             settings.moves = moves;
+        }
+        if self.spec.reads_working_tree() {
+            ui.add_space(14.0);
+            ui.label(RichText::new("F5 blames again").size(12.0).color(weak));
         }
     }
 
@@ -907,8 +934,7 @@ impl BlameWindow {
                     settings.size = [size.x, size.y];
                 }
                 if reload {
-                    self.pending_scroll = Some(self.scroll);
-                    self.load(ui.ctx());
+                    self.reload(ui.ctx());
                 }
                 // Keys go to the main window too when the window is embedded in it.
                 self.handle_keys(ui);
@@ -1375,6 +1401,41 @@ mod tests {
             spec.old.as_ref().map(|v| v.rev),
             Some(Rev::Commit(Oid::from_hex(A).unwrap()))
         );
+    }
+
+    #[test]
+    fn f5_blames_only_the_working_tree_again() {
+        let ctx = egui::Context::default();
+        let mut w = window();
+        w.reload(&ctx);
+        assert!(w.ready().is_some());
+
+        w.spec.rev = Rev::WorkingTree;
+        w.scroll = 40.0;
+        w.reload(&ctx);
+        assert!(matches!(w.load, Load::Loading(_)));
+        assert_eq!(w.pending_scroll, Some(40.0));
+    }
+
+    #[test]
+    fn a_reload_keeps_the_chosen_commit_while_it_owns_lines() {
+        let repo = window().repo;
+        let mut w = window();
+        w.choose_line(1);
+        w.loaded(Ready::new(sample(), &repo));
+        assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
+        assert_eq!(w.selection, Some((1, 1)));
+
+        // B's line is gone, and so are lines 3 and 4.
+        let out = [
+            entry(A, 1, 1, 100, "", "one"),
+            entry(A, 2, 2, 100, "", "two"),
+        ]
+        .concat();
+        w.selection = Some((1, 3));
+        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo));
+        assert_eq!(w.chosen, None);
+        assert_eq!(w.selection, None);
     }
 
     #[test]
