@@ -777,6 +777,7 @@ impl LogWindow {
                 .request_repaint_after(std::time::Duration::from_millis(200));
         }
         let mut copy = None;
+        let mut jump = None;
         let ctx = ui.ctx().clone();
         let message = env.messages.get(&view.repo.path, commit.oid, &ctx);
         ScrollArea::vertical()
@@ -803,6 +804,17 @@ impl LogWindow {
                                     }
                                 });
                                 ui.end_row();
+                                if commit.parents.len() > 1 {
+                                    ui.weak("Merge");
+                                    ui.horizontal(|ui| {
+                                        for &p in &commit.parents {
+                                            if let Some(row) = parent_link(ui, view, p) {
+                                                jump = Some(row);
+                                            }
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
                                 ui.weak("Author");
                                 ui.horizontal(|ui| {
                                     ui.label(format!(
@@ -834,6 +846,12 @@ impl LogWindow {
             });
         if let Some(what) = copy {
             self.copied = Some((what, now));
+        }
+        if let Some(row) = jump
+            && let Some(view) = &mut self.view
+        {
+            view.selected = Some(row);
+            view.reveal = true;
         }
     }
 
@@ -1100,6 +1118,21 @@ fn copy_button(ui: &mut Ui, copied: bool, c: &Colors) -> Response {
         color,
     );
     response
+}
+
+/// A merge parent's short hash, as `git log`'s `Merge:` line has it. A link to the parent's
+/// row if the log lists it: returns that row when clicked. Otherwise plain, weak text.
+fn parent_link(ui: &mut Ui, view: &LogView, parent: CommitIx) -> Option<usize> {
+    let text = RichText::new(view.repo.commit(parent).oid.short(view.repo.abbrev_len)).monospace();
+    let Some(row) = view.commits.iter().position(|&c| c == parent) else {
+        ui.label(text.color(ui.visuals().weak_text_color()))
+            .on_hover_text("Not in this log");
+        return None;
+    };
+    let link = ui
+        .link(text.color(widgets::tones(ui).on_fg))
+        .on_hover_text("Show this commit");
+    link.clicked().then_some(row)
 }
 
 /// A commit message, subject in the strong colour, monospaced as in a terminal. The text is
