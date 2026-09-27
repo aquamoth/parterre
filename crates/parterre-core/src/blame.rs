@@ -99,6 +99,8 @@ pub struct Origin {
     pub author_time: i64,
     /// `+hhmm` or `-hhmm`.
     pub author_tz: String,
+    /// Seconds since the epoch. For lines no commit has yet, when git blamed them.
+    pub committer_time: i64,
     /// The commit's subject.
     pub summary: String,
     /// The history stops here: a shallow clone's oldest commit, or a graft. What was before
@@ -221,6 +223,7 @@ impl Blame {
                             author_email: f.author_email,
                             author_time: f.author_time,
                             author_tz: f.author_tz,
+                            committer_time: f.committer_time,
                             summary: f.summary,
                             boundary: f.boundary,
                         });
@@ -259,6 +262,11 @@ impl Blame {
                         .map_err(|_| format!("author time {value:?}"))?;
                 }
                 "author-tz" => fields.author_tz = value.to_owned(),
+                "committer-time" => {
+                    fields.committer_time = value
+                        .parse()
+                        .map_err(|_| format!("committer time {value:?}"))?;
+                }
                 "summary" => fields.summary = value.to_owned(),
                 "boundary" => fields.boundary = true,
                 "previous" => {
@@ -272,7 +280,7 @@ impl Blame {
                     });
                 }
                 "filename" => fields.filename = Some(unquote(value)?),
-                // Committer fields, and any git adds later.
+                // The committer's name and zone, and any fields git adds later.
                 _ => {}
             }
         }
@@ -328,6 +336,7 @@ struct Fields {
     author_email: String,
     author_time: i64,
     author_tz: String,
+    committer_time: i64,
     summary: String,
     boundary: bool,
     previous: Option<Version>,
@@ -418,8 +427,9 @@ mod tests {
     fn entry(hash: &str, orig: u32, fin: u32, time: i64, extra: &str, line: &str) -> String {
         format!(
             "{hash} {orig} {fin} 1\nauthor A B\nauthor-mail <a@b>\nauthor-time {time}\n\
-             author-tz +0200\ncommitter A B\ncommitter-mail <a@b>\ncommitter-time {time}\n\
-             committer-tz +0200\nsummary s{time}\n{extra}\t{line}\n"
+             author-tz +0200\ncommitter A B\ncommitter-mail <a@b>\ncommitter-time {}\n\
+             committer-tz +0200\nsummary s{time}\n{extra}\t{line}\n",
+            time + 5
         )
     }
 
@@ -457,6 +467,7 @@ mod tests {
         assert_eq!(b.path, "b \"q\".txt");
         assert_eq!(b.author_email, "a@b");
         assert_eq!(b.summary, "s200");
+        assert_eq!((b.author_time, b.committer_time), (200, 205));
         assert_eq!(
             b.previous,
             Some(Version {
@@ -540,6 +551,7 @@ mod tests {
             author_email: String::new(),
             author_time: time,
             author_tz: tz.into(),
+            committer_time: time,
             summary: String::new(),
             boundary: false,
         };
