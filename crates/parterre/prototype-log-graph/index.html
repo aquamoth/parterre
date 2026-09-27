@@ -1,0 +1,472 @@
+<!doctype html>
+<!--
+  PROTOTYPE, throwaway. Question: what should a graph column in the log window's commit list
+  look like, so you can see how the commits go together? Three variants of the same live log:
+    A  TortoiseGit: a narrow graph as the first column, straight lines, colour by lane.
+    B  Branch lanes: rounded lines coloured by branch, refs in a column of their own beside it.
+    C  Condensed: lines longer than N rows are cut into stubs you can click to jump across,
+       so long-idle branches don't widen the column.
+  Stretch (all variants): the "Show" controls in the log header change which commits the log
+  includes, like TortoiseGit's All branches and walk options. Only the commit list and a small
+  details pane are here; the files pane is not part of the question.
+  Switch with ?variant=A|B|C, the arrows in the bottom bar, or the ← → keys. ?theme=light|dark.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>parterre – log graph prototype</title>
+<style>
+@font-face { font-family: "egui"; src: url("Ubuntu-Light.ttf"); }
+@font-face { font-family: "eguimono"; src: url("Hack-Regular.ttf"); }
+.light {
+  --desk: #c9c3d6; --panel: #f7f7f7; --base: #ffffff; --text: #262626; --weak: #8a8a8a;
+  --line: rgba(0,0,0,.10); --hover: rgba(0,0,0,.045); --sel: #d7e8fd; --sel-fg: #0b3d7a;
+  --field: #ffffff; --field-line: rgba(0,0,0,.14); --title: #ebebeb; --title-btn: rgba(0,0,0,.08);
+  --accent: #3584e4; --link: #1a5fb4; --stripe: rgba(0,0,0,.018); --ring: #ffffff;
+}
+.dark {
+  --desk: #2a2536; --panel: #1f1f1f; --base: #1b1b1b; --text: #dcdcdc; --weak: #8e8e8e;
+  --line: rgba(255,255,255,.09); --hover: rgba(255,255,255,.05); --sel: #213a57; --sel-fg: #cfe5ff;
+  --field: #2a2a2a; --field-line: rgba(255,255,255,.12); --title: #2e2e2e; --title-btn: rgba(255,255,255,.10);
+  --accent: #3584e4; --link: #8ec2ff; --stripe: rgba(255,255,255,.02); --ring: #1b1b1b;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--desk); font: 13px/1.25 "egui", "Ubuntu", sans-serif; color: var(--text);
+  display: flex; align-items: center; justify-content: center; }
+.mono { font-family: eguimono, monospace; font-size: 12px; }
+.win { width: min(1320px, 97vw); height: min(860px, calc(100vh - 70px)); margin-bottom: 50px;
+  background: var(--panel); border-radius: 12px 12px 0 0; overflow: hidden; display: flex;
+  flex-direction: column; box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+.titlebar { height: 46px; flex: none; background: var(--title); display: flex; align-items: center;
+  justify-content: center; font: bold 14.5px "Cantarell", "Ubuntu", sans-serif; position: relative; }
+.titlebar .wb { position: absolute; right: 10px; display: flex; gap: 12px; }
+.titlebar .wb span { width: 24px; height: 24px; border-radius: 50%; background: var(--title-btn);
+  display: grid; place-items: center; font-size: 11px; font-weight: normal; }
+.head { flex: none; display: flex; align-items: center; gap: 10px; padding: 6px 12px;
+  border-bottom: 1px solid var(--line); min-height: 40px; flex-wrap: wrap; }
+.range { color: var(--link); font-size: 13.5px; }
+.head .count { color: var(--weak); margin-left: auto; font-variant-numeric: tabular-nums; }
+/* The stretch goal: which commits the log includes. */
+.show { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.show .lbl { color: var(--weak); margin-right: 2px; }
+.seg { display: inline-flex; border: 1px solid var(--field-line); border-radius: 7px; overflow: hidden; }
+.seg button, .chip { border: 0; background: var(--field); color: var(--text); font: 12.5px "egui", sans-serif;
+  padding: 4px 9px; cursor: default; }
+.seg button + button { border-left: 1px solid var(--field-line); }
+.seg button.on { background: var(--sel); color: var(--sel-fg); }
+.chip { border: 1px solid var(--field-line); border-radius: 7px; }
+.chip.on { background: var(--sel); color: var(--sel-fg); border-color: transparent; }
+.chip:hover, .seg button:hover { filter: brightness(.96); }
+.cutn { width: 46px; font: 12.5px "egui", sans-serif; padding: 3px 4px; border-radius: 6px;
+  border: 1px solid var(--field-line); background: var(--field); color: var(--text); }
+.body { flex: 1; min-height: 0; display: flex; }
+.pane { min-height: 0; min-width: 0; overflow: hidden; display: flex; flex-direction: column; background: var(--base); }
+.split-v { flex: none; width: 6px; background: var(--panel); border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+
+.list { flex: 1; min-height: 0; overflow: auto; position: relative; outline: none; }
+.lhead, .row { display: grid; align-items: center; }
+.lhead { position: sticky; top: 0; z-index: 2; background: var(--panel); height: 26px; border-bottom: 1px solid var(--line); color: var(--weak); font-size: 12px; }
+.lhead > div, .row > div { padding: 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lhead > div.g, .row > div.g { padding: 0; overflow: hidden; height: 24px; }
+.row { position: absolute; left: 0; right: 0; height: 24px; cursor: default; }
+.row.odd { background: var(--stripe); }
+.row:hover { background: var(--hover); }
+.row.sel { background: var(--sel); color: var(--sel-fg); }
+.row .hash { color: var(--weak); }
+.row.sel .hash, .row.sel .date { color: inherit; }
+.row .date { font-variant-numeric: tabular-nums; color: var(--weak); }
+.row .refs { text-align: right; }
+.badge { display: inline-block; padding: 0 5px; margin-right: 4px; border-radius: 3px; font-size: 11.5px;
+  line-height: 17px; vertical-align: 1px; border: 1px solid rgba(0,0,0,.25); }
+.row .subj { display: flex; align-items: center; min-width: 0; }
+.row .subj .t { overflow: hidden; text-overflow: ellipsis; }
+.row .subj .badge { flex: none; }
+svg.g { display: block; overflow: visible; }
+svg .stub { cursor: pointer; }
+svg .stub:hover path, svg .stub:hover line { stroke-width: 3; }
+.empty, .loading { padding: 30px; color: var(--weak); text-align: center; }
+
+.details { flex: 1; min-height: 0; overflow: auto; padding: 10px 12px; user-select: text; }
+.details .meta { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin-bottom: 10px; color: var(--weak); align-items: center; }
+.details .meta b { font-weight: normal; color: var(--text); }
+.details pre { margin: 0; white-space: pre-wrap; font: 12.5px/1.45 eguimono, monospace; }
+.details pre .subject { font-weight: bold; }
+.details a { color: var(--link); text-decoration: none; cursor: pointer; }
+.details a:hover { text-decoration: underline; }
+.details .gone { color: var(--weak); }
+
+.proto { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 100;
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 999px;
+  background: #111; color: #fff; box-shadow: 0 4px 18px rgba(0,0,0,.4); font: 12.5px system-ui, sans-serif; white-space: nowrap; }
+.proto button { background: #333; color: #fff; border: 0; border-radius: 999px; width: 28px; height: 26px; font-size: 14px; }
+.proto button:hover { background: #555; }
+.proto .vl { min-width: 190px; text-align: center; }
+.proto .sep { width: 1px; height: 18px; background: #444; }
+.proto input { background: #222; color: #fff; border: 1px solid #444; border-radius: 6px; height: 26px; width: 200px; font: inherit; padding: 0 6px; }
+.proto .dim { color: #aaa; }
+</style>
+</head>
+<body>
+<div class="win">
+  <div class="titlebar"><span id="title">Log</span><div class="wb"><span>—</span><span>▢</span><span>✕</span></div></div>
+  <div class="head">
+    <span class="range" id="range"></span>
+    <span class="show" id="show"></span>
+    <span class="count" id="count"></span>
+  </div>
+  <div class="body">
+    <div class="pane" style="flex: 0 0 64%"><div class="list" id="list" tabindex="0"></div></div>
+    <div class="split-v"></div>
+    <div class="pane" style="flex: 1"><div class="details" id="details"></div></div>
+  </div>
+</div>
+<div class="proto">
+  <button id="prev" title="Previous variant (←)">‹</button>
+  <span class="vl" id="vlabel"></span>
+  <button id="next" title="Next variant (→)">›</button>
+  <span class="sep"></span>
+  <span class="dim">Log of</span>
+  <input id="spec" title="Tips, or a range, as for git log (Enter)">
+  <span class="sep"></span>
+  <button id="theme" title="Theme" style="width:auto;padding:0 10px">◐</button>
+</div>
+<script>
+const VARIANTS = {
+  A: "TortoiseGit",
+  B: "Branch lanes",
+  C: "Condensed",
+};
+const params = new URLSearchParams(location.search);
+let variant = VARIANTS[params.get("variant")] ? params.get("variant") : "A";
+let theme = params.get("theme") === "dark" ? "dark" : "light";
+document.body.className = theme;
+const ROW = 24;
+const S = {
+  refs: {}, rows: [], rowOf: new Map(), sel: 0, messages: new Map(), graph: null,
+  opts: {
+    all: params.get("all") === "1", first: params.get("first") === "1",
+    nomerges: params.get("nomerges") === "1", compressed: params.get("compressed") === "1",
+    order: params.get("order") === "date" ? "date" : "topo",
+  },
+  spec: params.get("spec") || "HEAD",
+  cut: +(params.get("cut") || 40),
+};
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const api = (path) => fetch(path).then((r) => { if (!r.ok) return r.text().then((t) => { throw new Error(t); }); return r.json(); });
+
+// parterre's label colours (theme.rs); dark = lightness inverted, as theme.rs does.
+const FILL = { current: [200, 0, 0], local: [0, 195, 0], remote: [255, 221, 170], tag: [255, 255, 0] };
+function invertL([r, g, b]) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b); let h = 0, s = 0; const l = (max + min) / 2;
+  if (max !== min) { const d = max - min; s = l > .5 ? d / (2 - max - min) : d / (max + min);
+    h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4; h /= 6; }
+  const L = 1 - l; const q = L < .5 ? L * (1 + s) : L + s - L * s, p = 2 * L - q;
+  const f = (t) => { t = (t + 1) % 1; return t < 1/6 ? p + (q - p) * 6 * t : t < .5 ? q : t < 2/3 ? p + (q - p) * (2/3 - t) * 6 : p; };
+  return [f(h + 1/3), f(h), f(h - 1/3)].map((v) => Math.round(v * 255));
+}
+function badge(r) {
+  const c = theme === "dark" ? invertL(FILL[r.kind]) : FILL[r.kind];
+  const lum = (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
+  return `<span class="badge" style="background:rgb(${c});color:${lum < .55 ? "#fff" : "#000"}">${esc(r.name)}</span>`;
+}
+let ABBREV = 7;
+const short = (h) => h.slice(0, ABBREV);
+
+// ---------- lanes ----------
+// Walks the rows top to bottom keeping the lanes: which commit each lane waits for. A commit
+// takes the leftmost lane waiting for it (or a free one if none: a tip); its first parent
+// continues its lane, other parents join a lane already waiting for them or open a new one.
+// Lanes keep their column while they pass through rows, so lines stay straight.
+// With `cut`, an edge spanning more rows than that is not drawn: its ends get stubs instead.
+function layout(rows, cut, compact) {
+  const rowOf = S.rowOf;
+  const cutChildren = new Map(); // parent -> [child rows] whose edge to it is cut
+  if (cut < Infinity) rows.forEach((r, i) => r.ps.forEach((p) => {
+    const pr = rowOf.get(p);
+    if (pr !== undefined && pr - i > cut) { if (!cutChildren.has(p)) cutChildren.set(p, []); cutChildren.get(p).push(i); }
+  }));
+  const RES = { h: null, reserved: true };
+  let lanes = [];
+  let colors = 0;
+  const inColor = new Map();
+  const out = [];
+  let width = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const top = lanes.slice();
+    const hits = [];
+    top.forEach((l, k) => { if (l && l.h === r.h) hits.push(k); });
+    let col, color;
+    const segs = [];
+    if (hits.length) { col = hits[0]; color = top[col].color; }
+    else {
+      col = lanes.indexOf(null); if (col < 0) col = lanes.length;
+      color = inColor.has(r.h) ? inColor.get(r.h) : colors++;
+    }
+    top.forEach((l, k) => {
+      if (!l) return;
+      segs.push(l.h === r.h ? { x1: k, y1: 0, x2: col, y2: .5, c: l.color } : { x1: k, y1: 0, x2: k, y2: .5, c: l.color });
+    });
+    if (cutChildren.has(r.h)) segs.push({ x1: col, y1: 0, x2: col, y2: .5, c: color, stub: "in", to: cutChildren.get(r.h) });
+    for (const k of hits) lanes[k] = null;
+    lanes[col] = RES;
+    const place = (h, c) => { let k = lanes.indexOf(null); if (k < 0) k = lanes.length; lanes[k] = { h, color: c }; return k; };
+    r.ps.forEach((p, j) => {
+      const pr = rowOf.get(p);
+      if (pr === undefined) { segs.push({ x1: col, y1: .5, x2: col + (j ? .6 : 0), y2: .95, c: color, stub: "gone", p }); return; }
+      if (pr - i > cut) {
+        if (j === 0) inColor.set(p, color);
+        segs.push({ x1: col, y1: .5, x2: col + (j ? .6 : 0), y2: .85, c: j === 0 ? color : (inColor.get(p) ?? color), stub: "out", to: [pr] });
+        return;
+      }
+      const existing = lanes.findIndex((l) => l && l.h === p);
+      if (existing >= 0) { segs.push({ x1: col, y1: .5, x2: existing, y2: 1, c: j === 0 ? color : lanes[existing].color }); return; }
+      let k;
+      if (j === 0) { lanes[col] = { h: p, color }; k = col; } else k = place(p, colors++);
+      segs.push({ x1: col, y1: .5, x2: k, y2: 1, c: lanes[k].color });
+    });
+    if (lanes[col] === RES) lanes[col] = null;
+    top.forEach((l, k) => { if (l && l.h !== r.h) segs.push({ x1: k, y1: .5, x2: k, y2: 1, c: l.color }); });
+    if (compact) {
+      // Close the gaps: lanes right of a free one move left, with a slant in the lower half.
+      const to = []; let n = 0;
+      lanes.forEach((l, k) => { to[k] = l ? n++ : null; });
+      for (const sg of segs) if (sg.y2 === 1 && !sg.stub && to[sg.x2] != null) sg.x2 = to[sg.x2];
+      lanes = lanes.filter((l) => l);
+    }
+    while (lanes.length && lanes[lanes.length - 1] === null) lanes.pop();
+    width = Math.max(width, top.length, lanes.length, col + 1);
+    out.push({ col, color, segs, merge: r.ps.length > 1 });
+  }
+  return { rows: out, width };
+}
+
+// ---------- variants ----------
+const PAL_A = ["#d32f2f", "#1976d2", "#388e3c", "#f57c00", "#7b1fa2", "#00838f", "#c2185b", "#5d4037"];
+const PAL_B = ["#4e79a7", "#e15759", "#59a14f", "#f28e2b", "#b07aa1", "#76b7b2", "#edc948", "#ff9da7", "#9c755f", "#86bcb6"];
+const V = {
+  A: { lane: 11, cut: Infinity, maxLanes: 24, curve: false, colorBy: "lane", pal: PAL_A, r: 3.5,
+       cols: (gw) => `${gw}px var(--hashw) minmax(200px,1fr) 150px 118px`, order: ["g", "hash", "subj", "author", "date"] },
+  B: { lane: 16, cut: Infinity, maxLanes: 16, curve: true, colorBy: "branch", pal: PAL_B, r: 4.5,
+       cols: (gw) => `var(--hashw) 190px ${gw}px minmax(180px,1fr) 150px 118px`, order: ["hash", "refs", "g", "t", "author", "date"] },
+  C: { lane: 12, cut: null, compact: true, maxLanes: 10, curve: false, colorBy: "branch", pal: PAL_B, r: 3.5,
+       cols: (gw) => `var(--hashw) ${gw}px minmax(200px,1fr) 150px 118px`, order: ["hash", "g", "subj", "author", "date"] },
+};
+const cfg = () => V[variant];
+const gwidth = () => { const v = cfg(); return Math.min(Math.max(S.graph.width, 1), v.maxLanes) * v.lane + 8; };
+const laneX = (k) => 4 + k * cfg().lane + cfg().lane / 2;
+
+function segColor(s) {
+  const v = cfg();
+  if (s.stub === "gone") return "var(--weak)";
+  if (v.colorBy === "lane") {
+    const k = s.y1 === 0 ? s.x1 : s.x2; // the lane the line runs in
+    return v.pal[Math.round(k) % v.pal.length];
+  }
+  return v.pal[s.c % v.pal.length];
+}
+
+function graphSVG(i) {
+  const v = cfg(); const g = S.graph.rows[i]; const gw = gwidth();
+  let s = `<svg class="g" width="${gw}" height="${ROW}">`;
+  for (const seg of g.segs) {
+    const x1 = laneX(seg.x1), x2 = laneX(seg.x2), y1 = seg.y1 * ROW, y2 = seg.y2 * ROW;
+    const col = segColor(seg);
+    const w = v.curve ? 2 : 1.6;
+    if (seg.stub === "out" || seg.stub === "in" || seg.stub === "gone") {
+      const tgt = seg.stub === "gone" ? null : seg.to;
+      const title = seg.stub === "gone" ? `Parent ${short(seg.p)} is not in this log`
+        : seg.stub === "out" ? `Continues at ${short(S.rows[tgt[0]].h)}, ${tgt[0] - i} rows down. Click to go there.`
+        : `Comes from ${tgt.map((c) => short(S.rows[c].h)).join(", ")}, ${i - tgt[0]} rows up. Click to go there.`;
+      const ya = seg.stub === "in" ? 2 : y1, yb = seg.stub === "in" ? y2 : y2 - 2;
+      s += `<g class="stub" data-go="${tgt ? tgt[0] : ""}"><title>${esc(title)}</title>`
+        + `<line x1="${x1}" y1="${ya}" x2="${x2}" y2="${yb}" stroke="${col}" stroke-width="${w}" stroke-dasharray="2 2"/>`;
+      // A chevron where the line leaves the row (out) or enters it (in).
+      const cx = seg.stub === "in" ? x1 : x2, cy = seg.stub === "in" ? 4 : yb;
+      if (seg.stub !== "gone") s += `<path d="M${cx - 3.5} ${cy - 3} L${cx} ${cy + 1} L${cx + 3.5} ${cy - 3}" fill="none" stroke="${col}" stroke-width="1.8"/>`;
+      s += `<rect x="${Math.min(x1, x2) - 5}" y="${Math.min(ya, yb)}" width="${Math.abs(x2 - x1) + 10}" height="${Math.abs(yb - ya) + 2}" fill="transparent"/></g>`;
+      continue;
+    }
+    if (v.curve && x1 !== x2) {
+      const ym = (y1 + y2) / 2;
+      s += `<path d="M${x1} ${y1} C${x1} ${ym} ${x2} ${ym} ${x2} ${y2}" fill="none" stroke="${col}" stroke-width="${w}"/>`;
+    } else {
+      s += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="${w}"/>`;
+    }
+  }
+  const cx = laneX(g.col), cy = ROW / 2;
+  const nodeColor = v.colorBy === "lane" ? v.pal[g.col % v.pal.length] : v.pal[g.color % v.pal.length];
+  const h = S.rows[i].h;
+  const refs = S.refs[h] || [];
+  if (variant === "B") {
+    const big = refs.length ? v.r + 1.5 : v.r;
+    s += `<circle cx="${cx}" cy="${cy}" r="${big + 1.5}" fill="var(--ring)"/>`;
+    s += g.merge ? `<circle cx="${cx}" cy="${cy}" r="${big - .5}" fill="var(--ring)" stroke="${nodeColor}" stroke-width="2.2"/>`
+                 : `<circle cx="${cx}" cy="${cy}" r="${big}" fill="${nodeColor}"/>`;
+    if (refs.some((r) => r.kind === "current")) s += `<circle cx="${cx}" cy="${cy}" r="${big - 2.6}" fill="var(--ring)"/>`;
+  } else {
+    s += g.merge ? `<circle cx="${cx}" cy="${cy}" r="${v.r}" fill="var(--base)" stroke="${nodeColor}" stroke-width="1.8"/>`
+                 : `<circle cx="${cx}" cy="${cy}" r="${v.r}" fill="${nodeColor}"/>`;
+  }
+  return s + "</svg>";
+}
+
+// ---------- rendering ----------
+function header() {
+  const o = S.opts;
+  const seg = (on, label, act, tip) => `<button class="${on ? "on" : ""}" data-act="${act}" title="${esc(tip)}">${label}</button>`;
+  const chip = (key, label, tip) => `<button class="chip ${o[key] ? "on" : ""}" data-act="${key}" title="${esc(tip)}">${label}</button>`;
+  $("show").innerHTML = `<span class="lbl">Show</span>`
+    + `<span class="seg">${seg(!o.all, esc(S.spec), "tips", "Only what the log was opened on")}${seg(o.all, "All branches", "all", "Every branch, remote branch and tag (TortoiseGit: All Branches)")}</span>`
+    + chip("first", "First parent only", "Follow only first parents (TortoiseGit: Walk Behavior › First Parent Only)")
+    + chip("nomerges", "No merges", "Leave merge commits out (TortoiseGit: Walk Behavior › No Merges)")
+    + chip("compressed", "Labelled and merges", "Only commits with refs, and merges joining them (TortoiseGit: Walk Behavior › Compressed Graph)")
+    + `<span class="seg">${seg(o.order === "topo", "Topological", "order-topo", "Children before parents, branches kept together")}${seg(o.order === "date", "By date", "order-date", "Newest first, branches interleaved")}</span>`
+    + (variant === "C" ? `<span class="lbl" style="margin-left:6px">Cut lines longer than</span><input class="cutn" id="cut" type="number" min="2" value="${S.cut}"><span class="lbl">rows</span>` : "");
+  $("range").textContent = S.opts.all ? "All branches" : S.spec;
+}
+
+function rowHTML(i) {
+  const r = S.rows[i]; const refs = S.refs[r.h] || [];
+  const cells = {
+    g: `<div class="g">${graphSVG(i)}</div>`,
+    hash: `<div class="hash mono">${short(r.h)}</div>`,
+    subj: `<div class="subj">${refs.map(badge).join("")}<span class="t">${esc(r.s)}</span></div>`,
+    refs: `<div class="refs">${refs.map(badge).join("")}</div>`,
+    t: `<div class="subj"><span class="t">${esc(r.s)}</span></div>`,
+    author: `<div>${esc(r.an)}</div>`,
+    date: `<div class="date">${esc(r.ad)}</div>`,
+  };
+  const cls = "row" + (i % 2 ? " odd" : "") + (i === S.sel ? " sel" : "");
+  return `<div class="${cls}" data-i="${i}" style="top:${26 + i * ROW}px;grid-template-columns:${cfg().cols(gwidth())}">${cfg().order.map((c) => cells[c]).join("")}</div>`;
+}
+
+function renderList() {
+  const list = $("list");
+  if (!S.rows.length) { list.innerHTML = `<div class="empty">No commits.</div>`; return; }
+  const names = { g: "Graph", hash: "Hash", subj: "Subject", refs: "Refs", t: "Subject", author: "Author", date: "Date" };
+  const hashw = ABBREV * 7.3 + 20;
+  list.style.setProperty("--hashw", hashw + "px");
+  const first = Math.max(0, Math.floor((list.scrollTop - 26) / ROW) - 8);
+  const last = Math.min(S.rows.length, first + Math.ceil(list.clientHeight / ROW) + 16);
+  let html = `<div class="lhead" style="grid-template-columns:${cfg().cols(gwidth())}">${cfg().order.map((c) => `<div class="${c === "g" ? "g" : ""}" style="${c === "g" ? "padding-left:6px;line-height:26px" : ""}">${names[c]}</div>`).join("")}</div>`;
+  html += `<div style="height:${S.rows.length * ROW}px"></div>`;
+  for (let i = first; i < last; i++) html += rowHTML(i);
+  list.innerHTML = html;
+}
+
+async function renderDetails() {
+  const r = S.rows[S.sel]; const d = $("details");
+  if (!r) { d.innerHTML = ""; return; }
+  const refs = S.refs[r.h] || [];
+  const link = (h) => S.rowOf.has(h) ? `<a class="mono" data-go="${S.rowOf.get(h)}" title="Show this commit">${short(h)}</a>` : `<span class="mono gone" title="Not in this log">${short(h)}</span>`;
+  const children = [];
+  S.rows.forEach((c, j) => { if (c.ps.includes(r.h)) children.push(c.h); });
+  const meta = `<div class="meta">
+    <span>Commit</span><b class="mono">${r.h}</b>
+    ${refs.length ? `<span>Refs</span><b>${refs.map(badge).join("")}</b>` : ""}
+    ${r.ps.length > 1 ? `<span>Merge</span><b>${r.ps.map(link).join(" ")}</b>` : r.ps.length ? `<span>Parent</span><b>${link(r.ps[0])}</b>` : ""}
+    ${children.length ? `<span>Children</span><b>${children.map(link).join(" ")}</b>` : ""}
+    <span>Author</span><b>${esc(r.an)}</b>
+    <span>Date</span><b>${esc(r.ad)}</b></div>`;
+  let msg = S.messages.get(r.h);
+  d.innerHTML = meta + `<pre>${msg === undefined ? `<span class="subject">${esc(r.s)}</span>` : fmtMessage(msg)}</pre>`;
+  if (msg === undefined) {
+    msg = await api("/api/message?h=" + r.h); S.messages.set(r.h, msg);
+    if (S.rows[S.sel] === r) renderDetails();
+  }
+}
+function fmtMessage(m) {
+  const lines = m.replace(/\s+$/, "").split("\n");
+  return `<span class="subject">${esc(lines[0])}</span>` + (lines.length > 1 ? "\n" + esc(lines.slice(1).join("\n")) : "");
+}
+
+function select(i, reveal) {
+  if (i < 0 || i >= S.rows.length) return;
+  S.sel = i;
+  const list = $("list");
+  if (reveal) {
+    const top = 26 + i * ROW;
+    if (top < list.scrollTop + 26 || top + ROW > list.scrollTop + list.clientHeight)
+      list.scrollTop = top - list.clientHeight / 3;
+  }
+  renderList(); renderDetails();
+}
+
+function render() {
+  $("vlabel").textContent = `${variant} — ${VARIANTS[variant]}`;
+  S.graph = layout(S.rows, variant === "C" ? S.cut : cfg().cut, !!cfg().compact);
+  header(); renderList(); renderDetails();
+  $("count").textContent = `${S.rows.length.toLocaleString("en")} commits · ${S.graph.width} lanes`;
+  const u = new URL(location);
+  u.searchParams.set("variant", variant); u.searchParams.set("theme", theme); u.searchParams.set("spec", S.spec);
+  for (const k of ["all", "first", "nomerges", "compressed"]) S.opts[k] ? u.searchParams.set(k, "1") : u.searchParams.delete(k);
+  u.searchParams.set("order", S.opts.order); u.searchParams.set("cut", S.cut);
+  history.replaceState(null, "", u);
+}
+
+async function load() {
+  const keep = S.rows[S.sel]?.h;
+  $("list").innerHTML = `<div class="loading">Loading…</div>`;
+  const q = new URLSearchParams({ spec: S.spec, order: S.opts.order });
+  for (const k of ["all", "first", "nomerges", "compressed"]) if (S.opts[k]) q.set(k, "1");
+  let rows;
+  try { rows = await api("/api/log?" + q); }
+  catch (e) { $("list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  S.rows = rows.map(([h, ps, an, ad, s]) => ({ h, ps, an, ad, s }));
+  S.rowOf = new Map(S.rows.map((r, i) => [r.h, i]));
+  S.sel = keep && S.rowOf.has(keep) ? S.rowOf.get(keep) : 0;
+  const want = params.get("sel"); params.delete("sel");
+  if (want) { const i = S.rows.findIndex((r) => r.h.startsWith(want)); if (i >= 0) S.sel = i; }
+  render();
+  select(S.sel, true);
+}
+
+// ---------- events ----------
+$("list").addEventListener("scroll", () => renderList());
+$("list").addEventListener("click", (e) => {
+  const stub = e.target.closest(".stub");
+  if (stub && stub.dataset.go) { select(+stub.dataset.go, true); return; }
+  const row = e.target.closest(".row");
+  if (row) select(+row.dataset.i, false);
+});
+$("details").addEventListener("click", (e) => {
+  const a = e.target.closest("a[data-go]"); if (a) select(+a.dataset.go, true);
+});
+$("show").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-act]"); if (!b) return;
+  const a = b.dataset.act;
+  if (a === "tips") S.opts.all = false;
+  else if (a === "all") S.opts.all = true;
+  else if (a === "order-topo") S.opts.order = "topo";
+  else if (a === "order-date") S.opts.order = "date";
+  else S.opts[a] = !S.opts[a];
+  load();
+});
+$("show").addEventListener("change", (e) => { if (e.target.id === "cut") { S.cut = Math.max(2, +e.target.value || 40); render(); } });
+function cycle(d) { const ks = Object.keys(VARIANTS); variant = ks[(ks.indexOf(variant) + d + ks.length) % ks.length]; render(); }
+$("prev").onclick = () => cycle(-1);
+$("next").onclick = () => cycle(1);
+$("theme").onclick = () => { theme = theme === "dark" ? "light" : "dark"; document.body.className = theme; render(); };
+$("spec").value = S.spec;
+$("spec").addEventListener("keydown", (e) => { if (e.key === "Enter") { S.spec = e.target.value.trim() || "HEAD"; S.opts.all = false; load(); } });
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("input, textarea, [contenteditable]")) return;
+  if (e.key === "ArrowLeft") cycle(-1);
+  else if (e.key === "ArrowRight") cycle(1);
+  else if (e.key === "ArrowDown") { e.preventDefault(); select(S.sel + 1, true); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); select(S.sel - 1, true); }
+});
+
+(async () => {
+  const repo = await api("/api/repo");
+  S.refs = repo.refs; ABBREV = repo.abbrev;
+  $("title").textContent = `${repo.name} – Log`;
+  load();
+})();
+</script>
+</body>
+</html>
