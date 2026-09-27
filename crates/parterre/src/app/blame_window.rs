@@ -31,14 +31,18 @@
 //! in the overview strip, the one gone to stronger; Enter and `F3` go to the next, round the
 //! end, scrolling it into view. Finding never changes the chosen commit, as in
 //! TortoiseGitBlame. Esc in the find field leaves it; elsewhere it closes the window.
+//!
+//! Go to line (`Ctrl+G`), as in TortoiseGitBlame, asks for a line number in a popup under the
+//! find field, with the lines there are. Enter chooses that line whole, and so its commit and
+//! row, scrolling it into view; Esc closes the popup alone.
 
 use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
 
 use eframe::egui::text::{CCursor, LayoutJob, TextFormat};
 use eframe::egui::{
-    self, Color32, FontId, Id, Key, Modifiers, Rect, RichText, ScrollArea, Sense, Stroke, Ui,
-    UiBuilder, Vec2, pos2, vec2,
+    self, Color32, FontId, Id, Key, Modifiers, PopupCloseBehavior, Rect, RectAlign, RichText,
+    ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use parterre_core::blame::{Blame, BlameOptions, BlameSpec, Moves, Origin};
 use parterre_core::changed_files::FileStatus;
@@ -50,7 +54,7 @@ use parterre_core::glyphs;
 use parterre_core::log_graph::LogGraph;
 use parterre_core::repo::cmp_refs_for_display;
 use parterre_core::revgraph::GraphOptions;
-use parterre_core::text::{thousands, word_at};
+use parterre_core::text::{line_number, thousands, word_at};
 use parterre_core::{CommitIx, Oid, Repo};
 
 use super::ParterreApp;
@@ -371,6 +375,16 @@ struct Find {
     reveal: bool,
 }
 
+/// Go to line (Ctrl+G): the popup asking for a line number, in this window alone. What was
+/// typed isn't kept for the next time.
+#[derive(Debug, Default)]
+struct GoTo {
+    open: bool,
+    text: String,
+    /// Focus the field once the popup is drawn for real (its first frame only sizes it).
+    focus: bool,
+}
+
 #[derive(Debug)]
 struct BlameWindow {
     id: u64,
@@ -411,6 +425,9 @@ struct BlameWindow {
     /// The first line drawn in the last frame.
     top: usize,
     find: Find,
+    go_to: GoTo,
+    /// Scroll this line into view in the next frame, if it is out of view.
+    reveal_line: Option<usize>,
     /// Bring the window to the front in the next frame.
     focus: bool,
     closed: bool,
@@ -454,6 +471,8 @@ impl BlameWindow {
             hoff: 0.0,
             top: 0,
             find: Find::default(),
+            go_to: GoTo::default(),
+            reveal_line: None,
             focus: false,
             closed: false,
             title_theme: None,
@@ -794,6 +813,44 @@ impl BlameWindow {
         self.find.reveal = true;
     }
 
+    fn go_to_id(&self) -> Id {
+        Id::new(("blame-go-to", self.id))
+    }
+
+    /// Ctrl+G: opens the go-to-line popup with an empty field, once there are lines to go to.
+    fn open_go_to(&mut self) {
+        if self.ready().is_some_and(|r| !r.blame.lines.is_empty()) {
+            self.go_to = GoTo {
+                open: true,
+                text: String::new(),
+                focus: true,
+            };
+        }
+    }
+
+    /// Esc, a click outside the popup, or going: closes the popup, and leaves its field.
+    fn close_go_to(&mut self, ctx: &egui::Context) {
+        self.go_to.open = false;
+        ctx.memory_mut(|m| m.surrender_focus(self.go_to_id()));
+    }
+
+    /// The line (from 0) the go-to field names, if it names one of the file's.
+    fn typed_line(&self) -> Option<usize> {
+        line_number(&self.go_to.text, self.ready()?.blame.lines.len())
+    }
+
+    /// Enter in the go-to field: chooses the line it names, whole, and so its commit and row,
+    /// scrolls it into view and closes the popup. False, doing nothing, if it names no line.
+    fn go_to_typed_line(&mut self, ctx: &egui::Context) -> bool {
+        let Some(i) = self.typed_line() else {
+            return false;
+        };
+        self.choose_line(i);
+        self.reveal_line = Some(i);
+        self.close_go_to(ctx);
+        true
+    }
+
     /// Asks for a blame of the version before line `i`'s commit, in a window of its own, with
     /// the line's place in that version chosen, near where it came in. This window stays as it
     /// is.
@@ -807,9 +864,10 @@ impl BlameWindow {
     }
 
     /// Ctrl+F finds, F3 and Shift+F3 go to the next and previous place, and Esc in the find
-    /// field leaves it; elsewhere Esc closes. Ctrl+A chooses every line; `Up`/`Down` step
-    /// through the history pane wherever the pointer is, while it shows. While the find field
-    /// has the focus, other keys are its own.
+    /// field leaves it; Ctrl+G asks for a line to go to, and Esc then closes the popup;
+    /// elsewhere Esc closes. Ctrl+A chooses every line; `Up`/`Down` step through the history
+    /// pane wherever the pointer is, while it shows. While the find field or the popup has the
+    /// focus, other keys are its own.
     fn handle_keys(&mut self, ui: &Ui) {
         let id = self.find_id();
         // egui drops the focus on Esc before the frame starts.
@@ -826,6 +884,16 @@ impl BlameWindow {
         });
         if previous || next {
             self.find_step(next);
+        }
+        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::G)) {
+            self.open_go_to();
+        }
+        if self.go_to.open {
+            // Never the window.
+            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                self.close_go_to(ui.ctx());
+            }
+            return;
         }
         if in_find {
             if ui.input(|i| i.key_pressed(Key::Escape)) {
@@ -981,7 +1049,7 @@ impl BlameWindow {
             ui.label(RichText::new("F5 blames again").size(12.0).color(weak));
         }
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let find = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let on = self.show_history;
             let title = if on {
                 "Hide the history pane"
@@ -1005,9 +1073,87 @@ impl BlameWindow {
                     // Narrow windows squeeze the field rather than the tools.
                     let width = (room - 16.0).clamp(60.0, 380.0);
                     ui.add_space(((room - width) / 2.0).max(0.0));
+                    let left = ui.cursor().left();
                     self.find_field(ui, width);
+                    let rect = ui.min_rect();
+                    Rect::from_x_y_ranges(left..=rect.right(), rect.y_range())
                 },
-            );
+            )
+            .inner
+        });
+        self.go_to_popup(ui, find.inner);
+    }
+
+    /// The go-to-line popup, centred under `under` (where the find field is), while it is
+    /// open.
+    fn go_to_popup(&mut self, ui: &Ui, under: Rect) {
+        let Some(n) = self.ready().map(|r| r.blame.lines.len()) else {
+            return;
+        };
+        let mut open = self.go_to.open;
+        let id = self.go_to_id().with("popup");
+        egui::Popup::new(id, ui.ctx().clone(), under, ui.layer_id())
+            .open_bool(&mut open)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .align(RectAlign::BOTTOM)
+            .gap(4.0)
+            .style(crate::menu::popover_style)
+            .show(|ui| self.go_to_field(ui, n));
+        if !open && self.go_to.open {
+            self.close_go_to(ui.ctx());
+        }
+    }
+
+    /// The popup's field, marked while it names none of the `n` lines, and the lines there
+    /// are. Enter goes to the line, if it names one.
+    fn go_to_field(&mut self, ui: &mut Ui, n: usize) {
+        ui.weak("Go to line");
+        let invalid = !self.go_to.text.trim().is_empty() && self.typed_line().is_none();
+        let id = self.go_to_id();
+        let focused = ui.memory(|m| m.has_focus(id));
+        let t = widgets::tones(ui);
+        let error = ui.visuals().error_fg_color;
+        let stroke = if invalid {
+            Stroke::new(1.5, error)
+        } else if focused {
+            Stroke::new(1.5, t.accent)
+        } else {
+            Stroke::new(1.0, t.field_line)
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let response = egui::Frame::new()
+                .fill(t.field)
+                .stroke(stroke)
+                .corner_radius(7)
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.go_to.text)
+                            .id(id)
+                            .frame(egui::Frame::NONE)
+                            .hint_text("Line number")
+                            .desired_width(110.0),
+                    )
+                })
+                .inner;
+            if self.go_to.focus && !ui.is_sizing_pass() {
+                response.request_focus();
+                self.go_to.focus = false;
+            }
+            let range = format!("1–{}", thousands(n));
+            let color = if invalid {
+                error
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            ui.label(RichText::new(range).color(color));
+            if response.lost_focus()
+                && ui.input(|i| i.key_pressed(Key::Enter))
+                && !self.go_to_typed_line(ui.ctx())
+            {
+                response.request_focus();
+            }
         });
     }
 
@@ -1157,15 +1303,19 @@ impl BlameWindow {
         } else if let Some(offset) = self.pending_scroll.take() {
             self.scroll_to = Some(offset);
         }
-        // The place found gone to: into view, a third of the way down if it was out of it, and
-        // sideways too.
+        // A line gone to: into view, a third of the way down if it was out of it.
+        if let Some(line) = self.reveal_line.take() {
+            let line = line.min(n - 1);
+            if let Some(offset) = reveal(line, self.scroll, area.height(), row_h) {
+                self.scroll_to = Some(offset);
+            }
+        }
+        // The place found gone to: the same, and sideways too.
         if std::mem::take(&mut self.find.reveal)
             && let Some(m) = self.find.current.and_then(|c| self.find.matches.get(c))
         {
-            let y = m.line as f32 * row_h;
-            if y < self.scroll || y + row_h > self.scroll + area.height() {
-                let above = (area.height() / row_h / 3.0).floor();
-                self.scroll_to = Some(((m.line as f32 - above) * row_h).max(0.0));
+            if let Some(offset) = reveal(m.line, self.scroll, area.height(), row_h) {
+                self.scroll_to = Some(offset);
             }
             let (x0, x1) = (m.range.start as f32 * char_w, m.range.end as f32 * char_w);
             if x0 < self.hoff || x1 > self.hoff + text_w - char_w {
@@ -2021,6 +2171,16 @@ fn runs(n: usize, owned: impl Fn(usize) -> bool) -> Vec<std::ops::Range<usize>> 
         }
     }
     runs
+}
+
+/// The scroll offset that brings line `i` into view a third of the way down, if it is out of
+/// view at `scroll` in text `height` tall.
+fn reveal(i: usize, scroll: f32, height: f32, row_h: f32) -> Option<f32> {
+    let y = i as f32 * row_h;
+    (y < scroll || y + row_h > scroll + height).then(|| {
+        let above = (height / row_h / 3.0).floor();
+        ((i as f32 - above) * row_h).max(0.0)
+    })
 }
 
 /// Sizes of a blame's rows and columns, from the text size and the number of lines.
@@ -3174,5 +3334,123 @@ mod tests {
         frame(&ctx, &mut other, vec![ctrl(Key::F)]);
         assert_eq!(other.find.query, "");
         assert_eq!(w.find.last, "four");
+    }
+
+    fn has_go_to_focus(ctx: &egui::Context, w: &BlameWindow) -> bool {
+        ctx.memory(|m| m.has_focus(w.go_to_id()))
+    }
+
+    /// Ctrl+G, a frame for the popup to size itself, then `text` typed into its field.
+    fn go_to(ctx: &egui::Context, w: &mut BlameWindow, text: &str) {
+        frame(ctx, w, vec![ctrl(Key::G)]);
+        frame(ctx, w, Vec::new());
+        frame(ctx, w, vec![egui::Event::Text(text.into())]);
+    }
+
+    /// [`window`] with 300 lines from A, the history pane hidden.
+    fn long_window() -> BlameWindow {
+        let mut w = window();
+        w.show_history = false;
+        let out: String = (1..=300).map(|i| entry(A, i, i, 100, "", "a")).collect();
+        let repo = w.repo.clone();
+        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo));
+        w
+    }
+
+    #[test]
+    fn ctrl_g_chooses_the_line_typed_whole_with_its_commit_and_row() {
+        let ctx = egui::Context::default();
+        let mut w = listed_window();
+        frame(&ctx, &mut w, Vec::new());
+        go_to(&ctx, &mut w, "2");
+        assert!(w.go_to.open);
+        assert!(has_go_to_focus(&ctx, &w));
+        assert_eq!(w.typed_line(), Some(1));
+        frame(&ctx, &mut w, vec![key(Key::Enter)]);
+        assert!(!w.go_to.open);
+        assert!(!has_go_to_focus(&ctx, &w));
+        assert_eq!(span(&w), Some((1, 1)));
+        assert_eq!(w.selection.and_then(|s| s.chars()), None);
+        assert_eq!(w.chosen, Some(Some(oid(B))));
+        assert_eq!(w.list.selected, Some(0));
+        // In view already: the text stays where it is.
+        frame(&ctx, &mut w, Vec::new());
+        assert_eq!(w.scroll, 0.0);
+
+        // Again: the popup opens empty, and the next line goes to A's row.
+        go_to(&ctx, &mut w, "4");
+        assert_eq!(w.go_to.text, "4");
+        frame(&ctx, &mut w, vec![key(Key::Enter)]);
+        assert_eq!(span(&w), Some((3, 3)));
+        assert_eq!(w.chosen, Some(Some(oid(A))));
+        assert_eq!(w.list.selected, Some(2));
+    }
+
+    #[test]
+    fn a_line_out_of_view_is_scrolled_a_third_of_the_way_down_and_one_in_view_is_not() {
+        let ctx = egui::Context::default();
+        let mut w = long_window();
+        frame(&ctx, &mut w, Vec::new());
+        go_to(&ctx, &mut w, "250");
+        frame(&ctx, &mut w, vec![key(Key::Enter)]);
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        assert_eq!(span(&w), Some((249, 249)));
+        let row_h = Metrics::new(&ctx, 300, w.repo.abbrev_len).row_h;
+        let height = 700.0 - TOOLBAR - HEADER - INFO;
+        let above = (height / row_h / 3.0).floor() as usize;
+        assert_eq!(w.top, 249 - above);
+
+        // A line in view: chosen, without scrolling.
+        let (top, scroll) = (w.top, w.scroll);
+        go_to(&ctx, &mut w, &(top + 3).to_string());
+        frame(&ctx, &mut w, vec![key(Key::Enter)]);
+        frame(&ctx, &mut w, Vec::new());
+        assert_eq!(span(&w), Some((top + 2, top + 2)));
+        assert_eq!(w.scroll, scroll);
+    }
+
+    #[test]
+    fn a_number_naming_no_line_is_marked_and_enter_does_nothing() {
+        let ctx = egui::Context::default();
+        let mut w = window();
+        frame(&ctx, &mut w, Vec::new());
+        click(&ctx, &mut w, 0, Modifiers::NONE);
+        for typed in ["5", "0", "x"] {
+            go_to(&ctx, &mut w, typed);
+            assert_eq!(w.go_to.text, typed);
+            assert_eq!(w.typed_line(), None);
+            frame(&ctx, &mut w, vec![key(Key::Enter)]);
+            frame(&ctx, &mut w, Vec::new());
+            assert!(w.go_to.open);
+            assert!(has_go_to_focus(&ctx, &w), "the field keeps the focus");
+            assert_eq!(span(&w), Some((0, 0)));
+        }
+        // Nothing typed is nothing gone to either.
+        frame(&ctx, &mut w, vec![key(Key::Backspace)]);
+        assert_eq!(w.go_to.text, "");
+        frame(&ctx, &mut w, vec![key(Key::Enter)]);
+        assert!(w.go_to.open);
+    }
+
+    #[test]
+    fn esc_closes_the_go_to_popup_and_only_then_the_window() {
+        let ctx = egui::Context::default();
+        let mut w = window();
+        frame(&ctx, &mut w, Vec::new());
+        go_to(&ctx, &mut w, "3");
+        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        assert!(!w.go_to.open);
+        assert!(!w.closed);
+        assert!(!has_go_to_focus(&ctx, &w));
+        assert_eq!(span(&w), None);
+        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        assert!(w.closed);
+
+        // Not before there are lines to go to.
+        let mut w = window();
+        w.load = Load::Failed("no".into());
+        frame(&ctx, &mut w, vec![ctrl(Key::G)]);
+        assert!(!w.go_to.open);
     }
 }
