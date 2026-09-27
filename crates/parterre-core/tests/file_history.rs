@@ -7,7 +7,7 @@ use parterre_core::Oid;
 use parterre_core::blame::{BlameOptions, BlameSpec, Moves};
 use parterre_core::file_diff::Rev;
 use parterre_core::file_history::{FileHistory, Source};
-use parterre_core::git::{Cancel, Git, GitError};
+use parterre_core::git::{Cancel, Git};
 
 fn at(hash: &str, path: &str) -> BlameSpec {
     BlameSpec {
@@ -275,6 +275,8 @@ fn nothing_newer_than_the_blamed_revision_is_listed() {
 fn cancelling_kills_git() {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    use parterre_core::git::GitError;
 
     let mut r = TestRepo::new();
     r.write("f.txt", b"one\n");
