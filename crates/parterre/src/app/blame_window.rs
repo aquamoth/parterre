@@ -1237,7 +1237,9 @@ impl BlameWindow {
                 }
             }
             self.dragging = true;
-        } else if double
+        }
+        // Not only after a press: a quick double-click can end in the frame it started.
+        if double
             && let Some((i, col)) = hover
             && self.selection.is_some_and(|s| !s.lines && s.touches(i))
             && let Some(word) = self
@@ -1250,7 +1252,8 @@ impl BlameWindow {
                 lines: false,
             });
             self.dragging = false;
-        } else if let Some(i) = secondary
+        } else if press.is_none()
+            && let Some(i) = secondary
             && !self.selection.is_some_and(|s| s.touches(i))
         {
             self.choose_line(i);
@@ -2265,14 +2268,29 @@ mod tests {
         assert_eq!(w.selected_text().as_deref(), Some("two"));
         assert_eq!(w.chosen, Some(Some(oid(B))));
 
-        // Ctrl+A chooses every line, whole.
+        // Also when each click comes in a single frame.
+        for _ in 0..60 {
+            frame(&ctx, &mut w, Vec::new());
+        }
+        let p = char_at(&ctx, &w, 2, 1);
+        for _ in 0..2 {
+            let clicked = vec![
+                egui::Event::PointerMoved(p),
+                button(p, true, false),
+                button(p, false, false),
+            ];
+            frame(&ctx, &mut w, clicked);
+        }
+        assert_eq!(w.selected_text().as_deref(), Some("three"));
+
+        // Ctrl+A chooses every line, whole, keeping the chosen commit.
         frame(&ctx, &mut w, vec![ctrl(Key::A)]);
         assert_eq!(span(&w), Some((0, 3)));
         assert_eq!(
             w.selected_text().as_deref(),
             Some("one\ntwo\tx\nthree\nfour\n")
         );
-        assert_eq!(w.chosen, Some(Some(oid(B))));
+        assert_eq!(w.chosen, Some(Some(oid(A))));
     }
 
     /// A click at line `i`, pressed and released, with `modifiers`.
