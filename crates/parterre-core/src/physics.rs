@@ -37,6 +37,8 @@
 //! nodes moved by hand as soon as their nodes move relative to each other, other edges once
 //! they are pulled far out of shape, and any edge a moved node comes to cover. Those are routed
 //! afresh around the nodes ([`crate::route`]), while dragging and whenever the net settles.
+//! Edges the layout bundled into a trunk stay bundled: a routed edge joins its bundle's trunk,
+//! and the trunk is routed afresh as a whole once it no longer fits.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -133,6 +135,8 @@ const SUBSTEPS: usize = 4;
 const FOLLOW_HZ: f32 = 3.0;
 /// Minimum gap kept between node boxes when avoiding overlap.
 const OVERLAP_MARGIN: f32 = 6.0;
+/// No bundle, for [`Net::bundle`].
+const NO_BUNDLE: u32 = u32::MAX;
 /// Minimum distance along the history direction between the boxes at the two ends of an edge
 /// segment while the graph adapts, so that an edge always visibly leaves its child towards its
 /// parent. More than twice [`route::CLEARANCE`], so that routes still fit between rows.
@@ -215,6 +219,26 @@ impl SpringsAt {
     fn get(&self, particle: usize) -> &[u32] {
         &self.ids[self.start[particle] as usize..self.start[particle + 1] as usize]
     }
+}
+
+/// A route of an edge's own, used once its layout route no longer fits.
+#[derive(Clone, Debug)]
+struct Route {
+    bends: Vec<Point>,
+    /// Where the route joins its bundle's trunk (an index into [`Net::trunks`]); from there on
+    /// it runs through the trunk's bend points.
+    join: Option<u32>,
+}
+
+/// How the edges of a bundle run into their parent.
+#[derive(Clone, Debug)]
+enum Trunk {
+    /// Through the trunk's bend points, as in the layout.
+    Layout,
+    /// Along a route of the trunk's own, from its first bend point on.
+    Routed(Vec<Point>),
+    /// The parent has been moved before the trunk: every edge takes a route of its own.
+    Broken,
 }
 
 /// A drag in progress.
@@ -306,8 +330,16 @@ pub struct Net {
     magnet_nodes: Vec<u32>,
     undo: Vec<Change>,
     redo: Vec<Change>,
-    /// Edges whose layout route no longer fits get a route of their own: its bend points.
-    routes: Vec<Option<Vec<Point>>>,
+    /// Edges into the same parent that the layout bundled: the bend points they share, in
+    /// order (the trunk), and the edges. Each edge's layout route ends with part of the trunk.
+    trunks: Vec<Vec<u32>>,
+    bundle_edges: Vec<Vec<u32>>,
+    /// The bundle of every edge, or [`NO_BUNDLE`].
+    bundle: Vec<u32>,
+    /// How each bundle's trunk runs, worked out once per routing pass.
+    trunk_cache: HashMap<u32, Trunk>,
+    /// Edges whose layout route no longer fits get a route of their own.
+    routes: Vec<Option<Route>>,
     /// Per edge: its route was made for an edge turned around (see [`Net::turns`]).
     turned: Vec<bool>,
     /// Node boxes for routing, set up when first needed.
@@ -402,6 +434,47 @@ impl Net {
             }
         }
 
+        // Bundles: edges whose last bend points are shared (all edges sharing a bend point run
+        // into the same parent). The longest shared run is the trunk.
+        let mut trunks: Vec<Vec<u32>> = Vec::new();
+        let mut bundle = vec![NO_BUNDLE; chains.len()];
+        let mut bundle_at: HashMap<u32, u32> = HashMap::new();
+        fn shared_run<'a>(chain: &'a [u32], bend_edges: &[u32], n: usize) -> &'a [u32] {
+            let bends = &chain[1..chain.len() - 1];
+            let k = bends
+                .iter()
+                .rev()
+                .take_while(|&&p| bend_edges[p as usize - n] > 1)
+                .count();
+            &bends[bends.len() - k..]
+        }
+        for (e, chain) in chains.iter().enumerate() {
+            let run = shared_run(chain, &bend_edges, n);
+            let parent = chain[chain.len() - 1];
+            if run.is_empty() || parent == chain[0] {
+                continue;
+            }
+            let b = *bundle_at.entry(parent).or_insert_with(|| {
+                trunks.push(Vec::new());
+                trunks.len() as u32 - 1
+            });
+            if run.len() > trunks[b as usize].len() {
+                trunks[b as usize] = run.to_vec();
+            }
+            bundle[e] = b;
+        }
+        let mut bundle_edges = vec![Vec::new(); trunks.len()];
+        for (e, chain) in chains.iter().enumerate() {
+            let b = bundle[e];
+            if b != NO_BUNDLE {
+                if trunks[b as usize].ends_with(shared_run(chain, &bend_edges, n)) {
+                    bundle_edges[b as usize].push(e as u32);
+                } else {
+                    bundle[e] = NO_BUNDLE;
+                }
+            }
+        }
+
         let count = origin.len();
         let adjacent = SpringsAt::new(count, &springs);
         Net {
@@ -437,6 +510,10 @@ impl Net {
             magnet_nodes: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
+            trunks,
+            bundle_edges,
+            bundle,
+            trunk_cache: HashMap::new(),
             routes: vec![None; layout.edges.len()],
             turned: vec![false; layout.edges.len()],
             obstacles: None,
@@ -462,10 +539,15 @@ impl Net {
     pub fn edge_points(&self, e: usize) -> impl ExactSizeIterator<Item = Point> + '_ {
         let chain = &self.chains[e];
         let pts: Vec<Point> = match &self.routes[e] {
-            Some(bends) => {
+            Some(route) => {
                 let (c, p) = (chain[0] as usize, chain[chain.len() - 1] as usize);
+                let trunk = match route.join {
+                    Some(j) => &self.trunks[self.bundle[e] as usize][j as usize..],
+                    None => &[],
+                };
                 std::iter::once(self.pos(c))
-                    .chain(bends.iter().copied())
+                    .chain(route.bends.iter().copied())
+                    .chain(trunk.iter().map(|&t| self.pos(t as usize)))
                     .chain(std::iter::once(self.pos(p)))
                     .collect()
             }
@@ -1024,6 +1106,7 @@ impl Net {
             return;
         }
         self.obstacles();
+        self.trunk_cache.clear();
         let mut area: Option<(Point, Point)> = None;
         for &node in moved {
             let i = node as usize;
@@ -1059,6 +1142,20 @@ impl Net {
                 }
             }
         }
+        self.refresh_routes(edges);
+    }
+
+    /// Refreshes the routes of `edges`, and of all edges bundled with them: they share their
+    /// trunk, so they have to agree on how it runs.
+    fn refresh_routes(&mut self, mut edges: Vec<u32>) {
+        let bundles: Vec<u32> = edges
+            .iter()
+            .map(|&e| self.bundle[e as usize])
+            .filter(|&b| b != NO_BUNDLE)
+            .collect();
+        for b in bundles {
+            edges.extend_from_slice(&self.bundle_edges[b as usize]);
+        }
         edges.sort_unstable();
         edges.dedup();
         for e in edges {
@@ -1081,44 +1178,138 @@ impl Net {
     }
 
     /// Routes edge `e` afresh if its layout route no longer fits: its nodes have moved
-    /// relative to each other, or a moved node covers it. Otherwise it follows the layout.
+    /// relative to each other, or a moved node covers it, or (for a bundled edge) its trunk
+    /// has been routed afresh. Otherwise it follows the layout.
     fn refresh_route(&mut self, e: usize) {
         let chain = &self.chains[e];
         let (c, p) = (chain[0] as usize, chain[chain.len() - 1] as usize);
-        // Edges at nodes moved by hand re-route as soon as they change; edges that merely
-        // gave way keep the layout's route unless pulled far out of shape.
-        let limit = if self.rearranged(c) || self.rearranged(p) {
+        let stretched = self.stretched(c, p);
+        let bundle = self.bundle[e];
+        let trunk = (bundle != NO_BUNDLE).then(|| self.trunk(bundle));
+        let trunk_routed = matches!(trunk, Some(Trunk::Routed(_)));
+        if !(stretched || trunk_routed || self.blocked(e)) {
+            self.turned[e] = false;
+            self.routes[e] = None;
+            return;
+        }
+        // From where edges leave the child (its side along the direction of history) to
+        // where they enter the parent (the side against it).
+        let a = self.exit(c);
+        let b = self.entry(p);
+        let vertical = self.vertical;
+        self.turned[e] = self.is_reversed(e);
+        let route = if self.turned[e] {
+            // Turned around: keep those sides, and run round both boxes from just past the
+            // child to just before the parent (the route starts and ends with those turns).
+            let a = add(a, scale(self.flow, route::TURN));
+            let b = sub(b, scale(self.flow, route::TURN));
+            let ends = [route::NO_END; 2];
+            let mut pts = vec![a];
+            pts.extend(route::route(self.obstacles(), vertical, a, b, ends));
+            pts.push(b);
+            Route {
+                bends: pts,
+                join: None,
+            }
+        } else {
+            // A bundled edge joins its trunk at the first point far enough on from the child.
+            let ahead = |q: Point| dot(sub(q, a), self.flow) >= FLOW_GAP;
+            let ends = [c as u32, route::NO_END];
+            match trunk {
+                Some(Trunk::Layout) => {
+                    let join = self.trunks[bundle as usize]
+                        .iter()
+                        .map(|&t| self.pos(t as usize))
+                        .enumerate()
+                        .find(|&(_, q)| ahead(q));
+                    join.map(|(j, at)| Route {
+                        bends: route::route(self.obstacles(), vertical, a, at, ends),
+                        join: Some(j as u32),
+                    })
+                }
+                Some(Trunk::Routed(pts)) => pts.iter().position(|&q| ahead(q)).map(|j| {
+                    let mut bends = route::route(self.obstacles(), vertical, a, pts[j], ends);
+                    bends.extend_from_slice(&pts[j..]);
+                    Route { bends, join: None }
+                }),
+                Some(Trunk::Broken) | None => None,
+            }
+            .unwrap_or_else(|| Route {
+                bends: route::route(self.obstacles(), vertical, a, b, [c as u32, p as u32]),
+                join: None,
+            })
+        };
+        self.routes[e] = Some(route);
+    }
+
+    /// True if nodes `c` and `p` have moved too far relative to each other for the layout's
+    /// route between them. Edges at nodes moved by hand re-route as soon as they change;
+    /// edges that merely gave way keep the layout's route unless pulled far out of shape.
+    fn stretched(&self, c: usize, p: usize) -> bool {
+        self.pulled(c, p, self.rearranged(c) || self.rearranged(p))
+    }
+
+    /// True if particles `a` and `b` have moved relative to each other by more than edges
+    /// allow (less if one of them is `rearranged`).
+    fn pulled(&self, a: usize, b: usize, rearranged: bool) -> bool {
+        let limit = if rearranged {
             REROUTE_AFTER
         } else {
             REROUTE_ANYWAY
         };
-        let stretched = len(sub(self.disp[p], self.disp[c])) > limit;
-        self.routes[e] = if stretched || self.blocked(e) {
-            // From where edges leave the child (its side along the direction of history) to
-            // where they enter the parent (the side against it).
-            let flow = self.flow;
-            let depth = |i: usize| flow.x.abs() * self.half[i].x + flow.y.abs() * self.half[i].y;
-            let a = add(self.pos(c), scale(flow, depth(c)));
-            let b = sub(self.pos(p), scale(flow, depth(p)));
-            let vertical = self.vertical;
-            self.turned[e] = self.is_reversed(e);
-            Some(if self.turned[e] {
-                // Turned around: keep those sides, and run round both boxes from just past the
-                // child to just before the parent (the route starts and ends with those turns).
-                let a = add(a, scale(flow, route::TURN));
-                let b = sub(b, scale(flow, route::TURN));
-                let ends = [route::NO_END; 2];
-                let mut pts = vec![a];
-                pts.extend(route::route(self.obstacles(), vertical, a, b, ends));
-                pts.push(b);
-                pts
-            } else {
-                route::route(self.obstacles(), vertical, a, b, [c as u32, p as u32])
-            })
+        len(sub(self.disp[b], self.disp[a])) > limit
+    }
+
+    /// Where edges leave node `i` (its side along the direction of history).
+    fn exit(&self, i: usize) -> Point {
+        add(self.pos(i), scale(self.flow, self.depth(i)))
+    }
+
+    /// Where edges enter node `i` (its side against the direction of history).
+    fn entry(&self, i: usize) -> Point {
+        sub(self.pos(i), scale(self.flow, self.depth(i)))
+    }
+
+    /// Half the extent of node `i` along the direction of history.
+    fn depth(&self, i: usize) -> f32 {
+        self.flow.x.abs() * self.half[i].x + self.flow.y.abs() * self.half[i].y
+    }
+
+    /// How the edges of bundle `b` run into their parent (worked out once per routing pass).
+    /// The trunk keeps the layout's route unless its parent has moved relative to it or a
+    /// moved node covers it; then it runs from its first bend point along a route of its own.
+    fn trunk(&mut self, b: u32) -> Trunk {
+        if let Some(t) = self.trunk_cache.get(&b) {
+            return t.clone();
+        }
+        let trunk = &self.trunks[b as usize];
+        let chain = &self.chains[self.bundle_edges[b as usize][0] as usize];
+        let p = chain[chain.len() - 1] as usize;
+        let (first, last) = (trunk[0] as usize, trunk[trunk.len() - 1] as usize);
+        let start = self.pos(first);
+        let end = self.entry(p);
+        let state = if dot(sub(end, start), self.flow) < FLOW_GAP {
+            Trunk::Broken
         } else {
-            self.turned[e] = false;
-            None
+            let pts: Vec<Point> = trunk
+                .iter()
+                .map(|&t| self.pos(t as usize))
+                .chain(std::iter::once(self.pos(p)))
+                .collect();
+            if self.pulled(last, p, self.rearranged(p))
+                || self.covered(&pts, [route::NO_END, p as u32])
+            {
+                let vertical = self.vertical;
+                let ends = [route::NO_END, p as u32];
+                let mut pts = vec![start];
+                pts.extend(route::route(self.obstacles(), vertical, start, end, ends));
+                Trunk::Routed(pts)
+            } else {
+                Trunk::Layout
+            }
         };
+        self.trunk_cache.insert(b, state.clone());
+        state
     }
 
     /// True if node `i` has been moved by hand (or is being dragged), or has been pushed far
@@ -1132,6 +1323,11 @@ impl Net {
         let chain = &self.chains[e];
         let ends = [chain[0], chain[chain.len() - 1]];
         let pts: Vec<Point> = chain.iter().map(|&p| self.pos(p as usize)).collect();
+        self.covered(&pts, ends)
+    }
+
+    /// True if a rearranged node other than `ends` covers the line through `pts`.
+    fn covered(&mut self, pts: &[Point], ends: [u32; 2]) -> bool {
         let (origin, disp, half, moved, held) = (
             &self.origin,
             &self.disp,
@@ -1169,11 +1365,12 @@ impl Net {
         if self.obstacles.is_none() || !(0..n).any(|i| self.rearranged(i)) {
             return;
         }
-        for e in 0..self.routes.len() {
-            if self.routes[e].is_none() && self.blocked(e) {
-                self.refresh_route(e);
-            }
-        }
+        self.trunk_cache.clear();
+        let blocked: Vec<u32> = (0..self.routes.len())
+            .filter(|&e| self.routes[e].is_none() && self.blocked(e))
+            .map(|e| e as u32)
+            .collect();
+        self.refresh_routes(blocked);
     }
 
     /// Computes where every woken particle is heading.
@@ -2172,6 +2369,114 @@ mod tests {
         settle(&mut net, &free());
         assert!(close(net.node_pos(4), l.nodes[4]));
         assert!(!net.is_rerouted(3), "0 -> 3 takes the layout's route again");
+    }
+
+    /// 0 -> 3 -> 4, and merges 1, 2 and 5 of 4 and 3 above 3: their edges into 4 are
+    /// bundled into one trunk (edges 2, 3 and 4).
+    fn bundle_net() -> (Layout, Net) {
+        let merge = |child, parent| LayoutEdge {
+            first_parent: false,
+            ..edge(child, parent)
+        };
+        let input = LayoutInput {
+            sizes: vec![Point::new(60.0, 20.0); 6],
+            times: vec![10, 10, 10, 5, 1, 10],
+            edges: vec![
+                edge(0, 3),
+                edge(3, 4),
+                edge(1, 4),
+                edge(2, 4),
+                edge(5, 4),
+                merge(1, 3),
+                merge(2, 3),
+                merge(5, 3),
+            ],
+            priority: Vec::new(),
+        };
+        let opts = LayoutOptions {
+            concentrate_edges: true,
+            ..LayoutOptions::default()
+        };
+        let l = layout::layout(&input, &opts);
+        let net = Net::new(&l, &input.sizes);
+        (l, net)
+    }
+
+    /// The last segment of each of `edges`: where they join into their parent.
+    fn last_segments(net: &Net, edges: &[usize]) -> Vec<Vec<Point>> {
+        edges
+            .iter()
+            .map(|&e| {
+                let n = net.edge_points(e).len();
+                net.edge_points(e).skip(n - 2).collect()
+            })
+            .collect()
+    }
+
+    /// True if `edges` end in one trunk: their last segments coincide, and start away from
+    /// their children.
+    fn bundled(net: &Net, edges: &[usize]) -> bool {
+        let last = last_segments(net, edges);
+        let children: Vec<Point> = edges
+            .iter()
+            .map(|&e| net.node_pos(net.chains[e][0] as usize))
+            .collect();
+        last.iter().all(|s| *s == last[0]) && !children.contains(&last[0][0])
+    }
+
+    const BUNDLED: [usize; 3] = [2, 3, 4];
+
+    #[test]
+    fn rerouted_edges_join_their_trunk() {
+        let (_, mut net) = bundle_net();
+        assert!(bundled(&net, &BUNDLED), "a trunk to begin with");
+        for params in [free(), NetParams::default()] {
+            // Nudge one child: its edge re-routes, and still joins the others.
+            drag(&mut net, &[1], Point::new(6.0, 4.0), &params);
+            settle(&mut net, &params);
+            assert!(net.is_rerouted(2));
+            assert!(bundled(&net, &BUNDLED), "{params:?}");
+            // Move all the children: still one trunk.
+            drag(&mut net, &[1, 2, 5], Point::new(-20.0, 10.0), &params);
+            settle(&mut net, &params);
+            assert!(BUNDLED.iter().all(|&e| net.is_rerouted(e)));
+            assert!(bundled(&net, &BUNDLED), "{params:?}");
+            net.reset();
+            settle(&mut net, &params);
+            assert!(BUNDLED.iter().all(|&e| !net.is_rerouted(e)));
+        }
+    }
+
+    #[test]
+    fn a_moved_parent_keeps_its_edges_bundled() {
+        let (_, mut net) = bundle_net();
+        for params in [free(), NetParams::default()] {
+            drag(&mut net, &[4], Point::new(80.0, 30.0), &params);
+            settle(&mut net, &params);
+            assert!(
+                bundled(&net, &BUNDLED),
+                "{params:?}: {:?}",
+                last_segments(&net, &BUNDLED)
+            );
+            for e in 0..8 {
+                assert!(edge_is_clear(&net, e), "edge {e} runs through a node");
+            }
+            net.reset();
+            settle(&mut net, &params);
+        }
+    }
+
+    #[test]
+    fn a_child_moved_past_the_trunk_takes_a_route_of_its_own() {
+        let (l, mut net) = bundle_net();
+        // Put 5 beside 3, level with the trunk's only bend point.
+        let by = sub(Point::new(l.nodes[3].x + 150.0, l.nodes[3].y), l.nodes[5]);
+        drag(&mut net, &[5], by, &free());
+        settle(&mut net, &free());
+        assert!(bundled(&net, &[2, 3]));
+        let last = last_segments(&net, &[4, 2]);
+        assert_eq!(last[0][0], net.node_pos(5), "straight from 5 to 4");
+        assert_ne!(last[0], last[1]);
     }
 
     #[test]
