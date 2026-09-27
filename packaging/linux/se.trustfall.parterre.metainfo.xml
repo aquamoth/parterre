@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata, for software centres and Flathub. -->
+<component type="desktop-application">
+  <id>se.trustfall.parterre</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>parterre</name>
+  <summary>See how the branches of a git repository relate</summary>
+  <developer id="se.trustfall">
+    <name>Trustfall AB</name>
+  </developer>
+  <description>
+    <p>
+      A fast, native git viewer inspired by TortoiseGit's Revision Graph: a compact, tree-like
+      picture of how the branches and tags of a repository relate, every branch at once.
+    </p>
+    <p>
+      Rearrange the graph by hand to understand the repository better. Drag a node and the rest
+      of the graph gives way a little; edges are routed afresh around the nodes in their way.
+    </p>
+    <ul>
+      <li>Local branches, remote branches, tags and stashes, coloured by kind or by name</li>
+      <li>A log of any branch or range, with each commit's changed files and their diffs</li>
+      <li>Blame of a file, next to its history</li>
+      <li>Open pull requests on GitHub, shown on their head commits</li>
+      <li>Export the graph as SVG, PNG or WebP</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">se.trustfall.parterre.desktop</launchable>
+  <provides>
+    <binary>parterre</binary>
+  </provides>
+  <url type="homepage">https://github.com/aquamoth/parterre</url>
+  <url type="bugtracker">https://github.com/aquamoth/parterre/issues</url>
+  <url type="vcs-browser">https://github.com/aquamoth/parterre</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>The revision graph of a demo repository</caption>
+      <image>https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/demo.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <categories>
+    <category>Development</category>
+    <category>RevisionControl</category>
+  </categories>
+  <recommends>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </recommends>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <!-- packaging/linux/build-packages.sh adds the version being packaged when it isn't here. -->
+  <releases>
+    <release version="0.5.1" date="2026-09-27"/>
+    <release version="0.5.0" date="2026-09-27"/>
+    <release version="0.4.0" date="2026-09-26"/>
+    <release version="0.3.0" date="2026-09-25"/>
+    <release version="0.2.0" date="2026-09-25"/>
+  </releases>
+</component>

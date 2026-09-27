@@ -3,7 +3,9 @@ resolver = "3"
 members = ["crates/parterre-core", "crates/parterre"]
 
 [workspace.package]
-version = "0.4.0"
+# Not parterre's version, which comes from the git tags (docs/releasing.md). 0.0.0 so that it
+# can't pass for one; scripts/prepare-crates-release.py sets the tag's version for crates.io.
+version = "0.0.0"
 edition = "2024"
 # egui/eframe 0.36 need 1.95.
 rust-version = "1.95"
@@ -17,7 +19,7 @@ homepage = "https://github.com/aquamoth/parterre"
 
 [workspace.dependencies]
 # crates.io needs a version next to the path; keep it equal to the workspace version above.
-parterre-core = { path = "crates/parterre-core", version = "=0.4.0" }
+parterre-core = { path = "crates/parterre-core", version = "=0.0.0" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

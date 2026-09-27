@@ -1,8 +1,8 @@
 # Releasing
 
 GitHub releases are tag-driven. The tag supplies the version shown by the binary and in the
-release filenames. Tag a clean commit on `main`; the root `Cargo.toml` and
-`Cargo.lock` do not need a version bump for a GitHub release.
+release filenames. Tag a clean commit on `main`; the version in the root `Cargo.toml` stays
+`0.0.0` and is never bumped in the repository.
 
 1. Tag the chosen commit on `main` and push the tag:
 
@@ -19,11 +19,19 @@ release filenames. Tag a clean commit on `main`; the root `Cargo.toml` and
    archive holds the binary, the README, `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.html`.
    Windows also gets an installer built from the same files,
    `parterre-0.5.0-rc1-x86_64-pc-windows-msvc.msi` (see
-   [building.md](building.md#windows-installer)). A tag with a pre-release part publishes a
-   pre-release; its MSI has version `0.5.0`, since MSI versions are numbers only.
+   [building.md](building.md#windows-installer)), and Linux a `.deb` and an `.rpm` from the same
+   binary, `parterre_0.5.0-rc1_amd64.deb` and `parterre-0.5.0-rc1-1.x86_64.rpm` (see
+   [building.md](building.md#linux-packages)). Before the release is published they are
+   installed, run and removed on Debian 12, Ubuntu 22.04 and 24.04, Fedora and openSUSE Leap
+   15.6. A tag with a pre-release part publishes a pre-release; its MSI has version `0.5.0`,
+   since MSI versions are numbers only.
 
 3. The workflow then builds the [Chocolatey](#chocolatey) package from that MSI, tests it, and
    pushes it unless the tag is a pre-release.
+
+Add the release to the `<releases>` of `packaging/linux/se.trustfall.parterre.metainfo.xml`
+afterwards, with its date. Until then the packages get an entry of their own, dated the day
+they were built.
 
 The build fails if the tag is not `vX.Y.Z` with an optional pre-release suffix, does not point
 at the commit being built, or the sources have local changes. In that case delete the tag
@@ -87,17 +95,27 @@ fixed with a new release.
 | Build | Version |
 |---|---|
 | Release workflow for `v0.5.0-rc1` | `parterre 0.5.0-rc1 (a1b2c3d)` |
-| A clean checkout of a tag matching the Cargo version | `parterre 0.4.0 (a1b2c3d)` |
-| A clean checkout of `v0.5.0-rc1` built without the release workflow | `parterre 0.4.0-dev+a1b2c3d` |
+| A clean checkout of tag `v0.5.1` | `parterre 0.5.1 (a1b2c3d)` |
 | The published crate (`cargo install parterre --version 0.5.0-rc1`) | `parterre 0.5.0-rc1 (b4c5d6e)` |
-| Anything else from a git checkout | `parterre 0.4.0-dev+a1b2c3d` |
-| … with uncommitted changes to the sources (`crates/`, Cargo files) | `parterre 0.4.0-dev+a1b2c3d.dirty` |
-| Without git (e.g. from GitHub's source archive) | `parterre 0.4.0-dev` |
+| A checkout 3 commits past `v0.5.1` | `parterre 0.5.2-dev.3+a1b2c3d` |
+| A checkout 3 commits past `v0.5.0-rc1` | `parterre 0.5.0-rc1.dev.3+a1b2c3d` |
+| … with uncommitted changes to the sources (`crates/`, Cargo files) | `parterre 0.5.2-dev.3+a1b2c3d.dirty` |
+| A git checkout without release tags (e.g. a shallow clone) | `parterre 0.0.0-dev+a1b2c3d` |
+| Without git (e.g. from GitHub's source archive) | `parterre 0.0.0-dev` |
 
-A plain version means a clean release build. The published crate has no `.git`; `cargo package`
-records its packaging commit in `.cargo_vcs_info.json`, which `build.rs` reads. Git only counts when its
-top level is the workspace root, so sources unpacked inside some other repository don't take
-that repository's commit. Dev builds carry a `dev` pre-release and the commit as semver build
-metadata. The release workflow sets `PARTERRE_RELEASE_TAG` to the tag, which supplies the binary
-version and makes anything but a clean build of that tag fail. The logic is in
-`crates/parterre/src/version.rs`, which `crates/parterre/build.rs` runs.
+The version comes from the release tags, not from `Cargo.toml`: `build.rs` asks
+`git describe --tags --match 'v[0-9]*'` for the nearest one. A plain version means a clean build
+of a tag. A dev build is a pre-release of the version after the tag it follows, numbered by the
+commits since, so it sorts after that release and before the next one: in semver, and in dpkg
+and rpm, where the `.deb` and `.rpm` write its `-` as `~`. The commit is semver build metadata.
+Only a checkout without release tags (CI checks out the whole history for this reason) or
+without git falls back to `Cargo.toml`'s version, which is always `0.0.0` so that it can't pass
+for a real one.
+
+The published crate has no `.git`; `cargo package` records its packaging commit in
+`.cargo_vcs_info.json`, which `build.rs` reads, and its `Cargo.toml` has the tag's version. Git
+only counts when its top level is the workspace root, so sources unpacked inside some other
+repository don't take that repository's commit or tags. The release workflow sets
+`PARTERRE_RELEASE_TAG` to the tag, which supplies the binary version and makes anything but a
+clean build of that tag fail. The logic is in `crates/parterre/src/version.rs`, which
+`crates/parterre/build.rs` runs.

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=parterre
+GenericName=Revision Graph
+Comment=Revision graph of a git repository (TortoiseGit style)
+Keywords=git;graph;history;branches;revision;
+Exec=parterre %f
+Icon=se.trustfall.parterre
+Terminal=false
+Categories=Development;RevisionControl;
+# No MimeType=inode/directory: where the desktop names no default folder app (Xfce, MATE, LXQt),
+# that would make parterre the default. Folders get Revision Graph from packaging/linux/
+# file-managers instead (docs/distribution.md#linux).
+StartupWMClass=se.trustfall.parterre

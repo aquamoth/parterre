@@ -68,6 +68,9 @@ jobs:
           apt-get install -y --no-install-recommends build-essential ca-certificates curl git
       - uses: actions/checkout@v6
         if: env.BUILD == 'true'
+        # The whole history with its tags: the version follows the nearest release tag.
+        with:
+          fetch-depth: 0
       - name: Trust the checkout
         if: env.BUILD == 'true' && matrix.container
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -92,7 +95,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         if: env.BUILD == 'true'
         with:
-          tool: cargo-about
+          tool: ${{ runner.os == 'Linux' && 'cargo-about,cargo-deb,cargo-generate-rpm' || 'cargo-about' }}
       # The binary with its license, NOTICE and the licenses of the crates built into it.
       - name: Package
         if: env.BUILD == 'true'
@@ -102,6 +105,11 @@ jobs:
           cp target/release/parterre${{ runner.os == 'Windows' && '.exe' || '' }} LICENSE NOTICE dist/
           cargo about generate --locked -c packaging/about.toml packaging/about.hbs \
             -o dist/THIRD-PARTY-NOTICES.html
+      # The .deb and .rpm from the same binary, so every PR has them to try
+      # (packaging/linux/build-packages.sh). The linux-packages job installs them.
+      - name: Linux packages
+        if: env.BUILD == 'true' && runner.os == 'Linux'
+        run: packaging/linux/build-packages.sh dist
       # The installer from the same files, so every PR has one to try
       # (packaging/windows/build-msi.ps1).
       - name: Windows installer
@@ -116,3 +124,12 @@ jobs:
         with:
           name: parterre-${{ matrix.os }}
           path: dist/
+
+  # Installs the Linux leg's .deb and .rpm on Debian, Ubuntu, Fedora and openSUSE.
+  linux-packages:
+    name: Linux packages
+    needs: [changes, test]
+    if: needs.changes.outputs.code == 'true'
+    uses: ./.github/workflows/linux-packages.yml
+    with:
+      artifact: parterre-ubuntu-latest
