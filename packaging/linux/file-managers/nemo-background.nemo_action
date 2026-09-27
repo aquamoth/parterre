@@ -1,0 +1,11 @@
+# Revision Graph in the context menu of the background of a folder open in Nemo (Cinnamon).
+# Installed in /usr/share/nemo/actions as se.trustfall.parterre-background.nemo_action.
+[Nemo Action]
+Name=Revision Graph
+Comment=Show the revision graph of the repository at %p
+Exec=parterre %P
+Icon-Name=se.trustfall.parterre
+Selection=none
+Extensions=any;
+UriScheme=file
+Dependencies=parterre;

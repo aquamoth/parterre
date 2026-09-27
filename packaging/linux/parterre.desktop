@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=parterre
-Comment=Revision graph of a git repository (TortoiseGit style)
-Exec=parterre %f
-Icon=parterre
-Terminal=false
-Categories=Development;RevisionControl;
-StartupWMClass=parterre

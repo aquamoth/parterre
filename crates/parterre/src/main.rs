@@ -361,6 +361,7 @@ fn main() -> ExitCode {
             .with_inner_size([w, h])
             .with_min_inner_size([400.0, 300.0])
             .with_icon(std::sync::Arc::new(icon::icon())),
+        persistence_path: settings::storage_file(),
         ..Default::default()
     };
     options.glow_options.vsync = vsync;

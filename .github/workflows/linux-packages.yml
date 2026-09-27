@@ -1,0 +1,45 @@
+name: Linux packages
+
+# Installs the .deb and .rpm of a build on the oldest and newest distributions parterre supports,
+# runs it and removes it again (packaging/linux/test-package.sh). Called by ci.yml and
+# release.yml with the name of the artifact that holds the packages.
+on:
+  workflow_call:
+    inputs:
+      artifact: { type: string, required: true }
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: Install (${{ matrix.image }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "debian:12", package: deb }
+          - { image: "ubuntu:22.04", package: deb }
+          # Also checks the desktop entry and the AppStream metadata.
+          - { image: "ubuntu:24.04", package: deb, validate: "desktop-file-utils appstream" }
+          - { image: "fedora:latest", package: rpm }
+          - { image: "opensuse/leap:15.6", package: rpm }
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    steps:
+      # Without git, actions/checkout unpacks a tarball, and openSUSE's image has no tar.
+      - name: Prepare container
+        if: startsWith(matrix.image, 'opensuse/')
+        run: zypper --non-interactive install tar gzip
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: packaging/linux
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist
+      - name: Validators
+        if: matrix.validate
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends ${{ matrix.validate }}
+      - name: Install, run and remove
+        run: sh packaging/linux/test-package.sh dist/*.${{ matrix.package }}

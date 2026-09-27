@@ -123,6 +123,87 @@ version; an older one is refused. That only works within one scope: Windows Inst
 for the installed version in the scope being installed, so a per-user install followed by a
 machine-wide one leaves two entries.
 
+## Linux packages
+
+The `.deb` and `.rpm` are built with `cargo-deb` and `cargo-generate-rpm` from a release build,
+with the metadata in `crates/parterre/Cargo.toml` (why these two: [distribution.md](distribution.md#linux)).
+Setup, once:
+
+```sh
+cargo install --locked cargo-deb cargo-generate-rpm cargo-about
+```
+
+Then:
+
+```sh
+cargo build --release
+packaging/linux/build-packages.sh              # → target/packages/parterre_<version>_amd64.deb, .rpm
+packaging/linux/build-packages.sh --target x86_64-unknown-linux-gnu dist   # as the release does
+```
+
+The packages take their version from `parterre --version`, with a pre-release's `-` turned into
+`~` so that `0.5.0~rc1` sorts before `0.5.0` in both dpkg and rpm. The script also writes
+`THIRD-PARTY-NOTICES.html` and a copy of the AppStream metadata next to the binary, adding an
+entry for the version being packaged when `se.trustfall.parterre.metainfo.xml` has none yet
+(software centres show the newest entry as the version).
+
+What they install:
+
+| File | Where |
+|---|---|
+| `parterre` | `/usr/bin` |
+| Desktop entry `se.trustfall.parterre.desktop` | `/usr/share/applications` |
+| AppStream metadata | `/usr/share/metainfo` |
+| Icons, named `se.trustfall.parterre` | `/usr/share/icons/hicolor` |
+| *Revision Graph* for Dolphin | `/usr/share/kio/servicemenus` |
+| *Revision Graph* for Nemo | `/usr/share/nemo/actions` |
+| *Revision Graph* for Nautilus | `/usr/share/nautilus-python/extensions` |
+| README, NOTICE, third-party notices (and the licence) | `/usr/share/doc/parterre` (`/usr/share/licenses/parterre`) |
+
+Besides git (`git-core` in the `.rpm`, which is git without Perl and the GUIs), both depend on
+the display libraries parterre loads at run time and neither tool can see: EGL and GLX, Wayland
+client and EGL, X11, X11-xcb, Xcursor, Xi, Xrender, xkbcommon and xkbcommon-x11. That list came
+from running parterre with `LD_DEBUG=libs` on Wayland and on X11. The `.deb` names Debian's
+packages; the `.rpm` asks for the libraries by soname, so it installs on Fedora and openSUSE
+alike.
+
+`packaging/linux/test-package.sh PACKAGE` installs a package with the system's package manager,
+checks that `parterre --version` runs and the desktop files are in place, and removes it again.
+CI runs it on Debian 12, Ubuntu 22.04 and 24.04, Fedora and openSUSE Leap 15.6
+(`.github/workflows/linux-packages.yml`), as root in their containers:
+
+```sh
+docker run --rm -v "$PWD:/src" -w /src debian:12 \
+  sh packaging/linux/test-package.sh target/packages/parterre_0.5.1_amd64.deb
+```
+
+### Revision Graph in file managers
+
+Right-clicking a folder, or the background of an open one, gives *Revision Graph*, as on
+Windows. Menus belong to the file manager, not to Wayland or X11, and each has its own way in,
+all in `packaging/linux/file-managers`:
+
+- **Nautilus** (GNOME): `nautilus.py`, loaded by nautilus-python, which the packages recommend
+  (`python3-nautilus`, `nautilus-python` on Fedora). It starts parterre through its desktop
+  entry. It handles both the extension API of Nautilus 43 and later and the older one of
+  Nautilus 42 (Ubuntu 22.04).
+- **Dolphin** (KDE): `dolphin.desktop`, a service menu.
+- **Nemo** (Cinnamon): two actions, one for a folder and one for the background.
+
+All three offer it for one folder on this machine at a time. Clicked through, from the
+packages, under Xvfb in Nautilus 42 (Ubuntu 22.04) and 46 (Ubuntu 24.04), Dolphin 23.08 (KDE
+Frameworks 5, Ubuntu 24.04) and 26.08 (Frameworks 6, Fedora 44) and Nemo 6.0: the item is there
+on a folder and on the background, not on files, and starts parterre with the folder's path. Xfce (Thunar), MATE (Caja) and LXQt
+(PCManFM-Qt) get nothing: Thunar's custom actions live only in each user's own settings.
+
+The desktop entry deliberately has no `MimeType=inode/directory`, which would have listed
+parterre under *Open With* for folders. Where the desktop names no default folder app, as on
+Xfce, MATE, LXQt and plain window managers, GIO then picks the first app that can open folders,
+alphabetically, and `se.trustfall.parterre` comes before `thunar`: tried on Ubuntu 24.04 with
+Thunar, `xdg-open` and `exo-open` then opened folders in parterre. `NoDisplay`, `OnlyShowIn` and
+`NotShowIn` don't keep GIO from choosing it. A test in `crates/parterre/src/settings.rs`
+keeps it out.
+
 ## macOS
 
 Should build with `cargo build --release`. Not yet tried.
@@ -162,9 +243,10 @@ build tools above), or `x86_64-w64-mingw32-windres` for the GNU target; without 
 only warns and the `.exe` has no icon or details. The `.icns` waits for a macOS `.app` bundle.
 
 On Linux, `packaging/linux/install.sh` installs the release binary into `~/.local/bin`, and the
-desktop entry and the icon where the desktop finds them; `--uninstall` removes them again. A
-desktop shows a window's icon through the desktop entry, which it loads only if the entry's
-`Exec` can be found, so the script writes the binary's absolute path into the entry rather than
-relying on `~/.local/bin` being on the session's PATH. On Wayland the entry is the only source
-of the icon, since GNOME never uses the icon a window sets on itself. A running parterre shows
-it after a restart.
+desktop entry, the icon and the file managers' *Revision Graph* where the desktop finds them;
+`--uninstall` removes them again. A desktop shows a window's icon through the desktop entry of
+the window's app ID, `se.trustfall.parterre`, which it loads only if the entry's `Exec` can be
+found, so the script writes the binary's absolute path into the entry rather than relying on
+`~/.local/bin` being on the session's PATH. On Wayland the entry is the only source of the icon,
+since GNOME never uses the icon a window sets on itself. A running parterre shows it after a
+restart. The entry and icon were called `parterre` up to 0.5; the script removes those.

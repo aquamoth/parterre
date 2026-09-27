@@ -1,0 +1,16 @@
+# Revision Graph in the context menu of Dolphin (KDE) for a folder and for the background of an
+# open one. Installed as /usr/share/kio/servicemenus/se.trustfall.parterre.desktop.
+[Desktop Entry]
+Type=Service
+MimeType=inode/directory;
+Actions=revisionGraph;
+X-KDE-Priority=TopLevel
+X-KDE-Protocols=file
+X-KDE-MaxNumberOfUrls=1
+# KDE Frameworks 5 lists a service menu only with this.
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+
+[Desktop Action revisionGraph]
+Name=Revision Graph
+Icon=se.trustfall.parterre
+Exec=parterre %f

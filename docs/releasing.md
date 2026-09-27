@@ -19,11 +19,19 @@ release filenames. Tag a clean commit on `main`; the root `Cargo.toml` and
    archive holds the binary, the README, `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.html`.
    Windows also gets an installer built from the same files,
    `parterre-0.5.0-rc1-x86_64-pc-windows-msvc.msi` (see
-   [building.md](building.md#windows-installer)). A tag with a pre-release part publishes a
-   pre-release; its MSI has version `0.5.0`, since MSI versions are numbers only.
+   [building.md](building.md#windows-installer)), and Linux a `.deb` and an `.rpm` from the same
+   binary, `parterre_0.5.0~rc1_amd64.deb` and `parterre-0.5.0~rc1-1.x86_64.rpm` (see
+   [building.md](building.md#linux-packages)). Before the release is published they are
+   installed, run and removed on Debian 12, Ubuntu 22.04 and 24.04, Fedora and openSUSE Leap
+   15.6. A tag with a pre-release part publishes a pre-release; its MSI has version `0.5.0`,
+   since MSI versions are numbers only.
 
 3. The workflow then builds the [Chocolatey](#chocolatey) package from that MSI, tests it, and
    pushes it unless the tag is a pre-release.
+
+Add the release to the `<releases>` of `packaging/linux/se.trustfall.parterre.metainfo.xml`
+afterwards, with its date. Until then the packages get an entry of their own, dated the day
+they were built.
 
 The build fails if the tag is not `vX.Y.Z` with an optional pre-release suffix, does not point
 at the commit being built, or the sources have local changes. In that case delete the tag

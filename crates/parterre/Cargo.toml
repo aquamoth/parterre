@@ -46,3 +46,74 @@ embed-resource = "3"
 
 [lints]
 workspace = true
+
+# The .deb and .rpm, built by packaging/linux/build-packages.sh, which first writes the files
+# under target/release/packaging. Paths are relative to this directory, except that both tools
+# take target/release/ to mean the build's own directory, target/<triple>/release/ with --target. Besides git, the dependencies are
+# the display libraries parterre loads at run time, which neither tool can see: EGL or GLX, Wayland,
+# X11 and xkbcommon.
+[package.metadata.deb]
+name = "parterre"
+maintainer = "Mattias Åslund <mattias@trustfall.se>"
+copyright = "2026 Mattias Åslund"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+A fast, native git viewer inspired by TortoiseGit's Revision Graph: a compact, tree-like picture \
+of how the branches and tags of a repository relate, every branch at once."""
+section = "vcs"
+priority = "optional"
+# python3-nautilus loads the Revision Graph item in Nautilus's context menu.
+recommends = "python3-nautilus"
+depends = "$auto, git, libegl1, libgl1, libwayland-client0, libwayland-egl1, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxrender1, libxkbcommon0, libxkbcommon-x11-0"
+assets = [
+    ["target/release/parterre", "usr/bin/", "755"],
+    ["../../packaging/linux/se.trustfall.parterre.desktop", "usr/share/applications/", "644"],
+    ["target/release/packaging/se.trustfall.parterre.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../packaging/icon/parterre.svg", "usr/share/icons/hicolor/scalable/apps/se.trustfall.parterre.svg", "644"],
+    ["../../packaging/icon/parterre-16.png", "usr/share/icons/hicolor/16x16/apps/se.trustfall.parterre.png", "644"],
+    ["../../packaging/icon/parterre-24.png", "usr/share/icons/hicolor/24x24/apps/se.trustfall.parterre.png", "644"],
+    ["../../packaging/icon/parterre-32.png", "usr/share/icons/hicolor/32x32/apps/se.trustfall.parterre.png", "644"],
+    ["../../packaging/icon/parterre-48.png", "usr/share/icons/hicolor/48x48/apps/se.trustfall.parterre.png", "644"],
+    ["../../packaging/icon/parterre-64.png", "usr/share/icons/hicolor/64x64/apps/se.trustfall.parterre.png", "644"],
+    ["../../packaging/icon/parterre-128.png", "usr/share/icons/hicolor/128x128/apps/se.trustfall.parterre.png", "644"],
+    ["../../packaging/icon/parterre-256.png", "usr/share/icons/hicolor/256x256/apps/se.trustfall.parterre.png", "644"],
+    ["../../packaging/icon/parterre-512.png", "usr/share/icons/hicolor/512x512/apps/se.trustfall.parterre.png", "644"],
+    ["../../packaging/linux/file-managers/dolphin.desktop", "usr/share/kio/servicemenus/se.trustfall.parterre.desktop", "644"],
+    ["../../packaging/linux/file-managers/nemo-folder.nemo_action", "usr/share/nemo/actions/se.trustfall.parterre.nemo_action", "644"],
+    ["../../packaging/linux/file-managers/nemo-background.nemo_action", "usr/share/nemo/actions/se.trustfall.parterre-background.nemo_action", "644"],
+    ["../../packaging/linux/file-managers/nautilus.py", "usr/share/nautilus-python/extensions/parterre.py", "644"],
+    ["../../README.md", "usr/share/doc/parterre/", "644"],
+    ["../../NOTICE", "usr/share/doc/parterre/", "644"],
+    ["target/release/packaging/THIRD-PARTY-NOTICES.html", "usr/share/doc/parterre/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "parterre"
+summary = "TortoiseGit-style revision graph viewer for git repositories"
+url = "https://github.com/aquamoth/parterre"
+# Fedora and openSUSE: git-core is git without Perl, Python and the GUIs.
+requires = { git-core = "*", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*", "libwayland-client.so.0()(64bit)" = "*", "libwayland-egl.so.1()(64bit)" = "*", "libX11.so.6()(64bit)" = "*", "libX11-xcb.so.1()(64bit)" = "*", "libXcursor.so.1()(64bit)" = "*", "libXi.so.6()(64bit)" = "*", "libXrender.so.1()(64bit)" = "*", "libxkbcommon.so.0()(64bit)" = "*", "libxkbcommon-x11.so.0()(64bit)" = "*" }
+# nautilus-python (Fedora) or python3-nautilus (openSUSE) loads the item in Nautilus's menu.
+recommends = { nautilus-python = "*", python3-nautilus = "*" }
+assets = [
+    { source = "target/release/parterre", dest = "/usr/bin/parterre", mode = "755" },
+    { source = "../../packaging/linux/se.trustfall.parterre.desktop", dest = "/usr/share/applications/se.trustfall.parterre.desktop", mode = "644" },
+    { source = "target/release/packaging/se.trustfall.parterre.metainfo.xml", dest = "/usr/share/metainfo/se.trustfall.parterre.metainfo.xml", mode = "644" },
+    { source = "../../packaging/icon/parterre.svg", dest = "/usr/share/icons/hicolor/scalable/apps/se.trustfall.parterre.svg", mode = "644" },
+    { source = "../../packaging/icon/parterre-16.png", dest = "/usr/share/icons/hicolor/16x16/apps/se.trustfall.parterre.png", mode = "644" },
+    { source = "../../packaging/icon/parterre-24.png", dest = "/usr/share/icons/hicolor/24x24/apps/se.trustfall.parterre.png", mode = "644" },
+    { source = "../../packaging/icon/parterre-32.png", dest = "/usr/share/icons/hicolor/32x32/apps/se.trustfall.parterre.png", mode = "644" },
+    { source = "../../packaging/icon/parterre-48.png", dest = "/usr/share/icons/hicolor/48x48/apps/se.trustfall.parterre.png", mode = "644" },
+    { source = "../../packaging/icon/parterre-64.png", dest = "/usr/share/icons/hicolor/64x64/apps/se.trustfall.parterre.png", mode = "644" },
+    { source = "../../packaging/icon/parterre-128.png", dest = "/usr/share/icons/hicolor/128x128/apps/se.trustfall.parterre.png", mode = "644" },
+    { source = "../../packaging/icon/parterre-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/se.trustfall.parterre.png", mode = "644" },
+    { source = "../../packaging/icon/parterre-512.png", dest = "/usr/share/icons/hicolor/512x512/apps/se.trustfall.parterre.png", mode = "644" },
+    { source = "../../packaging/linux/file-managers/dolphin.desktop", dest = "/usr/share/kio/servicemenus/se.trustfall.parterre.desktop", mode = "644" },
+    { source = "../../packaging/linux/file-managers/nemo-folder.nemo_action", dest = "/usr/share/nemo/actions/se.trustfall.parterre.nemo_action", mode = "644" },
+    { source = "../../packaging/linux/file-managers/nemo-background.nemo_action", dest = "/usr/share/nemo/actions/se.trustfall.parterre-background.nemo_action", mode = "644" },
+    { source = "../../packaging/linux/file-managers/nautilus.py", dest = "/usr/share/nautilus-python/extensions/parterre.py", mode = "644" },
+    { source = "../../README.md", dest = "/usr/share/doc/parterre/README.md", mode = "644", doc = true },
+    { source = "../../NOTICE", dest = "/usr/share/doc/parterre/NOTICE", mode = "644", doc = true },
+    { source = "target/release/packaging/THIRD-PARTY-NOTICES.html", dest = "/usr/share/doc/parterre/THIRD-PARTY-NOTICES.html", mode = "644", doc = true },
+    { source = "../../LICENSE", dest = "/usr/share/licenses/parterre/LICENSE", mode = "644", doc = true },
+]

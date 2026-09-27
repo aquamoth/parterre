@@ -25,7 +25,15 @@ Download the archive for your system from the
 [releases page](https://github.com/aquamoth/parterre/releases) and put `parterre` on your
 `PATH`. On Windows the `.msi` next to it does that for you, and adds a Start menu entry and
 *Revision Graph* to Explorer's context menu for folders; it installs for the
-current user without asking for admin rights. The Linux build needs glibc 2.35 or newer (Debian 12, Ubuntu 22.04 and later). With a
+current user without asking for admin rights. On Linux the `.deb` (Debian, Ubuntu) and `.rpm`
+(Fedora, openSUSE) do the same, with git, a menu entry and *Revision Graph* in the context menu
+of Nautilus, Dolphin and Nemo:
+
+```sh
+sudo apt install ./parterre_*_amd64.deb   # or: sudo dnf install ./parterre-*.x86_64.rpm
+```
+
+The Linux build needs glibc 2.35 or newer (Debian 12, Ubuntu 22.04 and later). With a
 Rust toolchain you can also install it from crates.io:
 
 ```sh
@@ -33,7 +41,7 @@ cargo install --locked parterre    # build from source; installs only the binary
 cargo binstall parterre            # or download the release binary with cargo-binstall
 ```
 
-parterre also needs `git`. Packages for winget, Chocolatey and Linux are on their way; see
+parterre also needs `git`. More channels are on their way; see
 [docs/distribution.md](docs/distribution.md).
 
 ## Usage
@@ -191,6 +199,7 @@ needed to build. See [docs/building.md](docs/building.md) for Windows and macOS 
 | `docs/research/` | Notes on how TortoiseGit's revision graph works, with source links |
 | `docs/architecture.md` | How the pieces fit together |
 | `docs/distribution.md` | Where parterre is published, under which names, and why |
+| `packaging/` | The icon, the Windows installer, Chocolatey, the Linux packages and desktop files, a draft Flatpak |
 
 Open questions, planned work and bugs are tracked in
 [GitHub issues](https://github.com/aquamoth/parterre/issues).

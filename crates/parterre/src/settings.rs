@@ -11,11 +11,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::theme::{BranchColor, ThemeChoice};
 
-/// The app id: names eframe's storage directory and, on Wayland, the window (matching
-/// `packaging/linux/parterre.desktop`).
-pub const APP_ID: &str = "parterre";
-/// What the app was called up to 0.2, and its app id then.
+/// The app id: the Wayland app id and X11 window class, which a desktop pairs with the desktop
+/// entry of the same name (`packaging/linux/se.trustfall.parterre.desktop`) for the icon. Also
+/// the Flatpak id.
+pub const APP_ID: &str = "se.trustfall.parterre";
+/// Names the storage directory, which is older than the app id and stays where it was.
+const STORAGE_ID: &str = "parterre";
+/// What the app was called up to 0.2, and its storage directory then.
 const OLD_APP_ID: &str = "gitgraph";
+
+/// The file eframe saves the settings in. Left to itself it would name the directory after the
+/// root viewport's app id.
+pub fn storage_file() -> Option<std::path::PathBuf> {
+    eframe::storage_dir(STORAGE_ID).map(|dir| dir.join("app.ron"))
+}
 
 // The storage keys still carry the old name, so settings saved before the rename keep loading.
 pub const STORAGE_KEY: &str = "gitgraph-settings";
@@ -33,7 +42,10 @@ pub type RememberedMoves =
 /// Carries over what the app saved while it was called gitgraph: the first time it runs as
 /// parterre, it copies the old storage directory's `app.ron`, the one file eframe keeps there.
 pub fn adopt_old_storage() {
-    if let (Some(from), Some(to)) = (eframe::storage_dir(OLD_APP_ID), eframe::storage_dir(APP_ID)) {
+    if let (Some(from), Some(to)) = (
+        eframe::storage_dir(OLD_APP_ID),
+        eframe::storage_dir(STORAGE_ID),
+    ) {
         copy_storage(&from, &to);
     }
 }
@@ -343,6 +355,42 @@ mod tests {
             std::fs::read_to_string(to.join("app.ron")).unwrap(),
             "saved"
         );
+    }
+
+    #[test]
+    fn settings_stay_where_they_were_before_the_app_id() {
+        // eframe would name the directory after the app id; the settings stay under parterre.
+        assert_ne!(APP_ID, STORAGE_ID);
+        assert_eq!(
+            storage_file(),
+            eframe::storage_dir("parterre").map(|dir| dir.join("app.ron"))
+        );
+    }
+
+    #[test]
+    fn desktop_files_carry_the_app_id() {
+        // Only in the repository: the published crate has no packaging directory.
+        let linux = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/linux");
+        if !linux.exists() {
+            return;
+        }
+        let entry = std::fs::read_to_string(linux.join(format!("{APP_ID}.desktop"))).unwrap();
+        for line in [format!("Icon={APP_ID}"), format!("StartupWMClass={APP_ID}")] {
+            assert!(entry.lines().any(|l| l == line), "{line} missing");
+        }
+        // Handling folders would make parterre the default folder app on desktops that name
+        // none, such as Xfce.
+        assert!(
+            !entry
+                .lines()
+                .any(|l| l.starts_with("MimeType=") && l.contains("inode/"))
+        );
+        let metainfo =
+            std::fs::read_to_string(linux.join(format!("{APP_ID}.metainfo.xml"))).unwrap();
+        assert!(metainfo.contains(&format!("<id>{APP_ID}</id>")));
+        assert!(metainfo.contains(&format!(
+            r#"<launchable type="desktop-id">{APP_ID}.desktop<"#
+        )));
     }
 
     #[test]

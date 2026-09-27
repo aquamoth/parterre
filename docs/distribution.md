@@ -59,7 +59,7 @@ parterre runs the `git` command-line tool, so every package needs git:
 |---|---|
 | winget | `PackageDependencies: Git.Git`, installed automatically since winget 1.6. Must be in the first version: a dependency added later isn't installed on upgrade. TortoiseGit's manifest does the same. |
 | Chocolatey | dependency on the `git` package |
-| .deb / .rpm | `Depends: git` / `Requires: git` |
+| .deb / .rpm | `Depends: git` / `Requires: git-core` (git without Perl and the GUIs, on Fedora and openSUSE) |
 | Snap | git bundled (the sandbox can't reach the host's git) |
 | Flathub | git bundled; the freedesktop runtime has none |
 | crates.io, zip, tarballs | documented in the README |
@@ -118,7 +118,19 @@ Sources:
   - Raise the baseline when Ubuntu 22.04's standard support ends in April 2027.
 - **.deb and .rpm** declare their dependencies by hand: git and the libraries loaded at run
   time (EGL/GL, Wayland, X11, xkbcommon). `cargo-deb` and `cargo-generate-rpm` only detect
-  libc.
+  libc. Details in [building.md](building.md#linux-packages).
+- **App ID in the window.** The Wayland app ID and X11 window class are `se.trustfall.parterre`,
+  like the desktop entry and icons, so desktops pair the window with its icon. The settings stay
+  in `~/.local/share/parterre`.
+- **Folders get *Revision Graph* in the file manager's context menu, not *Open With*.**
+  (Decided 2026-09-27.) `MimeType=inode/directory` in the desktop entry would list parterre
+  under *Open With* for folders, but where the desktop names no default folder app it makes
+  parterre the default. GNOME, KDE and Cinnamon name one; Xfce, MATE, LXQt and plain window
+  managers don't, and GIO then takes the first that sorts alphabetically. Tried on Ubuntu 24.04
+  with Thunar: `xdg-open` and `exo-open` opened folders in parterre. `NoDisplay`, `OnlyShowIn`
+  and `NotShowIn` don't change GIO's choice. So the packages add a menu item to Nautilus (via
+  nautilus-python), Dolphin and Nemo, each file manager's own way; Thunar, Caja and PCManFM-Qt
+  get none. See [building.md](building.md#revision-graph-in-file-managers).
 - **Snap:**
   - Strict confinement. Classic is "reserved for mature, well-known applications", and new
     projects are refused.
@@ -137,6 +149,11 @@ Sources:
   - `--filesystem=home:ro` needs an exception, which git GUIs have been granted.
   - Directories chosen through the portal break linked worktrees, so a portal alone isn't
     enough.
+  - `packaging/flatpak` has a draft manifest that builds from source and runs (written
+    2026-09-27 by an AI assistant, so for reference only, not for submitting). What it found:
+    git has to be built too (the freedesktop runtime has none); pull requests need a token
+    without `gh`, which isn't in the sandbox; and git inside doesn't read
+    `~/.config/git/config`.
 
 Sources:
 [Flathub requirements](https://docs.flathub.org/docs/for-app-authors/requirements),
