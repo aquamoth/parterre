@@ -7,12 +7,15 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::blame::{Blame, BlameOptions, BlameSpec};
 use crate::changed_files::{ChangedFile, parse_diff_tree};
 use crate::file_diff::{Content, FileDiffSpec, LoadedDiff, Rev, Version, decode};
+use crate::file_history::{self, FileLog};
 use crate::oid::Oid;
 use crate::repo::{Commit, CommitIx, DEFAULT_ABBREV_LEN, GitRef, Head, RefKind, Repo};
 
@@ -34,6 +37,54 @@ pub enum GitError {
         #[source]
         source: std::io::Error,
     },
+    /// Stopped with [`Cancel::cancel`].
+    #[error("cancelled")]
+    Cancelled,
+}
+
+/// Stops git commands running on another thread, one at a time. [`Cancel::cancel`] kills the
+/// one running, and those started after it with the same handle stop at once. Closing git's
+/// output would not do: git notices only when it next writes, which can be after walking the
+/// whole history.
+#[derive(Clone, Debug, Default)]
+pub struct Cancel(Arc<Mutex<Running>>);
+
+#[derive(Debug, Default)]
+struct Running {
+    cancelled: bool,
+    child: Option<Child>,
+}
+
+impl Cancel {
+    pub fn new() -> Cancel {
+        Cancel::default()
+    }
+
+    /// Kills the git command running with this handle, if any, and waits for it to exit.
+    pub fn cancel(&self) {
+        let mut running = self.lock();
+        running.cancelled = true;
+        if let Some(mut child) = running.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.lock().cancelled
+    }
+
+    /// Fails with [`GitError::Cancelled`] once cancelled.
+    fn check(&self) -> Result<(), GitError> {
+        if self.is_cancelled() {
+            return Err(GitError::Cancelled);
+        }
+        Ok(())
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Running> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// A handle for running git commands against one repository.
@@ -135,6 +186,45 @@ impl Git {
             });
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Runs git and returns stdout as bytes, failing on a non-zero exit status, unless `cancel`
+    /// kills it first.
+    fn run_cancellable(&self, args: &[&str], cancel: &Cancel) -> Result<Vec<u8>, GitError> {
+        let mut child = self.command(args).spawn().map_err(GitError::Spawn)?;
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        {
+            let mut running = cancel.lock();
+            if running.cancelled {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GitError::Cancelled);
+            }
+            running.child = Some(child);
+        }
+        // Read stderr alongside, so that neither pipe can fill up and stall git.
+        let errors = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf);
+            buf
+        });
+        let mut out = Vec::new();
+        let read = stdout.read_to_end(&mut out);
+        let stderr = errors.join().unwrap_or_default();
+        // Gone if `cancel` killed it (and waited for it).
+        let Some(mut child) = cancel.lock().child.take() else {
+            return Err(GitError::Cancelled);
+        };
+        let status = child.wait().map_err(GitError::Spawn)?;
+        read.map_err(GitError::Spawn)?;
+        if !status.success() {
+            return Err(GitError::Failed {
+                args: args.join(" "),
+                stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
+            });
+        }
+        Ok(out)
     }
 
     /// Runs git and returns trimmed stdout, or `None` on a non-zero exit status (for queries
@@ -579,6 +669,113 @@ impl Git {
         args.extend(["--", &spec.path]);
         let out = self.run_bytes(&args)?;
         Blame::parse(&out).map_err(GitError::Parse)
+    }
+}
+
+impl Git {
+    /// The commits that changed the file a blame is of, up to the blamed revision, for the
+    /// history pane: `git log --no-follow --topo-order --parents <rev> -- <path>`, in git's
+    /// default history simplification, so a merge is listed only if it changed the file
+    /// compared with every parent. Combine it with the blame in
+    /// [`FileHistory::new`](crate::file_history::FileHistory::new).
+    ///
+    /// For the working tree, the log starts at `HEAD` (and `MERGE_HEAD` during a merge) and
+    /// runs on the file's path in `HEAD`, which differs after a staged rename; it also says
+    /// whether the file differs from `HEAD` at all (`git diff --quiet`), since an edit that
+    /// only deletes lines leaves no lines of its own in the blame.
+    ///
+    /// `cancel` kills git from another thread (the walk can take seconds on a long history).
+    pub fn file_log(&self, spec: &BlameSpec, cancel: &Cancel) -> Result<FileLog, GitError> {
+        let (revs, path, working_tree_changed) = match spec.rev {
+            Rev::Commit(oid) => (vec![oid.to_hex()], spec.path.clone(), false),
+            Rev::WorkingTree => {
+                let mut revs = vec!["HEAD".to_owned()];
+                revs.extend(self.query(&["rev-parse", "-q", "--verify", "MERGE_HEAD^{commit}"])?);
+                let changed = self.differs_from_head(&spec.path)?;
+                cancel.check()?;
+                (revs, self.path_in_head(&spec.path)?, changed)
+            }
+        };
+        cancel.check()?;
+        let mut args = vec![
+            "--literal-pathspecs",
+            "log",
+            "--no-follow",
+            "--topo-order",
+            "--parents",
+            "--no-color",
+            "--no-decorate",
+            file_history::DATE_FORMAT,
+            "-z",
+            file_history::LOG_FORMAT,
+        ];
+        args.extend(revs.iter().map(String::as_str));
+        args.extend(["--", &path]);
+        let out = self.run_cancellable(&args, cancel)?;
+        Ok(FileLog {
+            commits: file_history::parse_log(&out).map_err(GitError::Parse)?,
+            path,
+            working_tree_changed,
+        })
+    }
+
+    /// True if the file in the working tree, staged or not, differs from `HEAD`.
+    fn differs_from_head(&self, path: &str) -> Result<bool, GitError> {
+        let args = [
+            "--no-optional-locks",
+            "--literal-pathspecs",
+            "diff",
+            "--quiet",
+            "--no-ext-diff",
+            "HEAD",
+            "--",
+            path,
+        ];
+        let out = self.output(&args)?;
+        match out.status.code() {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(GitError::Failed {
+                args: args.join(" "),
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+            }),
+        }
+    }
+
+    /// The path in `HEAD` of the working tree's file at `path`, as blame finds it: the same
+    /// path if `HEAD` has it, else the file a staged rename came from (`HEAD` against the
+    /// index, unlimited, since a diff limited to the path can't see the rename). Otherwise the
+    /// file is new and the path stays.
+    fn path_in_head(&self, path: &str) -> Result<String, GitError> {
+        if self
+            .query(&["rev-parse", "-q", "--verify", &format!("HEAD:{path}")])?
+            .is_some()
+        {
+            return Ok(path.to_owned());
+        }
+        let out = self.run(&[
+            "diff-index",
+            "--cached",
+            "-M",
+            "-z",
+            "--name-status",
+            "HEAD",
+        ])?;
+        // `<status> NUL <path> NUL`, with the old path first for a rename.
+        let mut fields = out.split('\0');
+        while let Some(status) = fields.next() {
+            if status.starts_with('R') {
+                let (old, new) = (fields.next(), fields.next());
+                if new == Some(path)
+                    && let Some(old) = old
+                {
+                    return Ok(old.to_owned());
+                }
+            } else {
+                fields.next();
+            }
+        }
+        Ok(path.to_owned())
     }
 }
 

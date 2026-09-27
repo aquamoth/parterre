@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui::{
     self, Align, Id, Key, Layout, Margin, Popup, PopupCloseBehavior, RectAlign, Response, RichText,
-    Sense, Stroke, Ui, Vec2, vec2,
+    Sense, Stroke, Ui, vec2,
 };
 use parterre_core::glyphs::{self, Glyph};
 use parterre_core::layout::Direction;
@@ -176,95 +176,38 @@ impl ParterreApp {
     }
 
     fn find_field(&mut self, ui: &mut Ui, width: f32) {
-        let id = Id::new("search");
-        let focused = ui.memory(|m| m.has_focus(id));
-        let t = widgets::tones(ui);
-        let stroke = if focused {
-            Stroke::new(1.5, t.accent)
-        } else {
-            Stroke::new(1.0, t.field_line)
+        let n = self.search.hits.len();
+        let count = match self.search.current {
+            Some(c) => format!("{} / {n}", c + 1),
+            None if n == 0 => "None".to_owned(),
+            None => format!("{n} found"),
         };
-        egui::Frame::new()
-            .fill(t.field)
-            .stroke(stroke)
-            .corner_radius(8)
-            .inner_margin(Margin {
-                left: 8,
-                right: 4,
-                top: 0,
-                bottom: 0,
-            })
-            .show(ui, |ui| {
-                ui.set_width(width - 12.0);
-                ui.set_height(28.0);
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let weak = ui.visuals().weak_text_color();
-                let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                widgets::paint_glyph(ui.painter(), icon, glyphs::SEARCH, weak);
-                let searching = !self.search.query.is_empty();
-                let hint = width > 220.0;
-                let tail = if searching {
-                    128.0
-                } else if hint {
-                    52.0
-                } else {
-                    0.0
-                };
-                let edit = egui::TextEdit::singleline(&mut self.search.query)
-                    .id(id)
-                    .frame(egui::Frame::NONE)
-                    .hint_text("Find commits, branches, tags")
-                    .desired_width((ui.available_width() - tail).max(40.0));
-                let response = ui.add(edit);
-                if self.search.request_focus {
-                    response.request_focus();
-                    self.search.request_focus = false;
-                }
-                if response.changed() {
-                    self.update_search();
-                    if !self.search.hits.is_empty() {
-                        self.goto_search_hit(true);
-                    }
-                }
-                if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    let back = ui.input(|i| i.modifiers.shift);
-                    self.goto_search_hit(!back);
-                    response.request_focus();
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    if !searching {
-                        if !hint {
-                            return;
-                        }
-                        egui::Frame::new()
-                            .stroke(Stroke::new(1.0, t.field_line))
-                            .corner_radius(4)
-                            .inner_margin(Margin::symmetric(4, 0))
-                            .show(ui, |ui| ui.label(RichText::new("Ctrl+F").small().weak()));
-                        return;
-                    }
-                    if tip(widgets::mini_button(ui, glyphs::CLOSE), "Clear", "Esc").clicked() {
-                        self.search.query.clear();
-                        self.update_search();
-                    }
-                    let next = widgets::mini_button(ui, glyphs::CHEVRON_DOWN);
-                    if tip(next, "Next", "Enter").clicked() {
-                        self.goto_search_hit(true);
-                    }
-                    let previous = widgets::mini_button(ui, glyphs::CHEVRON_UP);
-                    if tip(previous, "Previous", "Shift+Enter").clicked() {
-                        self.goto_search_hit(false);
-                    }
-                    let n = self.search.hits.len();
-                    let text = match self.search.current {
-                        Some(c) => format!("{} / {n}", c + 1),
-                        None if n == 0 => "None".to_owned(),
-                        None => format!("{n} found"),
-                    };
-                    ui.label(RichText::new(text).small().weak());
-                });
-            });
+        let find = widgets::Find {
+            id: Id::new("search"),
+            width,
+            hint: "Find commits, branches, tags",
+            count: &count,
+            keys: ["Shift+Enter", "Enter", "Esc"],
+            focus: std::mem::take(&mut self.search.request_focus),
+            select: false,
+        };
+        let found = widgets::find_field(ui, &find, &mut self.search.query);
+        if found.changed {
+            self.update_search();
+            if !self.search.hits.is_empty() {
+                self.goto_search_hit(true);
+            }
+        }
+        if found.cleared {
+            self.search.query.clear();
+            self.update_search();
+        }
+        if found.next {
+            self.goto_search_hit(true);
+        }
+        if found.previous {
+            self.goto_search_hit(false);
+        }
     }
 
     fn filter_popover(&mut self, ui: &mut Ui) {

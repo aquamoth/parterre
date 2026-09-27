@@ -214,6 +214,10 @@ pub struct BlameWindowSettings {
     pub ignore_whitespace: bool,
     /// Whether moved and copied lines keep the commit that wrote them.
     pub moves: Moves,
+    /// The history pane below the text is shown.
+    pub show_history: bool,
+    /// Height of the history pane in points, with its headings.
+    pub history_height: f32,
 }
 
 impl Default for BlameWindowSettings {
@@ -222,6 +226,9 @@ impl Default for BlameWindowSettings {
             size: [1100.0, 800.0],
             ignore_whitespace: false,
             moves: Moves::Off,
+            show_history: true,
+            // The headings and 8 rows.
+            history_height: 26.0 + 8.0 * 24.0,
         }
     }
 }
@@ -380,6 +387,22 @@ mod tests {
         };
         let back: Settings = ron::from_str(&ron::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.text_size, 1.25);
+    }
+
+    #[test]
+    fn the_history_pane_is_remembered_and_shown_by_default() {
+        let old: Settings = ron::from_str("(blame_window: (size: (900.0, 600.0)))").unwrap();
+        assert!(old.blame_window.show_history);
+        assert_eq!(
+            old.blame_window.history_height,
+            BlameWindowSettings::default().history_height
+        );
+
+        let mut s = Settings::default();
+        s.blame_window.show_history = false;
+        s.blame_window.history_height = 300.0;
+        let back: Settings = ron::from_str(&ron::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.blame_window, s.blame_window);
     }
 
     #[test]

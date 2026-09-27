@@ -134,13 +134,23 @@ a pull request does; *Swap sides* turns the comparison round.
 **Blame** shows which commit last changed each line of a file: right-click a changed file in
 the log or compare window and pick *Blame*, or click *Blame* in a diff window's toolbar (it
 opens at the change in view). A gutter names each line's commit, author and date, shaded from
-plain (oldest) to amber (newest). Click a line to highlight every line of its commit; the bar
-at the bottom describes the commit under the pointer. Right-click a line to *Blame previous
-revision* (the file as it was before that commit, in the same window; `Alt+Left` goes back),
-*Show changes* (that commit's diff of the file, at the line), *Show log* from the commit, or
-copy its hash. Drag or `Shift`+click to choose lines, `Ctrl+C` to copy them. The toolbar
-says whether whitespace changes and moved or copied lines count (`git blame -w`, `-M`, `-C`).
-Blaming the working tree marks the lines you haven't committed; `F5` blames again.
+plain (oldest) to amber (newest). Click a line to highlight every line of its commit; the
+strip on the right marks them in the whole file (click it to go there), and the bar at the
+bottom describes the commit under the pointer. Right-click a line to *Blame previous revision*
+(the file as it was before that commit, in a new window, at that line), *Show changes* (that
+commit's diff of the file, at the line), *Show log* from the commit, or copy its hash. Drag or
+`Shift`+click to choose lines, `Ctrl+C` to copy them. The toolbar says whether whitespace
+changes and moved or copied lines count (`git blame -w`, `-M`, `-C`). Blaming the working tree
+marks the lines you haven't committed; `F5` blames again.
+
+Below the text, the **history pane** lists the commits that changed the file up to the blamed
+revision, like the log: graph, hash (in its lines' shade), subject, author, date. Commits from
+before a rename say the path the file had there; commits none of whose lines remain are greyed
+out; *Working tree changes* sits on top when the file differs from `HEAD`. Clicking a line
+selects its commit's row, and clicking a row highlights its commit's lines (the text stays
+put; the strip shows where they are). `Up` and `Down` step through the rows. Right-click a row
+to *Blame this revision*, *Show changes* (also a double-click), *Show log* or copy its hash.
+Drag the divider to resize the pane, or hide it with *History* in the toolbar.
 
 Colours follow TortoiseGit:
 

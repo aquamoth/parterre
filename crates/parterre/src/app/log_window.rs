@@ -22,12 +22,13 @@ use parterre_core::blame::BlameSpec;
 use parterre_core::file_diff::{FileDiffSpec, Rev};
 use parterre_core::glyphs::{self, Glyph};
 use parterre_core::log::{LogOptions, LogOrder, LogQuery};
-use parterre_core::log_graph::{GraphRow, LogGraph};
+use parterre_core::log_graph::LogGraph;
 use parterre_core::log_layout::LogLayout;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{find_urls, thousands};
 use parterre_core::{Commit, CommitIx, GitRef, Oid, Repo};
 
+use super::commit_table::{CommitList, CommitTable, Row};
 use super::compare_window::CompareRequest;
 use super::file_table::{DiffQueue, FileTable, Lister, Listing};
 use super::{Details, ParterreApp};
@@ -36,26 +37,10 @@ use crate::text_size;
 use crate::theme::{Palette, text_on};
 use crate::widgets;
 
-/// Height of a commit row.
-const ROW: f32 = 24.0;
-/// Width of a lane of the graph column, and the margin on either side of the lanes.
-const GRAPH_LANE: f32 = 11.0;
-const GRAPH_PAD: f32 = 4.0;
-/// The graph column grows to this many lanes, and only while the subject keeps this much room;
-/// lanes further right are cut off.
-const GRAPH_MAX_LANES: usize = 24;
-const GRAPH_SUBJECT_ROOM: f32 = 220.0;
 /// Height of a table's column headings.
 pub(super) const HEADING: f32 = 26.0;
 /// Thickness of the draggable dividers between panes.
-const DIVIDER: f32 = 6.0;
-const AUTHOR_WIDTH: f32 = 170.0;
-const DATE_WIDTH: f32 = 128.0;
-/// A commit list narrower than this (beside another pane) gets narrower author and date
-/// columns, as in the prototype's layouts B and D.
-const NARROW_LIST: f32 = 720.0;
-const NARROW_AUTHOR_WIDTH: f32 = 128.0;
-const NARROW_DATE_WIDTH: f32 = 118.0;
+pub(super) const DIVIDER: f32 = 6.0;
 pub(super) const CELL_PAD: f32 = 8.0;
 /// How long a Copy button says "Copied".
 const COPIED_SECONDS: f64 = 1.2;
@@ -120,14 +105,8 @@ struct LogView {
     commits: Vec<CommitIx>,
     /// The graph column's lanes, a row for each of `commits`.
     graph: LogGraph,
-    /// Index into `commits`.
-    selected: Option<usize>,
-    /// Scroll the list to the selected row in the next frame.
-    reveal: bool,
-    /// The list's scroll offset and height in the last frame, for keeping the selection in
-    /// view and for paging.
-    scroll: f32,
-    list_height: f32,
+    /// The selected row (an index into `commits`) and the scroll position.
+    list: CommitList,
 }
 
 impl LogView {
@@ -139,17 +118,18 @@ impl LogView {
             repo,
             query,
             options,
-            selected: (!list.commits.is_empty()).then_some(0),
+            list: CommitList {
+                selected: (!list.commits.is_empty()).then_some(0),
+                reveal: true,
+                ..CommitList::default()
+            },
             graph: LogGraph::new(&list),
             commits: list.commits,
-            reveal: true,
-            scroll: 0.0,
-            list_height: 0.0,
         }
     }
 
     fn selected_commit(&self) -> Option<CommitIx> {
-        self.commits.get(self.selected?).copied()
+        self.commits.get(self.list.selected?).copied()
     }
 
     /// Re-runs the query on a newly loaded snapshot, keeping the selected commit if it is still
@@ -162,7 +142,7 @@ impl LogView {
     /// still listed.
     fn set_options(&mut self, options: LogOptions) {
         self.rebuild(self.repo.clone(), options);
-        self.reveal = true;
+        self.list.reveal = true;
     }
 
     /// Re-runs the query on `repo` with `options`, keeping the selected commit if it is still
@@ -178,13 +158,13 @@ impl LogView {
         let mut query = self.query.clone();
         query.tips = map(&self.query.tips);
         query.exclude = map(&self.query.exclude);
-        let (scroll, height) = (self.scroll, self.list_height);
+        let (scroll, height) = (self.list.scroll, self.list.height);
         *self = LogView::new(self.id, repo, query, options);
-        (self.scroll, self.list_height) = (scroll, height);
+        (self.list.scroll, self.list.height) = (scroll, height);
         if let Some(oid) = selected {
             let at = self.repo.lookup(&oid);
             if let Some(i) = self.commits.iter().position(|&c| Some(c) == at) {
-                self.selected = Some(i);
+                self.list.selected = Some(i);
             }
         }
     }
@@ -220,14 +200,14 @@ struct Arrangement {
 /// A draggable divider, and how a pointer position turns into its fraction in
 /// [`Dividers`](parterre_core::log_layout::Dividers).
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Bar {
-    rect: Rect,
+pub(super) struct Bar {
+    pub(super) rect: Rect,
     /// Dragged sideways: a vertical bar between panes side by side.
-    vertical: bool,
+    pub(super) vertical: bool,
     /// Where the bar's middle is (along x for a vertical bar, else y) at fraction 0, and the
     /// room its fraction is of.
-    origin: f32,
-    room: f32,
+    pub(super) origin: f32,
+    pub(super) room: f32,
 }
 
 impl Bar {
@@ -474,12 +454,10 @@ impl LogWindow {
         }
         let Some(view) = &mut self.view else { return };
         let n = view.commits.len();
-        let page = ((view.list_height / ROW).floor() as usize)
-            .saturating_sub(1)
-            .max(1);
+        let page = view.list.page();
         let target = ui.input_mut(|i| {
             let mut key = |k: Key| i.consume_key(Modifiers::NONE, k);
-            let current = view.selected.unwrap_or(0);
+            let current = view.list.selected.unwrap_or(0);
             if key(Key::ArrowDown) {
                 Some(current + 1)
             } else if key(Key::ArrowUp) {
@@ -499,8 +477,7 @@ impl LogWindow {
         if let Some(target) = target
             && n > 0
         {
-            view.selected = Some(target.min(n - 1));
-            view.reveal = true;
+            view.list.select(Some(target.min(n - 1)));
         }
         if ui.input(|i| i.key_pressed(Key::Escape)) {
             self.view = None;
@@ -629,220 +606,62 @@ impl LogWindow {
     }
 
     /// The commit list: the graph, short hash, ref badges and subject, author, date.
-    /// Virtualised; the rows are painted directly.
     fn commits_pane(&mut self, ui: &mut Ui, env: &mut Env, c: &Colors) {
         let Some(view) = &mut self.view else { return };
-        let mono = FontId::monospace(12.0);
-        let body = egui::TextStyle::Body.resolve(ui.style());
-        let digit = ui
-            .painter()
-            .layout_no_wrap("0".into(), mono.clone(), c.line)
-            .size()
-            .x;
-        let hash_width = digit * view.repo.abbrev_len as f32 + 2.0 * CELL_PAD + 2.0;
-        let weak = ui.visuals().weak_text_color();
-        let text = ui.visuals().text_color();
-        let (author_width, date_width) = if ui.available_width() < NARROW_LIST {
-            (NARROW_AUTHOR_WIDTH, NARROW_DATE_WIDTH)
-        } else {
-            (AUTHOR_WIDTH, DATE_WIDTH)
+        let LogView {
+            id,
+            repo,
+            refs,
+            commits,
+            graph,
+            list,
+            ..
+        } = view;
+        let table = CommitTable {
+            id: Id::new(("log-commits", *id)),
+            rows: commits.len(),
+            graph,
+            abbrev_len: repo.abbrev_len,
+            palette: &env.palette,
         };
-
-        // Only as wide as leaves the subject its room.
-        let graph_width = if view.graph.lanes == 0 {
-            0.0
-        } else {
-            let lanes = view.graph.lanes.min(GRAPH_MAX_LANES) as f32 * GRAPH_LANE;
-            let room =
-                ui.available_width() - hash_width - author_width - date_width - GRAPH_SUBJECT_ROOM;
-            lanes.min(room.max(3.0 * GRAPH_LANE)) + 2.0 * GRAPH_PAD
-        };
-        let columns = |width: f32, left: f32| {
-            let (width, left) = (width - graph_width, left + graph_width);
-            let subject = (width - hash_width - author_width - date_width).max(80.0);
-            let x = [
-                left,
-                left + hash_width,
-                left + hash_width + subject,
-                left + hash_width + subject + author_width,
-            ];
-            let w = [hash_width, subject, author_width, date_width];
-            (x, w)
-        };
-
-        // Column headings.
-        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADING), Sense::hover());
-        heading_background(ui, head, c);
-        let (x, w) = columns(head.width(), head.left());
-        let title = ui
-            .painter()
-            .layout_no_wrap("Graph".into(), FontId::proportional(12.0), weak);
-        if title.size().x + 2.0 * GRAPH_PAD <= graph_width {
-            ui.painter().galley(
-                pos2(
-                    head.left() + GRAPH_PAD,
-                    head.center().y - title.size().y / 2.0,
-                ),
-                title,
-                weak,
-            );
-        }
-        for (i, title) in ["Hash", "Subject", "Author", "Date"]
-            .into_iter()
-            .enumerate()
-        {
-            let g = cell(
-                ui,
-                title,
-                FontId::proportional(12.0),
-                weak,
-                w[i] - 2.0 * CELL_PAD,
-            );
-            ui.painter().galley(
-                pos2(x[i] + CELL_PAD, head.center().y - g.size().y / 2.0),
-                g,
-                weak,
-            );
-        }
-
-        if view.commits.is_empty() {
+        let head = repo.head_commit().map(|c| repo.commit(c).oid);
+        let (marked, shows) = (env.marked, |r: &&GitRef| env.graph.shows(r.kind));
+        let mut request = None;
+        table.show(
+            ui,
+            c,
+            list,
+            |i| {
+                let commit = repo.commit(commits[i]);
+                Row {
+                    hash: commit.oid.short(repo.abbrev_len),
+                    marked: marked.is_some_and(|(m, _)| *m == commit.oid),
+                    refs: refs[commits[i].ix()]
+                        .iter()
+                        .map(|&r| &repo.refs[r])
+                        .filter(shows)
+                        .collect(),
+                    subject: &commit.subject,
+                    author: &commit.author_name,
+                    author_email: &commit.author_email,
+                    date: &commit.author_date,
+                    ..Row::default()
+                }
+            },
+            |ui, i| {
+                let commit = repo.commit(commits[i]);
+                if let Some(r) = row_menu(ui, commit, marked, head, repo.has_working_tree) {
+                    request = Some(r);
+                }
+            },
+            // The details pane shows the whole message.
+            None,
+        );
+        if commits.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| ui.weak("No commits."));
-            return;
         }
-
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let mut area = ScrollArea::vertical()
-            .id_salt(("log-commits", view.id))
-            .auto_shrink(false);
-        if view.reveal
-            && let Some(sel) = view.selected
-        {
-            view.reveal = false;
-            let top = sel as f32 * ROW;
-            let height = view.list_height.max(ROW);
-            if top < view.scroll {
-                area = area.vertical_scroll_offset(top);
-            } else if top + ROW > view.scroll + height {
-                area = area.vertical_scroll_offset(top + ROW - height);
-            }
-        }
-        let mut clicked = None;
-        let mut request = None;
-        let head = view.repo.head_commit().map(|c| view.repo.commit(c).oid);
-        let output = area.show_rows(ui, ROW, view.commits.len(), |ui, range| {
-            let graph = view.graph.rows(range.clone());
-            for (i, graph) in range.zip(&graph) {
-                let commit = view.repo.commit(view.commits[i]);
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
-                let selected = view.selected == Some(i);
-                let bg = if selected {
-                    Some(c.selected_bg)
-                } else if response.hovered() {
-                    Some(c.hover)
-                } else if i % 2 == 1 {
-                    Some(c.stripe)
-                } else {
-                    None
-                };
-                if let Some(bg) = bg {
-                    ui.painter().rect_filled(rect, 0.0, bg);
-                }
-                let (fg, fg_weak) = if selected {
-                    (c.selected_fg, c.selected_fg)
-                } else {
-                    (text, weak)
-                };
-                let (x, w) = columns(rect.width(), rect.left());
-                let y = rect.center().y;
-                let painter = ui.painter();
-                let graph_rect = Rect::from_min_size(rect.min, vec2(graph_width, ROW));
-                paint_graph(painter, graph_rect, graph, c, bg);
-                let put = |g: Arc<Galley>, x: f32, color| {
-                    painter.galley(pos2(x, y - g.size().y / 2.0), g, color);
-                };
-                let hash = commit.oid.short(view.repo.abbrev_len);
-                put(
-                    cell(ui, &hash, mono.clone(), fg_weak, w[0]),
-                    x[0] + CELL_PAD,
-                    fg_weak,
-                );
-
-                // The mark, ref badges, then the subject in what is left.
-                let mut left = x[1] + CELL_PAD;
-                let right = x[1] + w[1] - CELL_PAD;
-                if env.marked.is_some_and(|(m, _)| *m == commit.oid) {
-                    let ribbon = Rect::from_center_size(pos2(left + 5.0, y), vec2(10.0, 15.0));
-                    widgets::paint_ribbon(painter, ribbon, env.palette.marked, Stroke::NONE);
-                    left += 16.0;
-                }
-                for &r in &view.refs[view.commits[i].ix()] {
-                    let git_ref = &view.repo.refs[r];
-                    if !env.graph.shows(git_ref.kind) || left >= right {
-                        continue;
-                    }
-                    left += badge(ui, git_ref, &env.palette, pos2(left, y), right - left) + 4.0;
-                }
-                if left < right {
-                    put(
-                        cell(ui, &commit.subject, body.clone(), fg, right - left),
-                        left,
-                        fg,
-                    );
-                }
-                put(
-                    cell(
-                        ui,
-                        &commit.author_name,
-                        body.clone(),
-                        fg,
-                        w[2] - 2.0 * CELL_PAD,
-                    ),
-                    x[2] + CELL_PAD,
-                    fg,
-                );
-                put(
-                    cell(
-                        ui,
-                        &commit.author_date,
-                        body.clone(),
-                        fg_weak,
-                        w[3] - 2.0 * CELL_PAD,
-                    ),
-                    x[3] + CELL_PAD,
-                    fg_weak,
-                );
-                let author = Rect::from_x_y_ranges(x[2]..=x[2] + w[2], rect.y_range());
-                let over_author = response.hover_pos().is_some_and(|p| author.contains(p));
-                let response = if over_author {
-                    response
-                        .on_hover_text(format!("{} <{}>", commit.author_name, commit.author_email))
-                } else {
-                    response
-                };
-                if response.clicked() || response.secondary_clicked() {
-                    clicked = Some(i);
-                }
-                egui::Popup::context_menu(&response)
-                    .style(crate::menu::style)
-                    .show(|ui| {
-                        crate::menu::fit_window(ui, |ui| {
-                            ui.set_min_width(crate::menu::MIN_WIDTH);
-                            let tree = view.repo.has_working_tree;
-                            if let Some(r) = row_menu(ui, commit, env.marked, head, tree) {
-                                request = Some(r);
-                            }
-                        });
-                    });
-            }
-        });
         self.requests.extend(request);
-        view.scroll = output.state.offset.y;
-        view.list_height = output.inner_rect.height();
-        if let Some(i) = clicked {
-            view.selected = Some(i);
-        }
     }
 
     /// The selected commit as `git log` shows it: full hash, refs, a merge's parents, author and
@@ -965,8 +784,7 @@ impl LogWindow {
         if let Some(row) = jump
             && let Some(view) = &mut self.view
         {
-            view.selected = Some(row);
-            view.reveal = true;
+            view.list.select(Some(row));
         }
     }
 
@@ -1146,7 +964,7 @@ pub(super) fn heading_background(ui: &Ui, rect: Rect, c: &Colors) {
 
 /// A divider between two panes. While it is dragged, returns where its middle should go: the
 /// pointer's position across the bar, less where on the bar it was grabbed.
-fn divider(ui: &mut Ui, id: Id, bar: &Bar) -> Option<f32> {
+pub(super) fn divider(ui: &mut Ui, id: Id, bar: &Bar) -> Option<f32> {
     let c = colors(ui);
     let rect = bar.rect;
     let cursor = if bar.vertical {
@@ -1201,60 +1019,6 @@ fn layout_tools(ui: &mut Ui, settings: &mut LogWindowSettings) {
     }
     if let Some(layout) = layout_picker(ui, current) {
         settings.layout = layout;
-    }
-}
-
-/// One row of the graph column in `rect`: each line in the colour of the lane it runs in,
-/// then the commit's dot, a ring for a merge. `bg` is the row's background over the pane's.
-fn paint_graph(
-    painter: &egui::Painter,
-    rect: Rect,
-    row: &GraphRow,
-    c: &Colors,
-    bg: Option<Color32>,
-) {
-    if rect.width() <= 0.0 {
-        return;
-    }
-    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
-    let x = |lane: usize| rect.left() + GRAPH_PAD + (lane as f32 + 0.5) * GRAPH_LANE;
-    let color = |lane: usize| c.lanes[lane % c.lanes.len()];
-    let (top, mid, bottom) = (rect.top(), rect.center().y, rect.bottom());
-    let stroke = |lane| Stroke::new(1.6, color(lane));
-    for line in &row.upper {
-        let points = [pos2(x(line.from), top), pos2(x(line.to), mid)];
-        painter.line_segment(points, stroke(line.from));
-    }
-    for line in &row.lower {
-        let points = [pos2(x(line.from), mid), pos2(x(line.to), bottom)];
-        painter.line_segment(points, stroke(line.to));
-    }
-    let centre = pos2(x(row.lane), mid);
-    if centre.x > rect.right() - GRAPH_PAD {
-        // The commit's lane is cut off: point to it from the edge.
-        let tip = pos2(rect.right() - 1.0, mid);
-        let arrow = vec![tip, tip + vec2(-5.0, -4.0), tip + vec2(-5.0, 4.0)];
-        let shape = egui::Shape::convex_polygon(arrow, color(row.lane), Stroke::NONE);
-        painter.add(shape);
-        return;
-    }
-    if row.outside {
-        // History that goes on outside the log; aside if a line in the log goes down too.
-        let weak = Stroke::new(1.4, painter.ctx().global_style().visuals.weak_text_color());
-        let aside = row.lower.iter().any(|l| l.from == row.lane);
-        let end_x = centre.x + if aside { 0.6 * GRAPH_LANE } else { 0.0 };
-        let points = [centre, pos2(end_x, bottom)];
-        painter.extend(egui::Shape::dashed_line(&points, weak, 2.0, 2.0));
-    }
-    const R: f32 = 3.5;
-    if row.merge {
-        painter.circle_filled(centre, R, c.pane);
-        if let Some(bg) = bg {
-            painter.circle_filled(centre, R, bg);
-        }
-        painter.circle_stroke(centre, R, Stroke::new(1.8, color(row.lane)));
-    } else {
-        painter.circle_filled(centre, R, color(row.lane));
     }
 }
 

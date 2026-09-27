@@ -766,25 +766,47 @@ fn without_ending(raw: &str) -> &str {
 
 impl DiffLine {
     /// Where display column `col` (a character of [`DiffLine::text`]) falls in
-    /// [`DiffLine::raw`], as a byte offset. A column inside a tab's run of spaces counts as
-    /// after the tab.
+    /// [`DiffLine::raw`], as a byte offset ([`raw_offset`]).
     pub fn raw_offset(&self, col: usize) -> usize {
-        let mut at = 0;
-        for (i, c) in self.raw.char_indices() {
-            if at >= col {
-                return i;
-            }
-            at += if c == '\t' {
-                TAB_WIDTH - at % TAB_WIDTH
-            } else {
-                1
-            };
-            if at > col {
-                return i + c.len_utf8();
-            }
-        }
-        self.raw.len()
+        raw_offset(&self.raw, col)
     }
+}
+
+/// Where display column `col` (a character of the line as [`display`] shows it) falls in the
+/// `raw` line, as a byte offset. A column inside a tab's run of spaces counts as after the tab.
+pub fn raw_offset(raw: &str, col: usize) -> usize {
+    let mut at = 0;
+    for (i, c) in raw.char_indices() {
+        if at >= col {
+            return i;
+        }
+        at += if c == '\t' {
+            TAB_WIDTH - at % TAB_WIDTH
+        } else {
+            1
+        };
+        if at > col {
+            return i + c.len_utf8();
+        }
+    }
+    raw.len()
+}
+
+/// The display column (a character of the line as [`display`] shows it) where byte `offset` of
+/// the `raw` line falls: the other way from [`raw_offset`]. A tab ends at the next tab stop.
+pub fn display_column(raw: &str, offset: usize) -> usize {
+    let mut col = 0;
+    for (i, c) in raw.char_indices() {
+        if i >= offset {
+            break;
+        }
+        col += if c == '\t' {
+            TAB_WIDTH - col % TAB_WIDTH
+        } else {
+            1
+        };
+    }
+    col
 }
 
 /// The display form of a raw line, and its spans moved along: the line ending dropped and tabs
@@ -1118,6 +1140,12 @@ mod tests {
         assert_eq!(&l.raw[l.raw_offset(4)..l.raw_offset(9)], "ab\tc");
         assert_eq!(l.raw_offset(10), l.raw.len());
         assert_eq!(l.raw_offset(99), l.raw.len());
+        // And back: a byte offset of the raw line as a column.
+        assert_eq!(display_column(&l.raw, 0), 0);
+        assert_eq!(display_column(&l.raw, 1), 4);
+        assert_eq!(display_column(&l.raw, 3), 6);
+        assert_eq!(display_column(&l.raw, 4), 8);
+        assert_eq!(display_column(&l.raw, l.raw.len()), 10);
     }
 
     #[test]

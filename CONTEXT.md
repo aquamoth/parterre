@@ -47,3 +47,24 @@ _Avoid_: patch, delta, compare
 A separate window showing one file diff. Several can be open at once. It outlives the log window
 it was opened from, but closes with the repository.
 _Avoid_: diff viewer, compare window, merge view
+
+### Blame
+
+**Blame window**:
+A separate window showing, for each line of one file at one revision, the commit that last
+changed it. Several can be open at once; it closes with the repository.
+_Avoid_: annotate, blame view
+
+**Blamed revision**:
+The version of the file whose text a blame window shows: a commit, or the working tree.
+_Avoid_: current revision, selected revision
+
+**Chosen commit**:
+The commit a blame window highlights: every line it still owns in the blamed revision, and its
+row in the history pane. Choosing a line or a row chooses its commit; it never changes the
+blamed revision.
+_Avoid_: selected commit, active commit
+
+**History pane**:
+The list at the bottom of a blame window of the commits that changed the file, one per row.
+_Avoid_: log pane, commit list

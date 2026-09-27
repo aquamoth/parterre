@@ -410,6 +410,146 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
         .inner
 }
 
+/// A find field, as in the main toolbar and the blame windows' toolbars.
+pub struct Find<'a> {
+    pub id: Id,
+    pub width: f32,
+    /// Shown while the field is empty.
+    pub hint: &'a str,
+    /// While there is a query: how many places it was found at, e.g. "3 of 12".
+    pub count: &'a str,
+    /// The shortcuts the tooltips of the previous, next and clear buttons name.
+    pub keys: [&'a str; 3],
+    /// Take the focus in this frame; `select` also selects the query, so typing replaces it.
+    pub focus: bool,
+    pub select: bool,
+}
+
+/// What was done in a find field this frame.
+pub struct Found {
+    /// The query was edited.
+    pub changed: bool,
+    /// Enter or the button asked for the next place; Shift+Enter or the button for the
+    /// previous one.
+    pub next: bool,
+    pub previous: bool,
+    /// The clear button was clicked.
+    pub cleared: bool,
+}
+
+/// A find field for `query`: a magnifier, the query (a hint and "Ctrl+F" while empty, if there
+/// is room), and while there is one, the count and buttons for the previous and next place and
+/// for clearing. Enter keeps the focus. A paste leaves out the line break it ends with.
+pub fn find_field(ui: &mut Ui, find: &Find, query: &mut String) -> Found {
+    let focused = ui.memory(|m| m.has_focus(find.id));
+    let t = tones(ui);
+    let stroke = if focused {
+        Stroke::new(1.5, t.accent)
+    } else {
+        Stroke::new(1.0, t.field_line)
+    };
+    let mut found = Found {
+        changed: false,
+        next: false,
+        previous: false,
+        cleared: false,
+    };
+    egui::Frame::new()
+        .fill(t.field)
+        .stroke(stroke)
+        .corner_radius(8)
+        .inner_margin(egui::Margin {
+            left: 8,
+            right: 4,
+            top: 0,
+            bottom: 0,
+        })
+        .show(ui, |ui| {
+            ui.set_width(find.width - 12.0);
+            ui.set_height(28.0);
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let weak = ui.visuals().weak_text_color();
+            let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+            paint_glyph(ui.painter(), icon, glyphs::SEARCH, weak);
+            if focused {
+                // A line copied whole ends with a line break, which the field would keep as a
+                // blank that no line ends with.
+                ui.input_mut(|i| {
+                    for event in &mut i.events {
+                        if let egui::Event::Paste(text) = event {
+                            text.truncate(text.trim_end_matches(['\r', '\n']).len());
+                        }
+                    }
+                });
+            }
+            let searching = !query.is_empty();
+            let hint = find.width > 220.0;
+            let tail = if searching {
+                128.0
+            } else if hint {
+                52.0
+            } else {
+                0.0
+            };
+            let edit = egui::TextEdit::singleline(query)
+                .id(find.id)
+                .frame(egui::Frame::NONE)
+                .hint_text(find.hint)
+                .desired_width((ui.available_width() - tail).max(40.0));
+            let response = ui.add(edit);
+            if find.focus {
+                response.request_focus();
+                if find.select
+                    && let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), find.id)
+                {
+                    let all = egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(query.chars().count()),
+                    );
+                    state.cursor.set_char_range(Some(all));
+                    state.store(ui.ctx(), find.id);
+                }
+            }
+            found.changed = response.changed();
+            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if ui.input(|i| i.modifiers.shift) {
+                    found.previous = true;
+                } else {
+                    found.next = true;
+                }
+                response.request_focus();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if !searching {
+                    if !hint {
+                        return;
+                    }
+                    egui::Frame::new()
+                        .stroke(Stroke::new(1.0, t.field_line))
+                        .corner_radius(4)
+                        .inner_margin(egui::Margin::symmetric(4, 0))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("Ctrl+F").small().weak())
+                        });
+                    return;
+                }
+                let [previous, next, clear] = find.keys;
+                if tip(mini_button(ui, glyphs::CLOSE), "Clear", clear).clicked() {
+                    found.cleared = true;
+                }
+                if tip(mini_button(ui, glyphs::CHEVRON_DOWN), "Next", next).clicked() {
+                    found.next = true;
+                }
+                if tip(mini_button(ui, glyphs::CHEVRON_UP), "Previous", previous).clicked() {
+                    found.previous = true;
+                }
+                ui.label(egui::RichText::new(find.count).small().weak());
+            });
+        });
+    found
+}
+
 /// A tooltip: `text`, then `key` (a shortcut) in a weaker colour.
 pub fn tip(response: Response, text: &str, key: &str) -> Response {
     response.on_hover_ui(|ui| {

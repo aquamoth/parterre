@@ -19,6 +19,9 @@ crates/parterre-core   GUI-free; everything testable lives here
   blame.rs             blaming a file (`git blame --line-porcelain`): each line's origin
                        (commit, path, the version before), and where a line leads: its
                        change, and the blame before it
+  file_history.rs      the blame window's history pane: `git log --no-follow` of the file
+                       plus the blame's own commits and the working tree, with which rows
+                       own lines and are in the snapshot, and their graph column
   text.rs              URLs in commit messages, paths cut at the start, thousands separators
   text_size.rs         the text size's steps, and Ctrl+wheel and pinch turned into steps
   revgraph.rs          reduce the commit DAG to a revision graph (TortoiseGit's rules)
@@ -59,9 +62,13 @@ crates/parterre        the binary (eframe/egui)
                        worker thread that asks git for such lists
     compare_window.rs  the compare window (Compare revisions, with HEAD, with the marked
                        commit): two commits and the files they differ in
+    commit_table.rs    the commit table (graph column, hash, subject with refs, author,
+                       date) the log window and the blame window's history pane share
     blame_window.rs    blame windows: a file's lines with a gutter naming their commits,
-                       shaded by age; a line's menu blames the version before (with Back),
-                       shows its change, or its log
+                       shaded by age; a line's menu blames the version before (a new window),
+                       shows its change, or its log; the history pane below lists the
+                       file's commits (git lists them on a worker thread alongside the
+                       blame), and choosing a line or a row chooses the commit in both
   scene.rs             node contents and sizes + layout + physics net, hit testing
   render.rs            painting nodes, edges, arrows, overview
   export.rs            SVG export, and PNG and WebP export: render.rs painted in tiles by
