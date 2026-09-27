@@ -238,6 +238,8 @@ pub struct ParterreApp {
     requested: Option<(GraphOptions, LayoutOptions)>,
     job: Option<LayoutJob>,
     view: View,
+    /// The view at the start of the frame, before any panning or zooming.
+    view_before: View,
     needs_initial_view: bool,
     canvas: Rect,
     /// The pointer is over the graph (or its overview map), where Ctrl+wheel is the graph's.
@@ -392,6 +394,7 @@ impl ParterreApp {
             requested: None,
             job: None,
             view: View::default(),
+            view_before: View::default(),
             needs_initial_view: true,
             canvas: Rect::NOTHING,
             graph_hovered: false,
@@ -1487,6 +1490,11 @@ impl ParterreApp {
                 self.view.pan_screen(scroll);
             }
         }
+        // However the view was panned or zoomed this frame (keys, toolbar, pointer), keep the
+        // graph in sight, before drawing it: drawn beyond the limit and pulled back on the
+        // next frame, it would jitter.
+        self.view
+            .keep_in_sight(canvas, scene.bounds(), self.view_before);
 
         // Physics.
         let dt = self
@@ -2229,6 +2237,7 @@ impl eframe::App for ParterreApp {
         self.auto_reload(&ctx);
         self.update_pull_requests(&ctx);
         self.ensure_scene(&ctx);
+        self.view_before = self.view;
         self.handle_keys(&ctx);
 
         egui::Panel::top("toolbar")
