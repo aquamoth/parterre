@@ -10,12 +10,13 @@
 # target\release\parterre.exe (run `cargo build --release` first) and cargo-about.
 # -Out defaults to target\msi\ with the name above.
 #
-# The MSI version is the Cargo.toml version without its pre-release part: MSI versions are
-# numbers only.
+# The MSI version is the version of the release tag in PARTERRE_RELEASE_TAG, as the release
+# workflow sets it, or else the Cargo.toml version, without its pre-release part: MSI versions
+# are numbers only.
 #
 # The MSI is then checked with the ICE rules (`wix msi validate`). Two are suppressed, for the
 # reasons given in parterre.wxs: ICE57 (the dual-purpose Start menu shortcut) and ICE61 (same
-# version upgrades).
+# version upgrades). Last, the script checks that the MSI's ProductVersion is the version above.
 [CmdletBinding()]
 param(
     [string]$Stage,
@@ -32,8 +33,14 @@ if ($Out) { $Out = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPath
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
 Push-Location $root
 try {
-    $metadata = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
-    $version = ($metadata.packages | Where-Object name -EQ 'parterre').version
+    # The release workflow's tag, like the binary's version (docs/releasing.md); Cargo.toml's
+    # version isn't bumped for releases.
+    if ($env:PARTERRE_RELEASE_TAG) {
+        $version = $env:PARTERRE_RELEASE_TAG -replace '^v', ''
+    } else {
+        $metadata = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+        $version = ($metadata.packages | Where-Object name -EQ 'parterre').version
+    }
     $msiVersion = ($version -split '[-+]')[0]
 
     if (-not $Stage) {
@@ -59,7 +66,21 @@ try {
         -o $Out `
         packaging\windows\parterre.wxs
     wix msi validate -acceptEula wix7 -sice ICE57 -sice ICE61 $Out
-    Write-Host "Built $Out"
+
+    # The version Windows and winget see, read back from the MSI (v0.5.0 shipped one saying
+    # 0.4.0). Windows Installer's COM objects have no type information, hence InvokeMember.
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $invoke = { param($object, $member, $kind, $arguments) $object.GetType().InvokeMember($member, $kind, $null, $object, $arguments) }
+    $database = & $invoke $installer OpenDatabase InvokeMethod @($Out, 0)
+    $view = & $invoke $database OpenView InvokeMethod @("SELECT Value FROM Property WHERE Property = 'ProductVersion'")
+    & $invoke $view Execute InvokeMethod $null
+    $productVersion = & $invoke (& $invoke $view Fetch InvokeMethod $null) StringData GetProperty @(1)
+    & $invoke $view Close InvokeMethod $null
+    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($database)
+    if ($productVersion -ne $msiVersion) {
+        throw "The MSI's ProductVersion is '$productVersion', expected '$msiVersion'"
+    }
+    Write-Host "Built $Out, version $productVersion"
 }
 finally {
     Pop-Location
