@@ -25,6 +25,12 @@
 //! no lines are greyed out. A row's menu blames the file at that commit, shows its change to
 //! the file, or shows the log from it. The divider above the pane is remembered for the next
 //! window.
+//!
+//! Find (`Ctrl+F`, #114) looks for text in the lines as in the file, ignoring case as the main
+//! window's find does, in each window on its own. Every place found is highlighted and marked
+//! in the overview strip, the one gone to stronger; Enter and `F3` go to the next, round the
+//! end, scrolling it into view. Finding never changes the chosen commit, as in
+//! TortoiseGitBlame. Esc in the find field leaves it; elsewhere it closes the window.
 
 use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
@@ -36,8 +42,9 @@ use eframe::egui::{
 };
 use parterre_core::blame::{Blame, BlameOptions, BlameSpec, Moves, Origin};
 use parterre_core::changed_files::FileStatus;
-use parterre_core::file_diff::{FileDiffSpec, Rev, Version, raw_offset};
+use parterre_core::file_diff::{FileDiffSpec, Rev, Version, display_column, raw_offset};
 use parterre_core::file_history::{FileHistory, FileLog, HistoryRow, Source};
+use parterre_core::find;
 use parterre_core::git::{Cancel, Git};
 use parterre_core::glyphs;
 use parterre_core::log_graph::LogGraph;
@@ -347,6 +354,23 @@ impl Selection {
     }
 }
 
+/// Find in the text (Ctrl+F), in this window alone: the query, where it occurs, and the place
+/// gone to. Finding never changes the chosen commit.
+#[derive(Debug, Default)]
+struct Find {
+    query: String,
+    /// The last query searched for, which Ctrl+F offers again after Esc cleared the field.
+    last: String,
+    /// Every place the query occurs: a line and display columns in it.
+    matches: Vec<find::Match>,
+    /// The place gone to (an index into `matches`).
+    current: Option<usize>,
+    /// Focus the field and select the query in the next frame.
+    focus: bool,
+    /// Scroll the current place into view in the next frame.
+    reveal: bool,
+}
+
 #[derive(Debug)]
 struct BlameWindow {
     id: u64,
@@ -384,6 +408,9 @@ struct BlameWindow {
     scroll: f32,
     /// Sideways scroll of the text, in points.
     hoff: f32,
+    /// The first line drawn in the last frame.
+    top: usize,
+    find: Find,
     /// Bring the window to the front in the next frame.
     focus: bool,
     closed: bool,
@@ -425,6 +452,8 @@ impl BlameWindow {
             scroll_to: None,
             scroll: 0.0,
             hoff: 0.0,
+            top: 0,
+            find: Find::default(),
             focus: false,
             closed: false,
             title_theme: None,
@@ -504,6 +533,10 @@ impl BlameWindow {
             self.selection = None;
         }
         self.load = Load::Ready(Box::new(ready));
+        // The lines are the same but for a working tree's; the place gone to stays if it can.
+        let current = self.find.current;
+        self.refind();
+        self.find.current = current.filter(|&c| c < self.find.matches.len());
     }
 
     /// Makes the history pane's rows once the blame and the listing are both there, and
@@ -689,6 +722,78 @@ impl BlameWindow {
         }
     }
 
+    /// The single line of the chosen characters, if they are on one line.
+    fn selected_in_line(&self) -> Option<String> {
+        let (a, b) = self.selection?.chars()?;
+        (a.0 == b.0 && b.1 != LINE_END)
+            .then(|| self.selected_text())
+            .flatten()
+    }
+
+    fn find_id(&self) -> Id {
+        Id::new(("blame-find", self.id))
+    }
+
+    /// Ctrl+F: focuses the find field with the chosen characters, if they are on one line, or
+    /// else the last query, selected so that typing replaces it.
+    fn open_find(&mut self) {
+        let query = self
+            .selected_in_line()
+            .unwrap_or_else(|| self.find.last.clone());
+        if query != self.find.query {
+            self.find.query = query;
+            self.query_changed();
+        }
+        self.find.focus = true;
+    }
+
+    /// Esc in the find field, or its clear button: empties it, and leaves it.
+    fn close_find(&mut self, ctx: &egui::Context) {
+        self.find.query.clear();
+        self.refind();
+        ctx.memory_mut(|m| m.surrender_focus(self.find_id()));
+    }
+
+    /// Finds the query in the lines, as in the file, with nothing gone to yet.
+    fn refind(&mut self) {
+        self.find.current = None;
+        self.find.matches = match self.ready() {
+            Some(r) => {
+                let lines = &r.blame.lines;
+                find::find(lines.iter().map(|l| &l.raw), &self.find.query)
+                    .into_iter()
+                    .map(|m| {
+                        let raw = &lines[m.line].raw;
+                        let columns =
+                            display_column(raw, m.range.start)..display_column(raw, m.range.end);
+                        find::Match {
+                            line: m.line,
+                            range: columns,
+                        }
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+    }
+
+    /// The query was typed: goes to its first place at or after the top of the view.
+    fn query_changed(&mut self) {
+        self.refind();
+        if !self.find.query.is_empty() {
+            self.find.last = self.find.query.clone();
+        }
+        self.find.current = find::first_from(&self.find.matches, self.top);
+        self.find.reveal = true;
+    }
+
+    /// Enter, F3 (`forward`), Shift+Enter, Shift+F3: goes to the next or previous place,
+    /// round the ends.
+    fn find_step(&mut self, forward: bool) {
+        self.find.current = find::step(&self.find.matches, self.find.current, forward, self.top);
+        self.find.reveal = true;
+    }
+
     /// Asks for a blame of the version before line `i`'s commit, in a window of its own, with
     /// the line's place in that version chosen, near where it came in. This window stays as it
     /// is.
@@ -701,9 +806,33 @@ impl BlameWindow {
         }
     }
 
-    /// Esc closes; Ctrl+A chooses every line; `Up`/`Down` step through the history pane
-    /// wherever the pointer is, while it shows.
+    /// Ctrl+F finds, F3 and Shift+F3 go to the next and previous place, and Esc in the find
+    /// field leaves it; elsewhere Esc closes. Ctrl+A chooses every line; `Up`/`Down` step
+    /// through the history pane wherever the pointer is, while it shows. While the find field
+    /// has the focus, other keys are its own.
     fn handle_keys(&mut self, ui: &Ui) {
+        let id = self.find_id();
+        // egui drops the focus on Esc before the frame starts.
+        let in_find = ui.memory(|m| m.has_focus(id) || m.had_focus_last_frame(id));
+        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
+            self.open_find();
+        }
+        // Shift+F3 first: a plain F3 would match it too.
+        let (previous, next) = ui.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::SHIFT, Key::F3),
+                i.consume_key(Modifiers::NONE, Key::F3),
+            )
+        });
+        if previous || next {
+            self.find_step(next);
+        }
+        if in_find {
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                self.close_find(ui.ctx());
+            }
+            return;
+        }
         if ui.ctx().egui_wants_keyboard_input() {
             return;
         }
@@ -866,7 +995,51 @@ impl BlameWindow {
                 self.show_history = !on;
                 settings.show_history = self.show_history;
             }
+
+            // Find, in the middle of what is left, as in the main window.
+            let room = ui.available_width();
+            ui.allocate_ui_with_layout(
+                vec2(room, widgets::BUTTON),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    // Narrow windows squeeze the field rather than the tools.
+                    let width = (room - 16.0).clamp(60.0, 380.0);
+                    ui.add_space(((room - width) / 2.0).max(0.0));
+                    self.find_field(ui, width);
+                },
+            );
         });
+    }
+
+    /// The find field, with how many places the query was found at.
+    fn find_field(&mut self, ui: &mut Ui, width: f32) {
+        let n = self.find.matches.len();
+        let count = match (self.find.current, n) {
+            (_, 0) => "No matches".to_owned(),
+            (Some(c), n) => format!("{} of {n}", c + 1),
+            (None, 1) => "1 match".to_owned(),
+            (None, n) => format!("{n} matches"),
+        };
+        let focus = std::mem::take(&mut self.find.focus);
+        let find = widgets::Find {
+            id: self.find_id(),
+            width,
+            hint: "Find in the file",
+            count: &count,
+            keys: ["Shift+Enter, Shift+F3", "Enter, F3", "Esc"],
+            focus,
+            select: focus,
+        };
+        let found = widgets::find_field(ui, &find, &mut self.find.query);
+        if found.changed {
+            self.query_changed();
+        }
+        if found.cleared {
+            self.close_find(ui.ctx());
+        }
+        if found.next || found.previous {
+            self.find_step(found.next);
+        }
     }
 
     /// The path and the revision; the counts on the right, and a note on bytes that aren't
@@ -984,6 +1157,21 @@ impl BlameWindow {
         } else if let Some(offset) = self.pending_scroll.take() {
             self.scroll_to = Some(offset);
         }
+        // The place found gone to: into view, a third of the way down if it was out of it, and
+        // sideways too.
+        if std::mem::take(&mut self.find.reveal)
+            && let Some(m) = self.find.current.and_then(|c| self.find.matches.get(c))
+        {
+            let y = m.line as f32 * row_h;
+            if y < self.scroll || y + row_h > self.scroll + area.height() {
+                let above = (area.height() / row_h / 3.0).floor();
+                self.scroll_to = Some(((m.line as f32 - above) * row_h).max(0.0));
+            }
+            let (x0, x1) = (m.range.start as f32 * char_w, m.range.end as f32 * char_w);
+            if x0 < self.hoff || x1 > self.hoff + text_w - char_w {
+                self.hoff = if x1 < text_w - char_w { 0.0 } else { x0 - 80.0 };
+            }
+        }
         let mut scroll = ScrollArea::vertical()
             .auto_shrink(false)
             .id_salt(("blame", self.id));
@@ -998,6 +1186,7 @@ impl BlameWindow {
 
         let selection = self.selection;
         let highlighted = self.chosen;
+        let (matches, current) = (&self.find.matches, self.find.current);
         let pointer = ui.input(|i| i.pointer.interact_pos());
         let pressed = ui.input(|i| i.pointer.primary_pressed());
         let (hoff, abbrev) = (self.hoff, self.repo.abbrev_len);
@@ -1088,8 +1277,23 @@ impl BlameWindow {
                 let g = painter.layout_no_wrap(line.text.clone(), font.clone(), c.text);
                 let at = pos2(text_x - hoff, y - g.size().y / 2.0);
                 let text = painter.with_clip_rect(clip);
+                let x = |col| at.x + g.pos_from_cursor(CCursor::new(col)).min.x;
+                // Every place found in the line, the one gone to stronger.
+                let from = matches.partition_point(|m| m.line < i);
+                for (k, m) in matches.iter().enumerate().skip(from) {
+                    if m.line != i {
+                        break;
+                    }
+                    let fill = if current == Some(k) {
+                        bc.found_current
+                    } else {
+                        bc.found
+                    };
+                    let place =
+                        Rect::from_x_y_ranges(x(m.range.start)..=x(m.range.end), rect.y_range());
+                    text.rect_filled(place, 0.0, fill);
+                }
                 if let Some(cols) = selection.and_then(|s| s.columns(i)) {
-                    let x = |col| at.x + g.pos_from_cursor(CCursor::new(col)).min.x;
                     let x1 = if cols.end == LINE_END {
                         // Past the end, a little, to show the line break is included.
                         at.x + g.size().x + row_h / 2.0
@@ -1147,6 +1351,7 @@ impl BlameWindow {
             }
         });
         self.scroll = out.state.offset.y;
+        self.top = first.unwrap_or(0);
 
         // Every line of the chosen commit in the whole file, and the part in view. Click or
         // drag to put that place in the middle.
@@ -1168,6 +1373,21 @@ impl BlameWindow {
                 );
                 ui.painter().rect_filled(mark, 0.0, bc.mark);
             }
+        }
+        // The lines the query was found in, over the chosen commit's, in a colour of their own.
+        let scale = overview_scale(strip, n, row_h);
+        let mut marked = None;
+        for m in &self.find.matches {
+            if marked == Some(m.line) {
+                continue;
+            }
+            marked = Some(m.line);
+            let y0 = m.line as f32 * scale;
+            let mark = Rect::from_min_max(
+                pos2(strip.left() + 3.0, strip.top() + y0),
+                pos2(strip.right() - 2.0, strip.top() + y0 + scale.max(2.0)),
+            );
+            ui.painter().rect_filled(mark, 0.0, bc.found_mark);
         }
         overview_view(ui, strip, view, c);
         let id = egui::Id::new(("blame-overview", self.id));
@@ -1504,6 +1724,14 @@ impl BlameWindow {
         );
     }
 
+    /// What Ctrl+C copies from the text, unless the find field has the focus (then it copies
+    /// from the field).
+    fn copied(&self, ui: &Ui) -> Option<String> {
+        let copy = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+        let in_find = ui.memory(|m| m.has_focus(self.find_id()));
+        (copy && !in_find).then(|| self.selected_text()).flatten()
+    }
+
     /// Shows the window; sets `closed` when it was closed. Ctrl+wheel and Ctrl+plus, minus
     /// and 0 change `text_size`.
     fn show(
@@ -1560,9 +1788,7 @@ impl BlameWindow {
                     self.closed = true;
                 }
             }
-            if ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)))
-                && let Some(text) = self.selected_text()
-            {
+            if let Some(text) = self.copied(ui) {
                 ui.ctx().copy_text(text);
             }
             let env = Env {
@@ -1854,6 +2080,10 @@ struct BlameColors {
     new: Color32,
     commit: Color32,
     mark: Color32,
+    /// Behind the places found, the one gone to, and their marks in the overview strip.
+    found: Color32,
+    found_current: Color32,
+    found_mark: Color32,
 }
 
 impl BlameColors {
@@ -1878,6 +2108,9 @@ fn blame_colors(ui: &Ui) -> BlameColors {
             new: Color32::from_rgb(0x5c, 0x45, 0x12),
             commit: Color32::from_rgba_unmultiplied(0x35, 0x84, 0xe4, 40),
             mark: Color32::from_rgb(0x62, 0xa0, 0xea),
+            found: Color32::from_rgba_unmultiplied(0xd0, 0x9a, 0x1c, 80),
+            found_current: Color32::from_rgba_unmultiplied(0xc2, 0x6a, 0x00, 200),
+            found_mark: Color32::from_rgb(0xf0, 0xa0, 0x30),
         }
     } else {
         BlameColors {
@@ -1885,6 +2118,9 @@ fn blame_colors(ui: &Ui) -> BlameColors {
             new: Color32::from_rgb(0xff, 0xd9, 0x80),
             commit: Color32::from_rgba_unmultiplied(0x35, 0x84, 0xe4, 26),
             mark: Color32::from_rgb(0x1c, 0x71, 0xd8),
+            found: Color32::from_rgba_unmultiplied(0xff, 0xcc, 0x33, 130),
+            found_current: Color32::from_rgba_unmultiplied(0xff, 0x8c, 0x00, 190),
+            found_mark: Color32::from_rgb(0xe0, 0x82, 0x00),
         }
     }
 }
@@ -2551,6 +2787,9 @@ mod tests {
             new: Color32::from_rgb(200, 100, 50),
             commit: Color32::TRANSPARENT,
             mark: Color32::TRANSPARENT,
+            found: Color32::TRANSPARENT,
+            found_current: Color32::TRANSPARENT,
+            found_mark: Color32::TRANSPARENT,
         };
         assert_eq!(c.age(0.0), c.old);
         assert_eq!(c.age(1.0), c.new);
@@ -2748,5 +2987,192 @@ mod tests {
         clicked(&ctx, &mut w, &mut settings, pos2(975.0, TOOLBAR / 2.0));
         assert!(!w.show_history);
         assert!(!settings.show_history);
+    }
+
+    fn shift(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::SHIFT,
+        }
+    }
+
+    /// The places found, as line and the text found there.
+    fn found(w: &BlameWindow) -> Vec<(usize, String)> {
+        let lines = &w.ready().unwrap().blame.lines;
+        w.find
+            .matches
+            .iter()
+            .map(|m| {
+                let text: String = lines[m.line].text.chars().collect::<Vec<_>>()[m.range.clone()]
+                    .iter()
+                    .collect();
+                (m.line, text)
+            })
+            .collect()
+    }
+
+    fn has_find_focus(ctx: &egui::Context, w: &BlameWindow) -> bool {
+        ctx.memory(|m| m.has_focus(w.find_id()))
+    }
+
+    #[test]
+    fn ctrl_f_finds_as_typed_and_f3_and_enter_go_round_the_places() {
+        let ctx = egui::Context::default();
+        let mut w = window();
+        frame(&ctx, &mut w, Vec::new());
+        click(&ctx, &mut w, 1, Modifiers::NONE);
+        let chosen = w.chosen;
+        frame(&ctx, &mut w, vec![ctrl(Key::F)]);
+        assert!(has_find_focus(&ctx, &w));
+        // Any case: "O" finds one, two and four; the first at or after the top is gone to.
+        frame(&ctx, &mut w, vec![egui::Event::Text("O".into())]);
+        assert_eq!(w.find.query, "O");
+        assert_eq!(
+            found(&w),
+            [(0, "o".into()), (1, "o".into()), (3, "o".into())]
+        );
+        assert_eq!(w.find.current, Some(0));
+        // Enter and F3 go on, round the end; Shift goes back.
+        frame(&ctx, &mut w, vec![key(Key::Enter)]);
+        assert_eq!(w.find.current, Some(1));
+        assert!(has_find_focus(&ctx, &w));
+        frame(&ctx, &mut w, vec![key(Key::F3)]);
+        frame(&ctx, &mut w, vec![key(Key::F3)]);
+        assert_eq!(w.find.current, Some(0));
+        frame(&ctx, &mut w, vec![shift(Key::F3)]);
+        assert_eq!(w.find.current, Some(2));
+        let held = egui::Event::ModifiersChanged;
+        frame(
+            &ctx,
+            &mut w,
+            vec![held(Modifiers::SHIFT), shift(Key::Enter)],
+        );
+        frame(&ctx, &mut w, vec![held(Modifiers::NONE)]);
+        assert_eq!(w.find.current, Some(1));
+        // Tabs are found as in the file.
+        frame(&ctx, &mut w, vec![egui::Event::Text("\tx".into())]);
+        frame(
+            &ctx,
+            &mut w,
+            vec![ctrl(Key::A), egui::Event::Text("o\tx".into())],
+        );
+        assert_eq!(found(&w), [(1, "o x".into())]);
+        // Finding never changes the chosen commit or lines.
+        assert_eq!(w.chosen, chosen);
+        assert_eq!(span(&w), Some((1, 1)));
+        // F3 works outside the field too.
+        w.find.current = None;
+        ctx.memory_mut(|m| m.surrender_focus(w.find_id()));
+        frame(&ctx, &mut w, vec![key(Key::F3)]);
+        assert_eq!(w.find.current, Some(0));
+    }
+
+    #[test]
+    fn typing_goes_to_the_first_place_from_the_top_of_the_view_and_scrolls_to_it() {
+        let ctx = egui::Context::default();
+        let mut w = window();
+        w.show_history = false;
+        // 300 lines; "needle" in lines 10 and 250.
+        let out: String = (1..=300)
+            .map(|i| {
+                let text = if i == 11 || i == 251 {
+                    "a needle"
+                } else {
+                    "hay"
+                };
+                entry(A, i, i, 100, "", text)
+            })
+            .collect();
+        let repo = w.repo.clone();
+        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo));
+        frame(&ctx, &mut w, Vec::new());
+        // Scrolled so that line 100 is at the top.
+        let row_h = Metrics::new(&ctx, 300, w.repo.abbrev_len).row_h;
+        w.scroll_to = Some(100.0 * row_h);
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        assert_eq!(w.top, 100);
+        frame(&ctx, &mut w, vec![ctrl(Key::F)]);
+        frame(&ctx, &mut w, vec![egui::Event::Text("NEEDLE".into())]);
+        assert_eq!(w.find.current, Some(1));
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        let middle = w.top as f32;
+        assert!(
+            w.top <= 250 && 250 < w.top + 20,
+            "line 250 in view, top {middle}"
+        );
+        // Round the end to line 10.
+        frame(&ctx, &mut w, vec![key(Key::Enter)]);
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        assert_eq!(w.find.current, Some(0));
+        assert!(w.top <= 10, "line 10 in view, top {}", w.top);
+    }
+
+    #[test]
+    fn esc_in_the_find_field_leaves_it_and_only_then_closes_the_window() {
+        let ctx = egui::Context::default();
+        let mut w = window();
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, vec![ctrl(Key::F)]);
+        frame(&ctx, &mut w, vec![egui::Event::Text("t".into())]);
+        assert_eq!(w.find.matches.len(), 2);
+        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        assert!(!w.closed);
+        assert!(!has_find_focus(&ctx, &w));
+        assert_eq!(w.find.query, "");
+        assert!(w.find.matches.is_empty());
+        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        assert!(w.closed);
+    }
+
+    #[test]
+    fn ctrl_f_offers_the_chosen_characters_or_the_windows_last_query_to_type_over() {
+        let ctx = egui::Context::default();
+        let mut w = window();
+        let mut other = window();
+        frame(&ctx, &mut w, Vec::new());
+        // Characters chosen in one line: they are the query.
+        let (from, to) = (char_at(&ctx, &w, 2, 1), char_at(&ctx, &w, 2, 4));
+        drag(&ctx, &mut w, from, to, Modifiers::NONE);
+        frame(&ctx, &mut w, vec![ctrl(Key::F)]);
+        assert_eq!(w.find.query, "hre");
+        assert_eq!(found(&w), [(2, "hre".into())]);
+        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        assert_eq!(w.find.query, "");
+
+        // Otherwise the window's last query, selected: a paste replaces it. Characters over
+        // several lines don't count.
+        let (from, to) = (char_at(&ctx, &w, 0, 1), char_at(&ctx, &w, 1, 1));
+        drag(&ctx, &mut w, from, to, Modifiers::NONE);
+        frame(&ctx, &mut w, vec![ctrl(Key::F)]);
+        assert_eq!(w.find.query, "hre");
+        // A line copied whole: its line break is left out.
+        frame(&ctx, &mut w, vec![egui::Event::Paste("four\n".into())]);
+        assert_eq!(w.find.query, "four");
+        assert_eq!(found(&w), [(3, "four".into())]);
+        // Ctrl+A and Ctrl+C in the field are the field's: the lines stay as chosen, and the
+        // text's characters aren't copied.
+        let chosen = w.selection;
+        frame(&ctx, &mut w, vec![ctrl(Key::A)]);
+        assert_eq!(w.selection, chosen);
+        assert!(has_find_focus(&ctx, &w));
+        let copied = std::cell::Cell::new(None);
+        let input = egui::RawInput {
+            events: vec![egui::Event::Copy],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| copied.set(Some(w.copied(ui))));
+        assert_eq!(copied.take(), Some(None));
+
+        // Each window finds on its own: another has no last query.
+        frame(&ctx, &mut other, Vec::new());
+        frame(&ctx, &mut other, vec![ctrl(Key::F)]);
+        assert_eq!(other.find.query, "");
+        assert_eq!(w.find.last, "four");
     }
 }
