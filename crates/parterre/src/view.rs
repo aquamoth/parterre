@@ -4,6 +4,9 @@ use eframe::egui::{Pos2, Rect, Vec2, pos2};
 
 pub const MIN_ZOOM: f32 = 0.02;
 pub const MAX_ZOOM: f32 = 4.0;
+/// Panning and zooming keep at least this fraction of the canvas (along each axis) covered by
+/// the graph, or all of the graph if it is smaller, so that it can't be lost off screen.
+pub const KEEP_IN_SIGHT: f32 = 0.1;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct View {
@@ -79,6 +82,31 @@ impl View {
         self.offset = world.to_vec2() - screen_offset / self.scale();
     }
 
+    /// Pans back as far as needed to keep [`KEEP_IN_SIGHT`] of `world` (the graph) on the
+    /// canvas, but never further than where the view was `before` panning or zooming: a view
+    /// already further off (after the graph changed, say) can come back, but not drift further
+    /// away, and doesn't jump.
+    pub fn keep_in_sight(&mut self, canvas: Rect, world: Rect, before: View) {
+        if !canvas.is_positive() || !world.is_finite() || world.is_negative() {
+            return;
+        }
+        let axis = |i: usize, v: View| {
+            let visible = canvas.size()[i] / v.scale();
+            let keep = (KEEP_IN_SIGHT * visible).min(world.size()[i]).max(0.0);
+            // Offsets that keep `keep` of the graph between the canvas edges.
+            (world.min[i] + keep - visible, world.max[i] - keep)
+        };
+        for i in 0..2 {
+            // How far off (in points) `before` was, which is allowed to stay.
+            let (lo, hi) = axis(i, before);
+            let off = before.offset[i];
+            let slack = (lo - off).max(off - hi).max(0.0) * before.scale();
+            let (lo, hi) = axis(i, *self);
+            let slack = slack / self.scale();
+            self.offset[i] = self.offset[i].clamp(lo - slack, hi + slack);
+        }
+    }
+
     /// Zooms and pans so `world` fills the canvas, never zooming in beyond `max_zoom`.
     pub fn fit(&mut self, canvas: Rect, world: Rect, max_zoom: f32) {
         let margin = 24.0;
@@ -93,6 +121,7 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eframe::egui::vec2;
 
     fn canvas() -> Rect {
         Rect::from_min_size(pos2(10.0, 20.0), Vec2::new(800.0, 600.0))
@@ -181,6 +210,94 @@ mod tests {
         let world = Rect::from_min_max(pos2(-500.0, 0.0), pos2(2500.0, 9000.0));
         v.fit(canvas(), world, 1.0);
         assert!(canvas().contains_rect(v.rect_to_screen(canvas(), world)));
+    }
+
+    fn graph() -> Rect {
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 2000.0))
+    }
+
+    /// The part of the graph on the canvas, in points along x and y.
+    fn in_sight(v: View) -> Vec2 {
+        let shown = v.rect_to_screen(canvas(), graph()).intersect(canvas());
+        shown.size().max(Vec2::ZERO)
+    }
+
+    #[test]
+    fn panning_stops_before_the_graph_is_lost() {
+        let mut v = View::default();
+        v.show_at(canvas(), graph().center(), Vec2::splat(0.5));
+        for delta in [vec2(5000.0, 0.0), vec2(-5000.0, 0.0), vec2(0.0, 9000.0)] {
+            let mut w = v;
+            w.pan_screen(delta);
+            w.keep_in_sight(canvas(), graph(), v);
+            let seen = in_sight(w);
+            assert!(
+                seen.x >= 80.0 - 1e-3 && seen.y >= 60.0 - 1e-3,
+                "{delta:?}: {seen:?}"
+            );
+            // Right at the limit, not held back before it.
+            assert!(seen.x < 81.0 || seen.y < 61.0, "{delta:?}: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn panning_within_the_limits_is_left_alone() {
+        let mut v = View::default();
+        v.show_at(canvas(), graph().center(), Vec2::splat(0.5));
+        let mut w = v;
+        w.pan_screen(vec2(300.0, -200.0));
+        let wanted = w;
+        w.keep_in_sight(canvas(), graph(), v);
+        assert_eq!(w, wanted);
+    }
+
+    #[test]
+    fn a_small_graph_stays_in_sight_whole() {
+        let tiny = Rect::from_min_max(pos2(0.0, 0.0), pos2(20.0, 10.0));
+        let mut v = View::default();
+        v.show_at(canvas(), tiny.center(), Vec2::splat(0.5));
+        let before = v;
+        v.pan_screen(vec2(-2000.0, 2000.0));
+        v.keep_in_sight(canvas(), tiny, before);
+        assert!(canvas().contains_rect(v.rect_to_screen(canvas(), tiny)));
+    }
+
+    #[test]
+    fn zooming_in_beside_the_graph_keeps_it_in_sight() {
+        let mut v = View::default();
+        v.show_at(canvas(), pos2(-300.0, 1000.0), Vec2::splat(0.5));
+        let before = v;
+        v.zoom_around(canvas(), canvas().center(), 3.0);
+        v.keep_in_sight(canvas(), graph(), before);
+        assert!(in_sight(v).x >= 80.0 - 1e-3);
+    }
+
+    #[test]
+    fn a_view_already_off_the_graph_can_come_back_but_not_go_further() {
+        let mut v = View::default();
+        v.show_at(canvas(), pos2(-3000.0, 1000.0), Vec2::splat(0.5));
+        let lost = v;
+        // Further away: held where it was.
+        v.pan_screen(vec2(500.0, 0.0));
+        v.keep_in_sight(canvas(), graph(), lost);
+        assert!((v.offset - lost.offset).length() < 1e-3);
+        // Back towards the graph: free.
+        v.pan_screen(vec2(-500.0, 0.0));
+        let wanted = v;
+        v.keep_in_sight(canvas(), graph(), lost);
+        assert_eq!(v, wanted);
+        // Untouched: stays.
+        let mut w = lost;
+        w.keep_in_sight(canvas(), graph(), lost);
+        assert!((w.offset - lost.offset).length() < 1e-3);
+    }
+
+    #[test]
+    fn nothing_to_keep_in_sight_before_there_is_a_canvas() {
+        let mut v = View::default();
+        v.keep_in_sight(Rect::NOTHING, graph(), View::default());
+        v.keep_in_sight(canvas(), Rect::NOTHING, View::default());
+        assert_eq!(v, View::default());
     }
 
     #[test]
