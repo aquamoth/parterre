@@ -6,7 +6,7 @@
 #   packaging/linux/build-packages.sh [--target TRIPLE] [OUT]   (default OUT: target/packages)
 #
 # The packages take their version from the binary: the release tag's in the release workflow,
-# X.Y.Z-dev+commit otherwise. A pre-release's - becomes ~, which sorts before the release in
+# X.Y.Z-dev.N+commit otherwise. A pre-release's - becomes ~, which sorts before the release in
 # both dpkg and rpm, so 0.5.0-rc1 is packaged as 0.5.0~rc1 and 0.5.0 replaces it.
 set -eu
 

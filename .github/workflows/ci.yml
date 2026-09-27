@@ -68,6 +68,9 @@ jobs:
           apt-get install -y --no-install-recommends build-essential ca-certificates curl git
       - uses: actions/checkout@v6
         if: env.BUILD == 'true'
+        # The whole history with its tags: the version follows the nearest release tag.
+        with:
+          fetch-depth: 0
       - name: Trust the checkout
         if: env.BUILD == 'true' && matrix.container
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"

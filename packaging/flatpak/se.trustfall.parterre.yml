@@ -110,7 +110,7 @@ modules:
       #     tag: v0.5.1
       #     commit: <full hash of v0.5.1>
       # Built from a copy, build.rs may not find the repository (a linked worktree's .git
-      # points outside it), and --version then says e.g. 0.4.0-dev.
+      # points outside it), and --version then says 0.0.0-dev.
       - type: dir
         path: ../..
         skip:

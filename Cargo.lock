@@ -1879,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "parterre"
-version = "0.4.0"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1896,7 +1896,7 @@ dependencies = [
 
 [[package]]
 name = "parterre-core"
-version = "0.4.0"
+version = "0.0.0"
 dependencies = [
  "image",
  "imara-diff",

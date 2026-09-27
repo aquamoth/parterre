@@ -44,7 +44,7 @@ use crate::automation::Automation;
 use crate::theme::ThemeChoice;
 
 /// This build's version: `0.5.0-rc1 (a1b2c3d)` for a tagged release,
-/// `0.4.0-dev+a1b2c3d` otherwise.
+/// `0.5.1-dev.3+a1b2c3d` three commits after `v0.5.0`.
 const VERSION: &str = env!("PARTERRE_VERSION");
 
 /// Show the revision graph of a git repository: how its branches and tags relate.

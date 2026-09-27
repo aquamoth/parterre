@@ -1,8 +1,9 @@
 //! Sets `PARTERRE_VERSION`, the version string `--version` and Help show (see `src/version.rs`),
 //! and gives the Windows executable its icon and version information (see `src/win_resource.rs`).
 //!
-//! The release workflow sets `PARTERRE_RELEASE_TAG` to the pushed tag; the build uses its version
-//! and fails unless that tag points at the clean commit being built.
+//! The version follows the nearest release tag (`git describe`). The release workflow sets
+//! `PARTERRE_RELEASE_TAG` to the pushed tag; the build uses its version and fails unless that
+//! tag points at the clean commit being built.
 //!
 //! The sources are either a git checkout of the workspace, or a crate packaged by `cargo
 //! package` (e.g. downloaded from crates.io by `cargo install`), which has no `.git` but records
@@ -131,10 +132,16 @@ fn git_state(dir: &Path) -> Option<GitState> {
     status.extend(SOURCES);
     let status = git(dir, &status)?;
     let tags = git(dir, &["tag", "--points-at", "HEAD"])?;
+    // The version follows the nearest release tag; none in a shallow clone without tags.
+    let described = git(
+        dir,
+        &["describe", "--tags", "--long", "--match", "v[0-9]*", "HEAD"],
+    );
     Some(GitState {
         commit,
         dirty: !status.is_empty(),
         tags: tags.lines().map(str::to_owned).collect(),
+        nearest: described.as_deref().and_then(version::parse_describe),
     })
 }
 
@@ -142,8 +149,9 @@ fn git_state(dir: &Path) -> Option<GitState> {
 /// current without rerunning on every build.
 fn watch(dir: &Path) {
     let mut paths = Vec::new();
-    // HEAD's reflog changes on every commit, checkout and reset, including in worktrees.
-    for name in ["HEAD", "logs/HEAD", "packed-refs"] {
+    // HEAD's reflog changes on every commit, checkout and reset, including in worktrees; a new
+    // tag lands in refs/tags.
+    for name in ["HEAD", "logs/HEAD", "packed-refs", "refs/tags"] {
         paths.extend(git(dir, &["rev-parse", "--git-path", name]));
     }
     if let Some(branch) = git(dir, &["rev-parse", "--symbolic-full-name", "HEAD"])

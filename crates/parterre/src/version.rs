@@ -26,6 +26,16 @@ pub struct GitState {
     pub dirty: bool,
     /// Tags pointing at `HEAD`.
     pub tags: Vec<String>,
+    /// The release tag nearest `HEAD` in its history, which the version follows.
+    pub nearest: Option<NearestTag>,
+}
+
+/// A tag in the history of `HEAD`, from `git describe` (see [`parse_describe`]).
+#[derive(Debug, PartialEq, Eq)]
+pub struct NearestTag {
+    pub tag: String,
+    /// Commits in `HEAD`'s history that the tag's doesn't have; 0 when it is `HEAD`.
+    pub since: u32,
 }
 
 /// The commit a packaged crate was made from, as recorded in its `.cargo_vcs_info.json`.
@@ -39,10 +49,16 @@ pub struct VcsInfo {
 
 /// The version string for a build of package version `pkg_version`.
 ///
-/// A build of exactly the released sources reports the plain version and commit,
-/// `0.3.0 (a1b2c3d)`: a clean checkout of tag `v0.3.0`, or a packaged crate such as the one on
-/// crates.io. Every other build is a dev build, marked with a `dev` pre-release and the commit
-/// as build metadata: `0.3.0-dev+a1b2c3d(.dirty)`, or just `0.3.0-dev` without git.
+/// Versions come from the release tags. A build of exactly the released sources reports the
+/// plain version and commit, `0.3.0 (a1b2c3d)`: a clean checkout of tag `v0.3.0`, or a packaged
+/// crate such as the one on crates.io (whose `Cargo.toml` has the tag's version). Every other
+/// build is a dev build, marked with a `dev` pre-release and the commit as build metadata.
+/// Past a release tag it is a pre-release of the next version, numbered by the commits since
+/// the tag: `0.3.1-dev.4+a1b2c3d(.dirty)` four commits after `v0.3.0`, or
+/// `0.3.0-rc1.dev.4+a1b2c3d` after `v0.3.0-rc1`, so that it sorts after the release it follows
+/// and before the next one (in dpkg and rpm too, with `-` as `~`). Only without a release tag
+/// in sight does the dev version fall back to `Cargo.toml`'s: `0.3.0-dev+a1b2c3d`, or just
+/// `0.3.0-dev` without git.
 ///
 /// The release workflow sets `release_tag`. Its version comes from the tag, and the build
 /// fails unless that tag points at the commit being built and the checkout is clean.
@@ -51,49 +67,109 @@ pub fn describe(
     release_tag: Option<&str>,
     source: &Source,
 ) -> Result<String, String> {
-    let version = release_tag.map(parse_release_tag).transpose()?;
-    let version = version.unwrap_or(pkg_version);
-    let tag = format!("v{version}");
-    if matches!(source, Source::Package(_)) && release_tag.is_some() && version != pkg_version {
-        return Err(format!(
-            "release tag {tag} doesn't match the packaged crate version {pkg_version}"
-        ));
-    }
-    let (commit, dirty, released) = match source {
-        Source::Git(git) => (Some(&git.commit), git.dirty, git.tags.contains(&tag)),
-        Source::Package(info) => (info.commit.as_ref(), info.dirty, true),
-        Source::Unknown => (None, false, false),
-    };
     if let Some(tag) = release_tag {
-        let Some(commit) = commit else {
-            return Err(format!(
-                "release tag {tag} given, but git can't tell which commit is being built"
-            ));
-        };
-        if !released {
-            return Err(format!(
-                "release tag {tag} doesn't point at the commit being built ({commit})"
-            ));
-        }
-        if dirty {
-            return Err(format!(
-                "release {tag} is being built from a checkout with local changes"
-            ));
-        }
+        return release(pkg_version, tag, source);
     }
-    if released && !dirty {
-        return Ok(match commit {
-            Some(commit) => format!("{version} ({commit})"),
-            None => version.to_owned(),
-        });
+    let (commit, dirty) = match source {
+        Source::Git(git) => (Some(&git.commit), git.dirty),
+        Source::Package(info) => (info.commit.as_ref(), info.dirty),
+        Source::Unknown => (None, false),
+    };
+    let nearest = match source {
+        Source::Git(git) => git
+            .nearest
+            .as_ref()
+            .and_then(|n| Some((parse_release_tag(&n.tag).ok()?, n.since))),
+        _ => None,
+    };
+    let released = match source {
+        Source::Git(_) => nearest.and_then(|(version, since)| (since == 0).then_some(version)),
+        Source::Package(_) => Some(pkg_version),
+        Source::Unknown => None,
+    };
+    if let Some(version) = released
+        && !dirty
+    {
+        return Ok(plain(version, commit));
     }
-    let sep = if pkg_version.contains('-') { '.' } else { '-' };
-    let dev = format!("{pkg_version}{sep}dev");
+    let dev = match nearest {
+        Some((version, since)) if version.contains('-') => format!("{version}.dev.{since}"),
+        Some((version, since)) => format!("{}-dev.{since}", next_patch(version)),
+        None => {
+            let sep = if pkg_version.contains('-') { '.' } else { '-' };
+            format!("{pkg_version}{sep}dev")
+        }
+    };
     let Some(commit) = commit else {
         return Ok(dev);
     };
     let dirty = if dirty { ".dirty" } else { "" };
     Ok(format!("{dev}+{commit}{dirty}"))
+}
+
+/// The version of a release build for tag `tag`, which must point at the clean commit being
+/// built.
+fn release(pkg_version: &str, tag: &str, source: &Source) -> Result<String, String> {
+    let version = parse_release_tag(tag)?;
+    let (commit, dirty, tagged) = match source {
+        Source::Git(git) => (
+            Some(&git.commit),
+            git.dirty,
+            git.tags.iter().any(|t| t == tag),
+        ),
+        Source::Package(info) => {
+            if version != pkg_version {
+                return Err(format!(
+                    "release tag {tag} doesn't match the packaged crate version {pkg_version}"
+                ));
+            }
+            (info.commit.as_ref(), info.dirty, true)
+        }
+        Source::Unknown => (None, false, false),
+    };
+    let Some(commit) = commit else {
+        return Err(format!(
+            "release tag {tag} given, but git can't tell which commit is being built"
+        ));
+    };
+    if !tagged {
+        return Err(format!(
+            "release tag {tag} doesn't point at the commit being built ({commit})"
+        ));
+    }
+    if dirty {
+        return Err(format!(
+            "release {tag} is being built from a checkout with local changes"
+        ));
+    }
+    Ok(plain(version, Some(commit)))
+}
+
+/// `0.3.0 (a1b2c3d)`, or `0.3.0` when the commit isn't known.
+fn plain(version: &str, commit: Option<&String>) -> String {
+    match commit {
+        Some(commit) => format!("{version} ({commit})"),
+        None => version.to_owned(),
+    }
+}
+
+/// `0.3.1` for `0.3.0`, a version already checked by [`parse_release_tag`].
+fn next_patch(version: &str) -> String {
+    let (minor, patch) = version.rsplit_once('.').unwrap();
+    format!("{minor}.{}", patch.parse::<u64>().unwrap() + 1)
+}
+
+/// The tag and the commits since it from `git describe --tags --long`, e.g.
+/// `v0.3.0-rc1-4-ga1b2c3d`. `None` for anything else, such as a bare hash.
+pub fn parse_describe(described: &str) -> Option<NearestTag> {
+    let mut parts = described.rsplitn(3, '-');
+    let hash = parts.next()?;
+    let since = parts.next()?.parse().ok()?;
+    let tag = parts.next()?;
+    hash.starts_with('g').then(|| NearestTag {
+        tag: tag.to_owned(),
+        since,
+    })
 }
 
 /// Accept `vX.Y.Z` with an optional semver pre-release suffix. Build metadata is left out of
@@ -156,7 +232,83 @@ mod tests {
             commit: commit.to_owned(),
             dirty,
             tags: tags.iter().map(|t| t.to_string()).collect(),
+            nearest: None,
         })
+    }
+
+    /// A checkout `since` commits past release tag `tag`.
+    fn after(tag: &str, since: u32, commit: &str, dirty: bool) -> Source {
+        let tags = if since == 0 {
+            vec![tag.to_owned()]
+        } else {
+            vec![]
+        };
+        Source::Git(GitState {
+            commit: commit.to_owned(),
+            dirty,
+            tags,
+            nearest: Some(NearestTag {
+                tag: tag.to_owned(),
+                since,
+            }),
+        })
+    }
+
+    #[test]
+    fn dev_build_is_versioned_after_the_last_release_tag() {
+        // Cargo.toml's version isn't bumped for releases; the tags are the versions. A dev build
+        // comes after the release it follows and before the next one, in semver, dpkg and rpm.
+        let git = after("v0.5.1", 3, "a1b2c3d", false);
+        assert_eq!(
+            describe("0.4.0", None, &git).unwrap(),
+            "0.5.2-dev.3+a1b2c3d"
+        );
+    }
+
+    #[test]
+    fn dev_build_after_a_prerelease_tag_extends_its_prerelease() {
+        let git = after("v0.5.0-rc1", 2, "a1b2c3d", false);
+        assert_eq!(
+            describe("0.4.0", None, &git).unwrap(),
+            "0.5.0-rc1.dev.2+a1b2c3d"
+        );
+    }
+
+    #[test]
+    fn clean_checkout_of_a_tag_shows_the_tag_version() {
+        let git = after("v0.5.1", 0, "a1b2c3d", false);
+        assert_eq!(describe("0.4.0", None, &git).unwrap(), "0.5.1 (a1b2c3d)");
+    }
+
+    #[test]
+    fn tagged_checkout_with_local_changes_is_a_dev_build_of_the_next_version() {
+        let git = after("v0.5.1", 0, "a1b2c3d", true);
+        assert_eq!(
+            describe("0.4.0", None, &git).unwrap(),
+            "0.5.2-dev.0+a1b2c3d.dirty"
+        );
+    }
+
+    #[test]
+    fn nearest_tag_that_isnt_a_version_is_ignored() {
+        let git = after("vnext", 1, "a1b2c3d", false);
+        assert_eq!(describe("0.4.0", None, &git).unwrap(), "0.4.0-dev+a1b2c3d");
+    }
+
+    #[test]
+    fn git_describe_gives_tag_and_commits_since() {
+        let nearest = |tag: &str, since| {
+            Some(NearestTag {
+                tag: tag.to_owned(),
+                since,
+            })
+        };
+        assert_eq!(parse_describe("v0.5.1-3-ga1b2c3d"), nearest("v0.5.1", 3));
+        assert_eq!(
+            parse_describe("v0.5.0-rc1-0-ga1b2c3d"),
+            nearest("v0.5.0-rc1", 0)
+        );
+        assert_eq!(parse_describe("a1b2c3d"), None);
     }
 
     fn package(commit: Option<&str>, dirty: bool) -> Source {
@@ -244,28 +396,6 @@ mod tests {
     fn release_build_needs_git() {
         let err = describe("0.3.0", Some("v0.3.0"), &Source::Unknown).unwrap_err();
         assert!(err.contains("git"), "{err}");
-    }
-
-    #[test]
-    fn clean_checkout_of_the_release_tag_shows_plain_version() {
-        // E.g. a distribution building the tagged sources, or `cargo install --git --tag`.
-        let git = git("a1b2c3d", false, &["v0.3.0"]);
-        assert_eq!(describe("0.3.0", None, &git).unwrap(), "0.3.0 (a1b2c3d)");
-    }
-
-    #[test]
-    fn checkout_of_the_release_tag_with_local_changes_is_a_dev_build() {
-        let git = git("a1b2c3d", true, &["v0.3.0"]);
-        assert_eq!(
-            describe("0.3.0", None, &git).unwrap(),
-            "0.3.0-dev+a1b2c3d.dirty"
-        );
-    }
-
-    #[test]
-    fn other_tags_dont_make_a_release() {
-        let git = git("a1b2c3d", false, &["v0.2.0", "latest"]);
-        assert_eq!(describe("0.3.0", None, &git).unwrap(), "0.3.0-dev+a1b2c3d");
     }
 
     #[test]

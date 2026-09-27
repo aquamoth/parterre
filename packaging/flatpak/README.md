@@ -18,7 +18,7 @@ With `flatpak-builder` installed, and `uv` or `python3` with `aiohttp` and `toml
     packaging/flatpak/build.sh --bundle  # also write build/parterre.flatpak
 
 The first build downloads the SDK and the Rust extension, about 1.5 GB. Built from a copy of
-the checkout, `--version` says e.g. `0.4.0-dev` (Cargo.toml's version). Built from a tagged
+the checkout, `--version` says `0.0.0-dev` (Cargo.toml's placeholder). Built from a tagged
 `type: git` source with `PARTERRE_RELEASE_TAG` set, as Flathub's would be, it says
 `0.5.1 (f674e16)`.
 

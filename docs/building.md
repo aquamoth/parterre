@@ -90,9 +90,10 @@ The script gathers `parterre.exe`, `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.
 workflow do; `-Out FILE` names the MSI. It passes `-acceptEula wix7` on every run, which
 accepts WiX's Open Source Maintenance Fee EULA for that run only; don't run `wix eula accept`,
 which leaves an acceptance file behind. The MSI version is the release tag's version in the
-release workflow (`PARTERRE_RELEASE_TAG`), otherwise the `Cargo.toml` version, in both cases
-without its pre-release part: `0.5.0-rc.1` and `0.5.0` both build MSI version `0.5.0`, and the
-one installed later replaces the other. The script checks the built MSI's version.
+release workflow (`PARTERRE_RELEASE_TAG`), otherwise the version `parterre.exe` carries (from
+the git tags, see [releasing.md](releasing.md#version-strings)), in both cases without its
+pre-release part: `0.5.0-rc.1` and `0.5.0` both build MSI version `0.5.0`, and the one installed
+later replaces the other. The script checks the built MSI's version.
 
 The script ends with the ICE checks (`wix msi validate`), minus two it suppresses for reasons
 given in `parterre.wxs`: ICE57 (the Start menu shortcut in a dual-purpose package) and ICE61
