@@ -4,16 +4,18 @@
 //!
 //! A gutter on the left names each run of lines from one commit (hash, author, date), shaded by
 //! the commit's age among the file's commits as TortoiseGitBlame shades lines. Clicking a line
-//! chooses it and its commit, whose lines are all highlighted; choosing more lines (drag,
-//! Shift+click) keeps the commit of the first, and the chosen commit stays chosen until another
-//! is. An overview strip on the right marks the chosen commit's lines in the whole file and
-//! shows the part in view; the text never scrolls by itself when a commit is chosen, the strip
-//! scrolls it. The bar at the bottom describes the commit under the pointer or chosen. A line's
-//! menu goes on from there, as TortoiseGitBlame's does: blame the version before its commit (in
-//! a window of its own, the line chosen at its place there), show its commit's change to the
-//! file in a diff window, or show the log from its commit. The toolbar says whether whitespace
-//! changes and moved lines count, and whether the history pane shows, remembered for the next
-//! window.
+//! chooses it and its commit, whose lines are all highlighted. A drag over the text chooses
+//! characters for copying, as in the diff windows (a double-click a word); a drag over the
+//! commit column or the line numbers chooses whole lines; Shift+click extends either. Choosing
+//! more keeps the commit of the line it started on, and the chosen commit stays chosen until
+//! another is. An overview strip on the right marks the chosen commit's lines in the whole file
+//! and shows the part in view; the text never scrolls by itself when a commit is chosen, the
+//! strip scrolls it. The bar at the bottom describes the commit under the pointer or chosen. A
+//! line's menu goes on from there, as TortoiseGitBlame's does: blame the version before its
+//! commit (in a window of its own, the line chosen at its place there), show its commit's
+//! change to the file in a diff window, or show the log from its commit. The toolbar says
+//! whether whitespace changes and moved lines count, and whether the history pane shows,
+//! remembered for the next window.
 //!
 //! The history pane below the text lists the commits that changed the file
 //! ([`parterre_core::file_history`], listed by git alongside the blame) in the log window's
@@ -23,28 +25,25 @@
 //! no lines are greyed out. A row's menu blames the file at that commit, shows its change to
 //! the file, or shows the log from it. The divider above the pane is remembered for the next
 //! window.
-//!
-//! Deliberate deviation from TortoiseGitBlame (see #104): only whole lines are chosen for
-//! copying.
 
 use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
 
-use eframe::egui::text::{LayoutJob, TextFormat};
+use eframe::egui::text::{CCursor, LayoutJob, TextFormat};
 use eframe::egui::{
     self, Color32, FontId, Id, Key, Modifiers, Rect, RichText, ScrollArea, Sense, Stroke, Ui,
     UiBuilder, Vec2, pos2, vec2,
 };
 use parterre_core::blame::{Blame, BlameOptions, BlameSpec, Moves, Origin};
 use parterre_core::changed_files::FileStatus;
-use parterre_core::file_diff::{FileDiffSpec, Rev, Version};
+use parterre_core::file_diff::{FileDiffSpec, Rev, Version, raw_offset};
 use parterre_core::file_history::{FileHistory, FileLog, HistoryRow, Source};
 use parterre_core::git::{Cancel, Git};
 use parterre_core::glyphs;
 use parterre_core::log_graph::LogGraph;
 use parterre_core::repo::cmp_refs_for_display;
 use parterre_core::revgraph::GraphOptions;
-use parterre_core::text::thousands;
+use parterre_core::text::{thousands, word_at};
 use parterre_core::{CommitIx, Oid, Repo};
 
 use super::ParterreApp;
@@ -289,6 +288,65 @@ enum LineAction {
     CopyLines,
 }
 
+/// "To the end of the line", as a column.
+const LINE_END: usize = usize::MAX;
+
+/// What is chosen for copying, from `anchor` to `head`, each a line (an index into the lines)
+/// and a column (a character of the line's display text). A press on the commit column or the
+/// line numbers chooses whole lines (`lines`), as does choosing a line on its own; a press on
+/// the text chooses characters, and a click without a drag its line, whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Selection {
+    anchor: (usize, usize),
+    head: (usize, usize),
+    lines: bool,
+}
+
+impl Selection {
+    /// Lines `a` to `b`, whole.
+    fn lines(a: usize, b: usize) -> Selection {
+        Selection {
+            anchor: (a, 0),
+            head: (b, 0),
+            lines: true,
+        }
+    }
+
+    /// The first and last line it touches.
+    fn span(&self) -> (usize, usize) {
+        let (a, b) = (self.anchor.0, self.head.0);
+        (a.min(b), a.max(b))
+    }
+
+    fn touches(&self, i: usize) -> bool {
+        let (a, b) = self.span();
+        (a..=b).contains(&i)
+    }
+
+    /// Where the chosen characters start and end, in order, unless whole lines are chosen.
+    fn chars(&self) -> Option<((usize, usize), (usize, usize))> {
+        if self.lines || self.anchor == self.head {
+            None
+        } else if self.anchor < self.head {
+            Some((self.anchor, self.head))
+        } else {
+            Some((self.head, self.anchor))
+        }
+    }
+
+    /// The display columns chosen in line `i`, when characters are (the end may be
+    /// [`LINE_END`]).
+    fn columns(&self, i: usize) -> Option<std::ops::Range<usize>> {
+        let (a, b) = self.chars()?;
+        if i < a.0 || i > b.0 {
+            return None;
+        }
+        let start = if i == a.0 { a.1 } else { 0 };
+        let end = if i == b.0 { b.1 } else { LINE_END };
+        Some(start..end)
+    }
+}
+
 #[derive(Debug)]
 struct BlameWindow {
     id: u64,
@@ -309,12 +367,12 @@ struct BlameWindow {
     /// The options chosen in the toolbar, and those of the last load started.
     options: BlameOptions,
     requested: BlameOptions,
-    /// Lines chosen, from and to (indices into the lines, either way round).
-    selection: Option<(usize, usize)>,
+    /// Lines or characters chosen, for copying.
+    selection: Option<Selection>,
     /// The chosen commit, whose lines are highlighted (`None` inside is uncommitted). Set with
     /// the line a choice of lines starts at, or on its own ([`BlameWindow::choose_commit`]).
     chosen: Option<Option<Oid>>,
-    /// The mouse is choosing lines.
+    /// The mouse is choosing lines or characters.
     dragging: bool,
     /// Choose this line and scroll to it once loaded.
     pending_line: Option<usize>,
@@ -441,7 +499,7 @@ impl BlameWindow {
     fn loaded(&mut self, ready: Ready) {
         if self
             .selection
-            .is_some_and(|(a, b)| a.max(b) >= ready.blame.lines.len())
+            .is_some_and(|s| s.span().1 >= ready.blame.lines.len())
         {
             self.selection = None;
         }
@@ -528,7 +586,7 @@ impl BlameWindow {
 
     /// Chooses line `i` and its commit, and selects the commit's row in the history pane.
     fn choose_line(&mut self, i: usize) {
-        self.selection = Some((i, i));
+        self.selection = Some(Selection::lines(i, i));
         if let Some(commit) = self.origin(i).map(|o| o.commit) {
             self.chosen = Some(commit);
             if let Some(h) = self.history() {
@@ -578,17 +636,45 @@ impl BlameWindow {
                 .lines
                 .iter()
                 .position(|l| r.blame.origins[l.origin].commit == commit)?;
-            Some((first, first))
+            Some(Selection::lines(first, first))
         });
     }
 
-    /// The chosen lines as in the file, each ending with a newline.
+    /// What Ctrl+C copies: the chosen characters as in the file (tabs kept), a line per line
+    /// they span, ending with a newline if they run to the end of the last; otherwise the
+    /// chosen lines ([`BlameWindow::lines_text`]).
     fn selected_text(&self) -> Option<String> {
-        let (a, b) = self.selection?;
+        let s = self.selection?;
+        let Some((_, end)) = s.chars() else {
+            return self.lines_text();
+        };
         let lines = &self.ready()?.blame.lines;
-        let (a, b) = (a.min(b), a.max(b).min(lines.len().checked_sub(1)?));
+        let (a, b) = s.span();
+        let mut parts = Vec::new();
+        for (i, line) in lines.iter().enumerate().take(b + 1).skip(a) {
+            let cols = s.columns(i)?;
+            let start = raw_offset(&line.raw, cols.start);
+            let end = if cols.end == LINE_END {
+                line.raw.len()
+            } else {
+                raw_offset(&line.raw, cols.end)
+            };
+            parts.push(&line.raw[start..end.max(start)]);
+        }
+        let mut text = parts.join("\n");
+        if end.1 == LINE_END {
+            text.push('\n');
+        }
+        Some(text)
+    }
+
+    /// Every line the choice touches, whole, as in the file, each ending with a newline.
+    fn lines_text(&self) -> Option<String> {
+        let (a, b) = self.selection?.span();
+        let lines = &self.ready()?.blame.lines;
+        let b = b.min(lines.len().checked_sub(1)?);
         let mut text = String::new();
-        for line in &lines[a..=b] {
+        for line in lines.get(a..=b)? {
             text.push_str(&line.raw);
             text.push('\n');
         }
@@ -599,7 +685,7 @@ impl BlameWindow {
         if let Some(n) = self.ready().map(|r| r.blame.lines.len())
             && n > 0
         {
-            self.selection = Some((0, n - 1));
+            self.selection = Some(Selection::lines(0, n - 1));
         }
     }
 
@@ -868,13 +954,13 @@ impl BlameWindow {
         let font = FontId::monospace(FONT_SIZE);
         let hash_font = FontId::monospace(12.0);
         let small = FontId::proportional(12.5);
-        let row_h = ui.fonts_mut(|f| f.row_height(&font)).ceil() + 3.0;
-        let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
-        let hash_w = ui.fonts_mut(|f| f.glyph_width(&hash_font, '0')) * self.repo.abbrev_len as f32
-            + 2.0 * PAD;
-        let gutter = hash_w + AUTHOR + DATE;
-        let digits = (n as f32).log10().floor() + 1.0;
-        let numbers = digits * char_w + 2.0 * PAD;
+        let Metrics {
+            row_h,
+            char_w,
+            hash_w,
+            gutter,
+            numbers,
+        } = Metrics::new(ui.ctx(), n, self.repo.abbrev_len);
         let text_x = full.left() + gutter + numbers + PAD;
 
         let right = full.right() - OVERVIEW;
@@ -888,7 +974,7 @@ impl BlameWindow {
         if let Some(line) = self.pending_line.take() {
             let line = line.min(n - 1);
             let commit = blame.origins[blame.lines[line].origin].commit;
-            self.selection = Some((line, line));
+            self.selection = Some(Selection::lines(line, line));
             self.chosen = Some(commit);
             if let Listing::Ready(h) = &self.listing {
                 self.list.select(h.history.row_of(commit));
@@ -910,12 +996,16 @@ impl BlameWindow {
         }
         self.hoff = self.hoff.clamp(0.0, hmax);
 
-        let selection = self.selection.map(|(a, b)| (a.min(b), a.max(b)));
+        let selection = self.selection;
         let highlighted = self.chosen;
         let pointer = ui.input(|i| i.pointer.interact_pos());
         let pressed = ui.input(|i| i.pointer.primary_pressed());
         let (hoff, abbrev) = (self.hoff, self.repo.abbrev_len);
         let mut hovered = None;
+        // The line and column under the pointer.
+        let mut hover_at = None;
+        // Where the primary button went down: line, column, and whether on the commit column
+        // or the line numbers.
         let mut press = None;
         let mut secondary = None;
         let mut action = None;
@@ -940,8 +1030,9 @@ impl BlameWindow {
                 let text_rect =
                     Rect::from_x_y_ranges(rect.left() + gutter..=rect.right(), rect.y_range());
                 painter.rect_filled(gutter_rect, 0.0, bc.age(ready.ages[line.origin]));
-                let chosen = selection.is_some_and(|(a, b)| (a..=b).contains(&i));
-                if chosen {
+                // Whole lines are chosen as before; chosen characters are drawn over the text.
+                let whole = selection.is_some_and(|s| s.chars().is_none() && s.touches(i));
+                if whole {
                     painter.rect_filled(text_rect, 0.0, c.selection);
                 } else if highlighted == Some(origin.commit) {
                     painter.rect_filled(text_rect, 0.0, bc.commit);
@@ -995,17 +1086,36 @@ impl BlameWindow {
                 let clip = Rect::from_x_y_ranges(text_x..=rect.right(), rect.y_range())
                     .intersect(ui.clip_rect());
                 let g = painter.layout_no_wrap(line.text.clone(), font.clone(), c.text);
-                painter.with_clip_rect(clip).galley(
-                    pos2(text_x - hoff, y - g.size().y / 2.0),
-                    g,
-                    c.text,
-                );
-
-                if pointer.is_some_and(|p| rect.y_range().contains(p.y)) {
-                    hovered = Some(i);
+                let at = pos2(text_x - hoff, y - g.size().y / 2.0);
+                let text = painter.with_clip_rect(clip);
+                if let Some(cols) = selection.and_then(|s| s.columns(i)) {
+                    let x = |col| at.x + g.pos_from_cursor(CCursor::new(col)).min.x;
+                    let x1 = if cols.end == LINE_END {
+                        // Past the end, a little, to show the line break is included.
+                        at.x + g.size().x + row_h / 2.0
+                    } else {
+                        x(cols.end)
+                    };
+                    let chosen = Rect::from_x_y_ranges(x(cols.start)..=x1, rect.y_range());
+                    text.rect_filled(chosen, 0.0, c.selection);
                 }
-                if pressed && response.hovered() {
-                    press = Some(i);
+                text.galley(at, g.clone(), c.text);
+
+                if let Some(p) = pointer.filter(|p| rect.y_range().contains(p.y)) {
+                    hovered = Some(i);
+                    let col = if p.x <= at.x {
+                        0
+                    } else {
+                        g.cursor_from_pos(p - at).index.0
+                    };
+                    hover_at = Some((i, col));
+                    let on_gutter = p.x < text_x - PAD;
+                    if pressed && response.hovered() {
+                        press = Some((i, col, on_gutter));
+                    }
+                    if !on_gutter && response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+                    }
                 }
                 if response.secondary_clicked() {
                     secondary = Some(i);
@@ -1024,8 +1134,10 @@ impl BlameWindow {
                     .show(|ui| {
                         crate::menu::fit_window(ui, |ui| {
                             ui.set_min_width(crate::menu::MIN_WIDTH);
-                            let chosen =
-                                selection.is_some_and(|(a, b)| a != b && (a..=b).contains(&i));
+                            let chosen = selection.is_some_and(|s| {
+                                let (a, b) = s.span();
+                                a != b && s.touches(i)
+                            });
                             let in_repo = ready.in_repo[line.origin];
                             if let Some(a) = line_menu(ui, i, origin, in_repo, chosen) {
                                 action = Some(a);
@@ -1063,43 +1175,7 @@ impl BlameWindow {
             self.scroll_to = Some(offset);
         }
 
-        // Choosing lines: a press chooses a line and its commit (Shift extends, keeping the
-        // commit), a drag extends, scrolling past the edges; a right-click outside the chosen
-        // lines chooses its line and commit.
-        let (down, shift) = ui.input(|i| (i.pointer.primary_down(), i.modifiers.shift));
-        if let Some(i) = press {
-            match self.selection {
-                Some((a, _)) if shift => self.selection = Some((a, i)),
-                _ => self.choose_line(i),
-            }
-            self.dragging = true;
-        } else if let Some(i) = secondary
-            && !selection.is_some_and(|(a, b)| (a..=b).contains(&i))
-        {
-            self.choose_line(i);
-        }
-        if self.dragging {
-            if !down {
-                self.dragging = false;
-            } else if let Some((a, _)) = self.selection {
-                if let Some(i) = hovered {
-                    self.selection = Some((a, i));
-                } else if let Some(p) = pointer {
-                    if p.y < area.top() {
-                        if let Some(f) = first {
-                            self.selection = Some((a, f.saturating_sub(1)));
-                        }
-                        self.scroll_to = Some(self.scroll - row_h);
-                    } else if p.y > area.bottom() {
-                        if let Some(l) = last {
-                            self.selection = Some((a, (l + 1).min(n - 1)));
-                        }
-                        self.scroll_to = Some(self.scroll + row_h);
-                    }
-                    ui.ctx().request_repaint();
-                }
-            }
-        }
+        self.select(ui, press, hover_at, secondary, (first, last), area, row_h);
 
         if hmax > 0.0 {
             let track = Rect::from_min_max(pos2(text_x, bottom), pos2(right, full.bottom()));
@@ -1111,6 +1187,101 @@ impl BlameWindow {
             self.act(action, ui.ctx(), requests);
         }
         hovered
+    }
+
+    /// Chooses with the mouse, from what the rows saw this frame (`press` and `hover` as line,
+    /// column, and for a press whether on the commit column or the line numbers; `drawn`, the
+    /// first and last row drawn). A press on the text chooses its line and commit, and a drag
+    /// from there characters; a press on the commit column or the line numbers chooses lines.
+    /// The commit stays the one of the line the choosing started on. Shift extends; a drag
+    /// scrolls past the edges; a double-click on the text takes a word. A right-click outside
+    /// the chosen lines chooses its line and commit.
+    #[allow(clippy::too_many_arguments)]
+    fn select(
+        &mut self,
+        ui: &Ui,
+        press: Option<(usize, usize, bool)>,
+        hover: Option<(usize, usize)>,
+        secondary: Option<usize>,
+        (first, last): (Option<usize>, Option<usize>),
+        area: Rect,
+        row_h: f32,
+    ) {
+        let Some(n) = self.ready().map(|r| r.blame.lines.len()) else {
+            return;
+        };
+        let (down, shift, double) = ui.input(|i| {
+            (
+                i.pointer.primary_down(),
+                i.modifiers.shift,
+                i.pointer
+                    .button_double_clicked(egui::PointerButton::Primary),
+            )
+        });
+        if let Some((i, col, on_gutter)) = press {
+            match self.selection {
+                Some(s) if shift => {
+                    let lines = s.lines || on_gutter;
+                    let head = (i, if lines { 0 } else { col });
+                    self.selection = Some(Selection { head, lines, ..s });
+                }
+                _ => {
+                    self.choose_line(i);
+                    if !on_gutter {
+                        self.selection = Some(Selection {
+                            anchor: (i, col),
+                            head: (i, col),
+                            lines: false,
+                        });
+                    }
+                }
+            }
+            self.dragging = true;
+        } else if double
+            && let Some((i, col)) = hover
+            && self.selection.is_some_and(|s| !s.lines && s.touches(i))
+            && let Some(word) = self
+                .ready()
+                .and_then(|r| word_at(&r.blame.lines[i].text, col))
+        {
+            self.selection = Some(Selection {
+                anchor: (i, word.start),
+                head: (i, word.end),
+                lines: false,
+            });
+            self.dragging = false;
+        } else if let Some(i) = secondary
+            && !self.selection.is_some_and(|s| s.touches(i))
+        {
+            self.choose_line(i);
+        }
+        if !self.dragging {
+            return;
+        }
+        if !down {
+            self.dragging = false;
+            return;
+        }
+        let Some(mut s) = self.selection else { return };
+        let pointer = ui.input(|i| i.pointer.interact_pos());
+        if let Some((i, col)) = hover {
+            s.head = (i, if s.lines { 0 } else { col });
+        } else if let Some(p) = pointer {
+            // Past the top or bottom: take the line beyond those drawn, and scroll on.
+            if p.y < area.top() {
+                if let Some(f) = first {
+                    s.head = (f.saturating_sub(1), 0);
+                }
+                self.scroll_to = Some(self.scroll - row_h);
+            } else if p.y > area.bottom() {
+                if let Some(l) = last {
+                    s.head = ((l + 1).min(n - 1), if s.lines { 0 } else { LINE_END });
+                }
+                self.scroll_to = Some(self.scroll + row_h);
+            }
+            ui.ctx().request_repaint();
+        }
+        self.selection = Some(s);
     }
 
     fn act(&mut self, action: LineAction, ctx: &egui::Context, requests: &mut Vec<BlameRequest>) {
@@ -1135,7 +1306,7 @@ impl BlameWindow {
                 }
             }
             LineAction::CopyLines => {
-                if let Some(text) = self.selected_text() {
+                if let Some(text) = self.lines_text() {
                     ctx.copy_text(text);
                 }
             }
@@ -1623,6 +1794,35 @@ fn runs(n: usize, owned: impl Fn(usize) -> bool) -> Vec<std::ops::Range<usize>> 
     runs
 }
 
+/// Sizes of a blame's rows and columns, from the text size and the number of lines.
+struct Metrics {
+    row_h: f32,
+    /// The width of a character of the text.
+    char_w: f32,
+    /// The widths of the hash column, the whole gutter, and the line numbers.
+    hash_w: f32,
+    gutter: f32,
+    numbers: f32,
+}
+
+impl Metrics {
+    fn new(ctx: &egui::Context, lines: usize, abbrev: usize) -> Metrics {
+        let font = FontId::monospace(FONT_SIZE);
+        let row_h = ctx.fonts_mut(|f| f.row_height(&font)).ceil() + 3.0;
+        let char_w = ctx.fonts_mut(|f| f.glyph_width(&font, '0'));
+        let hash_font = FontId::monospace(12.0);
+        let hash_w = ctx.fonts_mut(|f| f.glyph_width(&hash_font, '0')) * abbrev as f32 + 2.0 * PAD;
+        let digits = (lines.max(1) as f32).log10().floor() + 1.0;
+        Metrics {
+            row_h,
+            char_w,
+            hash_w,
+            gutter: hash_w + AUTHOR + DATE,
+            numbers: digits * char_w + 2.0 * PAD,
+        }
+    }
+}
+
 /// The toolbar's icon for a choice of moved lines.
 fn moves_glyph(moves: Moves) -> glyphs::Glyph {
     match moves {
@@ -1890,6 +2090,16 @@ mod tests {
         pos2(500.0, top + HEADING + (i as f32 + 0.5) * ROW)
     }
 
+    fn ctrl(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }
+    }
+
     fn key(key: Key) -> egui::Event {
         egui::Event::Key {
             key,
@@ -1900,11 +2110,54 @@ mod tests {
         }
     }
 
-    /// The middle of line `i`'s text.
+    /// The middle of line `i`'s text, past the end of the sample's lines.
     fn at(ctx: &egui::Context, i: usize) -> egui::Pos2 {
         let font = FontId::monospace(FONT_SIZE);
         let row_h = ctx.fonts_mut(|f| f.row_height(&font)).ceil() + 3.0;
         pos2(700.0, TOOLBAR + HEADER + (i as f32 + 0.5) * row_h)
+    }
+
+    /// Where column `col` of line `i`'s text starts, in `w`.
+    fn char_at(ctx: &egui::Context, w: &BlameWindow, i: usize, col: usize) -> egui::Pos2 {
+        let n = w.ready().unwrap().blame.lines.len();
+        let m = Metrics::new(ctx, n, w.repo.abbrev_len);
+        let x = m.gutter + m.numbers + PAD + col as f32 * m.char_w;
+        pos2(x, at(ctx, i).y)
+    }
+
+    /// The middle of line `i`'s number, in `w`.
+    fn number_at(ctx: &egui::Context, w: &BlameWindow, i: usize) -> egui::Pos2 {
+        let n = w.ready().unwrap().blame.lines.len();
+        let m = Metrics::new(ctx, n, w.repo.abbrev_len);
+        pos2(m.gutter + m.numbers / 2.0, at(ctx, i).y)
+    }
+
+    /// The first and last line chosen.
+    fn span(w: &BlameWindow) -> Option<(usize, usize)> {
+        w.selection.map(|s| s.span())
+    }
+
+    /// A press at `from`, a move to `to` and a release there, with `modifiers` held.
+    fn drag(
+        ctx: &egui::Context,
+        w: &mut BlameWindow,
+        from: egui::Pos2,
+        to: egui::Pos2,
+        modifiers: Modifiers,
+    ) {
+        let changed = egui::Event::ModifiersChanged;
+        let press = egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers,
+        };
+        let events = vec![changed(modifiers), egui::Event::PointerMoved(from), press];
+        frame(ctx, w, events);
+        frame(ctx, w, vec![egui::Event::PointerMoved(to)]);
+        frame(ctx, w, vec![egui::Event::PointerMoved(to)]);
+        let release = vec![button(to, false, false), changed(Modifiers::NONE)];
+        frame(ctx, w, release);
     }
 
     fn button(at: egui::Pos2, pressed: bool, secondary: bool) -> egui::Event {
@@ -1932,22 +2185,94 @@ mod tests {
             vec![egui::Event::PointerMoved(p), button(p, true, false)],
         );
         frame(&ctx, &mut w, vec![button(p, false, false)]);
-        assert_eq!(w.selection, Some((2, 2)));
+        assert_eq!(span(&w), Some((2, 2)));
         assert_eq!(w.chosen, Some(Some(Oid::from_hex(A).unwrap())));
 
-        let q = at(&ctx, 1);
-        frame(
-            &ctx,
-            &mut w,
-            vec![egui::Event::PointerMoved(q), button(q, true, false)],
-        );
-        frame(&ctx, &mut w, vec![egui::Event::PointerMoved(at(&ctx, 3))]);
-        frame(&ctx, &mut w, vec![button(at(&ctx, 3), false, false)]);
-        assert_eq!(w.selection, Some((1, 3)));
+        // A drag over the line numbers chooses whole lines.
+        let (from, to) = (number_at(&ctx, &w, 1), number_at(&ctx, &w, 3));
+        drag(&ctx, &mut w, from, to, Modifiers::NONE);
+        assert_eq!(span(&w), Some((1, 3)));
+        assert_eq!(w.selection.and_then(|s| s.chars()), None);
         // The drag started on B's line: B stays chosen over A's lines.
         assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
         // Copied as in the file: tabs kept, a newline after each line.
         assert_eq!(w.selected_text().as_deref(), Some("two\tx\nthree\nfour\n"));
+
+        // So does one over the commit column.
+        let (from, to) = (pos2(20.0, at(&ctx, 0).y), pos2(20.0, at(&ctx, 2).y));
+        drag(&ctx, &mut w, from, to, Modifiers::NONE);
+        assert_eq!(span(&w), Some((0, 2)));
+        assert_eq!(w.selected_text().as_deref(), Some("one\ntwo\tx\nthree\n"));
+        assert_eq!(w.chosen, Some(Some(Oid::from_hex(A).unwrap())));
+    }
+
+    #[test]
+    fn a_drag_over_the_text_chooses_characters_and_copies_just_those() {
+        let ctx = egui::Context::default();
+        let mut w = window();
+        frame(&ctx, &mut w, Vec::new());
+        // From "tw|o    x" (the tab shown as spaces) to "thr|ee".
+        let (from, to) = (char_at(&ctx, &w, 1, 2), char_at(&ctx, &w, 2, 3));
+        drag(&ctx, &mut w, from, to, Modifiers::NONE);
+        assert_eq!(w.selection.and_then(|s| s.chars()), Some(((1, 2), (2, 3))));
+        // Copied as in the file, the tab kept.
+        assert_eq!(w.selected_text().as_deref(), Some("o\tx\nthr"));
+        // The chosen commit is that of the line the drag started on.
+        assert_eq!(w.chosen, Some(Some(oid(B))));
+        // The line menu's Copy lines still copies them whole.
+        let mut requests = Vec::new();
+        w.act(LineAction::CopyLines, &ctx, &mut requests);
+        assert_eq!(w.lines_text().as_deref(), Some("two\tx\nthree\n"));
+
+        // Backwards, within a line; then Shift+click on the text extends it.
+        let (from, to) = (char_at(&ctx, &w, 3, 3), char_at(&ctx, &w, 3, 1));
+        drag(&ctx, &mut w, from, to, Modifiers::NONE);
+        assert_eq!(w.selected_text().as_deref(), Some("ou"));
+        assert_eq!(w.chosen, Some(Some(oid(A))));
+        let p = char_at(&ctx, &w, 2, 0);
+        drag(&ctx, &mut w, p, p, Modifiers::SHIFT);
+        assert_eq!(w.selected_text().as_deref(), Some("three\nfou"));
+        assert_eq!(w.chosen, Some(Some(oid(A))));
+
+        // Past the last character, a line break is included.
+        let (from, to) = (char_at(&ctx, &w, 2, 3), at(&ctx, 2));
+        drag(&ctx, &mut w, from, to, Modifiers::NONE);
+        assert_eq!(w.selected_text().as_deref(), Some("ee"));
+    }
+
+    #[test]
+    fn a_click_on_the_text_chooses_its_line_whole_and_a_double_click_a_word() {
+        let ctx = egui::Context::default();
+        let mut w = window();
+        frame(&ctx, &mut w, Vec::new());
+        let p = char_at(&ctx, &w, 2, 2);
+        drag(&ctx, &mut w, p, p, Modifiers::NONE);
+        assert_eq!(span(&w), Some((2, 2)));
+        assert_eq!(w.selection.and_then(|s| s.chars()), None);
+        // Ctrl+C copies the line, as before.
+        assert_eq!(w.selected_text().as_deref(), Some("three\n"));
+
+        // A second later (not to count as a triple click), a double-click takes the word.
+        for _ in 0..60 {
+            frame(&ctx, &mut w, Vec::new());
+        }
+        let p = char_at(&ctx, &w, 1, 1);
+        for _ in 0..2 {
+            let press = vec![egui::Event::PointerMoved(p), button(p, true, false)];
+            frame(&ctx, &mut w, press);
+            frame(&ctx, &mut w, vec![button(p, false, false)]);
+        }
+        assert_eq!(w.selected_text().as_deref(), Some("two"));
+        assert_eq!(w.chosen, Some(Some(oid(B))));
+
+        // Ctrl+A chooses every line, whole.
+        frame(&ctx, &mut w, vec![ctrl(Key::A)]);
+        assert_eq!(span(&w), Some((0, 3)));
+        assert_eq!(
+            w.selected_text().as_deref(),
+            Some("one\ntwo\tx\nthree\nfour\n")
+        );
+        assert_eq!(w.chosen, Some(Some(oid(B))));
     }
 
     /// A click at line `i`, pressed and released, with `modifiers`.
@@ -1980,8 +2305,11 @@ mod tests {
         click(&ctx, &mut w, 1, Modifiers::NONE);
         click(&ctx, &mut w, 1, Modifiers::NONE);
         assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
-        click(&ctx, &mut w, 3, Modifiers::SHIFT);
-        assert_eq!(w.selection, Some((1, 3)));
+        // Shift+click on a line number chooses whole lines, from the text's line too.
+        let p = number_at(&ctx, &w, 3);
+        drag(&ctx, &mut w, p, p, Modifiers::SHIFT);
+        assert_eq!(span(&w), Some((1, 3)));
+        assert_eq!(w.selection.and_then(|s| s.chars()), None);
         assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
 
         // A right-click inside the chosen lines keeps them; outside, it chooses its line.
@@ -1992,7 +2320,7 @@ mod tests {
             vec![egui::Event::PointerMoved(p), button(p, true, true)],
         );
         frame(&ctx, &mut w, vec![button(p, false, true)]);
-        assert_eq!(w.selection, Some((1, 3)));
+        assert_eq!(span(&w), Some((1, 3)));
         assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
         let p = at(&ctx, 0);
         frame(
@@ -2001,7 +2329,7 @@ mod tests {
             vec![egui::Event::PointerMoved(p), button(p, true, true)],
         );
         frame(&ctx, &mut w, vec![button(p, false, true)]);
-        assert_eq!(w.selection, Some((0, 0)));
+        assert_eq!(span(&w), Some((0, 0)));
         assert_eq!(w.chosen, Some(Some(Oid::from_hex(A).unwrap())));
     }
 
@@ -2009,14 +2337,14 @@ mod tests {
     fn choosing_a_commit_chooses_its_first_line_without_scrolling() {
         let mut w = window();
         w.choose_commit(Some(Oid::from_hex(B).unwrap()));
-        assert_eq!(w.selection, Some((1, 1)));
+        assert_eq!(span(&w), Some((1, 1)));
         assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
         assert_eq!(w.scroll_to, None);
 
         // A commit that owns no lines here is chosen, with no line.
         let gone = Oid::from_hex("0123456789abcdef0123456789abcdef01234567").unwrap();
         w.choose_commit(Some(gone));
-        assert_eq!(w.selection, None);
+        assert_eq!(span(&w), None);
         assert_eq!(w.chosen, Some(Some(gone)));
         assert_eq!(w.scroll_to, None);
     }
@@ -2043,7 +2371,7 @@ mod tests {
         // This window stays as it was.
         assert_eq!(w.spec.rev, Rev::Commit(Oid::from_hex(B).unwrap()));
         assert!(w.ready().is_some());
-        assert_eq!(w.selection, Some((1, 1)));
+        assert_eq!(span(&w), Some((1, 1)));
     }
 
     #[test]
@@ -2130,12 +2458,12 @@ mod tests {
             entry(A, 2, 2, 100, "", "two"),
         ]
         .concat();
-        w.selection = Some((1, 3));
+        w.selection = Some(Selection::lines(1, 3));
         w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo));
         w.listing = log(vec![logged(A, 100, &[])]);
         w.settle();
         assert_eq!(w.chosen, None);
-        assert_eq!(w.selection, None);
+        assert_eq!(span(&w), None);
         assert_eq!(w.list.selected, None);
 
         // Without a history, the chosen commit stays while it owns lines.
@@ -2173,7 +2501,7 @@ mod tests {
         w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo));
         frame(&ctx, &mut w, Vec::new());
         w.choose_commit(Some(Oid::from_hex(B).unwrap()));
-        assert_eq!(w.selection, Some((250, 250)));
+        assert_eq!(span(&w), Some((250, 250)));
         frame(&ctx, &mut w, Vec::new());
         frame(&ctx, &mut w, Vec::new());
         assert_eq!(w.scroll, 0.0);
@@ -2194,7 +2522,7 @@ mod tests {
         let middle = (w.scroll + (bottom - top) / 2.0) / row_h;
         assert!((middle - 250.5).abs() < 2.0, "line {middle} in the middle");
         // The chosen commit and line stay.
-        assert_eq!(w.selection, Some((250, 250)));
+        assert_eq!(span(&w), Some((250, 250)));
         assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
     }
 
@@ -2225,7 +2553,7 @@ mod tests {
         frame(&ctx, &mut w, vec![button(p, false, false)]);
         assert_eq!(w.list.selected, Some(2));
         assert_eq!(w.chosen, Some(Some(oid(A))));
-        assert_eq!(w.selection, Some((0, 0)));
+        assert_eq!(span(&w), Some((0, 0)));
         assert_eq!(w.scroll, 0.0);
 
         // A commit that owns no lines: chosen, with no line, and greyed out without an age.
@@ -2237,7 +2565,7 @@ mod tests {
         );
         frame(&ctx, &mut w, vec![button(p, false, false)]);
         assert_eq!(w.chosen, Some(Some(oid(GONE))));
-        assert_eq!(w.selection, None);
+        assert_eq!(span(&w), None);
         let h = w.history().unwrap();
         let bc = blame_colors(&egui::Ui::new(ctx.clone(), Id::new("t"), UiBuilder::new()));
         let row = history_row(h, 1, &w.repo, &GraphOptions::default(), &bc);
@@ -2271,12 +2599,12 @@ mod tests {
         assert_eq!(w.list.selected, Some(0));
         assert_eq!(w.chosen, Some(Some(oid(B))));
         frame(&ctx, &mut w, vec![key(Key::ArrowDown)]);
-        assert_eq!((w.list.selected, w.selection), (Some(1), None));
+        assert_eq!((w.list.selected, span(&w)), (Some(1), None));
         frame(&ctx, &mut w, vec![key(Key::ArrowDown)]);
         frame(&ctx, &mut w, vec![key(Key::ArrowDown)]);
         assert_eq!(w.list.selected, Some(2));
         assert_eq!(w.chosen, Some(Some(oid(A))));
-        assert_eq!(w.selection, Some((0, 0)));
+        assert_eq!(span(&w), Some((0, 0)));
         frame(&ctx, &mut w, vec![key(Key::ArrowUp)]);
         assert_eq!(w.chosen, Some(Some(oid(GONE))));
         assert_eq!(w.scroll, 0.0);

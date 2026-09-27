@@ -27,6 +27,7 @@ use parterre_core::file_diff::{
     Shown, Version, Whitespace, WordMode, fold, fold_lines,
 };
 use parterre_core::glyphs;
+use parterre_core::text::word_at;
 use parterre_core::{Oid, Repo};
 
 use super::ParterreApp;
@@ -1188,37 +1189,8 @@ impl DiffWindow {
     fn word_at(&self, column: Column, row: usize, col: usize) -> Option<std::ops::Range<usize>> {
         let ready = self.ready()?;
         let (rows, _) = Self::rows_and_changes(&ready.diff, self.form);
-        let text: Vec<char> = ready
-            .diff
-            .line(*rows.get(row)?, column.side())?
-            .text
-            .chars()
-            .collect();
-        let col = col.min(text.len().checked_sub(1)?);
-        let class = |c: char| {
-            if c.is_alphanumeric() || c == '_' {
-                0
-            } else if c.is_whitespace() {
-                1
-            } else {
-                2
-            }
-        };
-        let k = class(text[col]);
-        if k == 2 {
-            return Some(col..col + 1);
-        }
-        let start = (0..col)
-            .rev()
-            .take_while(|&i| class(text[i]) == k)
-            .last()
-            .unwrap_or(col);
-        let end = (col..text.len())
-            .take_while(|&i| class(text[i]) == k)
-            .last()
-            .unwrap_or(col)
-            + 1;
-        Some(start..end)
+        let line = ready.diff.line(*rows.get(row)?, column.side())?;
+        word_at(&line.text, col)
     }
 
     /// The chosen text as it is in the file (tabs kept), a line per row; whole lines end

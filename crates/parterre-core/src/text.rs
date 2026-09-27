@@ -1,5 +1,5 @@
-//! Text helpers for the log window, free of any GUI: web links in commit messages, paths cut
-//! at the start, and counts with thousands separators.
+//! Text helpers for the windows, free of any GUI: web links in commit messages, paths cut at
+//! the start, counts with thousands separators, and the word under a double-click.
 
 use std::ops::Range;
 
@@ -104,6 +104,37 @@ pub fn thousands(n: usize) -> String {
     out
 }
 
+/// The word (or run of blanks, or other character) at character `col` of `text`, as a range
+/// of characters; the last character's when `col` is past the end. `None` for an empty text.
+pub fn word_at(text: &str, col: usize) -> Option<Range<usize>> {
+    let text: Vec<char> = text.chars().collect();
+    let col = col.min(text.len().checked_sub(1)?);
+    let class = |c: char| {
+        if c.is_alphanumeric() || c == '_' {
+            0
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    };
+    let k = class(text[col]);
+    if k == 2 {
+        return Some(col..col + 1);
+    }
+    let start = (0..col)
+        .rev()
+        .take_while(|&i| class(text[i]) == k)
+        .last()
+        .unwrap_or(col);
+    let end = (col..text.len())
+        .take_while(|&i| class(text[i]) == k)
+        .last()
+        .unwrap_or(col)
+        + 1;
+    Some(start..end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +189,20 @@ mod tests {
         assert_eq!(thousands(1000), "1,000");
         assert_eq!(thousands(13786), "13,786");
         assert_eq!(thousands(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn a_word_is_letters_digits_and_underscores_or_a_run_of_blanks() {
+        let text = "let näme_2  = a.b;";
+        let at = |col| {
+            word_at(text, col).map(|r| text.chars().skip(r.start).take(r.len()).collect::<String>())
+        };
+        assert_eq!(at(5).as_deref(), Some("näme_2"));
+        assert_eq!(at(11).as_deref(), Some("  "));
+        assert_eq!(at(14).as_deref(), Some("a"));
+        assert_eq!(at(15).as_deref(), Some("."));
+        // Past the end: the last character's.
+        assert_eq!(at(99).as_deref(), Some(";"));
+        assert_eq!(word_at("", 0), None);
     }
 }

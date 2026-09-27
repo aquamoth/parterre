@@ -766,25 +766,30 @@ fn without_ending(raw: &str) -> &str {
 
 impl DiffLine {
     /// Where display column `col` (a character of [`DiffLine::text`]) falls in
-    /// [`DiffLine::raw`], as a byte offset. A column inside a tab's run of spaces counts as
-    /// after the tab.
+    /// [`DiffLine::raw`], as a byte offset ([`raw_offset`]).
     pub fn raw_offset(&self, col: usize) -> usize {
-        let mut at = 0;
-        for (i, c) in self.raw.char_indices() {
-            if at >= col {
-                return i;
-            }
-            at += if c == '\t' {
-                TAB_WIDTH - at % TAB_WIDTH
-            } else {
-                1
-            };
-            if at > col {
-                return i + c.len_utf8();
-            }
-        }
-        self.raw.len()
+        raw_offset(&self.raw, col)
     }
+}
+
+/// Where display column `col` (a character of the line as [`display`] shows it) falls in the
+/// `raw` line, as a byte offset. A column inside a tab's run of spaces counts as after the tab.
+pub fn raw_offset(raw: &str, col: usize) -> usize {
+    let mut at = 0;
+    for (i, c) in raw.char_indices() {
+        if at >= col {
+            return i;
+        }
+        at += if c == '\t' {
+            TAB_WIDTH - at % TAB_WIDTH
+        } else {
+            1
+        };
+        if at > col {
+            return i + c.len_utf8();
+        }
+    }
+    raw.len()
 }
 
 /// The display form of a raw line, and its spans moved along: the line ending dropped and tabs
