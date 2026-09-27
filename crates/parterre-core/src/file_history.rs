@@ -25,9 +25,12 @@ use crate::log_graph::LogGraph;
 use crate::oid::Oid;
 use crate::repo::{CommitIx, Repo};
 
-/// `git log -z` format for the listing: NUL-separated fields, as the snapshot's log reads them.
-pub(crate) const LOG_FORMAT: &str = "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%ct%x00%s";
-const LOG_FIELDS: usize = 7;
+/// `git log -z` format for the listing: NUL-separated fields, as the snapshot's log reads them
+/// (with [`DATE_FORMAT`] for `%ad`).
+pub(crate) const LOG_FORMAT: &str = "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%ad%x00%ct%x00%s";
+/// The author date as the snapshot's log shows it: local time, to the minute.
+pub(crate) const DATE_FORMAT: &str = "--date=format-local:%Y-%m-%d %H:%M";
+const LOG_FIELDS: usize = 8;
 
 /// What git lists for a blamed file ([`crate::git::Git::file_log`]), before the blame's own
 /// commits are added.
@@ -53,6 +56,8 @@ pub struct LogCommit {
     pub author_email: String,
     /// Seconds since the epoch.
     pub author_time: i64,
+    /// `YYYY-MM-DD HH:MM` in local time, as the log shows it.
+    pub author_date: String,
     /// Seconds since the epoch.
     pub commit_time: i64,
     pub subject: String,
@@ -84,6 +89,9 @@ pub struct HistoryRow {
     pub author_email: String,
     /// Seconds since the epoch; 0 for the working tree.
     pub author_time: i64,
+    /// As the log shows it (local time), or in the author's zone for a commit only the blame
+    /// names that the snapshot doesn't have; empty for the working tree.
+    pub author_date: String,
     /// Seconds since the epoch; 0 for the working tree.
     pub commit_time: i64,
     pub subject: String,
@@ -135,6 +143,7 @@ impl FileHistory {
                 author_name: c.author_name,
                 author_email: c.author_email,
                 author_time: c.author_time,
+                author_date: c.author_date,
                 commit_time: c.commit_time,
                 subject: c.subject,
                 snapshot: repo.lookup(&c.oid),
@@ -149,6 +158,7 @@ impl FileHistory {
                     return None;
                 }
                 let o = &blame.origins[first_origin[&commit]];
+                let snapshot = repo.lookup(&oid);
                 Some(HistoryRow {
                     commit,
                     source: Source::Blame {
@@ -158,9 +168,11 @@ impl FileHistory {
                     author_name: o.author.clone(),
                     author_email: o.author_email.clone(),
                     author_time: o.author_time,
+                    author_date: snapshot
+                        .map_or_else(|| o.author_date(), |ix| repo.commit(ix).author_date.clone()),
                     commit_time: o.committer_time,
                     subject: o.summary.clone(),
-                    snapshot: repo.lookup(&oid),
+                    snapshot,
                     owns_lines: true,
                 })
             })
@@ -176,6 +188,7 @@ impl FileHistory {
                 author_name: String::new(),
                 author_email: String::new(),
                 author_time: 0,
+                author_date: String::new(),
                 commit_time: 0,
                 subject: String::new(),
                 snapshot: None,
@@ -276,7 +289,7 @@ pub(crate) fn parse_log(out: &[u8]) -> Result<Vec<LogCommit>, String> {
     let (records, _) = tokens.as_chunks::<LOG_FIELDS>();
     records
         .iter()
-        .map(|[hash, parents, an, ae, at, ct, subject]| {
+        .map(|[hash, parents, an, ae, at, ad, ct, subject]| {
             let hash = hash.trim_start_matches('\n');
             let oid = |hex: &str| Oid::from_hex(hex).ok_or_else(|| format!("bad hash {hex:?}"));
             let time = |t: &str| t.parse().map_err(|_| format!("bad time {t:?}"));
@@ -289,6 +302,7 @@ pub(crate) fn parse_log(out: &[u8]) -> Result<Vec<LogCommit>, String> {
                 author_name: (*an).to_owned(),
                 author_email: (*ae).to_owned(),
                 author_time: time(at)?,
+                author_date: (*ad).to_owned(),
                 commit_time: time(ct)?,
                 subject: (*subject).to_owned(),
             })
@@ -313,6 +327,7 @@ mod tests {
             author_name: "A".into(),
             author_email: "a@x".into(),
             author_time: time,
+            author_date: String::new(),
             commit_time: time,
             subject: format!("c{n}"),
         }
@@ -528,13 +543,16 @@ mod tests {
     #[test]
     fn parses_the_listing() {
         let (a, b) = ("a".repeat(40), "b".repeat(40));
-        let out =
-            format!("{b}\0{a}\0N\x1fame\0n@x\020\021\0sub ject\0\n{a}\0\0M\0m@x\010\011\0first\0");
+        let out = format!(
+            "{b}\0{a}\0N\x1fame\0n@x\020\01970-01-01 00:00\021\0sub ject\0\n\
+             {a}\0\0M\0m@x\010\01970-01-01 00:00\011\0first\0"
+        );
         let commits = parse_log(out.as_bytes()).unwrap();
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].parents, [Oid::from_hex(&a).unwrap()]);
         assert_eq!(commits[0].author_name, "N\x1fame");
         assert_eq!((commits[0].author_time, commits[0].commit_time), (20, 21));
+        assert_eq!(commits[0].author_date, "1970-01-01 00:00");
         assert_eq!(commits[0].subject, "sub ject");
         assert!(commits[1].parents.is_empty());
         assert!(parse_log(b"x\0y\0").is_err());

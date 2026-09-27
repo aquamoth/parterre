@@ -81,6 +81,12 @@ fn a_linear_history_lists_the_commits_that_changed_the_file() {
     assert_eq!(row.parents, [oid(&c2).unwrap()]);
     assert!(h.rows.iter().all(|r| r.snapshot.is_some()));
     assert_eq!(h.row_of(oid(&c1)), Some(3));
+    // Dated as the snapshot's log dates them.
+    let repo = r.load();
+    for row in &h.rows {
+        let ix = row.snapshot.unwrap();
+        assert_eq!(row.author_date, repo.commit(ix).author_date);
+    }
     let g = h.graph();
     assert_eq!((g.len(), g.lanes), (4, 1));
 }

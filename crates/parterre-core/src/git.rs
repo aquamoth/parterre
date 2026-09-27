@@ -705,6 +705,7 @@ impl Git {
             "--parents",
             "--no-color",
             "--no-decorate",
+            file_history::DATE_FORMAT,
             "-z",
             file_history::LOG_FORMAT,
         ];
