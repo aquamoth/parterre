@@ -131,3 +131,14 @@ jobs:
             --title "parterre ${GITHUB_REF_NAME#v}" \
             --generate-notes \
             $prerelease
+
+  # The Chocolatey package, from the MSI just published. Pre-releases are built and tested but
+  # not pushed.
+  chocolatey:
+    name: Chocolatey
+    needs: publish
+    uses: ./.github/workflows/chocolatey.yml
+    with:
+      tag: ${{ github.ref_name }}
+      push: ${{ !contains(github.ref_name, '-') }}
+    secrets: inherit

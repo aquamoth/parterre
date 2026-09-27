@@ -22,6 +22,9 @@ release filenames. Tag a clean commit on `main`; the root `Cargo.toml` and
    [building.md](building.md#windows-installer)). A tag with a pre-release part publishes a
    pre-release; its MSI has version `0.5.0`, since MSI versions are numbers only.
 
+3. The workflow then builds the [Chocolatey](#chocolatey) package from that MSI, tests it, and
+   pushes it unless the tag is a pre-release.
+
 The build fails if the tag is not `vX.Y.Z` with an optional pre-release suffix, does not point
 at the commit being built, or the sources have local changes. In that case delete the tag
 (`git push origin :refs/tags/v0.5.0-rc1`), fix things and tag again.
@@ -45,6 +48,37 @@ publish job of #20 exists this is done by hand. The first publish of each crate 
 A version on crates.io can be yanked but never replaced, so check the generated versions before
 publishing. The published crate's recorded commit is the local packaging commit; the GitHub
 binary reports the tagged source commit.
+
+## Chocolatey
+
+The package `parterre` wraps the MSI of a GitHub Release: `packaging/chocolatey` holds the
+nuspec and the install and uninstall scripts, which install it machine-wide (`ALLUSERS=1`) and
+depend on the `git` package. `packaging/chocolatey/build.ps1` fills in the version, the MSI's
+URL and its SHA-256, and runs `choco pack`.
+
+`.github/workflows/chocolatey.yml` builds the package from a release's MSI, installs and
+uninstalls it on a Windows runner, and keeps the `.nupkg` as a workflow artifact. The release
+workflow runs it for every tag; it also runs on pull requests that change the package (for the
+latest release, never pushing), and by hand for an existing release:
+
+```sh
+gh workflow run chocolatey.yml -f tag=v0.5.1 -f push=true
+```
+
+Pushing uses the `CHOCOLATEY_API_KEY` secret of the `chocolatey` environment, the API key of
+the Chocolatey account named in the nuspec's `owners`
+(<https://community.chocolatey.org/account>). Set it once:
+
+```sh
+gh api -X PUT repos/aquamoth/parterre/environments/chocolatey
+gh secret set CHOCOLATEY_API_KEY --env chocolatey
+```
+
+Without the secret, the push fails and the rest of the release is unaffected. Required reviewers
+on the environment would make every push wait for an approval. Every version is checked by
+Chocolatey's automated validator and verifier; the first ones also by a human moderator, which
+can take weeks. A version on Chocolatey can't be replaced once approved, so a broken one is
+fixed with a new release.
 
 ## Version strings
 

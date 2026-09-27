@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Chocolatey package, a wrapper that installs the MSI from the GitHub Release. build.ps1
+  fills in the version and the release tag. See docs/releasing.md#chocolatey.
+-->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>parterre</id>
+    <version>__VERSION__</version>
+    <title>parterre</title>
+    <!-- The Chocolatey account that maintains the package. -->
+    <owners>aquamoth</owners>
+    <authors>Mattias Åslund</authors>
+    <projectUrl>https://github.com/aquamoth/parterre</projectUrl>
+    <packageSourceUrl>https://github.com/aquamoth/parterre/tree/main/packaging/chocolatey</packageSourceUrl>
+    <projectSourceUrl>https://github.com/aquamoth/parterre</projectSourceUrl>
+    <docsUrl>https://github.com/aquamoth/parterre#readme</docsUrl>
+    <bugTrackerUrl>https://github.com/aquamoth/parterre/issues</bugTrackerUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/aquamoth/parterre@__TAG__/packaging/icon/parterre-128.png</iconUrl>
+    <licenseUrl>https://github.com/aquamoth/parterre/blob/__TAG__/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <copyright>Copyright (C) 2026 Mattias Åslund</copyright>
+    <tags>parterre git revision-graph tortoisegit gui foss cross-platform</tags>
+    <summary>A standalone, TortoiseGit-style revision graph viewer for git repositories.</summary>
+    <description><![CDATA[parterre draws the branches and tags of a git repository as a compact revision graph, in the style of TortoiseGit's Revision Graph, and lets you rearrange it by hand. From the graph you can browse the log, compare commits, and view file diffs and blame.
+
+It uses the git command line, which this package installs as a dependency.
+
+The package installs parterre for all users, into `C:\Program Files\parterre`, with a Start menu shortcut, `parterre` on the PATH and *Revision Graph* in Explorer's context menu for folders.
+]]></description>
+    <releaseNotes>https://github.com/aquamoth/parterre/releases/tag/__TAG__</releaseNotes>
+    <dependencies>
+      <!-- git log's diff-merges option, which parterre uses, is from git 2.31. -->
+      <dependency id="git" version="2.31.0" />
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>
