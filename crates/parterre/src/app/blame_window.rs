@@ -2,15 +2,17 @@
 //! its own (an immediate viewport, like the diff windows). Several can be open at once; they
 //! close with the repository. The model is [`parterre_core::blame`].
 //!
-//! A gutter on the left names each run of lines from one commit (hash, author, date), shaded
-//! by the commit's age among the file's commits as TortoiseGitBlame shades lines. Clicking a
-//! line chooses it and its commit, whose lines are all highlighted; choosing more lines (drag,
+//! A gutter on the left names each run of lines from one commit (hash, author, date), shaded by
+//! the commit's age among the file's commits as TortoiseGitBlame shades lines. Clicking a line
+//! chooses it and its commit, whose lines are all highlighted; choosing more lines (drag,
 //! Shift+click) keeps the commit of the first, and the chosen commit stays chosen until another
-//! is. The bar at the bottom describes the commit under the pointer or chosen. A line's menu
-//! goes on from there, as TortoiseGitBlame's does: blame the version before its commit (in a
-//! window of its own, the line chosen at its place there), show its commit's change to the file
-//! in a diff window, or show the log from its commit. The toolbar says whether whitespace changes and moved lines count,
-//! remembered for the next window.
+//! is. An overview strip on the right marks the chosen commit's lines in the whole file and
+//! shows the part in view; the text never scrolls by itself when a commit is chosen, the strip
+//! scrolls it. The bar at the bottom describes the commit under the pointer or chosen. A line's
+//! menu goes on from there, as TortoiseGitBlame's does: blame the version before its commit (in
+//! a window of its own, the line chosen at its place there), show its commit's change to the
+//! file in a diff window, or show the log from its commit. The toolbar says whether whitespace
+//! changes and moved lines count, remembered for the next window.
 //!
 //! Deliberate deviations from TortoiseGitBlame (see #104): no log pane of the file's
 //! history beside the text (the log window shows history), and only whole lines are chosen
@@ -30,7 +32,10 @@ use parterre_core::text::thousands;
 use parterre_core::{Oid, Repo};
 
 use super::ParterreApp;
-use super::diff_window::{Colors, SCROLLBAR, colors, hscrollbar, message};
+use super::diff_window::{
+    Colors, OVERVIEW, SCROLLBAR, colors, hscrollbar, message, overview_background, overview_scale,
+    overview_scroll, overview_view,
+};
 use super::log_window::cell;
 use crate::settings::BlameWindowSettings;
 use crate::text_size;
@@ -557,8 +562,8 @@ impl BlameWindow {
         painter.galley(pos2(right, y - counts.size().y / 2.0), counts, weak);
     }
 
-    /// The lines with their gutter, and the horizontal scrollbar. Returns the line under the
-    /// pointer.
+    /// The lines with their gutter, the overview strip and the horizontal scrollbar. Returns
+    /// the line under the pointer.
     fn body(
         &mut self,
         ui: &mut Ui,
@@ -588,11 +593,12 @@ impl BlameWindow {
         let numbers = digits * char_w + 2.0 * PAD;
         let text_x = full.left() + gutter + numbers + PAD;
 
-        let text_w = full.right() - text_x;
+        let right = full.right() - OVERVIEW;
+        let text_w = right - text_x;
         let content_w = blame.widest as f32 * char_w + 24.0;
         let hmax = (content_w - text_w).max(0.0);
         let bottom = full.bottom() - if hmax > 0.0 { SCROLLBAR } else { 0.0 };
-        let area = Rect::from_min_max(full.min, pos2(full.right(), bottom));
+        let area = Rect::from_min_max(full.min, pos2(right, bottom));
 
         // A line asked for: chosen, and a third of the way down.
         if let Some(line) = self.pending_line.take() {
@@ -742,6 +748,33 @@ impl BlameWindow {
         });
         self.scroll = out.state.offset.y;
 
+        // Every line of the chosen commit in the whole file, and the part in view. Click or
+        // drag to put that place in the middle.
+        let strip = Rect::from_min_max(pos2(right, full.top()), full.max);
+        let view = (
+            out.state.offset.y,
+            out.inner_rect.height(),
+            out.content_size.y,
+        );
+        overview_background(ui, strip, c);
+        if let Some(commit) = highlighted {
+            let scale = overview_scale(strip, n, row_h);
+            let owned = |i: usize| blame.origins[blame.lines[i].origin].commit == commit;
+            for run in runs(n, owned) {
+                let (y0, y1) = (run.start as f32 * scale, run.end as f32 * scale);
+                let mark = Rect::from_min_max(
+                    pos2(strip.left() + 3.0, strip.top() + y0),
+                    pos2(strip.right() - 2.0, strip.top() + y1.max(y0 + 2.0)),
+                );
+                ui.painter().rect_filled(mark, 0.0, bc.mark);
+            }
+        }
+        overview_view(ui, strip, view, c);
+        let id = egui::Id::new(("blame-overview", self.id));
+        if let Some(offset) = overview_scroll(ui, id, strip, n, row_h, view) {
+            self.scroll_to = Some(offset);
+        }
+
         // Choosing lines: a press chooses a line and its commit (Shift extends, keeping the
         // commit), a drag extends, scrolling past the edges; a right-click outside the chosen
         // lines chooses its line and commit.
@@ -781,7 +814,7 @@ impl BlameWindow {
         }
 
         if hmax > 0.0 {
-            let track = Rect::from_min_max(pos2(text_x, bottom), full.max);
+            let track = Rect::from_min_max(pos2(text_x, bottom), pos2(right, full.bottom()));
             let id = egui::Id::new(("blame-hbar", self.id));
             hscrollbar(ui, id, track, &mut self.hoff, text_w / content_w, hmax, c);
         }
@@ -1016,6 +1049,18 @@ fn line_menu(
     action
 }
 
+/// The runs of consecutive indices below `n` for which `owned` holds, in order.
+fn runs(n: usize, owned: impl Fn(usize) -> bool) -> Vec<std::ops::Range<usize>> {
+    let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
+    for i in (0..n).filter(|&i| owned(i)) {
+        match runs.last_mut() {
+            Some(run) if run.end == i => run.end = i + 1,
+            _ => runs.push(i..i + 1),
+        }
+    }
+    runs
+}
+
 /// The tooltip over the gutter: the commit's subject, author and date, and hash.
 fn origin_tip(ui: &mut Ui, origin: &Origin, date: &str, abbrev: usize) {
     ui.set_max_width(420.0);
@@ -1028,11 +1073,13 @@ fn origin_tip(ui: &mut Ui, origin: &Origin, date: &str, abbrev: usize) {
     ui.weak(format!("{date}   {}", oid.short(abbrev.max(12))));
 }
 
-/// Colours of the gutter by age, and of the lines of the highlighted commit.
+/// Colours of the gutter by age, and of the lines of the chosen commit and their marks in the
+/// overview strip.
 struct BlameColors {
     old: Color32,
     new: Color32,
     commit: Color32,
+    mark: Color32,
 }
 
 impl BlameColors {
@@ -1056,12 +1103,14 @@ fn blame_colors(ui: &Ui) -> BlameColors {
             old: Color32::from_gray(26),
             new: Color32::from_rgb(0x5c, 0x45, 0x12),
             commit: Color32::from_rgba_unmultiplied(0x35, 0x84, 0xe4, 40),
+            mark: Color32::from_rgb(0x62, 0xa0, 0xea),
         }
     } else {
         BlameColors {
             old: Color32::from_gray(250),
             new: Color32::from_rgb(0xff, 0xd9, 0x80),
             commit: Color32::from_rgba_unmultiplied(0x35, 0x84, 0xe4, 26),
+            mark: Color32::from_rgb(0x1c, 0x71, 0xd8),
         }
     }
 }
@@ -1439,11 +1488,61 @@ mod tests {
     }
 
     #[test]
+    fn runs_join_consecutive_lines() {
+        assert_eq!(
+            runs(8, |i| [1, 2, 3, 5, 7].contains(&i)),
+            [1..4, 5..6, 7..8]
+        );
+        assert!(runs(3, |_| false).is_empty());
+    }
+
+    #[test]
+    fn choosing_never_scrolls_and_the_overview_strip_does() {
+        let ctx = egui::Context::default();
+        let mut w = window();
+        // 300 lines from A, but line 250 from B.
+        let out: String = (1..=300)
+            .map(|i| match i {
+                251 => entry(B, i, i, 200, &format!("previous {A} a.txt\n"), "b"),
+                _ => entry(A, i, i, 100, "", "a"),
+            })
+            .collect();
+        let repo = w.repo.clone();
+        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo));
+        frame(&ctx, &mut w, Vec::new());
+        w.choose_commit(Some(Oid::from_hex(B).unwrap()));
+        assert_eq!(w.selection, Some((250, 250)));
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        assert_eq!(w.scroll, 0.0);
+
+        // A click on the strip at B's mark puts line 250 in the middle.
+        let font = FontId::monospace(FONT_SIZE);
+        let row_h = ctx.fonts_mut(|f| f.row_height(&font)).ceil() + 3.0;
+        let (top, bottom) = (TOOLBAR + HEADER, 700.0 - INFO);
+        let scale = ((bottom - top) / 300.0).min(row_h);
+        let p = pos2(1000.0 - OVERVIEW / 2.0, top + 250.5 * scale);
+        frame(
+            &ctx,
+            &mut w,
+            vec![egui::Event::PointerMoved(p), button(p, true, false)],
+        );
+        frame(&ctx, &mut w, vec![button(p, false, false)]);
+        frame(&ctx, &mut w, Vec::new());
+        let middle = (w.scroll + (bottom - top) / 2.0) / row_h;
+        assert!((middle - 250.5).abs() < 2.0, "line {middle} in the middle");
+        // The chosen commit and line stay.
+        assert_eq!(w.selection, Some((250, 250)));
+        assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
+    }
+
+    #[test]
     fn the_gutter_shades_from_old_to_new() {
         let c = BlameColors {
             old: Color32::from_rgb(0, 0, 0),
             new: Color32::from_rgb(200, 100, 50),
             commit: Color32::TRANSPARENT,
+            mark: Color32::TRANSPARENT,
         };
         assert_eq!(c.age(0.0), c.old);
         assert_eq!(c.age(1.0), c.new);

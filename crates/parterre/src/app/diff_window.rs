@@ -42,7 +42,7 @@ const FONT_SIZE: f32 = 13.0;
 /// Room for the `−`/`+` marker between the line numbers and the text.
 const MARKER: f32 = 16.0;
 /// Width of the overview strip.
-const OVERVIEW: f32 = 14.0;
+pub(super) const OVERVIEW: f32 = 14.0;
 /// Height of the horizontal scrollbar.
 pub(super) const SCROLLBAR: f32 = 10.0;
 /// Rows kept above a change scrolled to.
@@ -1062,20 +1062,9 @@ impl DiffWindow {
             self.open.push(lines);
             self.dirty = true;
         }
-        // The overview scrolls too: click or drag to put that place in the middle.
-        let response = ui.interact(
-            strip,
-            egui::Id::new(("diff-overview", self.id)),
-            Sense::click_and_drag(),
-        );
-        if (response.clicked() || response.dragged())
-            && let Some(p) = response.interact_pointer_pos()
-            && out.content_size.y > out.inner_rect.height()
-        {
-            let scale = (strip.height() / self.shown.len().max(1) as f32).min(row_h);
-            let row = (p.y - strip.top()) / scale;
-            self.scroll_to = Some(row * row_h - out.inner_rect.height() / 2.0);
-            ui.ctx().request_repaint();
+        let id = egui::Id::new(("diff-overview", self.id));
+        if let Some(offset) = overview_scroll(ui, id, strip, self.shown.len(), row_h, view) {
+            self.scroll_to = Some(offset);
         }
         if hmax > 0.0 {
             let track = Rect::from_min_max(
@@ -1532,20 +1521,13 @@ fn overview(
     rows: &[Row],
     shown: &[Shown],
     side: bool,
-    (offset, height, content): (f32, f32, f32),
+    view: (f32, f32, f32),
     row_h: f32,
     c: &Colors,
 ) {
+    overview_background(ui, strip, c);
     let painter = ui.painter();
-    painter.rect_filled(strip, 0.0, ui.visuals().panel_fill);
-    painter.vline(
-        strip.left() + 0.5,
-        strip.y_range(),
-        Stroke::new(1.0, c.line),
-    );
-    // A diff shorter than the window is drawn at its own scale, level with its rows.
-    let n = shown.len().max(1) as f32;
-    let scale = (strip.height() / n).min(row_h);
+    let scale = overview_scale(strip, shown.len(), row_h);
     let mark = |i: usize, kind: LineKind| {
         let y = strip.top() + i as f32 * scale;
         let color = if kind == LineKind::Removed {
@@ -1575,10 +1557,38 @@ fn overview(
             mark(i, LineKind::Added);
         }
     }
+    overview_view(ui, strip, view, c);
+}
+
+/// The height of a row in an overview strip of `rows` rows: a text shorter than the window is
+/// drawn at its own scale, level with its rows.
+pub(super) fn overview_scale(strip: Rect, rows: usize, row_h: f32) -> f32 {
+    (strip.height() / rows.max(1) as f32).min(row_h)
+}
+
+/// An overview strip's background and its line on the left, under the marks.
+pub(super) fn overview_background(ui: &Ui, strip: Rect, c: &Colors) {
+    let painter = ui.painter();
+    painter.rect_filled(strip, 0.0, ui.visuals().panel_fill);
+    painter.vline(
+        strip.left() + 0.5,
+        strip.y_range(),
+        Stroke::new(1.0, c.line),
+    );
+}
+
+/// The part in view, over an overview strip's marks. `view` is the scroll offset, the height in
+/// view and the height of the whole text.
+pub(super) fn overview_view(
+    ui: &Ui,
+    strip: Rect,
+    (offset, height, content): (f32, f32, f32),
+    c: &Colors,
+) {
     if content > height {
         let y0 = strip.top() + offset / content * strip.height();
         let y1 = strip.top() + (offset + height) / content * strip.height();
-        painter.rect_stroke(
+        ui.painter().rect_stroke(
             Rect::from_min_max(
                 pos2(strip.left() + 1.5, y0),
                 pos2(strip.right() - 0.5, y1.min(strip.bottom())),
@@ -1588,6 +1598,26 @@ fn overview(
             StrokeKind::Inside,
         );
     }
+}
+
+/// An overview strip scrolls too: a click or drag on it gives the scroll offset that puts that
+/// place in the middle. `view` as for [`overview_view`].
+pub(super) fn overview_scroll(
+    ui: &Ui,
+    id: egui::Id,
+    strip: Rect,
+    rows: usize,
+    row_h: f32,
+    (_, height, content): (f32, f32, f32),
+) -> Option<f32> {
+    let response = ui.interact(strip, id, Sense::click_and_drag());
+    let p = response.interact_pointer_pos()?;
+    if !(response.clicked() || response.dragged()) || content <= height {
+        return None;
+    }
+    ui.ctx().request_repaint();
+    let row = (p.y - strip.top()) / overview_scale(strip, rows, row_h);
+    Some(row * row_h - height / 2.0)
 }
 
 /// A horizontal scrollbar in `track` for an offset `hoff` of at most `hmax`, `visible` being
