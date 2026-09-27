@@ -212,8 +212,36 @@ pub const WHITESPACE_IGNORE_ALL: Glyph = &[Part::Path(
 /// Swap the two sides of a comparison (Lucide's arrow-left-right).
 pub const SWAP: Glyph = &[Part::Path("M8 3 4 7l4 4M4 7h16M16 21l4-4-4-4M20 17H4")];
 
+/// The log from every branch: three branch tips fanning out of one commit.
+pub const ALL_BRANCHES: Glyph = &[
+    dot(12.0, 19.5, 2.2),
+    Part::Path("M12 17.3V14M12 14c0-2.5-6.5-3-6.5-6.6M12 14V7.4M12 14c0-2.5 6.5-3 6.5-6.6"),
+    dot(5.5, 5.2, 2.2),
+    dot(12.0, 5.2, 2.2),
+    dot(18.5, 5.2, 2.2),
+];
+/// First parents only: a straight chain of commits, no side branches.
+pub const FIRST_PARENT: Glyph = &[
+    Part::Path("M12 3.5v17"),
+    dot(12.0, 4.5, 2.2),
+    dot(12.0, 12.0, 2.2),
+    dot(12.0, 19.5, 2.2),
+];
+/// No merges: Lucide's git-merge, struck through.
+pub const NO_MERGES: Glyph = &[
+    ring(18.0, 18.0, 2.6),
+    ring(6.0, 6.0, 2.6),
+    Part::Path("M6 21V8.6a9 9 0 0 0 9 9.4M3.5 20.5l17-17"),
+];
+/// Topological order: Lucide's list-tree, a branch's rows kept together.
+pub const ORDER_TOPOLOGICAL: Glyph = &[Part::Path(
+    "M21 12h-8M21 6H8M21 18h-8M3 6v4c0 1.1.9 2 2 2h3M3 10v6c0 1.1.9 2 2 2h3",
+)];
+/// Date order: Lucide's clock.
+pub const ORDER_DATE: Glyph = &[ring(12.0, 12.0, 9.0), Part::Path("M12 7v5l3 2")];
+
 /// Every glyph, for tests.
-pub const ALL: [Glyph; 36] = [
+pub const ALL: [Glyph; 41] = [
     MENU,
     SEARCH,
     PLUS,
@@ -250,6 +278,11 @@ pub const ALL: [Glyph; 36] = [
     WHITESPACE_IGNORE_CHANGES,
     WHITESPACE_IGNORE_ALL,
     SWAP,
+    ALL_BRANCHES,
+    FIRST_PARENT,
+    NO_MERGES,
+    ORDER_TOPOLOGICAL,
+    ORDER_DATE,
 ];
 
 /// One stroke of a flattened path.

@@ -6,7 +6,7 @@ mod common;
 use common::TestRepo;
 use parterre_core::changed_files::{ChangedFile, FileStatus};
 use parterre_core::git::Git;
-use parterre_core::log::LogQuery;
+use parterre_core::log::{LogOptions, LogOrder, LogQuery};
 use parterre_core::{CommitIx, Oid, Repo};
 
 fn ix(repo: &Repo, hash: &str) -> CommitIx {
@@ -120,6 +120,189 @@ fn ranges_match_git_log_date_order() {
             assert_eq!(hashes(&repo, &q.run(&repo)), expected, "seed {seed}");
         }
     }
+}
+
+/// `git log` with `args`, as full hashes.
+fn git_hashes(r: &TestRepo, args: &[&str]) -> Vec<String> {
+    let mut all = vec!["log", "--format=%H"];
+    all.extend(args);
+    r.git(&all)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Every walk option, and pairs of them, on random histories: the same commits in the same
+/// order as git gives them, for single tips and for ranges.
+#[test]
+fn walk_options_match_git_log() {
+    let topo = LogOptions::default();
+    let cases: [(LogOptions, &[&str]); 4] = [
+        (topo, &["--topo-order"]),
+        (
+            LogOptions {
+                first_parent: true,
+                ..topo
+            },
+            &["--topo-order", "--first-parent"],
+        ),
+        (
+            LogOptions {
+                no_merges: true,
+                ..topo
+            },
+            &["--topo-order", "--no-merges"],
+        ),
+        (
+            LogOptions {
+                first_parent: true,
+                order: LogOrder::Date,
+                ..topo
+            },
+            &["--date-order", "--first-parent"],
+        ),
+    ];
+    for seed in [2, 5, 19] {
+        let (r, all) = random_history(seed, 60);
+        let repo = r.load();
+        let mut rng = Rng(seed * 17 + 3);
+        for (options, args) in &cases {
+            for tip in all.iter().rev().step_by(9) {
+                let ours = LogQuery::commit(ix(&repo, tip)).list(&repo, options);
+                let mut git_args = args.to_vec();
+                git_args.push(tip);
+                let theirs = git_hashes(&r, &git_args);
+                assert_eq!(
+                    hashes(&repo, &ours.commits),
+                    theirs,
+                    "seed {seed}, {args:?} {tip}"
+                );
+            }
+            for _ in 0..6 {
+                let first = &all[rng.below(all.len() as u64) as usize];
+                let second = &all[rng.below(all.len() as u64) as usize];
+                let q = LogQuery::range(&repo, ix(&repo, first), ix(&repo, second));
+                let range = format!(
+                    "{}..{}",
+                    repo.commit(q.exclude[0]).oid.to_hex(),
+                    repo.commit(q.tips[0]).oid.to_hex()
+                );
+                let mut git_args = args.to_vec();
+                git_args.push(&range);
+                let theirs = git_hashes(&r, &git_args);
+                let ours = q.list(&repo, options);
+                assert_eq!(
+                    hashes(&repo, &ours.commits),
+                    theirs,
+                    "seed {seed}, {args:?} {range}"
+                );
+            }
+        }
+        // All branches, from wherever the log was opened.
+        let options = LogOptions {
+            all_branches: true,
+            ..topo
+        };
+        let ours = LogQuery::commit(ix(&repo, &all[0])).list(&repo, &options);
+        let theirs = git_hashes(
+            &r,
+            &["--topo-order", "--branches", "--remotes", "--tags", "HEAD"],
+        );
+        assert_eq!(
+            hashes(&repo, &ours.commits),
+            theirs,
+            "seed {seed}, all branches"
+        );
+    }
+}
+
+/// Parents as the log shows them: the real ones where nothing is left out, the first alone
+/// with `first_parent`, and always listed below their child.
+#[test]
+fn listed_parents_are_the_walked_ones_and_come_later() {
+    let (r, all) = random_history(23, 60);
+    let repo = r.load();
+    let tip = ix(&repo, all.last().unwrap());
+    for options in [
+        LogOptions::default(),
+        LogOptions {
+            first_parent: true,
+            ..LogOptions::default()
+        },
+        LogOptions {
+            no_merges: true,
+            ..LogOptions::default()
+        },
+        LogOptions {
+            branchings_only: true,
+            ..LogOptions::default()
+        },
+    ] {
+        let list = LogQuery::commit(tip).list(&repo, &options);
+        let row = |c| list.commits.iter().position(|&x| x == c).unwrap();
+        for (i, (&c, parents)) in list.commits.iter().zip(&list.parents).enumerate() {
+            assert!(parents.iter().all(|&p| row(p) > i), "{options:?}");
+            let real = &repo.commit(c).parents;
+            if options == LogOptions::default() {
+                assert_eq!(parents, real);
+            }
+            if options.first_parent {
+                assert_eq!(parents.as_slice(), &real[..real.len().min(1)]);
+            }
+            if options.no_merges {
+                assert!(real.len() < 2);
+            }
+        }
+        assert!(
+            list.outside.iter().all(|&o| !o),
+            "a whole history has nothing outside"
+        );
+    }
+}
+
+/// main: A - B - C - M
+///            \     /
+/// feature:    D - E
+/// With branchings only: M (tip, merge), C (first parent, straight through: gone), E (tip of
+/// feature), D (straight: gone), B (fork point), A (root).
+#[test]
+fn branchings_only_keeps_forks_merges_refs_and_roots() {
+    let mut r = TestRepo::new();
+    r.commit("A");
+    r.commit("B");
+    r.branch("feature");
+    r.commit("D");
+    r.commit("E");
+    r.checkout("main");
+    r.commit("C");
+    r.merge("feature", "M");
+    let repo = r.load();
+    let options = LogOptions {
+        branchings_only: true,
+        ..LogOptions::default()
+    };
+    let list = LogQuery::commit(repo.head_commit().unwrap()).list(&repo, &options);
+    assert_eq!(subjects(&repo, &list.commits), ["M", "E", "B", "A"]);
+    // M's first parent C is left out, so M leads to B through it; E to B through D.
+    let name = |c: &CommitIx| repo.commit(*c).subject.clone();
+    let parents: Vec<Vec<String>> = list
+        .parents
+        .iter()
+        .map(|ps| ps.iter().map(name).collect())
+        .collect();
+    assert_eq!(parents, [vec!["B", "E"], vec!["B"], vec!["A"], vec![]]);
+}
+
+/// A range's lower end has parents outside the log.
+#[test]
+fn a_range_marks_history_outside_it() {
+    let (r, [_, b, _, _, e]) = feature_branch();
+    let repo = r.load();
+    let q = LogQuery::range(&repo, ix(&repo, &b), ix(&repo, &e));
+    let list = q.list(&repo, &LogOptions::default());
+    assert_eq!(subjects(&repo, &list.commits), ["E", "D"]);
+    assert_eq!(list.outside, [false, true]);
 }
 
 /// main: A - B - C

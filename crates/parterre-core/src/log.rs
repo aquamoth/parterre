@@ -7,7 +7,9 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 
-use crate::repo::{CommitIx, GitRef, Repo};
+use serde::{Deserialize, Serialize};
+
+use crate::repo::{CommitIx, GitRef, RefKind, Repo};
 
 /// What the log lists: the commits reachable from any of `tips` but from none of `exclude`,
 /// like `git log <tips> ^<exclude>`.
@@ -83,11 +85,29 @@ impl LogQuery {
 
     /// The commits the query selects, newest first by committer date, never a parent before
     /// any of its children: the order of `git log --date-order`.
-    ///
-    /// Runs in O(n log n) over the commits reachable from the tips, with two flat arrays the
-    /// size of the snapshot.
     pub fn run(&self, repo: &Repo) -> Vec<CommitIx> {
+        let options = LogOptions {
+            order: LogOrder::Date,
+            ..LogOptions::default()
+        };
+        self.list(repo, &options).commits
+    }
+
+    /// The commits the query selects under `options`, in their order, each with the parents
+    /// the log shows for it.
+    ///
+    /// Runs in O(n log n) over the commits reachable from the tips, with a few flat arrays the
+    /// size of the snapshot.
+    pub fn list(&self, repo: &Repo, options: &LogOptions) -> LogList {
         let n = repo.commits.len();
+        let walk_parents = |c: CommitIx| -> &[CommitIx] {
+            let parents = &repo.commit(c).parents;
+            if options.first_parent {
+                &parents[..parents.len().min(1)]
+            } else {
+                parents
+            }
+        };
         let mut state = vec![State::Unseen; n];
         // Everything reachable from the exclusions is out.
         let mut stack: Vec<CommitIx> = Vec::new();
@@ -107,9 +127,20 @@ impl LogQuery {
         }
 
         // Walk from the tips, counting for every selected commit its selected children.
+        let mut tips = self.tips.clone();
+        if options.all_branches {
+            let branch_or_tag = |r: &&GitRef| {
+                matches!(
+                    r.kind,
+                    RefKind::LocalBranch | RefKind::RemoteBranch | RefKind::Tag
+                )
+            };
+            tips.extend(repo.refs.iter().filter(branch_or_tag).map(|r| r.target));
+            tips.extend(repo.head_commit());
+        }
         let mut children = vec![0u32; n];
         let mut selected = 0usize;
-        for &c in &self.tips {
+        for &c in &tips {
             if state[c.ix()] == State::Unseen {
                 state[c.ix()] = State::Selected;
                 selected += 1;
@@ -117,7 +148,7 @@ impl LogQuery {
             }
         }
         while let Some(c) = stack.pop() {
-            for &p in &repo.commit(c).parents {
+            for &p in walk_parents(c) {
                 match state[p.ix()] {
                     State::Excluded => {}
                     State::Selected => children[p.ix()] += 1,
@@ -130,47 +161,161 @@ impl LogQuery {
                 }
             }
         }
-
-        // git's topological sort by commit date (`sort_in_topological_order`): a commit becomes
-        // ready once all its children are out, and the newest ready commit goes next. Ties go
-        // to the commit that became ready first, as in git's priority queue.
-        let mut ready = BinaryHeap::new();
-        let mut seq = 0u32;
-        let mut push = |ready: &mut BinaryHeap<Ready>, c: CommitIx| {
-            ready.push(Ready {
-                time: repo.commit(c).commit_time,
-                seq: Reverse(seq),
-                commit: c,
-            });
-            seq += 1;
+        let fork = |c: CommitIx, children: &[u32]| children[c.ix()] > 1;
+        let forks: Vec<bool> = if options.branchings_only {
+            (0..n)
+                .map(|c| fork(CommitIx(c as u32), &children))
+                .collect()
+        } else {
+            Vec::new()
         };
+
         // Initial candidates in snapshot order, which is git's own date order.
-        let mut tips: Vec<CommitIx> = self
-            .tips
-            .iter()
-            .copied()
-            .filter(|c| state[c.ix()] == State::Selected && children[c.ix()] == 0)
-            .collect();
+        tips.retain(|c| state[c.ix()] == State::Selected && children[c.ix()] == 0);
         tips.sort_unstable();
         tips.dedup();
-        for c in tips {
-            push(&mut ready, c);
-        }
-        let mut out = Vec::with_capacity(selected);
-        while let Some(Ready { commit, .. }) = ready.pop() {
-            out.push(commit);
-            for &p in &repo.commit(commit).parents {
-                if state[p.ix()] == State::Selected {
-                    children[p.ix()] -= 1;
-                    if children[p.ix()] == 0 {
-                        push(&mut ready, p);
+        let mut order = Vec::with_capacity(selected);
+        match options.order {
+            LogOrder::Date => {
+                // git's topological sort by commit date (`sort_in_topological_order`): a commit
+                // becomes ready once all its children are out, and the newest ready commit goes
+                // next. Ties go to the commit that became ready first, as in git's priority
+                // queue.
+                let mut ready = BinaryHeap::new();
+                let mut seq = 0u32;
+                let mut push = |ready: &mut BinaryHeap<Ready>, c: CommitIx| {
+                    ready.push(Ready {
+                        time: repo.commit(c).commit_time,
+                        seq: Reverse(seq),
+                        commit: c,
+                    });
+                    seq += 1;
+                };
+                for &c in &tips {
+                    push(&mut ready, c);
+                }
+                while let Some(Ready { commit, .. }) = ready.pop() {
+                    order.push(commit);
+                    for &p in walk_parents(commit) {
+                        if state[p.ix()] == State::Selected {
+                            children[p.ix()] -= 1;
+                            if children[p.ix()] == 0 {
+                                push(&mut ready, p);
+                            }
+                        }
+                    }
+                }
+            }
+            LogOrder::Topological => {
+                // git's `--topo-order`: the same sort with a stack for a queue, so a commit's
+                // ancestors follow it until they reach one that has children still to come.
+                // The tips start in date order, and a merge's last parent comes out first.
+                let mut ready: Vec<CommitIx> = tips.iter().rev().copied().collect();
+                while let Some(commit) = ready.pop() {
+                    order.push(commit);
+                    for &p in walk_parents(commit) {
+                        if state[p.ix()] == State::Selected {
+                            children[p.ix()] -= 1;
+                            if children[p.ix()] == 0 {
+                                ready.push(p);
+                            }
+                        }
                     }
                 }
             }
         }
-        debug_assert_eq!(out.len(), selected);
+        debug_assert_eq!(order.len(), selected);
+
+        // Which commits are listed, and the listed commits each one stands for: itself, or
+        // for one left out, what its parents stand for. Parents come after their children, so
+        // going backwards meets every parent first.
+        let refs = options.branchings_only.then(|| repo.refs_by_commit());
+        let head = repo.head_commit();
+        let listed = |c: CommitIx| {
+            let parents = walk_parents(c);
+            (!options.no_merges || repo.commit(c).parents.len() < 2)
+                && (!options.branchings_only
+                    || parents.len() != 1
+                    || forks[c.ix()]
+                    || Some(c) == head
+                    || self.tips.contains(&c)
+                    || refs.as_ref().is_some_and(|refs| !refs[c.ix()].is_empty()))
+        };
+        let mut stands_for: Vec<Vec<CommitIx>> = vec![Vec::new(); n];
+        let mut beyond = vec![false; n];
+        let mut out = LogList::default();
+        for &c in order.iter().rev() {
+            let mut parents = Vec::new();
+            let mut outside = false;
+            for &p in walk_parents(c) {
+                if state[p.ix()] == State::Selected {
+                    for &q in &stands_for[p.ix()] {
+                        if !parents.contains(&q) {
+                            parents.push(q);
+                        }
+                    }
+                    outside |= beyond[p.ix()];
+                } else {
+                    outside = true;
+                }
+            }
+            if listed(c) {
+                stands_for[c.ix()] = vec![c];
+                out.commits.push(c);
+                out.parents.push(parents);
+                out.outside.push(outside);
+            } else {
+                stands_for[c.ix()] = parents;
+                beyond[c.ix()] = outside;
+            }
+        }
+        out.commits.reverse();
+        out.parents.reverse();
+        out.outside.reverse();
         out
     }
+}
+
+/// Which commits the log walks and how it orders them: TortoiseGit's All Branches and walk
+/// behaviour.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogOptions {
+    /// Also walk from every branch, remote branch and tag, and from HEAD (`git log --branches
+    /// --remotes --tags HEAD`); a range's exclusions still apply.
+    pub all_branches: bool,
+    /// Follow only first parents (`--first-parent`).
+    pub first_parent: bool,
+    /// Leave out merges (`--no-merges`).
+    pub no_merges: bool,
+    /// List only the commits where history branches or joins, and those with refs: forks,
+    /// merges, roots and tips (the revision graph's "Branchings and merges").
+    pub branchings_only: bool,
+    pub order: LogOrder,
+}
+
+/// The order of the log.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LogOrder {
+    /// `git log --topo-order`, TortoiseGit's default: a branch's commits stay together.
+    #[default]
+    Topological,
+    /// `git log --date-order`: newest first, never a parent before its children.
+    Date,
+}
+
+/// The result of [`LogQuery::list`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LogList {
+    /// The listed commits, in order.
+    pub commits: Vec<CommitIx>,
+    /// For each listed commit, the parents the log shows: its parents in the walk, where one
+    /// that is left out (a merge with [`LogOptions::no_merges`], say) is replaced by the
+    /// listed commits it stands for. Always listed below the commit.
+    pub parents: Vec<Vec<CommitIx>>,
+    /// For each listed commit, true if some of its history is outside the log: a parent in a
+    /// range's excluded part.
+    pub outside: Vec<bool>,
 }
 
 /// The label of a [`LogQuery`]: `to` alone, or `from..to` for a range.

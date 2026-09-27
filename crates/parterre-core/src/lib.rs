@@ -11,6 +11,7 @@ pub mod glyphs;
 pub mod icon;
 pub mod layout;
 pub mod log;
+pub mod log_graph;
 pub mod log_layout;
 pub mod oid;
 pub mod pattern;

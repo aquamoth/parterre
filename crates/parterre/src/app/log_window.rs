@@ -3,7 +3,11 @@
 //! a time; Show log on other nodes replaces its contents. Decided in #27, #28 and #29; the
 //! prototype is on the branch `prototype/log-window`.
 //!
-//! The window is handed a [`LogQuery`] and knows nothing about the graph. Its three panes are
+//! The commit list has a graph column of lanes, as TortoiseGit's log does ([`LogGraph`]), and
+//! the header has TortoiseGit's walk options ([`LogOptions`]); both chosen with the prototype on
+//! the branch `prototype/log-graph`.
+//!
+//! The window is handed a [`LogQuery`] and knows nothing about the revision graph. Its three panes are
 //! separate functions that a [`LogLayout`] arranges; the layout is picked in the header or in
 //! the settings, and it and the dividers of each layout are saved with the settings.
 
@@ -17,7 +21,8 @@ use eframe::egui::{
 use parterre_core::blame::BlameSpec;
 use parterre_core::file_diff::{FileDiffSpec, Rev};
 use parterre_core::glyphs::{self, Glyph};
-use parterre_core::log::LogQuery;
+use parterre_core::log::{LogOptions, LogOrder, LogQuery};
+use parterre_core::log_graph::{GraphRow, LogGraph};
 use parterre_core::log_layout::LogLayout;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{find_urls, thousands};
@@ -25,7 +30,7 @@ use parterre_core::{Commit, CommitIx, GitRef, Oid, Repo};
 
 use super::compare_window::CompareRequest;
 use super::file_table::{DiffQueue, FileTable, Lister, Listing};
-use super::{Messages, ParterreApp};
+use super::{Details, ParterreApp};
 use crate::settings::LogWindowSettings;
 use crate::text_size;
 use crate::theme::{Palette, text_on};
@@ -33,6 +38,13 @@ use crate::widgets;
 
 /// Height of a commit row.
 const ROW: f32 = 24.0;
+/// Width of a lane of the graph column, and the margin on either side of the lanes.
+const GRAPH_LANE: f32 = 11.0;
+const GRAPH_PAD: f32 = 4.0;
+/// The graph column grows to this many lanes, and only while the subject keeps this much room;
+/// lanes further right are cut off.
+const GRAPH_MAX_LANES: usize = 24;
+const GRAPH_SUBJECT_ROOM: f32 = 220.0;
 /// Height of a table's column headings.
 pub(super) const HEADING: f32 = 26.0;
 /// Thickness of the draggable dividers between panes.
@@ -103,7 +115,11 @@ struct LogView {
     /// [`Repo::refs_by_commit`] of `repo`.
     refs: Vec<Vec<usize>>,
     query: LogQuery,
+    /// The walk options the list was made with.
+    options: LogOptions,
     commits: Vec<CommitIx>,
+    /// The graph column's lanes, a row for each of `commits`.
+    graph: LogGraph,
     /// Index into `commits`.
     selected: Option<usize>,
     /// Scroll the list to the selected row in the next frame.
@@ -115,15 +131,17 @@ struct LogView {
 }
 
 impl LogView {
-    fn new(id: u64, repo: Arc<Repo>, query: LogQuery) -> LogView {
-        let commits = query.run(&repo);
+    fn new(id: u64, repo: Arc<Repo>, query: LogQuery, options: LogOptions) -> LogView {
+        let list = query.list(&repo, &options);
         LogView {
             id,
             refs: repo.refs_by_commit(),
             repo,
             query,
-            selected: (!commits.is_empty()).then_some(0),
-            commits,
+            options,
+            selected: (!list.commits.is_empty()).then_some(0),
+            graph: LogGraph::new(&list),
+            commits: list.commits,
             reveal: true,
             scroll: 0.0,
             list_height: 0.0,
@@ -137,6 +155,19 @@ impl LogView {
     /// Re-runs the query on a newly loaded snapshot, keeping the selected commit if it is still
     /// listed. Commits of the query that are gone from the snapshot are dropped from it.
     fn reload(&mut self, repo: Arc<Repo>) {
+        self.rebuild(repo, self.options);
+    }
+
+    /// Re-runs the query with other walk options, keeping the selected commit in view if it is
+    /// still listed.
+    fn set_options(&mut self, options: LogOptions) {
+        self.rebuild(self.repo.clone(), options);
+        self.reveal = true;
+    }
+
+    /// Re-runs the query on `repo` with `options`, keeping the selected commit if it is still
+    /// listed, and the scroll position.
+    fn rebuild(&mut self, repo: Arc<Repo>, options: LogOptions) {
         let selected = self.selected_commit().map(|c| self.repo.commit(c).oid);
         let map = |commits: &[CommitIx]| -> Vec<CommitIx> {
             commits
@@ -148,7 +179,7 @@ impl LogView {
         query.tips = map(&self.query.tips);
         query.exclude = map(&self.query.exclude);
         let (scroll, height) = (self.scroll, self.list_height);
-        *self = LogView::new(self.id, repo, query);
+        *self = LogView::new(self.id, repo, query, options);
         (self.scroll, self.list_height) = (scroll, height);
         if let Some(oid) = selected {
             let at = self.repo.lookup(&oid);
@@ -169,7 +200,7 @@ enum Pane {
 
 /// What the panes need from the app besides the log window's own state.
 struct Env<'a> {
-    messages: &'a mut Messages,
+    details: &'a mut Details,
     palette: Palette,
     graph: &'a GraphOptions,
     /// The layout and the dividers.
@@ -326,6 +357,8 @@ pub(super) struct Colors {
     pub(super) added: Color32,
     pub(super) removed: Color32,
     pub(super) renamed: Color32,
+    /// The graph column's lanes, in turn.
+    pub(super) lanes: [Color32; 8],
 }
 
 pub(super) fn colors(ui: &Ui) -> Colors {
@@ -342,6 +375,16 @@ pub(super) fn colors(ui: &Ui) -> Colors {
             added: Color32::from_rgb(0x7b, 0xd8, 0x8f),
             removed: Color32::from_rgb(0xff, 0x8a, 0x80),
             renamed: Color32::from_rgb(0xd1, 0xa5, 0xff),
+            lanes: [
+                Color32::from_rgb(0xef, 0x53, 0x50),
+                Color32::from_rgb(0x42, 0xa5, 0xf5),
+                Color32::from_rgb(0x66, 0xbb, 0x6a),
+                Color32::from_rgb(0xff, 0xa7, 0x26),
+                Color32::from_rgb(0xab, 0x47, 0xbc),
+                Color32::from_rgb(0x26, 0xc6, 0xda),
+                Color32::from_rgb(0xec, 0x40, 0x7a),
+                Color32::from_rgb(0xa1, 0x88, 0x7f),
+            ],
         }
     } else {
         Colors {
@@ -355,18 +398,28 @@ pub(super) fn colors(ui: &Ui) -> Colors {
             added: Color32::from_rgb(0x2e, 0x7d, 0x32),
             removed: Color32::from_rgb(0xc6, 0x28, 0x28),
             renamed: Color32::from_rgb(0x6a, 0x1b, 0x9a),
+            lanes: [
+                Color32::from_rgb(0xd3, 0x2f, 0x2f),
+                Color32::from_rgb(0x19, 0x76, 0xd2),
+                Color32::from_rgb(0x38, 0x8e, 0x3c),
+                Color32::from_rgb(0xf5, 0x7c, 0x00),
+                Color32::from_rgb(0x7b, 0x1f, 0xa2),
+                Color32::from_rgb(0x00, 0x83, 0x8f),
+                Color32::from_rgb(0xc2, 0x18, 0x5b),
+                Color32::from_rgb(0x5d, 0x40, 0x37),
+            ],
         }
     }
 }
 
 impl LogWindow {
     /// Shows `query` on `repo`, in place of what the window showed before.
-    fn open(&mut self, repo: Arc<Repo>, query: LogQuery, size: Vec2) {
+    fn open(&mut self, repo: Arc<Repo>, query: LogQuery, options: LogOptions, size: Vec2) {
         if self.view.is_none() {
             self.size = size;
         }
         self.opened += 1;
-        self.view = Some(LogView::new(self.opened, repo, query));
+        self.view = Some(LogView::new(self.opened, repo, query, options));
     }
 
     pub fn is_open(&self) -> bool {
@@ -458,13 +511,18 @@ impl LogWindow {
     fn contents(&mut self, ui: &mut Ui, env: &mut Env) {
         let c = colors(ui);
         self.header(ui, &c, env);
+        if let Some(view) = &mut self.view
+            && view.options != env.settings.options
+        {
+            view.set_options(env.settings.options);
+        }
         let body = ui.available_rect_before_wrap();
         self.body(ui, body, env);
         self.diffs.confirm_many(ui, Id::new("log-many-diffs"));
     }
 
     /// The range at the top left, as TortoiseGit shows it; on the right the commit count, the
-    /// layout picker and the button that resets the layout's dividers.
+    /// walk options, the layout picker and the button that resets the layout's dividers.
     fn header(&mut self, ui: &mut Ui, c: &Colors, env: &mut Env) {
         let Some(view) = &self.view else { return };
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
@@ -475,6 +533,8 @@ impl LogWindow {
         );
         tools.spacing_mut().item_spacing.x = 4.0;
         layout_tools(&mut tools, env.settings);
+        tools.add_space(12.0);
+        walk_tools(&mut tools, &mut env.settings.options);
         if let (Some(&from), Some(&to)) = (view.query.exclude.first(), view.query.tips.first()) {
             tools.add_space(8.0);
             let compare = widgets::tip_explained(
@@ -568,8 +628,8 @@ impl LogWindow {
         }
     }
 
-    /// The commit list: short hash, ref badges and subject, author, date. Virtualised; the rows
-    /// are painted directly.
+    /// The commit list: the graph, short hash, ref badges and subject, author, date.
+    /// Virtualised; the rows are painted directly.
     fn commits_pane(&mut self, ui: &mut Ui, env: &mut Env, c: &Colors) {
         let Some(view) = &mut self.view else { return };
         let mono = FontId::monospace(12.0);
@@ -588,7 +648,17 @@ impl LogWindow {
             (AUTHOR_WIDTH, DATE_WIDTH)
         };
 
+        // Only as wide as leaves the subject its room.
+        let graph_width = if view.graph.lanes == 0 {
+            0.0
+        } else {
+            let lanes = view.graph.lanes.min(GRAPH_MAX_LANES) as f32 * GRAPH_LANE;
+            let room =
+                ui.available_width() - hash_width - author_width - date_width - GRAPH_SUBJECT_ROOM;
+            lanes.min(room.max(3.0 * GRAPH_LANE)) + 2.0 * GRAPH_PAD
+        };
         let columns = |width: f32, left: f32| {
+            let (width, left) = (width - graph_width, left + graph_width);
             let subject = (width - hash_width - author_width - date_width).max(80.0);
             let x = [
                 left,
@@ -604,6 +674,19 @@ impl LogWindow {
         let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADING), Sense::hover());
         heading_background(ui, head, c);
         let (x, w) = columns(head.width(), head.left());
+        let title = ui
+            .painter()
+            .layout_no_wrap("Graph".into(), FontId::proportional(12.0), weak);
+        if title.size().x + 2.0 * GRAPH_PAD <= graph_width {
+            ui.painter().galley(
+                pos2(
+                    head.left() + GRAPH_PAD,
+                    head.center().y - title.size().y / 2.0,
+                ),
+                title,
+                weak,
+            );
+        }
         for (i, title) in ["Hash", "Subject", "Author", "Date"]
             .into_iter()
             .enumerate()
@@ -648,7 +731,8 @@ impl LogWindow {
         let mut request = None;
         let head = view.repo.head_commit().map(|c| view.repo.commit(c).oid);
         let output = area.show_rows(ui, ROW, view.commits.len(), |ui, range| {
-            for i in range {
+            let graph = view.graph.rows(range.clone());
+            for (i, graph) in range.zip(&graph) {
                 let commit = view.repo.commit(view.commits[i]);
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
@@ -673,6 +757,8 @@ impl LogWindow {
                 let (x, w) = columns(rect.width(), rect.left());
                 let y = rect.center().y;
                 let painter = ui.painter();
+                let graph_rect = Rect::from_min_size(rect.min, vec2(graph_width, ROW));
+                paint_graph(painter, graph_rect, graph, c, bg);
                 let put = |g: Arc<Galley>, x: f32, color| {
                     painter.galley(pos2(x, y - g.size().y / 2.0), g, color);
                 };
@@ -759,8 +845,9 @@ impl LogWindow {
         }
     }
 
-    /// The selected commit: full hash, author and date, each with a Copy button where it helps,
-    /// then the full message. The text is selectable, and web links open in the browser.
+    /// The selected commit as `git log` shows it: full hash, refs, a merge's parents, author and
+    /// date, each with a Copy button where it helps, the committer where it differs, then the
+    /// full message and the notes. The text is selectable, and web links open in the browser.
     fn details_pane(&mut self, ui: &mut Ui, env: &mut Env, c: &Colors) {
         let Some(view) = &self.view else { return };
         let Some(ix) = view.selected_commit() else {
@@ -777,8 +864,15 @@ impl LogWindow {
                 .request_repaint_after(std::time::Duration::from_millis(200));
         }
         let mut copy = None;
+        let mut jump = None;
         let ctx = ui.ctx().clone();
-        let message = env.messages.get(&view.repo.path, commit.oid, &ctx);
+        let details = env.details.get(&view.repo.path, commit.oid, &ctx);
+        let loaded = details.and_then(|d| d.as_ref().ok());
+        let refs: Vec<&GitRef> = view.refs[ix.ix()]
+            .iter()
+            .map(|&r| &view.repo.refs[r])
+            .filter(|r| env.graph.shows(r.kind))
+            .collect();
         ScrollArea::vertical()
             .id_salt(("log-details", commit.oid))
             .auto_shrink(false)
@@ -787,46 +881,79 @@ impl LogWindow {
                     .inner_margin(Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        egui::Grid::new("log-meta")
-                            .num_columns(2)
-                            .spacing(vec2(12.0, 4.0))
-                            .show(ui, |ui| {
-                                ui.weak("Commit");
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(commit.oid.to_hex()).monospace());
-                                    if copy_button(ui, copied == Some(Copied::Hash), c)
-                                        .on_hover_text("Copy the full hash")
-                                        .clicked()
-                                    {
-                                        ui.ctx().copy_text(commit.oid.to_hex());
-                                        copy = Some(Copied::Hash);
-                                    }
-                                });
-                                ui.end_row();
-                                ui.weak("Author");
-                                ui.horizontal(|ui| {
-                                    ui.label(format!(
-                                        "{} <{}>",
-                                        commit.author_name, commit.author_email
-                                    ));
-                                    if copy_button(ui, copied == Some(Copied::Email), c)
-                                        .on_hover_text("Copy the email address")
-                                        .clicked()
-                                    {
-                                        ui.ctx().copy_text(commit.author_email.clone());
-                                        copy = Some(Copied::Email);
-                                    }
-                                });
-                                ui.end_row();
-                                ui.weak("Date");
-                                ui.label(&commit.author_date);
-                                ui.end_row();
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        let label_width = field_label_width(ui);
+                        field(ui, label_width, "Commit", |ui| {
+                            ui.label(RichText::new(commit.oid.to_hex()).monospace());
+                            if copy_button(ui, copied == Some(Copied::Hash), c)
+                                .on_hover_text("Copy the full hash")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(commit.oid.to_hex());
+                                copy = Some(Copied::Hash);
+                            }
+                        });
+                        if !refs.is_empty() {
+                            field(ui, label_width, "Refs", |ui| {
+                                for r in &refs {
+                                    badge_widget(ui, r, &env.palette);
+                                }
                             });
+                        }
+                        if commit.parents.len() > 1 {
+                            field(ui, label_width, "Merge", |ui| {
+                                for &p in &commit.parents {
+                                    if let Some(row) = parent_link(ui, view, p) {
+                                        jump = Some(row);
+                                    }
+                                }
+                            });
+                        }
+                        field(ui, label_width, "Author", |ui| {
+                            ui.label(format!("{} <{}>", commit.author_name, commit.author_email));
+                            if copy_button(ui, copied == Some(Copied::Email), c)
+                                .on_hover_text("Copy the email address")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(commit.author_email.clone());
+                                copy = Some(Copied::Email);
+                            }
+                        });
+                        // To the minute in local time until git has said more.
+                        let date = loaded.map_or(&commit.author_date, |d| &d.author_date);
+                        field(ui, label_width, "Date", |ui| ui.label(date));
+                        // The committer only where it differs from the author.
+                        if let Some(d) = loaded {
+                            let committer = (d.committer_name.as_str(), d.committer_email.as_str());
+                            if committer != (&commit.author_name, &commit.author_email) {
+                                field(ui, label_width, "Committer", |ui| {
+                                    ui.label(format!("{} <{}>", committer.0, committer.1))
+                                });
+                            }
+                            if d.committer_date != d.author_date {
+                                field(ui, label_width, "Committed", |ui| {
+                                    ui.label(&d.committer_date)
+                                });
+                            }
+                        }
                         ui.add_space(10.0);
-                        match message {
-                            Some(message) => message_ui(ui, message),
+                        match details {
+                            Some(Ok(d)) => {
+                                message_ui(ui, &d.message, true);
+                                for note in &d.notes {
+                                    ui.add_space(10.0);
+                                    ui.weak(&note.heading);
+                                    ui.add_space(2.0);
+                                    message_ui(ui, &note.text, false);
+                                }
+                            }
+                            Some(Err(e)) => {
+                                message_ui(ui, &commit.subject, true);
+                                ui.add_space(6.0);
+                                ui.colored_label(ui.visuals().error_fg_color, e);
+                            }
                             None => {
-                                message_ui(ui, &commit.subject);
+                                message_ui(ui, &commit.subject, true);
                                 ui.spinner();
                             }
                         }
@@ -834,6 +961,12 @@ impl LogWindow {
             });
         if let Some(what) = copy {
             self.copied = Some((what, now));
+        }
+        if let Some(row) = jump
+            && let Some(view) = &mut self.view
+        {
+            view.selected = Some(row);
+            view.reveal = true;
         }
     }
 
@@ -1071,6 +1204,124 @@ fn layout_tools(ui: &mut Ui, settings: &mut LogWindowSettings) {
     }
 }
 
+/// One row of the graph column in `rect`: each line in the colour of the lane it runs in,
+/// then the commit's dot, a ring for a merge. `bg` is the row's background over the pane's.
+fn paint_graph(
+    painter: &egui::Painter,
+    rect: Rect,
+    row: &GraphRow,
+    c: &Colors,
+    bg: Option<Color32>,
+) {
+    if rect.width() <= 0.0 {
+        return;
+    }
+    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+    let x = |lane: usize| rect.left() + GRAPH_PAD + (lane as f32 + 0.5) * GRAPH_LANE;
+    let color = |lane: usize| c.lanes[lane % c.lanes.len()];
+    let (top, mid, bottom) = (rect.top(), rect.center().y, rect.bottom());
+    let stroke = |lane| Stroke::new(1.6, color(lane));
+    for line in &row.upper {
+        let points = [pos2(x(line.from), top), pos2(x(line.to), mid)];
+        painter.line_segment(points, stroke(line.from));
+    }
+    for line in &row.lower {
+        let points = [pos2(x(line.from), mid), pos2(x(line.to), bottom)];
+        painter.line_segment(points, stroke(line.to));
+    }
+    let centre = pos2(x(row.lane), mid);
+    if centre.x > rect.right() - GRAPH_PAD {
+        // The commit's lane is cut off: point to it from the edge.
+        let tip = pos2(rect.right() - 1.0, mid);
+        let arrow = vec![tip, tip + vec2(-5.0, -4.0), tip + vec2(-5.0, 4.0)];
+        let shape = egui::Shape::convex_polygon(arrow, color(row.lane), Stroke::NONE);
+        painter.add(shape);
+        return;
+    }
+    if row.outside {
+        // History that goes on outside the log; aside if a line in the log goes down too.
+        let weak = Stroke::new(1.4, painter.ctx().global_style().visuals.weak_text_color());
+        let aside = row.lower.iter().any(|l| l.from == row.lane);
+        let end_x = centre.x + if aside { 0.6 * GRAPH_LANE } else { 0.0 };
+        let points = [centre, pos2(end_x, bottom)];
+        painter.extend(egui::Shape::dashed_line(&points, weak, 2.0, 2.0));
+    }
+    const R: f32 = 3.5;
+    if row.merge {
+        painter.circle_filled(centre, R, c.pane);
+        if let Some(bg) = bg {
+            painter.circle_filled(centre, R, bg);
+        }
+        painter.circle_stroke(centre, R, Stroke::new(1.8, color(row.lane)));
+    } else {
+        painter.circle_filled(centre, R, color(row.lane));
+    }
+}
+
+/// Which commits the log lists and in what order, as toggles and order segments. In a
+/// right-to-left layout.
+fn walk_tools(ui: &mut Ui, options: &mut LogOptions) {
+    let order = [
+        (LogOrder::Topological, glyphs::ORDER_TOPOLOGICAL),
+        (LogOrder::Date, glyphs::ORDER_DATE),
+    ];
+    let chosen = widgets::segmented(ui, options.order, &order, |o, r| match o {
+        LogOrder::Topological => widgets::tip_explained(
+            r,
+            "Topological order",
+            "",
+            "Each branch's commits together, parents after their children. TortoiseGit's \
+             default.",
+        ),
+        LogOrder::Date => widgets::tip_explained(
+            r,
+            "Date order",
+            "",
+            "Newest first, the branches' commits interleaved; parents still after their \
+             children.",
+        ),
+    });
+    if let Some(o) = chosen {
+        options.order = o;
+    }
+    ui.add_space(8.0);
+    let toggles = [
+        (
+            &mut options.branchings_only,
+            glyphs::BRANCHINGS,
+            "Branchings and merges only",
+            "List only the commits where history branches or joins, and those with refs; the \
+             ones in between are left out.",
+        ),
+        (
+            &mut options.no_merges,
+            glyphs::NO_MERGES,
+            "No merges",
+            "Leave merge commits out.",
+        ),
+        (
+            &mut options.first_parent,
+            glyphs::FIRST_PARENT,
+            "First parent only",
+            "Follow only the first parent of each merge, so the commits it merged in are left \
+             out.",
+        ),
+        (
+            &mut options.all_branches,
+            glyphs::ALL_BRANCHES,
+            "All branches",
+            "Also list the commits of every branch, remote branch and tag, not only the \
+             history the log was opened on.",
+        ),
+    ];
+    for (on, glyph, title, body) in toggles {
+        let response = widgets::icon_button(ui, glyph, *on);
+        if widgets::tip_explained(response, title, "", body).clicked() {
+            *on = !*on;
+        }
+    }
+}
+
 /// The four layouts as icon segments, each named in its tooltip. Returns the one clicked.
 pub fn layout_picker(ui: &mut Ui, current: LogLayout) -> Option<LogLayout> {
     let items = LogLayout::ALL.map(|l| (l, layout_glyph(l)));
@@ -1102,9 +1353,81 @@ fn copy_button(ui: &mut Ui, copied: bool, c: &Colors) -> Response {
     response
 }
 
-/// A commit message, subject in the strong colour, monospaced as in a terminal. The text is
-/// selectable; `http(s)` links are clickable.
-fn message_ui(ui: &mut Ui, message: &str) {
+/// Height of a line of the selected commit's fields: that of a Copy button.
+const FIELD: f32 = 20.0;
+/// The names of the selected commit's fields.
+const FIELD_LABELS: [&str; 7] = [
+    "Commit",
+    "Refs",
+    "Merge",
+    "Author",
+    "Date",
+    "Committer",
+    "Committed",
+];
+
+/// The width of the column of field names: the widest name and a gap.
+fn field_label_width(ui: &Ui) -> f32 {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let widest = FIELD_LABELS
+        .iter()
+        .map(|&l| {
+            ui.painter()
+                .layout_no_wrap(l.to_owned(), font.clone(), Color32::PLACEHOLDER)
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    widest + 12.0
+}
+
+/// One of the selected commit's fields: its name in a column `label_width` wide, then what
+/// `add` adds, wrapping onto more lines where it has to.
+fn field<R>(ui: &mut Ui, label_width: f32, label: &str, add: impl FnOnce(&mut Ui) -> R) {
+    debug_assert!(FIELD_LABELS.contains(&label));
+    ui.horizontal_top(|ui| {
+        let centred = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(vec2(label_width, FIELD), centred, |ui| {
+            ui.set_min_size(vec2(label_width, FIELD));
+            ui.weak(label);
+        });
+        let width = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(width, FIELD), centred.with_main_wrap(true), |ui| {
+            ui.set_min_height(FIELD);
+            add(ui);
+        });
+    });
+}
+
+/// A ref's badge (see [`badge`]) laid out in `ui`.
+fn badge_widget(ui: &mut Ui, git_ref: &GitRef, palette: &Palette) {
+    let text = ui.painter().layout_no_wrap(
+        git_ref.name.clone(),
+        FontId::proportional(11.5),
+        Color32::PLACEHOLDER,
+    );
+    let (rect, _) = ui.allocate_exact_size(vec2(text.size().x + 11.0, 17.0), Sense::hover());
+    badge(ui, git_ref, palette, rect.left_center(), rect.width());
+}
+
+/// A merge parent's short hash, as `git log`'s `Merge:` line has it. A link to the parent's
+/// row if the log lists it: returns that row when clicked. Otherwise plain, weak text.
+fn parent_link(ui: &mut Ui, view: &LogView, parent: CommitIx) -> Option<usize> {
+    let text = RichText::new(view.repo.commit(parent).oid.short(view.repo.abbrev_len)).monospace();
+    let Some(row) = view.commits.iter().position(|&c| c == parent) else {
+        ui.label(text.color(ui.visuals().weak_text_color()))
+            .on_hover_text("Not in this log");
+        return None;
+    };
+    let link = ui
+        .link(text.color(widgets::tones(ui).on_fg))
+        .on_hover_text("Show this commit");
+    link.clicked().then_some(row)
+}
+
+/// A commit message or note, monospaced as in a terminal; a message's subject in the strong
+/// colour. The text is selectable; `http(s)` links are clickable.
+fn message_ui(ui: &mut Ui, message: &str, subject: bool) {
     let font = FontId::monospace(12.5);
     let text = ui.visuals().text_color();
     let strong = ui.visuals().strong_text_color();
@@ -1122,8 +1445,9 @@ fn message_ui(ui: &mut Ui, message: &str) {
     };
     for (n, line) in message.trim_end().lines().enumerate() {
         let urls = find_urls(line);
-        let color = if n == 0 { strong } else { text };
-        if urls.is_empty() && n > 0 {
+        let first = subject && n == 0;
+        let color = if first { strong } else { text };
+        if urls.is_empty() && !first {
             plain.push_str(if line.is_empty() { " " } else { line });
             plain.push('\n');
             continue;
@@ -1182,7 +1506,8 @@ impl ParterreApp {
         };
         let was_open = self.log.is_open();
         let [w, h] = self.settings.log_window.size;
-        self.log.open(repo, query, vec2(w, h));
+        let options = self.settings.log_window.options;
+        self.log.open(repo, query, options, vec2(w, h));
         if was_open {
             self.focus_log = true;
         }
@@ -1245,7 +1570,7 @@ impl ParterreApp {
             }
             let palette = Palette::new(ui.visuals().dark_mode, &self.settings.branch_colors);
             let mut env = Env {
-                messages: &mut self.messages,
+                details: &mut self.details,
                 palette,
                 graph: &self.settings.graph,
                 settings: &mut self.settings.log_window,

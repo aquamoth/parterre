@@ -326,11 +326,64 @@ impl Git {
     }
 }
 
+/// What `git log` shows of a commit beyond what [`Git::load`] reads for every commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitDetails {
+    /// The full message: subject and body.
+    pub message: String,
+    /// The author date to the second, in the author's time zone (`2026-09-27 08:14:19 +0200`).
+    pub author_date: String,
+    pub committer_name: String,
+    pub committer_email: String,
+    /// The committer date, like [`CommitDetails::author_date`].
+    pub committer_date: String,
+    /// The commit's notes from the refs `git log` shows notes from, in its order.
+    pub notes: Vec<CommitNote>,
+}
+
+/// The note of one notes ref on a commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitNote {
+    /// `Notes` for the default notes ref, `Notes (review)` for `refs/notes/review`.
+    pub heading: String,
+    pub text: String,
+}
+
 impl Git {
-    /// The full commit message (subject and body) of a commit.
-    pub fn message(&self, oid: &Oid) -> Result<String, GitError> {
-        let out = self.run(&["log", "-1", "--no-color", "--format=%B", &oid.to_hex()])?;
-        Ok(out.trim_end().to_owned())
+    /// The message, dates, committer and notes of a commit.
+    pub fn details(&self, oid: &Oid) -> Result<CommitDetails, GitError> {
+        let hex = oid.to_hex();
+        let out = self.run(&[
+            "log",
+            "-1",
+            "--no-color",
+            "--format=%ai%x00%cn%x00%ce%x00%ci%x00%B",
+            &hex,
+        ])?;
+        let mut fields = out.splitn(5, '\0');
+        let mut field = || fields.next().unwrap_or_default().to_owned();
+        let (author_date, committer_name, committer_email, committer_date) =
+            (field(), field(), field(), field());
+        let message = field().trim_end().to_owned();
+        // A format of one's own gets the notes without their headings (`%N`); only git's
+        // own formats say which notes ref each comes from, as `git log` does.
+        let fuller = self.run(&[
+            "log",
+            "-1",
+            "--no-color",
+            "--no-expand-tabs",
+            "--format=fuller",
+            "--notes",
+            &hex,
+        ])?;
+        Ok(CommitDetails {
+            message,
+            author_date,
+            committer_name,
+            committer_email,
+            committer_date,
+            notes: parse_notes(&fuller),
+        })
     }
 
     /// The changed files of a commit: what it changed compared with its first parent (a root
@@ -592,6 +645,30 @@ fn added_lines(patch: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// `<rev>:<path>`, the name git reads a committed version by.
+/// The notes in `git log --format=fuller --notes` output of one commit. The headers end at the
+/// first empty line; after them, the message and every note's text are indented by four
+/// spaces, and each note starts with a heading at the start of a line.
+fn parse_notes(fuller: &str) -> Vec<CommitNote> {
+    let mut notes: Vec<CommitNote> = Vec::new();
+    for line in fuller.lines().skip_while(|l| !l.is_empty()) {
+        if let Some(heading) = line.strip_suffix(':').filter(|h| h.starts_with("Notes")) {
+            notes.push(CommitNote {
+                heading: heading.to_owned(),
+                text: String::new(),
+            });
+        } else if let Some(note) = notes.last_mut()
+            && let Some(text) = line.strip_prefix("    ")
+        {
+            note.text.push_str(text);
+            note.text.push('\n');
+        }
+    }
+    for note in &mut notes {
+        note.text.truncate(note.text.trim_end().len());
+    }
+    notes
+}
+
 fn object_name(v: &Version) -> String {
     let rev = v.rev.commit().map(|o| o.to_hex()).unwrap_or_default();
     format!("{rev}:{}", v.path)

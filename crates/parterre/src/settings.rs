@@ -3,6 +3,7 @@
 use parterre_core::blame::Moves;
 use parterre_core::file_diff::{Whitespace, WordMode};
 use parterre_core::layout::LayoutOptions;
+use parterre_core::log::LogOptions;
 use parterre_core::log_layout::{Dividers, LogLayout};
 use parterre_core::physics::NetParams;
 use parterre_core::revgraph::GraphOptions;
@@ -235,6 +236,8 @@ pub struct LogWindowSettings {
     pub layout: LogLayout,
     /// Where the dividers are, for each layout.
     pub dividers: Dividers,
+    /// Which commits the log walks, and their order.
+    pub options: LogOptions,
 }
 
 impl Default for LogWindowSettings {
@@ -243,6 +246,7 @@ impl Default for LogWindowSettings {
             size: [1100.0, 760.0],
             layout: LogLayout::default(),
             dividers: Dividers::default(),
+            options: LogOptions::default(),
         }
     }
 }
