@@ -1,23 +1,23 @@
 # parterre
 
-A standalone, fast, native re-creation of TortoiseGit's **Revision Graph**: a compact,
+A standalone, fast, native Git viewer, inspired by TortoiseGit's **Revision Graph**: a compact,
 tree-like picture of how the branches and tags of a git repository relate, in a resizable window
 that runs on Linux and Windows (and should run on macOS).
 
 A parterre is a formal garden laid out in patterns, designed above all to be seen from the upper
 floors of the house. This parterre gives you that view of a repository: every branch at once,
-from above. (Up to version 0.2 it was called gitgraph.)
+from above.
 
-On top of the TortoiseGit look you can rearrange the graph by hand. Drag a node and the rest of
-the graph gives way a little: neighbours follow along their edges and nodes in the way move
-aside, like weak magnets. Other drag modes move only the selected nodes, or a whole subtree.
-Edges at moved nodes are routed afresh through the gaps between nodes, so they lose bends they
-no longer need and go around nodes that are now in the way.
+You can rearrange the Revision Graph by hand to build a better understanding of the repository. 
+Drag a node and the rest of the graph gives way a little: neighbours follow along their edges 
+and nodes in the way move aside, like weak magnets. Other drag modes move only the selected nodes, 
+or a whole subtree. Edges at moved nodes are routed afresh through the gaps between nodes, 
+so they lose bends they no longer need and go around nodes that are now in the way.
 
 ![parterre showing a demo repository](docs/images/demo.png)
 
-_(Made with `scripts/make-demo-repo.sh`: local branches green, remote branches orange, tags
-yellow, the current branch red.)_
+_(Image displays the graph with local branches in green, remote branches in orange, 
+tags in yellow, and the current branch in red.)_
 
 ## Installing
 
