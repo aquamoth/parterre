@@ -136,7 +136,7 @@ the log or compare window and pick *Blame*, or click *Blame* in a diff window's 
 opens at the change in view). A gutter names each line's commit, author and date, shaded from
 plain (oldest) to amber (newest). Click a line to highlight every line of its commit; the bar
 at the bottom describes the commit under the pointer. Right-click a line to *Blame previous
-revision* (the file as it was before that commit, in the same window; `Alt+Left` goes back),
+revision* (the file as it was before that commit, in a new window, at that line),
 *Show changes* (that commit's diff of the file, at the line), *Show log* from the commit, or
 copy its hash. Drag or `Shift`+click to choose lines, `Ctrl+C` to copy them. The toolbar
 says whether whitespace changes and moved or copied lines count (`git blame -w`, `-M`, `-C`).

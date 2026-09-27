@@ -7,9 +7,9 @@
 //! line chooses it and its commit, whose lines are all highlighted; choosing more lines (drag,
 //! Shift+click) keeps the commit of the first, and the chosen commit stays chosen until another
 //! is. The bar at the bottom describes the commit under the pointer or chosen. A line's menu
-//! goes on from there, as TortoiseGitBlame's does: blame the version before its commit (in the
-//! same window; Back returns), show its commit's change to the file in a diff window, or show
-//! the log from its commit. The toolbar says whether whitespace changes and moved lines count,
+//! goes on from there, as TortoiseGitBlame's does: blame the version before its commit (in a
+//! window of its own, the line chosen at its place there), show its commit's change to the file
+//! in a diff window, or show the log from its commit. The toolbar says whether whitespace changes and moved lines count,
 //! remembered for the next window.
 //!
 //! Deliberate deviations from TortoiseGitBlame (see #104): no log pane of the file's
@@ -53,6 +53,8 @@ const PAD: f32 = 8.0;
 /// What a blame window asks the app for.
 #[derive(Debug)]
 pub enum BlameRequest {
+    /// A blame window for the file at another revision, with a line (from 0) chosen.
+    Blame(Arc<Repo>, BlameSpec, usize),
     /// A diff window: a line's commit's change to the file, at the line (from 0, in the new
     /// version).
     Diff(Arc<Repo>, FileDiffSpec, usize),
@@ -122,7 +124,6 @@ impl BlameWindows {
 #[derive(Debug)]
 struct Ready {
     blame: Blame,
-    options: BlameOptions,
     /// Per origin: its age among the file's commits, 0 (oldest) to 1 (newest).
     ages: Vec<f32>,
     /// Per origin: the author date as the log shows it (local time), or in the author's zone
@@ -134,7 +135,7 @@ struct Ready {
 }
 
 impl Ready {
-    fn new(blame: Blame, options: BlameOptions, repo: &Repo) -> Ready {
+    fn new(blame: Blame, repo: &Repo) -> Ready {
         let ages = blame.ages();
         let (dates, in_repo) = blame
             .origins
@@ -148,7 +149,6 @@ impl Ready {
         Ready {
             commits: blame.commit_count(),
             blame,
-            options,
             ages,
             dates,
             in_repo,
@@ -162,15 +162,6 @@ enum Load {
     Loading(mpsc::Receiver<Result<Ready, String>>),
     Ready(Box<Ready>),
     Failed(String),
-}
-
-/// A blame the window showed before "Blame previous revision", for Back.
-#[derive(Debug)]
-struct Visit {
-    spec: BlameSpec,
-    selection: Option<(usize, usize)>,
-    scroll: f32,
-    ready: Option<Box<Ready>>,
 }
 
 /// What a line's menu asked for.
@@ -194,7 +185,6 @@ struct BlameWindow {
     /// The options chosen in the toolbar, and those of the last load started.
     options: BlameOptions,
     requested: BlameOptions,
-    back: Vec<Visit>,
     /// Lines chosen, from and to (indices into the lines, either way round).
     selection: Option<(usize, usize)>,
     /// The chosen commit, whose lines are highlighted (`None` inside is uncommitted). Set with
@@ -204,7 +194,7 @@ struct BlameWindow {
     dragging: bool,
     /// Choose this line and scroll to it once loaded.
     pending_line: Option<usize>,
-    /// Scroll to this offset once loaded (a reload, or Back).
+    /// Scroll to this offset once loaded (a reload).
     pending_scroll: Option<f32>,
     /// Scroll to this offset in the next frame.
     scroll_to: Option<f32>,
@@ -240,7 +230,6 @@ impl BlameWindow {
             load: Load::Failed(String::new()),
             options,
             requested: options,
-            back: Vec::new(),
             selection: None,
             chosen: None,
             dragging: false,
@@ -264,7 +253,7 @@ impl BlameWindow {
         std::thread::spawn(move || {
             let result = git
                 .blame(&spec, options)
-                .map(|blame| Ready::new(blame, options, &repo))
+                .map(|blame| Ready::new(blame, &repo))
                 .map_err(|e| e.to_string());
             let _ = tx.send(result);
             ctx.request_repaint();
@@ -368,64 +357,25 @@ impl BlameWindow {
         }
     }
 
-    /// Blames the version before line `i`'s commit, in this window, keeping what it showed for
-    /// Back. The line's place in that commit's version is chosen, near where it came in.
-    fn blame_previous(&mut self, i: usize, ctx: &egui::Context) {
-        let Some(origin) = self.origin(i) else { return };
-        let Some(spec) = origin.previous_blame() else {
+    /// Asks for a blame of the version before line `i`'s commit, in a window of its own, with
+    /// the line's place in that version chosen, near where it came in. This window stays as it
+    /// is.
+    fn blame_previous(&self, i: usize, requests: &mut Vec<BlameRequest>) {
+        let Some(spec) = self.origin(i).and_then(Origin::previous_blame) else {
             return;
         };
-        let line = self.ready().map(|r| r.blame.lines[i].orig_line as usize);
-        let ready = match std::mem::replace(&mut self.load, Load::Failed(String::new())) {
-            Load::Ready(r) => Some(r),
-            _ => None,
-        };
-        self.back.push(Visit {
-            spec: std::mem::replace(&mut self.spec, spec),
-            selection: self.selection.take(),
-            scroll: self.scroll,
-            ready,
-        });
-        self.pending_line = line;
-        self.hoff = 0.0;
-        self.load(ctx);
-        ctx.send_viewport_cmd_to(
-            self.viewport_id(),
-            egui::ViewportCommand::Title(self.title()),
-        );
-    }
-
-    /// Back to the blame shown before "Blame previous revision".
-    fn go_back(&mut self, ctx: &egui::Context) {
-        let Some(visit) = self.back.pop() else { return };
-        self.spec = visit.spec;
-        self.selection = visit.selection;
-        self.pending_line = None;
-        self.pending_scroll = Some(visit.scroll);
-        self.hoff = 0.0;
-        match visit.ready {
-            Some(ready) => {
-                self.requested = ready.options;
-                self.load = Load::Ready(ready);
-            }
-            None => self.load(ctx),
+        if let Some(line) = self.ready().map(|r| r.blame.lines[i].orig_line as usize) {
+            requests.push(BlameRequest::Blame(self.repo.clone(), spec, line));
         }
-        ctx.send_viewport_cmd_to(
-            self.viewport_id(),
-            egui::ViewportCommand::Title(self.title()),
-        );
     }
 
-    /// Esc closes; Alt+Left goes back; Ctrl+A chooses every line.
+    /// Esc closes; Ctrl+A chooses every line.
     fn handle_keys(&mut self, ui: &Ui) {
         if ui.ctx().egui_wants_keyboard_input() {
             return;
         }
         if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A)) {
             self.select_all();
-        }
-        if ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowLeft)) {
-            self.go_back(ui.ctx());
         }
         if ui.input(|i| i.key_pressed(Key::Escape)) {
             self.closed = true;
@@ -461,7 +411,7 @@ impl BlameWindow {
         requests
     }
 
-    /// Back, then whether whitespace changes and moved lines count.
+    /// Whether whitespace changes and moved lines count.
     fn toolbar(&mut self, ui: &mut Ui, settings: &mut BlameWindowSettings) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), TOOLBAR), Sense::hover());
         ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
@@ -473,22 +423,6 @@ impl BlameWindow {
         let ui = &mut bar;
         ui.spacing_mut().item_spacing.x = 4.0;
         let weak = ui.visuals().weak_text_color();
-
-        let before = self.back.last().map(|v| self.rev_name(v.spec.rev));
-        let back = ui
-            .add_enabled_ui(before.is_some(), |ui| {
-                let text = before.map_or("Back".to_owned(), |b| format!("Back to {b}"));
-                widgets::tip(
-                    widgets::icon_button(ui, glyphs::CHEVRON_LEFT, false),
-                    &text,
-                    "Alt+Left",
-                )
-            })
-            .inner;
-        if back.clicked() {
-            self.go_back(ui.ctx());
-        }
-        ui.add_space(14.0);
 
         let spaces = [
             (false, glyphs::WHITESPACE_COMPARE),
@@ -643,10 +577,9 @@ impl BlameWindow {
         } else if let Some(offset) = self.pending_scroll.take() {
             self.scroll_to = Some(offset);
         }
-        let mut scroll =
-            ScrollArea::vertical()
-                .auto_shrink(false)
-                .id_salt(("blame", self.id, self.back.len()));
+        let mut scroll = ScrollArea::vertical()
+            .auto_shrink(false)
+            .id_salt(("blame", self.id));
         if let Some(offset) = self.scroll_to.take() {
             scroll = scroll.vertical_scroll_offset(offset.max(0.0));
         }
@@ -834,7 +767,7 @@ impl BlameWindow {
 
     fn act(&mut self, action: LineAction, ctx: &egui::Context, requests: &mut Vec<BlameRequest>) {
         match action {
-            LineAction::BlamePrevious(i) => self.blame_previous(i, ctx),
+            LineAction::BlamePrevious(i) => self.blame_previous(i, requests),
             LineAction::ShowChanges(i) => {
                 if let Some(spec) = self.origin(i).and_then(Origin::changes)
                     && let Some(line) = self.ready().map(|r| r.blame.lines[i].orig_line)
@@ -1125,6 +1058,9 @@ impl ParterreApp {
         requests.extend(self.blames.take_requests());
         for request in requests {
             match request {
+                BlameRequest::Blame(repo, spec, line) => {
+                    self.open_blame(repo, spec, Some(line), ctx);
+                }
                 BlameRequest::Diff(repo, spec, line) => {
                     let settings = &self.settings.diff_window;
                     self.diffs.open_at(repo, spec, Some(line), settings, ctx);
@@ -1227,8 +1163,7 @@ mod tests {
         };
         let settings = BlameWindowSettings::default();
         let mut w = BlameWindow::new(1, repo.clone(), spec, &settings);
-        let options = w.options;
-        w.load = Load::Ready(Box::new(Ready::new(sample(), options, &repo)));
+        w.load = Load::Ready(Box::new(Ready::new(sample(), &repo)));
         w
     }
 
@@ -1373,30 +1308,49 @@ mod tests {
     }
 
     #[test]
-    fn blaming_the_previous_revision_keeps_the_way_back() {
+    fn blaming_the_previous_revision_asks_for_a_window_of_its_own() {
         let ctx = egui::Context::default();
         let mut w = window();
         frame(&ctx, &mut w, Vec::new());
-        w.selection = Some((1, 1));
-        w.blame_previous(1, &ctx);
+        w.choose_line(1);
+        let mut requests = Vec::new();
+        w.act(LineAction::BlamePrevious(1), &ctx, &mut requests);
+        // The line's place in its commit's version is chosen there.
+        let [BlameRequest::Blame(_, spec, 1)] = requests.as_slice() else {
+            panic!("expected a blame: {requests:?}");
+        };
         assert_eq!(
-            w.spec,
+            *spec,
             BlameSpec {
                 rev: Rev::Commit(Oid::from_hex(A).unwrap()),
                 path: "a.txt".into()
             }
         );
-        // The line's place in its commit's version is chosen once the blame is there.
-        assert_eq!(w.pending_line, Some(1));
-        assert_eq!(w.back.len(), 1);
-        assert!(matches!(w.load, Load::Loading(_)));
-
-        // Back shows the blame kept, without git.
-        w.go_back(&ctx);
-        assert!(w.back.is_empty());
+        // This window stays as it was.
+        assert_eq!(w.spec.rev, Rev::Commit(Oid::from_hex(B).unwrap()));
         assert!(w.ready().is_some());
         assert_eq!(w.selection, Some((1, 1)));
-        assert_eq!(w.spec.rev, Rev::Commit(Oid::from_hex(B).unwrap()));
+    }
+
+    #[test]
+    fn opening_a_blame_already_open_brings_it_forward_with_the_line_chosen() {
+        let ctx = egui::Context::default();
+        let w = window();
+        let (repo, spec) = (w.repo.clone(), w.spec.clone());
+        let mut windows = BlameWindows {
+            windows: vec![w],
+            opened: 1,
+            requests: Vec::new(),
+        };
+        let settings = BlameWindowSettings::default();
+        windows.open(repo, spec, Some(2), &settings, &ctx);
+        let [w] = windows.windows.as_slice() else {
+            panic!("expected one window");
+        };
+        assert!(w.focus);
+        assert_eq!(w.pending_line, Some(2));
+        // Not blamed again: a commit's blame can't change.
+        assert!(w.ready().is_some());
     }
 
     #[test]

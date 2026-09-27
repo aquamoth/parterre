@@ -60,7 +60,7 @@ crates/parterre        the binary (eframe/egui)
     compare_window.rs  the compare window (Compare revisions, with HEAD, with the marked
                        commit): two commits and the files they differ in
     blame_window.rs    blame windows: a file's lines with a gutter naming their commits,
-                       shaded by age; a line's menu blames the version before (with Back),
+                       shaded by age; a line's menu blames the version before (a new window),
                        shows its change, or its log
   scene.rs             node contents and sizes + layout + physics net, hit testing
   render.rs            painting nodes, edges, arrows, overview

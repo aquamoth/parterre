@@ -64,7 +64,6 @@ pub const CHECK: Glyph = &[Part::Path("M5 12.5l4.5 4.5L19 7.5")];
 pub const CHEVRON_DOWN: Glyph = &[Part::Path("M6 9l6 6 6-6")];
 pub const CHEVRON_UP: Glyph = &[Part::Path("M6 15l6-6 6 6")];
 pub const CHEVRON_RIGHT: Glyph = &[Part::Path("M9 6l6 6-6 6")];
-pub const CHEVRON_LEFT: Glyph = &[Part::Path("M15 6l-6 6 6 6")];
 pub const ZOOM: Glyph = &[
     ring(11.0, 11.0, 6.5),
     Part::Path("M16 16l4.5 4.5M8.3 11h5.4M11 8.3v5.4"),
@@ -241,7 +240,7 @@ pub const ORDER_TOPOLOGICAL: Glyph = &[Part::Path(
 pub const ORDER_DATE: Glyph = &[ring(12.0, 12.0, 9.0), Part::Path("M12 7v5l3 2")];
 
 /// Every glyph, for tests.
-pub const ALL: [Glyph; 41] = [
+pub const ALL: [Glyph; 40] = [
     MENU,
     SEARCH,
     PLUS,
@@ -251,7 +250,6 @@ pub const ALL: [Glyph; 41] = [
     CHEVRON_DOWN,
     CHEVRON_UP,
     CHEVRON_RIGHT,
-    CHEVRON_LEFT,
     ZOOM,
     HEAD,
     OVERVIEW,
