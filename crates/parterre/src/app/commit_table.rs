@@ -155,7 +155,13 @@ impl CommitTable<'_> {
         {
             list.reveal = false;
             let top = sel as f32 * ROW;
-            let height = list.height.max(ROW);
+            // Before the rows were first shown, the room they will have.
+            let height = if list.height > 0.0 {
+                list.height
+            } else {
+                ui.available_height()
+            };
+            let height = height.max(ROW);
             if top < list.scroll {
                 area = area.vertical_scroll_offset(top);
             } else if top + ROW > list.scroll + height {

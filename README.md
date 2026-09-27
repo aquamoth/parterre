@@ -143,6 +143,15 @@ commit's diff of the file, at the line), *Show log* from the commit, or copy its
 changes and moved or copied lines count (`git blame -w`, `-M`, `-C`). Blaming the working tree
 marks the lines you haven't committed; `F5` blames again.
 
+Below the text, the **history pane** lists the commits that changed the file up to the blamed
+revision, like the log: graph, hash (in its lines' shade), subject, author, date. Commits from
+before a rename say the path the file had there; commits none of whose lines remain are greyed
+out; *Working tree changes* sits on top when the file differs from `HEAD`. Clicking a line
+selects its commit's row, and clicking a row highlights its commit's lines (the text stays
+put; the strip shows where they are). `Up` and `Down` step through the rows. Right-click a row
+to *Blame this revision*, *Show changes* (also a double-click), *Show log* or copy its hash.
+Drag the divider to resize the pane, or hide it with *History* in the toolbar.
+
 Colours follow TortoiseGit:
 
 | Label | Colour |

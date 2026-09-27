@@ -40,7 +40,7 @@ use crate::widgets;
 /// Height of a table's column headings.
 pub(super) const HEADING: f32 = 26.0;
 /// Thickness of the draggable dividers between panes.
-const DIVIDER: f32 = 6.0;
+pub(super) const DIVIDER: f32 = 6.0;
 pub(super) const CELL_PAD: f32 = 8.0;
 /// How long a Copy button says "Copied".
 const COPIED_SECONDS: f64 = 1.2;
@@ -200,14 +200,14 @@ struct Arrangement {
 /// A draggable divider, and how a pointer position turns into its fraction in
 /// [`Dividers`](parterre_core::log_layout::Dividers).
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Bar {
-    rect: Rect,
+pub(super) struct Bar {
+    pub(super) rect: Rect,
     /// Dragged sideways: a vertical bar between panes side by side.
-    vertical: bool,
+    pub(super) vertical: bool,
     /// Where the bar's middle is (along x for a vertical bar, else y) at fraction 0, and the
     /// room its fraction is of.
-    origin: f32,
-    room: f32,
+    pub(super) origin: f32,
+    pub(super) room: f32,
 }
 
 impl Bar {
@@ -962,7 +962,7 @@ pub(super) fn heading_background(ui: &Ui, rect: Rect, c: &Colors) {
 
 /// A divider between two panes. While it is dragged, returns where its middle should go: the
 /// pointer's position across the bar, less where on the bar it was grabbed.
-fn divider(ui: &mut Ui, id: Id, bar: &Bar) -> Option<f32> {
+pub(super) fn divider(ui: &mut Ui, id: Id, bar: &Bar) -> Option<f32> {
     let c = colors(ui);
     let rect = bar.rect;
     let cursor = if bar.vertical {

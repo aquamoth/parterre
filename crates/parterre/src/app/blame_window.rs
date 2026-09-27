@@ -12,33 +12,51 @@
 //! menu goes on from there, as TortoiseGitBlame's does: blame the version before its commit (in
 //! a window of its own, the line chosen at its place there), show its commit's change to the
 //! file in a diff window, or show the log from its commit. The toolbar says whether whitespace
-//! changes and moved lines count, remembered for the next window.
+//! changes and moved lines count, and whether the history pane shows, remembered for the next
+//! window.
 //!
-//! Deliberate deviations from TortoiseGitBlame (see #104): no log pane of the file's
-//! history beside the text (the log window shows history), and only whole lines are chosen
-//! for copying.
+//! The history pane below the text lists the commits that changed the file
+//! ([`parterre_core::file_history`], listed by git alongside the blame) in the log window's
+//! commit table, as decided in #111, #112 and #113. Choosing works both ways: a line selects
+//! its commit's row, a row (or `Up`/`Down`) chooses its commit and first line, without
+//! scrolling the text. The Hash cell carries the gutter's age colour; rows of commits that own
+//! no lines are greyed out. A row's menu blames the file at that commit, shows its change to
+//! the file, or shows the log from it. The divider above the pane is remembered for the next
+//! window.
+//!
+//! Deliberate deviation from TortoiseGitBlame (see #104): only whole lines are chosen for
+//! copying.
 
+use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
 
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
-    self, Color32, FontId, Key, Modifiers, Rect, RichText, ScrollArea, Sense, Stroke, Ui,
+    self, Color32, FontId, Id, Key, Modifiers, Rect, RichText, ScrollArea, Sense, Stroke, Ui,
     UiBuilder, Vec2, pos2, vec2,
 };
 use parterre_core::blame::{Blame, BlameOptions, BlameSpec, Moves, Origin};
-use parterre_core::file_diff::{FileDiffSpec, Rev};
+use parterre_core::changed_files::FileStatus;
+use parterre_core::file_diff::{FileDiffSpec, Rev, Version};
+use parterre_core::file_history::{FileHistory, FileLog, HistoryRow, Source};
+use parterre_core::git::{Cancel, Git};
 use parterre_core::glyphs;
+use parterre_core::log_graph::LogGraph;
+use parterre_core::repo::cmp_refs_for_display;
+use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::thousands;
-use parterre_core::{Oid, Repo};
+use parterre_core::{CommitIx, Oid, Repo};
 
 use super::ParterreApp;
+use super::commit_table::{CommitList, CommitTable, ROW, Row};
 use super::diff_window::{
     Colors, OVERVIEW, SCROLLBAR, colors, hscrollbar, message, overview_background, overview_scale,
     overview_scroll, overview_view,
 };
-use super::log_window::cell;
-use crate::settings::BlameWindowSettings;
+use super::log_window::{self, Bar, DIVIDER, HEADING, cell, divider};
+use crate::settings::{BlameWindowSettings, Settings};
 use crate::text_size;
+use crate::theme::Palette;
 use crate::widgets;
 
 /// Height of the toolbar.
@@ -54,12 +72,15 @@ const AUTHOR: f32 = 130.0;
 const DATE: f32 = 84.0;
 /// Padding inside the gutter's columns.
 const PAD: f32 = 8.0;
+/// The history pane is at least its headings and a row tall, and leaves the text this much.
+const MIN_HISTORY: f32 = HEADING + ROW;
+const MIN_TEXT: f32 = 80.0;
 
 /// What a blame window asks the app for.
 #[derive(Debug)]
 pub enum BlameRequest {
-    /// A blame window for the file at another revision, with a line (from 0) chosen.
-    Blame(Arc<Repo>, BlameSpec, usize),
+    /// A blame window for the file at another revision, with a line (from 0) chosen if given.
+    Blame(Arc<Repo>, BlameSpec, Option<usize>),
     /// A diff window: a line's commit's change to the file, at the line (from 0, in the new
     /// version).
     Diff(Arc<Repo>, FileDiffSpec, usize),
@@ -109,11 +130,11 @@ impl BlameWindows {
         self.requests.clear();
     }
 
-    /// True while git is still blaming for any window.
+    /// True while git is still blaming, or listing a file's history, for any window.
     pub fn is_loading(&self) -> bool {
         self.windows
             .iter()
-            .any(|w| matches!(w.load, Load::Loading(_)))
+            .any(|w| matches!(w.load, Load::Loading(_)) || matches!(w.listing, Listing::Running(_)))
     }
 
     /// What the windows asked for since the last call.
@@ -166,6 +187,98 @@ enum Load {
     Failed(String),
 }
 
+/// The history pane's rows, or how far listing them got.
+#[derive(Debug)]
+enum Listing {
+    /// git lists the file's history on a worker thread.
+    Running(mpsc::Receiver<Result<FileLog, String>>),
+    /// Listed; the rows are made once the blame is there too.
+    Listed(FileLog),
+    Ready(Box<History>),
+    Failed(String),
+}
+
+/// The history pane's rows, and what the pane shows for each.
+#[derive(Debug)]
+struct History {
+    history: FileHistory,
+    graph: LogGraph,
+    /// Per row: the refs at its commit in the snapshot (indices into its refs), in the order
+    /// the log shows them.
+    refs: Vec<Vec<usize>>,
+    /// Per row: its commit's age as the gutter shades it, if it owns lines.
+    ages: Vec<Option<f32>>,
+    /// Per row: the first line it owns.
+    first_lines: Vec<Option<usize>>,
+}
+
+impl History {
+    fn new(log: FileLog, ready: &Ready, repo: &Repo) -> History {
+        let blame = &ready.blame;
+        let history = FileHistory::new(log, blame, repo);
+        let n = history.rows.len();
+        let mut ages = vec![None; n];
+        for (origin, age) in blame.origins.iter().zip(&ready.ages) {
+            if let Some(row) = history.row_of(origin.commit) {
+                ages[row] = Some(*age);
+            }
+        }
+        let mut first_lines = vec![None; n];
+        for (i, line) in blame.lines.iter().enumerate() {
+            if let Some(row) = history.row_of(blame.origins[line.origin].commit) {
+                first_lines[row].get_or_insert(i);
+            }
+        }
+        let rows: HashMap<CommitIx, usize> = history
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| Some((r.snapshot?, i)))
+            .collect();
+        let mut refs = vec![Vec::new(); n];
+        for (k, r) in repo.refs.iter().enumerate() {
+            if let Some(&row) = rows.get(&r.target) {
+                refs[row].push(k);
+            }
+        }
+        for on in &mut refs {
+            on.sort_by(|&a, &b| cmp_refs_for_display(&repo.refs[a], &repo.refs[b]));
+        }
+        History {
+            graph: history.graph(),
+            history,
+            refs,
+            ages,
+            first_lines,
+        }
+    }
+
+    /// The path of the file at row `i`'s commit: where the log ran, or for a row only the
+    /// blame names, the path its first line had there.
+    fn path<'a>(&'a self, i: usize, spec: &'a BlameSpec) -> &'a str {
+        match &self.history.rows[i].source {
+            Source::WorkingTree => &spec.path,
+            Source::Log => &self.history.path,
+            Source::Blame { paths } => paths.first().unwrap_or(&self.history.path),
+        }
+    }
+}
+
+/// What the history pane needs from the app: how ref badges look, and which refs show.
+struct Env<'a> {
+    palette: Palette,
+    graph: &'a GraphOptions,
+}
+
+/// What a row's menu (or a double-click) asked for, by row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowAction {
+    Blame(usize),
+    ShowChanges(usize),
+    ShowLog(usize),
+    CopyHash(usize),
+}
+
 /// What a line's menu asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LineAction {
@@ -184,6 +297,15 @@ struct BlameWindow {
     /// The size the window opened with (the viewport builder must not change while it is open).
     size: Vec2,
     load: Load,
+    /// The history pane's rows, listed alongside the blame.
+    listing: Listing,
+    /// Stops the listing (when the window closes or blames again).
+    cancel: Cancel,
+    /// The history pane's selected row and scroll position.
+    list: CommitList,
+    /// The history pane is shown, this tall (with its headings).
+    show_history: bool,
+    history_height: f32,
     /// The options chosen in the toolbar, and those of the last load started.
     options: BlameOptions,
     requested: BlameOptions,
@@ -230,6 +352,11 @@ impl BlameWindow {
             spec,
             size: vec2(w, h),
             load: Load::Failed(String::new()),
+            listing: Listing::Failed(String::new()),
+            cancel: Cancel::new(),
+            list: CommitList::default(),
+            show_history: settings.show_history,
+            history_height: settings.history_height,
             options,
             requested: options,
             selection: None,
@@ -246,26 +373,44 @@ impl BlameWindow {
         }
     }
 
-    /// Blames `spec` with the current options on a worker thread.
+    /// Blames `spec` with the current options, and lists the file's history, on worker
+    /// threads. A listing still running is stopped.
     fn load(&mut self, ctx: &egui::Context) {
         let (tx, rx) = mpsc::channel();
-        let git = parterre_core::git::Git::new(&self.repo.path);
+        let git = Git::new(&self.repo.path);
         let (spec, options, repo) = (self.spec.clone(), self.options, self.repo.clone());
-        let ctx = ctx.clone();
+        let repaint = ctx.clone();
         std::thread::spawn(move || {
             let result = git
                 .blame(&spec, options)
                 .map(|blame| Ready::new(blame, &repo))
                 .map_err(|e| e.to_string());
             let _ = tx.send(result);
-            ctx.request_repaint();
+            repaint.request_repaint();
         });
         self.requested = options;
         self.load = Load::Loading(rx);
         self.dragging = false;
+
+        self.cancel.cancel();
+        self.cancel = Cancel::new();
+        let (tx, rx) = mpsc::channel();
+        let (git, spec, cancel) = (
+            Git::new(&self.repo.path),
+            self.spec.clone(),
+            self.cancel.clone(),
+        );
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let result = git.file_log(&spec, &cancel).map_err(|e| e.to_string());
+            let _ = tx.send(result);
+            repaint.request_repaint();
+        });
+        self.listing = Listing::Running(rx);
     }
 
-    /// Takes the worker's result when it is there, and blames again if the options changed.
+    /// Takes the workers' results when they are there, and blames again if the options
+    /// changed.
     fn poll(&mut self, ctx: &egui::Context) {
         if let Load::Loading(rx) = &self.load
             && let Ok(result) = rx.try_recv()
@@ -275,6 +420,15 @@ impl BlameWindow {
                 Err(e) => self.load = Load::Failed(e),
             }
         }
+        if let Listing::Running(rx) = &self.listing
+            && let Ok(result) = rx.try_recv()
+        {
+            self.listing = match result {
+                Ok(log) => Listing::Listed(log),
+                Err(e) => Listing::Failed(e),
+            };
+        }
+        self.settle();
         if self.options != self.requested {
             // Keep the place: the lines stay, only their commits may change.
             self.pending_scroll = Some(self.scroll);
@@ -282,22 +436,46 @@ impl BlameWindow {
         }
     }
 
-    /// Shows a blame, keeping the chosen commit if it still owns lines (a reload), and the
-    /// chosen lines if the file still has them.
+    /// Shows a blame, keeping the chosen lines if the file still has them. Whether the chosen
+    /// commit stays is up to the history ([`BlameWindow::settle`]).
     fn loaded(&mut self, ready: Ready) {
-        let blame = &ready.blame;
-        if let Some(commit) = self.chosen
-            && !blame.origins.iter().any(|o| o.commit == commit)
-        {
-            self.chosen = None;
-        }
         if self
             .selection
-            .is_some_and(|(a, b)| a.max(b) >= blame.lines.len())
+            .is_some_and(|(a, b)| a.max(b) >= ready.blame.lines.len())
         {
             self.selection = None;
         }
         self.load = Load::Ready(Box::new(ready));
+    }
+
+    /// Makes the history pane's rows once the blame and the listing are both there, and
+    /// selects the chosen commit's row. The chosen commit stays (a reload) while it is still
+    /// listed, or if the listing failed, while it still owns lines.
+    fn settle(&mut self) {
+        let Load::Ready(ready) = &self.load else {
+            return;
+        };
+        let keep = match &mut self.listing {
+            listing @ Listing::Listed(_) => {
+                let Listing::Listed(log) =
+                    std::mem::replace(listing, Listing::Failed(String::new()))
+                else {
+                    unreachable!()
+                };
+                let history = History::new(log, ready, &self.repo);
+                let row = self.chosen.and_then(|c| history.history.row_of(c));
+                self.list.select(row);
+                *listing = Listing::Ready(Box::new(history));
+                row.is_some()
+            }
+            Listing::Failed(_) => self
+                .chosen
+                .is_some_and(|c| ready.blame.origins.iter().any(|o| o.commit == c)),
+            Listing::Running(_) | Listing::Ready(_) => return,
+        };
+        if !keep {
+            self.chosen = None;
+        }
     }
 
     /// F5: blames the working tree again, keeping the place. A blame at a commit can't change.
@@ -311,6 +489,13 @@ impl BlameWindow {
     fn ready(&self) -> Option<&Ready> {
         match &self.load {
             Load::Ready(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    fn history(&self) -> Option<&History> {
+        match &self.listing {
+            Listing::Ready(h) => Some(h),
             _ => None,
         }
     }
@@ -341,17 +526,50 @@ impl BlameWindow {
         blame.origins.get(blame.lines.get(i)?.origin)
     }
 
-    /// Chooses line `i` and its commit.
+    /// Chooses line `i` and its commit, and selects the commit's row in the history pane.
     fn choose_line(&mut self, i: usize) {
         self.selection = Some((i, i));
-        if let Some(origin) = self.origin(i) {
-            self.chosen = Some(origin.commit);
+        if let Some(commit) = self.origin(i).map(|o| o.commit) {
+            self.chosen = Some(commit);
+            if let Some(h) = self.history() {
+                let row = h.history.row_of(commit);
+                self.list.select(row);
+            }
         }
     }
 
+    /// Chooses row `i` of the history pane: selects it, keeping it in view, and chooses its
+    /// commit ([`BlameWindow::choose_commit`]).
+    fn choose_row(&mut self, i: usize) {
+        let Some(commit) = self
+            .history()
+            .and_then(|h| h.history.rows.get(i))
+            .map(|r| r.commit)
+        else {
+            return;
+        };
+        self.list.select(Some(i));
+        self.choose_commit(commit);
+    }
+
+    /// `Up`/`Down`: chooses the row above (newer, `by` < 0) or below the selected one, or the
+    /// first row if none is selected.
+    fn step(&mut self, by: isize) {
+        let Some(n) = self.history().map(|h| h.history.rows.len()) else {
+            return;
+        };
+        if n == 0 {
+            return;
+        }
+        let i = match self.list.selected {
+            Some(i) => i.saturating_add_signed(by).min(n - 1),
+            None => 0,
+        };
+        self.choose_row(i);
+    }
+
     /// Chooses `commit` (`None` for the uncommitted lines) and its first line, or no line if it
-    /// owns none in this version. The text stays where it is. (For the history pane, #113.)
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// owns none in this version. The text stays where it is.
     fn choose_commit(&mut self, commit: Option<Oid>) {
         self.chosen = Some(commit);
         self.selection = self.ready().and_then(|r| {
@@ -393,11 +611,12 @@ impl BlameWindow {
             return;
         };
         if let Some(line) = self.ready().map(|r| r.blame.lines[i].orig_line as usize) {
-            requests.push(BlameRequest::Blame(self.repo.clone(), spec, line));
+            requests.push(BlameRequest::Blame(self.repo.clone(), spec, Some(line)));
         }
     }
 
-    /// Esc closes; Ctrl+A chooses every line.
+    /// Esc closes; Ctrl+A chooses every line; `Up`/`Down` step through the history pane
+    /// wherever the pointer is, while it shows.
     fn handle_keys(&mut self, ui: &Ui) {
         if ui.ctx().egui_wants_keyboard_input() {
             return;
@@ -405,18 +624,53 @@ impl BlameWindow {
         if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A)) {
             self.select_all();
         }
+        if self.show_history && self.history().is_some() {
+            let step = ui.input_mut(|i| {
+                if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                    Some(-1)
+                } else if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                    Some(1)
+                } else {
+                    None
+                }
+            });
+            if let Some(by) = step {
+                self.step(by);
+            }
+        }
         if ui.input(|i| i.key_pressed(Key::Escape)) {
             self.closed = true;
         }
     }
 
-    fn contents(&mut self, ui: &mut Ui, settings: &mut BlameWindowSettings) -> Vec<BlameRequest> {
+    /// Where the text, the divider and the history pane go in `above` (what the toolbar,
+    /// header and bar leave): the pane at the bottom as tall as asked, less if the text would
+    /// get less than [`MIN_TEXT`].
+    fn arrange(&self, above: Rect) -> (Rect, Option<(Rect, Rect)>) {
+        if !self.show_history {
+            return (above, None);
+        }
+        let height = self.history_height.min(above.height() - DIVIDER - MIN_TEXT);
+        let top = above.bottom() - height.max(0.0);
+        let bar = Rect::from_x_y_ranges(above.x_range(), top - DIVIDER..=top);
+        let pane = Rect::from_min_max(pos2(above.left(), top), above.max);
+        let body = Rect::from_min_max(above.min, pos2(above.right(), bar.top().max(above.top())));
+        (body, Some((bar, pane)))
+    }
+
+    fn contents(
+        &mut self,
+        ui: &mut Ui,
+        settings: &mut BlameWindowSettings,
+        env: &Env,
+    ) -> Vec<BlameRequest> {
         let c = colors(ui);
         self.toolbar(ui, settings);
         self.header(ui, &c);
         let rest = ui.available_rect_before_wrap();
-        let body = Rect::from_min_max(rest.min, pos2(rest.right(), rest.bottom() - INFO));
-        let info = Rect::from_min_max(pos2(rest.left(), body.bottom()), rest.max);
+        let above = Rect::from_min_max(rest.min, pos2(rest.right(), rest.bottom() - INFO));
+        let info = Rect::from_min_max(pos2(rest.left(), above.bottom()), rest.max);
+        let (body, history) = self.arrange(above);
         ui.painter().rect_filled(body, 0.0, c.pane);
         let mut requests = Vec::new();
         let mut hovered = None;
@@ -434,15 +688,51 @@ impl BlameWindow {
                 hovered = self.body(&mut child, body, &c, &mut requests);
             }
         }
+        if let Some((bar, pane)) = history {
+            self.history_pane(ui, pane, env, &mut requests);
+            // The divider: dragging it sets the pane's height, for the next window too.
+            let bar = Bar {
+                rect: bar,
+                vertical: false,
+                origin: 0.0,
+                room: 1.0,
+            };
+            if let Some(middle) = divider(ui, Id::new(("blame-divider", self.id)), &bar) {
+                let most = (above.height() - DIVIDER - MIN_TEXT).max(MIN_HISTORY);
+                let height = above.bottom() - (middle + DIVIDER / 2.0);
+                self.history_height = height.clamp(MIN_HISTORY, most);
+                settings.history_height = self.history_height;
+            }
+        }
         self.info_bar(ui, info, hovered, &c);
         ui.allocate_rect(rest, Sense::hover());
         requests
     }
 
-    /// Whether whitespace changes and moved lines count.
+    /// Whether whitespace changes and moved lines count; on the right, whether the history
+    /// pane shows.
     fn toolbar(&mut self, ui: &mut Ui, settings: &mut BlameWindowSettings) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), TOOLBAR), Sense::hover());
         ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
+        let mut right = ui.new_child(
+            UiBuilder::new()
+                .max_rect(rect.shrink2(vec2(12.0, 0.0)))
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        right.spacing_mut().item_spacing.x = 8.0;
+        let (title, body) = (
+            "History",
+            "The commits that changed the file, below the text. Choosing a row chooses its \
+             commit's lines; Up and Down step through the rows.",
+        );
+        let switch = widgets::switch(&mut right, &mut self.show_history);
+        if switch.changed() {
+            settings.show_history = self.show_history;
+        }
+        widgets::tip_explained(switch, title, "", body);
+        let weak = right.visuals().weak_text_color();
+        let label = right.label(RichText::new("History").size(12.5).color(weak));
+        widgets::tip_explained(label, title, "", body);
         let mut bar = ui.new_child(
             UiBuilder::new()
                 .max_rect(rect.shrink2(vec2(10.0, 0.0)))
@@ -603,8 +893,12 @@ impl BlameWindow {
         // A line asked for: chosen, and a third of the way down.
         if let Some(line) = self.pending_line.take() {
             let line = line.min(n - 1);
+            let commit = blame.origins[blame.lines[line].origin].commit;
             self.selection = Some((line, line));
-            self.chosen = Some(blame.origins[blame.lines[line].origin].commit);
+            self.chosen = Some(commit);
+            if let Listing::Ready(h) = &self.listing {
+                self.list.select(h.history.row_of(commit));
+            }
             let above = (area.height() / row_h / 3.0).floor();
             self.scroll_to = Some(((line as f32 - above) * row_h).max(0.0));
         } else if let Some(offset) = self.pending_scroll.take() {
@@ -854,6 +1148,129 @@ impl BlameWindow {
         }
     }
 
+    /// The history pane in `rect`: the commits that changed the file in the log window's commit
+    /// table, or how far listing them got. A click on a row chooses it, a double-click shows
+    /// its change, a right-click chooses it and opens its menu.
+    fn history_pane(
+        &mut self,
+        ui: &mut Ui,
+        rect: Rect,
+        env: &Env,
+        requests: &mut Vec<BlameRequest>,
+    ) {
+        let c = log_window::colors(ui);
+        ui.painter().rect_filled(rect, 0.0, c.pane);
+        let mut child = ui.new_child(
+            UiBuilder::new()
+                .max_rect(rect)
+                .id_salt(("blame-history", self.id)),
+        );
+        child.set_clip_rect(rect.intersect(ui.clip_rect()));
+        let ui = &mut child;
+        let weak = ui.visuals().weak_text_color();
+        let bc = blame_colors(ui);
+        let ready = match &self.load {
+            Load::Ready(r) => Some(&**r),
+            _ => None,
+        };
+        let (history, status) = match &self.listing {
+            Listing::Ready(h) => (Some(&**h), None),
+            Listing::Failed(e) => (
+                None,
+                Some((format!("Could not list the file's history: {e}"), c.removed)),
+            ),
+            _ if matches!(self.load, Load::Failed(_)) => (
+                None,
+                Some((
+                    "Not listed, as the file could not be blamed.".to_owned(),
+                    weak,
+                )),
+            ),
+            _ => (None, Some(("Listing…".to_owned(), weak))),
+        };
+        let no_graph = LogGraph::default();
+        let table = CommitTable {
+            id: Id::new(("blame-history", self.id)),
+            rows: history.map_or(0, |h| h.history.rows.len()),
+            graph: history.map_or(&no_graph, |h| &h.graph),
+            abbrev_len: self.repo.abbrev_len,
+            palette: &env.palette,
+        };
+        let (repo, spec) = (&*self.repo, &self.spec);
+        let mut action = None;
+        let clicks = table.show(
+            ui,
+            &c,
+            &mut self.list,
+            |i| match history {
+                Some(h) => history_row(h, i, repo, env.graph, &bc),
+                None => Row::default(),
+            },
+            |ui, i| {
+                let (Some(h), Some(ready)) = (history, ready) else {
+                    return;
+                };
+                let changes = row_changes(h, i, ready, repo, spec).is_some();
+                if let Some(a) = history_menu(ui, i, &h.history.rows[i], changes) {
+                    action = Some(a);
+                }
+            },
+        );
+        if let Some((text, color)) = status {
+            let below = Rect::from_min_max(pos2(rect.left(), rect.top() + HEADING), rect.max);
+            message(ui, below, &text, color);
+        }
+        if let Some(i) = clicks.clicked {
+            self.choose_row(i);
+        }
+        if let Some(i) = clicks.double_clicked {
+            action = Some(RowAction::ShowChanges(i));
+        }
+        if let Some(action) = action {
+            self.act_row(action, ui.ctx(), requests);
+        }
+    }
+
+    fn act_row(
+        &mut self,
+        action: RowAction,
+        ctx: &egui::Context,
+        requests: &mut Vec<BlameRequest>,
+    ) {
+        let (Some(h), Some(ready)) = (self.history(), self.ready()) else {
+            return;
+        };
+        let row = |i: usize| &h.history.rows[i];
+        match action {
+            RowAction::Blame(i) => {
+                if let Some(oid) = row(i).commit {
+                    let spec = BlameSpec {
+                        rev: Rev::Commit(oid),
+                        path: h.path(i, &self.spec).to_owned(),
+                    };
+                    // The commit's first line, at its place in that version.
+                    let line = h.first_lines[i].map(|l| ready.blame.lines[l].orig_line as usize);
+                    requests.push(BlameRequest::Blame(self.repo.clone(), spec, line));
+                }
+            }
+            RowAction::ShowChanges(i) => {
+                if let Some((spec, line)) = row_changes(h, i, ready, &self.repo, &self.spec) {
+                    requests.push(BlameRequest::Diff(self.repo.clone(), spec, line));
+                }
+            }
+            RowAction::ShowLog(i) => {
+                if let Some(oid) = row(i).commit.filter(|_| row(i).snapshot.is_some()) {
+                    requests.push(BlameRequest::Log(oid));
+                }
+            }
+            RowAction::CopyHash(i) => {
+                if let Some(oid) = row(i).commit {
+                    ctx.copy_text(oid.to_hex());
+                }
+            }
+        }
+    }
+
     /// The commit of the line under the pointer, else the chosen commit: hash, author, date
     /// and subject.
     fn info_bar(&self, ui: &Ui, rect: Rect, hovered: Option<usize>, c: &Colors) {
@@ -924,8 +1341,7 @@ impl BlameWindow {
     fn show(
         &mut self,
         ctx: &egui::Context,
-        settings: &mut BlameWindowSettings,
-        text_size: &mut f32,
+        settings: &mut Settings,
         window_theme: Option<egui::SystemTheme>,
         icon: &Arc<egui::IconData>,
     ) -> Vec<BlameRequest> {
@@ -964,14 +1380,14 @@ impl BlameWindow {
                     && size.x > 0.0
                     && size.y > 0.0
                 {
-                    settings.size = [size.x, size.y];
+                    settings.blame_window.size = [size.x, size.y];
                 }
                 if reload {
                     self.reload(ui.ctx());
                 }
                 // Keys go to the main window too when the window is embedded in it.
                 self.handle_keys(ui);
-                text_size::read_input(ui, text_size, true);
+                text_size::read_input(ui, &mut settings.text_size, true);
                 if close {
                     self.closed = true;
                 }
@@ -981,14 +1397,25 @@ impl BlameWindow {
             {
                 ui.ctx().copy_text(text);
             }
+            let env = Env {
+                palette: Palette::new(ui.visuals().dark_mode, &settings.branch_colors),
+                graph: &settings.graph,
+            };
             egui::CentralPanel::default()
                 .frame(egui::Frame::central_panel(&ui.ctx().global_style()).inner_margin(0))
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
-                    requests = self.contents(ui, settings);
+                    requests = self.contents(ui, &mut settings.blame_window, &env);
                 });
         });
         requests
+    }
+}
+
+impl Drop for BlameWindow {
+    /// Stops the listing when the window closes (and with it the repository).
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }
 
@@ -1046,6 +1473,147 @@ fn line_menu(
     );
     let copy = if lines { "Copy lines" } else { "Copy line" };
     item(ui, true, copy, "", LineAction::CopyLines);
+    action
+}
+
+/// What row `i` of the history pane shows: the working tree changes, or a commit with its refs
+/// (those `graph` shows), the gutter's age colour behind the hash, the path the file had for a
+/// row only the blame names, and a mark if the snapshot doesn't have it. Greyed out if it owns
+/// no lines.
+fn history_row<'a>(
+    h: &'a History,
+    i: usize,
+    repo: &'a Repo,
+    graph: &GraphOptions,
+    bc: &BlameColors,
+) -> Row<'a> {
+    let row = &h.history.rows[i];
+    let (hash, subject) = match row.commit {
+        Some(oid) => (oid.short(repo.abbrev_len), row.subject.as_str()),
+        None => (String::new(), "Working tree changes"),
+    };
+    Row {
+        hash,
+        hash_fill: h.ages[i].filter(|_| row.owns_lines).map(|age| bc.age(age)),
+        refs: h.refs[i]
+            .iter()
+            .map(|&r| &repo.refs[r])
+            .filter(|r| graph.shows(r.kind))
+            .collect(),
+        tag: (row.commit.is_some() && row.snapshot.is_none()).then_some("not in the graph"),
+        subject,
+        note: match &row.source {
+            Source::Blame { paths } => Some(format!("(as {})", paths.join(", "))),
+            _ => None,
+        },
+        author: &row.author_name,
+        author_email: &row.author_email,
+        date: &row.author_date,
+        greyed: !row.owns_lines,
+        ..Row::default()
+    }
+}
+
+/// Row `i`'s change to the file, and the line (from 0, in the new version) to show: for a
+/// commit that owns lines, the change its first line's menu shows; otherwise the file at the
+/// commit against its first parent (the working tree against `HEAD`). `None` where the
+/// history before the commit isn't in the repository.
+fn row_changes(
+    h: &History,
+    i: usize,
+    ready: &Ready,
+    repo: &Repo,
+    spec: &BlameSpec,
+) -> Option<(FileDiffSpec, usize)> {
+    if let Some(first) = h.first_lines[i] {
+        let line = &ready.blame.lines[first];
+        let changes = ready.blame.origins[line.origin].changes()?;
+        return Some((changes, line.orig_line as usize));
+    }
+    let row = &h.history.rows[i];
+    let old_path = h.history.path.clone();
+    let (old, new) = match row.commit {
+        None => {
+            let head = repo.head_commit().map(|ix| repo.commit(ix).oid)?;
+            (
+                Some(Rev::Commit(head)),
+                (Rev::WorkingTree, spec.path.clone()),
+            )
+        }
+        Some(oid) => {
+            let commit = row.snapshot.map(|ix| repo.commit(ix));
+            if commit.is_some_and(|c| c.truncated) {
+                return None;
+            }
+            // No parents in the file's history: the commit added the file. Otherwise its first
+            // parent, or where the snapshot doesn't have it, the first parent in the file's
+            // history, which has the same version of the file.
+            let parent = (!row.parents.is_empty()).then(|| {
+                commit
+                    .and_then(|c| c.parents.first())
+                    .map(|&p| repo.commit(p).oid)
+                    .unwrap_or(row.parents[0])
+            });
+            (
+                parent.map(Rev::Commit),
+                (Rev::Commit(oid), old_path.clone()),
+            )
+        }
+    };
+    let status = match &old {
+        None => FileStatus::Added,
+        Some(_) if old_path != new.1 => FileStatus::Renamed,
+        Some(_) => FileStatus::Modified,
+    };
+    // Blamed files are regular text files; their exact modes don't change the diff.
+    const FILE: u32 = 0o100644;
+    let spec = FileDiffSpec {
+        modes: [if old.is_some() { FILE } else { 0 }, FILE],
+        old: old.map(|rev| Version {
+            rev,
+            path: old_path,
+        }),
+        new: Some(Version {
+            rev: new.0,
+            path: new.1,
+        }),
+        status,
+        binary: false,
+    };
+    Some((spec, 0))
+}
+
+/// The menu of a row of the history pane. The working tree changes offer only *Show changes*;
+/// *Show log* needs the commit in the snapshot.
+fn history_menu(ui: &mut Ui, i: usize, row: &HistoryRow, changes: bool) -> Option<RowAction> {
+    let mut action = None;
+    let mut item = |ui: &mut Ui, enabled: bool, text: &str, why: &str, a: RowAction| {
+        let r = ui
+            .add_enabled(enabled, egui::Button::new(text))
+            .on_disabled_hover_text(why);
+        if r.clicked() {
+            action = Some(a);
+            ui.close();
+        }
+    };
+    if row.commit.is_none() {
+        let why = "Nothing is committed yet to compare with";
+        item(ui, changes, "Show changes", why, RowAction::ShowChanges(i));
+        return action;
+    }
+    item(ui, true, "Blame this revision", "", RowAction::Blame(i));
+    let why = "The history before this commit isn't in this repository";
+    item(ui, changes, "Show changes", why, RowAction::ShowChanges(i));
+    let why = "Not in the graph: the commit isn't among the loaded history";
+    item(
+        ui,
+        row.snapshot.is_some(),
+        "Show log",
+        why,
+        RowAction::ShowLog(i),
+    );
+    crate::menu::separator(ui);
+    item(ui, true, "Copy hash", "", RowAction::CopyHash(i));
     action
 }
 
@@ -1118,13 +1686,11 @@ fn blame_colors(ui: &Ui) -> BlameColors {
 impl ParterreApp {
     /// Every open blame window, and what they ask for.
     pub(super) fn blame_windows(&mut self, ctx: &egui::Context) {
-        let settings = &mut self.settings;
         let mut requests = Vec::new();
         for window in &mut self.blames.windows {
             requests.extend(window.show(
                 ctx,
-                &mut settings.blame_window,
-                &mut settings.text_size,
+                &mut self.settings,
                 self.window_theme,
                 &self.window_icon,
             ));
@@ -1134,7 +1700,7 @@ impl ParterreApp {
         for request in requests {
             match request {
                 BlameRequest::Blame(repo, spec, line) => {
-                    self.open_blame(repo, spec, Some(line), ctx);
+                    self.open_blame(repo, spec, line, ctx);
                 }
                 BlameRequest::Diff(repo, spec, line) => {
                     let settings = &self.settings.diff_window;
@@ -1198,10 +1764,17 @@ impl ParterreApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parterre_core::file_history::LogCommit;
     use parterre_core::repo::Head;
 
     const A: &str = "c4275f7dbe7e820e3bb9a21c7d1cc1317657f2d4";
     const B: &str = "8e09b4551acb469f9df4ce58895b77e2e7e4190e";
+    /// A commit between A and B that changed the file, none of whose lines remain.
+    const GONE: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn oid(hex: &str) -> Oid {
+        Oid::from_hex(hex).unwrap()
+    }
 
     fn entry(hash: &str, orig: u32, fin: u32, time: i64, extra: &str, line: &str) -> String {
         format!(
@@ -1242,6 +1815,36 @@ mod tests {
         w
     }
 
+    /// A commit as git lists it for the file.
+    fn logged(hex: &str, time: i64, parents: &[&str]) -> LogCommit {
+        LogCommit {
+            oid: oid(hex),
+            parents: parents.iter().map(|p| oid(p)).collect(),
+            author_name: "A B".into(),
+            author_email: "a@b".into(),
+            author_time: time,
+            author_date: String::new(),
+            commit_time: time,
+            subject: format!("s{time}"),
+        }
+    }
+
+    /// [`window`] with its history listed: B, GONE (which owns no lines), A.
+    fn listed_window() -> BlameWindow {
+        let mut w = window();
+        w.listing = Listing::Listed(FileLog {
+            path: "a.txt".into(),
+            working_tree_changed: false,
+            commits: vec![
+                logged(B, 200, &[GONE]),
+                logged(GONE, 150, &[A]),
+                logged(A, 100, &[]),
+            ],
+        });
+        w.settle();
+        w
+    }
+
     /// Runs one frame of the window's contents with `events`.
     fn frame(
         ctx: &egui::Context,
@@ -1254,11 +1857,35 @@ mod tests {
             ..Default::default()
         };
         let mut settings = BlameWindowSettings::default();
+        let graph = GraphOptions::default();
         let mut requests = Vec::new();
-        ctx.run_ui(input, |ui| requests = w.contents(ui, &mut settings))
-            .textures_delta
-            .clear();
+        ctx.run_ui(input, |ui| {
+            let env = Env {
+                palette: Palette::new(false, &[]),
+                graph: &graph,
+            };
+            w.handle_keys(ui);
+            requests = w.contents(ui, &mut settings, &env);
+        })
+        .textures_delta
+        .clear();
         requests
+    }
+
+    /// The middle of row `i` of the history pane (in the 1000×700 window of [`frame`]).
+    fn row_at(i: usize) -> egui::Pos2 {
+        let top = 700.0 - INFO - BlameWindowSettings::default().history_height;
+        pos2(500.0, top + HEADING + (i as f32 + 0.5) * ROW)
+    }
+
+    fn key(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
     }
 
     /// The middle of line `i`'s text.
@@ -1391,7 +2018,7 @@ mod tests {
         let mut requests = Vec::new();
         w.act(LineAction::BlamePrevious(1), &ctx, &mut requests);
         // The line's place in its commit's version is chosen there.
-        let [BlameRequest::Blame(_, spec, 1)] = requests.as_slice() else {
+        let [BlameRequest::Blame(_, spec, Some(1))] = requests.as_slice() else {
             panic!("expected a blame: {requests:?}");
         };
         assert_eq!(
@@ -1467,15 +2094,25 @@ mod tests {
     }
 
     #[test]
-    fn a_reload_keeps_the_chosen_commit_while_it_owns_lines() {
-        let repo = window().repo;
-        let mut w = window();
-        w.choose_line(1);
+    fn a_reload_keeps_the_chosen_commit_while_it_is_listed() {
+        let repo = window().repo.clone();
+        let mut w = listed_window();
+        w.choose_commit(Some(oid(GONE)));
+        let log = |commits| {
+            Listing::Listed(FileLog {
+                path: "a.txt".into(),
+                working_tree_changed: false,
+                commits,
+            })
+        };
         w.loaded(Ready::new(sample(), &repo));
-        assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
-        assert_eq!(w.selection, Some((1, 1)));
+        w.listing = log(vec![logged(B, 200, &[GONE]), logged(GONE, 150, &[A])]);
+        w.settle();
+        // Listed, though it owns no lines.
+        assert_eq!(w.chosen, Some(Some(oid(GONE))));
+        assert_eq!(w.list.selected, Some(1));
 
-        // B's line is gone, and so are lines 3 and 4.
+        // Gone from the history, and lines 3 and 4 from the file.
         let out = [
             entry(A, 1, 1, 100, "", "one"),
             entry(A, 2, 2, 100, "", "two"),
@@ -1483,8 +2120,20 @@ mod tests {
         .concat();
         w.selection = Some((1, 3));
         w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo));
+        w.listing = log(vec![logged(A, 100, &[])]);
+        w.settle();
         assert_eq!(w.chosen, None);
         assert_eq!(w.selection, None);
+        assert_eq!(w.list.selected, None);
+
+        // Without a history, the chosen commit stays while it owns lines.
+        w.choose_line(0);
+        w.listing = Listing::Failed("no".into());
+        w.settle();
+        assert_eq!(w.chosen, Some(Some(oid(A))));
+        w.chosen = Some(Some(oid(B)));
+        w.settle();
+        assert_eq!(w.chosen, None);
     }
 
     #[test]
@@ -1500,6 +2149,7 @@ mod tests {
     fn choosing_never_scrolls_and_the_overview_strip_does() {
         let ctx = egui::Context::default();
         let mut w = window();
+        w.show_history = false;
         // 300 lines from A, but line 250 from B.
         let out: String = (1..=300)
             .map(|i| match i {
@@ -1547,5 +2197,175 @@ mod tests {
         assert_eq!(c.age(0.0), c.old);
         assert_eq!(c.age(1.0), c.new);
         assert_eq!(c.age(0.5), Color32::from_rgb(100, 50, 25));
+    }
+
+    #[test]
+    fn clicking_a_row_chooses_its_commit_and_first_line_without_scrolling() {
+        let ctx = egui::Context::default();
+        let mut w = listed_window();
+        frame(&ctx, &mut w, Vec::new());
+        let p = row_at(2);
+        frame(
+            &ctx,
+            &mut w,
+            vec![egui::Event::PointerMoved(p), button(p, true, false)],
+        );
+        frame(&ctx, &mut w, vec![button(p, false, false)]);
+        assert_eq!(w.list.selected, Some(2));
+        assert_eq!(w.chosen, Some(Some(oid(A))));
+        assert_eq!(w.selection, Some((0, 0)));
+        assert_eq!(w.scroll, 0.0);
+
+        // A commit that owns no lines: chosen, with no line, and greyed out without an age.
+        let p = row_at(1);
+        frame(
+            &ctx,
+            &mut w,
+            vec![egui::Event::PointerMoved(p), button(p, true, false)],
+        );
+        frame(&ctx, &mut w, vec![button(p, false, false)]);
+        assert_eq!(w.chosen, Some(Some(oid(GONE))));
+        assert_eq!(w.selection, None);
+        let h = w.history().unwrap();
+        let bc = blame_colors(&egui::Ui::new(ctx.clone(), Id::new("t"), UiBuilder::new()));
+        let row = history_row(h, 1, &w.repo, &GraphOptions::default(), &bc);
+        assert!(row.greyed);
+        assert_eq!(row.hash_fill, None);
+        let row = history_row(h, 0, &w.repo, &GraphOptions::default(), &bc);
+        assert!(!row.greyed);
+        assert_eq!(row.hash_fill, Some(bc.age(1.0)));
+    }
+
+    #[test]
+    fn clicking_a_line_selects_its_commits_row() {
+        let ctx = egui::Context::default();
+        let mut w = listed_window();
+        frame(&ctx, &mut w, Vec::new());
+        click(&ctx, &mut w, 1, Modifiers::NONE);
+        assert_eq!(w.chosen, Some(Some(oid(B))));
+        assert_eq!(w.list.selected, Some(0));
+        click(&ctx, &mut w, 3, Modifiers::NONE);
+        assert_eq!(w.list.selected, Some(2));
+    }
+
+    #[test]
+    fn up_and_down_step_through_the_rows_wherever_the_pointer_is() {
+        let ctx = egui::Context::default();
+        let mut w = listed_window();
+        frame(&ctx, &mut w, Vec::new());
+        // Over the text.
+        let over_text = egui::Event::PointerMoved(at(&ctx, 1));
+        frame(&ctx, &mut w, vec![over_text, key(Key::ArrowDown)]);
+        assert_eq!(w.list.selected, Some(0));
+        assert_eq!(w.chosen, Some(Some(oid(B))));
+        frame(&ctx, &mut w, vec![key(Key::ArrowDown)]);
+        assert_eq!((w.list.selected, w.selection), (Some(1), None));
+        frame(&ctx, &mut w, vec![key(Key::ArrowDown)]);
+        frame(&ctx, &mut w, vec![key(Key::ArrowDown)]);
+        assert_eq!(w.list.selected, Some(2));
+        assert_eq!(w.chosen, Some(Some(oid(A))));
+        assert_eq!(w.selection, Some((0, 0)));
+        frame(&ctx, &mut w, vec![key(Key::ArrowUp)]);
+        assert_eq!(w.chosen, Some(Some(oid(GONE))));
+        assert_eq!(w.scroll, 0.0);
+
+        // Not while the pane is hidden.
+        w.show_history = false;
+        frame(&ctx, &mut w, vec![key(Key::ArrowUp)]);
+        assert_eq!(w.list.selected, Some(1));
+    }
+
+    #[test]
+    fn a_rows_menu_blames_that_revision_and_shows_its_changes() {
+        let ctx = egui::Context::default();
+        let mut w = listed_window();
+        let mut requests = Vec::new();
+        w.act_row(RowAction::Blame(2), &ctx, &mut requests);
+        // A's first line is line 0 in its version.
+        let [BlameRequest::Blame(_, spec, Some(0))] = requests.as_slice() else {
+            panic!("expected a blame: {requests:?}");
+        };
+        assert_eq!(spec.rev, Rev::Commit(oid(A)));
+        assert_eq!(spec.path, "a.txt");
+
+        // A commit that owns no lines: against its parent in the file's history.
+        requests.clear();
+        w.act_row(RowAction::ShowChanges(1), &ctx, &mut requests);
+        let [BlameRequest::Diff(_, spec, 0)] = requests.as_slice() else {
+            panic!("expected a diff: {requests:?}");
+        };
+        assert_eq!(spec.old.as_ref().map(|v| v.rev), Some(Rev::Commit(oid(A))));
+        assert_eq!(
+            spec.new.as_ref().map(|v| v.rev),
+            Some(Rev::Commit(oid(GONE)))
+        );
+
+        // The snapshot has none of them, so there is no log to show.
+        requests.clear();
+        w.act_row(RowAction::ShowLog(0), &ctx, &mut requests);
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn the_pane_starts_as_the_last_window_left_it_and_its_divider_sets_the_height() {
+        let settings = BlameWindowSettings {
+            show_history: false,
+            history_height: 150.0,
+            ..BlameWindowSettings::default()
+        };
+        let w = BlameWindow::new(2, window().repo.clone(), window().spec.clone(), &settings);
+        assert!(!w.show_history);
+        assert_eq!(w.history_height, 150.0);
+
+        // Dragging the divider 50 points up makes the pane 50 points taller.
+        let ctx = egui::Context::default();
+        let mut w = listed_window();
+        let mut settings = BlameWindowSettings::default();
+        let graph = GraphOptions::default();
+        let run = |w: &mut BlameWindow, settings: &mut BlameWindowSettings, events| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 700.0))),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                let env = Env {
+                    palette: Palette::new(false, &[]),
+                    graph: &graph,
+                };
+                w.contents(ui, settings, &env);
+            })
+            .textures_delta
+            .clear();
+        };
+        let before = settings.history_height;
+        let middle = 700.0 - INFO - before - DIVIDER / 2.0;
+        let (p, q) = (pos2(500.0, middle), pos2(500.0, middle - 50.0));
+        run(&mut w, &mut settings, Vec::new());
+        run(
+            &mut w,
+            &mut settings,
+            vec![egui::Event::PointerMoved(p), button(p, true, false)],
+        );
+        run(&mut w, &mut settings, vec![egui::Event::PointerMoved(q)]);
+        run(&mut w, &mut settings, vec![egui::Event::PointerMoved(q)]);
+        run(&mut w, &mut settings, vec![button(q, false, false)]);
+        assert!((settings.history_height - (before + 50.0)).abs() < 1.0);
+        assert_eq!(w.history_height, settings.history_height);
+    }
+
+    #[test]
+    fn blaming_again_or_closing_stops_the_listing() {
+        let ctx = egui::Context::default();
+        let mut w = window();
+        w.spec.rev = Rev::WorkingTree;
+        let first = w.cancel.clone();
+        w.reload(&ctx);
+        assert!(first.is_cancelled());
+        assert!(matches!(w.listing, Listing::Running(_)));
+        let second = w.cancel.clone();
+        assert!(!second.is_cancelled());
+        drop(w);
+        assert!(second.is_cancelled());
     }
 }

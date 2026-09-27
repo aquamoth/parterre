@@ -62,9 +62,13 @@ crates/parterre        the binary (eframe/egui)
                        worker thread that asks git for such lists
     compare_window.rs  the compare window (Compare revisions, with HEAD, with the marked
                        commit): two commits and the files they differ in
+    commit_table.rs    the commit table (graph column, hash, subject with refs, author,
+                       date) the log window and the blame window's history pane share
     blame_window.rs    blame windows: a file's lines with a gutter naming their commits,
                        shaded by age; a line's menu blames the version before (a new window),
-                       shows its change, or its log
+                       shows its change, or its log; the history pane below lists the
+                       file's commits (git lists them on a worker thread alongside the
+                       blame), and choosing a line or a row chooses the commit in both
   scene.rs             node contents and sizes + layout + physics net, hit testing
   render.rs            painting nodes, edges, arrows, overview
   export.rs            SVG export, and PNG and WebP export: render.rs painted in tiles by
