@@ -1,0 +1,120 @@
+# DRAFT FOR REFERENCE ONLY: do not submit this file to Flathub as it is.
+#
+# It was written by an AI assistant (Claude), and Flathub's generative-AI policy doesn't accept
+# AI-written manifests, submission pull requests or review replies. The maintainer writes the
+# submitted manifest; this one shows a way that builds and runs (see README.md and #21).
+#
+# Builds parterre from this checkout, offline: the crates come from cargo-sources.json, which
+# build.sh generates from Cargo.lock and which isn't committed.
+id: se.trustfall.parterre
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  # Rust 1.98 for both 25.08 and 26.08 at the time of writing; parterre needs 1.95.
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: parterre
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # GitHub's API, for open pull requests. parterre gets its token from `gh auth token`, and
+  # there is no gh in the sandbox, so this does nothing until it can get one some other way.
+  - --share=network
+  # Repositories anywhere in home, read-only. Needs an exception on Flathub (git GUIs have been
+  # granted it): a folder chosen through the portal arrives as a /run/user/*/doc/ path, where
+  # the absolute paths in a linked worktree's .git file, and in the main repository's
+  # worktrees/, lead nowhere.
+  - --filesystem=home:ro
+
+modules:
+  # parterre runs the git command line, and the freedesktop runtime has none.
+  - name: git
+    buildsystem: simple
+    build-commands:
+      - make -j${FLATPAK_BUILDER_N_JOBS}
+      - make install
+    sources:
+      - type: archive
+        url: https://www.kernel.org/pub/software/scm/git/git-2.55.0.tar.xz
+        sha256: 457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357
+        # For Flathub's flatpak-external-data-checker, which opens update pull requests.
+        x-checker-data:
+          type: anitya
+          project-id: 5350
+          stable-only: true
+          url-template: https://www.kernel.org/pub/software/scm/git/git-$version.tar.xz
+      # git's Makefile reads config.mak. Only what parterre needs: no GUIs (gitk, git gui), no
+      # Perl or Python commands, no translations (none of them are in the runtime). curl and
+      # expat are, so https remotes work.
+      - type: inline
+        dest-filename: config.mak
+        contents: |
+          prefix = /app
+          NO_TCLTK = YesPlease
+          NO_PERL = YesPlease
+          NO_PYTHON = YesPlease
+          NO_GETTEXT = YesPlease
+          # Optional until git 3.0; then the git module needs the rust-stable extension too.
+          NO_RUST = YesPlease
+          # No git-add, git-log, ... copies of the built-ins in libexec.
+          SKIP_DASHED_BUILT_INS = YesPlease
+          INSTALL_SYMLINKS = YesPlease
+    # Servers, mail, other version control systems, stubs of the Perl commands: nothing
+    # parterre runs.
+    cleanup:
+      - /bin/git-shell
+      - /bin/git-cvsserver
+      - /bin/scalar
+      - /libexec/git-core/git-archimport
+      - /libexec/git-core/git-cvs*
+      - /libexec/git-core/git-daemon
+      - /libexec/git-core/git-http-backend
+      - /libexec/git-core/git-http-push
+      - /libexec/git-core/git-imap-send
+      - /libexec/git-core/git-instaweb
+      - /libexec/git-core/git-p4
+      - /libexec/git-core/git-send-email
+      - /libexec/git-core/git-shell
+      - /libexec/git-core/git-svn
+      - /libexec/git-core/scalar
+      - /share/bash-completion
+      - /share/git-core/templates/hooks
+
+  - name: parterre
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        # Where cargo-sources.json puts the vendored crates and the config that points at them.
+        CARGO_HOME: /run/build/parterre/cargo
+        # For a tagged build (Flathub), the tag: --version then shows the release rather than
+        # a dev build, and build.rs fails unless the tag is the commit being built.
+        # PARTERRE_RELEASE_TAG: v0.5.1
+    build-commands:
+      - cargo build --release --locked --offline -p parterre
+      - install -Dm755 target/release/parterre -t ${FLATPAK_DEST}/bin
+      - install -Dm644 packaging/linux/${FLATPAK_ID}.desktop -t ${FLATPAK_DEST}/share/applications
+      - install -Dm644 packaging/linux/${FLATPAK_ID}.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo
+      - install -Dm644 packaging/icon/parterre.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
+      - for s in 16 24 32 48 64 128 256 512; do install -Dm644 packaging/icon/parterre-$s.png ${FLATPAK_DEST}/share/icons/hicolor/${s}x$s/apps/${FLATPAK_ID}.png; done
+      # flatpak-builder puts each module's LICENSE or COPYING in share/licenses/<id>/<module>
+      # itself, but not NOTICE.
+      - install -Dm644 NOTICE -t ${FLATPAK_DEST}/share/licenses/${FLATPAK_ID}/parterre
+    sources:
+      # This checkout, as it is. Flathub's manifest takes a tagged commit instead, with
+      # PARTERRE_RELEASE_TAG above set to the same tag:
+      #   - type: git
+      #     url: https://github.com/aquamoth/parterre.git
+      #     tag: v0.5.1
+      #     commit: <full hash of v0.5.1>
+      # Built from a copy, build.rs may not find the repository (a linked worktree's .git
+      # points outside it), and --version then says e.g. 0.4.0-dev.
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          # build.sh's default work directory.
+          - packaging/flatpak/build
+      - cargo-sources.json
