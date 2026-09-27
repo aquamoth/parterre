@@ -709,30 +709,11 @@ impl BlameWindow {
         requests
     }
 
-    /// Whether whitespace changes and moved lines count; on the right, whether the history
-    /// pane shows.
+    /// Whether whitespace changes and moved lines count, as icon segments; on the right,
+    /// whether the history pane shows.
     fn toolbar(&mut self, ui: &mut Ui, settings: &mut BlameWindowSettings) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), TOOLBAR), Sense::hover());
         ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
-        let mut right = ui.new_child(
-            UiBuilder::new()
-                .max_rect(rect.shrink2(vec2(12.0, 0.0)))
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
-        );
-        right.spacing_mut().item_spacing.x = 8.0;
-        let (title, body) = (
-            "History",
-            "The commits that changed the file, below the text. Choosing a row chooses its \
-             commit's lines; Up and Down step through the rows.",
-        );
-        let switch = widgets::switch(&mut right, &mut self.show_history);
-        if switch.changed() {
-            settings.show_history = self.show_history;
-        }
-        widgets::tip_explained(switch, title, "", body);
-        let weak = right.visuals().weak_text_color();
-        let label = right.label(RichText::new("History").size(12.5).color(weak));
-        widgets::tip_explained(label, title, "", body);
         let mut bar = ui.new_child(
             UiBuilder::new()
                 .max_rect(rect.shrink2(vec2(10.0, 0.0)))
@@ -771,15 +752,12 @@ impl BlameWindow {
         }
         ui.add_space(14.0);
 
-        let label = ui.label(RichText::new("Moved lines").size(12.5).color(weak));
-        let mut moves = self.options.moves;
-        let items = Moves::ALL.map(|m| (m, m.label()));
-        widgets::text_segmented(ui, &mut moves, &items);
-        let explained = Moves::ALL
-            .map(|m| format!("{}: {}", m.label(), m.description()))
-            .join("\n\n");
-        widgets::tip_explained(label, "Moved and copied lines", "", &explained);
-        if moves != self.options.moves {
+        let moves = Moves::ALL.map(|m| (m, moves_glyph(m)));
+        let picked = widgets::segmented(ui, self.options.moves, &moves, |m, r| {
+            let title = format!("Moved lines: {}", m.label().to_lowercase());
+            widgets::tip_explained(r, &title, "", m.description())
+        });
+        if let Some(moves) = picked {
             self.options.moves = moves;
             settings.moves = moves;
         }
@@ -787,6 +765,22 @@ impl BlameWindow {
             ui.add_space(14.0);
             ui.label(RichText::new("F5 blames again").size(12.0).color(weak));
         }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let on = self.show_history;
+            let title = if on {
+                "Hide the history pane"
+            } else {
+                "Show the history pane"
+            };
+            let body = "Every commit that changed this file, in a list below the text. Choosing \
+                        a row chooses its commit's lines; Up and Down step through the rows.";
+            let response = widgets::icon_button(ui, glyphs::HISTORY, on);
+            if widgets::tip_explained(response, title, "", body).clicked() {
+                self.show_history = !on;
+                settings.show_history = self.show_history;
+            }
+        });
     }
 
     /// The path and the revision; the counts on the right, and a note on bytes that aren't
@@ -1629,6 +1623,15 @@ fn runs(n: usize, owned: impl Fn(usize) -> bool) -> Vec<std::ops::Range<usize>> 
     runs
 }
 
+/// The toolbar's icon for a choice of moved lines.
+fn moves_glyph(moves: Moves) -> glyphs::Glyph {
+    match moves {
+        Moves::Off => glyphs::MOVES_OFF,
+        Moves::WithinFile => glyphs::MOVES_WITHIN_FILE,
+        Moves::AcrossFiles => glyphs::MOVES_ACROSS_FILES,
+    }
+}
+
 /// The tooltip over the gutter: the commit's subject, author and date, and hash.
 fn origin_tip(ui: &mut Ui, origin: &Origin, date: &str, abbrev: usize) {
     ui.set_max_width(420.0);
@@ -1851,12 +1854,21 @@ mod tests {
         w: &mut BlameWindow,
         events: Vec<egui::Event>,
     ) -> Vec<BlameRequest> {
+        frame_with(ctx, w, &mut BlameWindowSettings::default(), events)
+    }
+
+    /// [`frame`], keeping what the window saves in `settings`.
+    fn frame_with(
+        ctx: &egui::Context,
+        w: &mut BlameWindow,
+        settings: &mut BlameWindowSettings,
+        events: Vec<egui::Event>,
+    ) -> Vec<BlameRequest> {
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 700.0))),
             events,
             ..Default::default()
         };
-        let mut settings = BlameWindowSettings::default();
         let graph = GraphOptions::default();
         let mut requests = Vec::new();
         ctx.run_ui(input, |ui| {
@@ -1865,7 +1877,7 @@ mod tests {
                 graph: &graph,
             };
             w.handle_keys(ui);
-            requests = w.contents(ui, &mut settings, &env);
+            requests = w.contents(ui, settings, &env);
         })
         .textures_delta
         .clear();
@@ -2367,5 +2379,28 @@ mod tests {
         assert!(!second.is_cancelled());
         drop(w);
         assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn the_toolbar_icons_pick_moved_lines_and_hide_the_history_pane() {
+        let ctx = egui::Context::default();
+        let mut w = listed_window();
+        let mut settings = BlameWindowSettings::default();
+        frame_with(&ctx, &mut w, &mut settings, Vec::new());
+        let clicked = |ctx: &egui::Context, w: &mut BlameWindow, s: &mut _, p| {
+            let events = vec![egui::Event::PointerMoved(p), button(p, true, false)];
+            frame_with(ctx, w, s, events);
+            frame_with(ctx, w, s, vec![button(p, false, false)]);
+        };
+        // The third of the moved-lines segments, after the two whitespace ones.
+        clicked(&ctx, &mut w, &mut settings, pos2(177.0, TOOLBAR / 2.0));
+        assert_eq!(w.options.moves, Moves::AcrossFiles);
+        assert_eq!(settings.moves, Moves::AcrossFiles);
+
+        // The history icon, at the right end.
+        assert!(w.show_history);
+        clicked(&ctx, &mut w, &mut settings, pos2(975.0, TOOLBAR / 2.0));
+        assert!(!w.show_history);
+        assert!(!settings.show_history);
     }
 }

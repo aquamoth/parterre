@@ -239,8 +239,26 @@ pub const ORDER_TOPOLOGICAL: Glyph = &[Part::Path(
 /// Date order: Lucide's clock.
 pub const ORDER_DATE: Glyph = &[ring(12.0, 12.0, 9.0), Part::Path("M12 7v5l3 2")];
 
+/// Blame, moved lines not followed: lines of text, left where they landed.
+pub const MOVES_OFF: Glyph = &[Part::Path("M4 6h16M4 12h16M4 18h11")];
+/// Blame, lines moved within the file followed: lines of text, one carried from the top to the
+/// bottom.
+pub const MOVES_WITHIN_FILE: Glyph = &[Part::Path(
+    "M3 6h9M3 12h9M3 18h9M14.5 6H17a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3h-2.5M17 15.5 14.5 18l2.5 2.5",
+)];
+/// Blame, lines moved from other files followed too: a line carried from one file to another.
+pub const MOVES_ACROSS_FILES: Glyph = &[
+    rect(3.0, 3.0, 7.5, 9.5, 1.5, false),
+    rect(14.0, 11.5, 7.0, 9.5, 1.5, false),
+    Part::Path("M6.75 12.5V15a2.5 2.5 0 0 0 2.5 2.5h3M10.25 15.5l2 2-2 2"),
+];
+/// The history pane: Lucide's history, a clock turned back.
+pub const HISTORY: Glyph = &[Part::Path(
+    "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M12 7v5l4 2",
+)];
+
 /// Every glyph, for tests.
-pub const ALL: [Glyph; 40] = [
+pub const ALL: [Glyph; 44] = [
     MENU,
     SEARCH,
     PLUS,
@@ -281,6 +299,10 @@ pub const ALL: [Glyph; 40] = [
     NO_MERGES,
     ORDER_TOPOLOGICAL,
     ORDER_DATE,
+    MOVES_OFF,
+    MOVES_WITHIN_FILE,
+    MOVES_ACROSS_FILES,
+    HISTORY,
 ];
 
 /// One stroke of a flattened path.

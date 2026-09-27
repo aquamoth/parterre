@@ -53,16 +53,20 @@ impl Moves {
         }
     }
 
+    /// What the choice does, in plain words, for its tooltip.
     pub fn description(self) -> &'static str {
         match self {
-            Moves::Off => "A moved or copied line belongs to the commit that moved it.",
+            Moves::Off => {
+                "A line moved or copied, within the file or from another, counts as changed \
+                 where it landed: it belongs to the commit that moved it."
+            }
             Moves::WithinFile => {
-                "Lines moved or copied within the file keep the commit that wrote them. \
-                 As git blame -M."
+                "Detect lines moved or copied within the file: they keep the commit that \
+                 wrote them. As git blame -M."
             }
             Moves::AcrossFiles => {
-                "Lines moved or copied within the file, or from other files the same commit \
-                 changed, keep the commit that wrote them. As git blame -M -C."
+                "Detect lines moved or copied within the file, and from other files the same \
+                 commit changed: they keep the commit that wrote them. As git blame -M -C."
             }
         }
     }
