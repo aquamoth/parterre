@@ -19,6 +19,9 @@ crates/parterre-core   GUI-free; everything testable lives here
   blame.rs             blaming a file (`git blame --line-porcelain`): each line's origin
                        (commit, path, the version before), and where a line leads: its
                        change, and the blame before it
+  file_history.rs      the blame window's history pane: `git log --no-follow` of the file
+                       plus the blame's own commits and the working tree, with which rows
+                       own lines and are in the snapshot, and their graph column
   text.rs              URLs in commit messages, paths cut at the start, thousands separators
   text_size.rs         the text size's steps, and Ctrl+wheel and pinch turned into steps
   revgraph.rs          reduce the commit DAG to a revision graph (TortoiseGit's rules)

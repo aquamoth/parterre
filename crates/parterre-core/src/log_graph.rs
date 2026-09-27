@@ -9,6 +9,9 @@
 //!
 //! Decided with the prototype on the branch `prototype/log-graph` (variant A, "TortoiseGit").
 //!
+//! [`LogGraph::from_parents`] draws any other list of rows the same way, such as the blame
+//! window's history pane ([`crate::file_history`]).
+//!
 //! Memory stays small for long logs: [`LogGraph`] keeps only the lanes at every
 //! [`CHECKPOINT`]th row and works out the rows asked for from the nearest one.
 
@@ -81,9 +84,17 @@ impl LogGraph {
             .iter()
             .map(|ps| ps.iter().filter_map(|p| rows.get(p).copied()).collect())
             .collect();
+        LogGraph::from_parents(parents, list.outside.clone())
+    }
+
+    /// The lanes of any list of rows, given for every row the rows of its parents (first
+    /// parent first, each below the row) and whether some of its history is outside the list.
+    /// A row with no parents and no row above leading to it stands alone.
+    pub fn from_parents(parents: Vec<Vec<u32>>, outside: Vec<bool>) -> LogGraph {
+        debug_assert_eq!(parents.len(), outside.len());
         let mut graph = LogGraph {
             parents,
-            outside: list.outside.clone(),
+            outside,
             checkpoints: Vec::new(),
             lanes: 0,
         };

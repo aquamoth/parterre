@@ -5,6 +5,7 @@ pub mod blame;
 pub mod changed_files;
 pub mod compare;
 pub mod file_diff;
+pub mod file_history;
 pub mod forge;
 pub mod git;
 pub mod glyphs;
