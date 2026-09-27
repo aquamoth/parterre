@@ -1,6 +1,7 @@
 mod common;
 
 use common::TestRepo;
+use parterre_core::git::CommitNote;
 use parterre_core::revgraph::{self, GraphOptions, PullRequestHead, RevGraph, Simplification};
 use parterre_core::{Head, RefKind, Repo};
 
@@ -418,16 +419,56 @@ fn hidden_branches_vanish_only_as_leaves() {
 }
 
 #[test]
-fn reads_full_commit_messages() {
+fn reads_full_commit_messages_committers_and_notes() {
     let mut r = TestRepo::new();
-    r.commit("Subject line\n\nBody paragraph\nsecond line");
+    r.commit("Subject line\n\nBody paragraph\n\tsecond line\nNotes:");
+    // Amended by someone else, later: the author stays, the committer changes.
+    r.set_clock(5);
+    r.git(&["config", "user.name", "Other"]);
+    r.git(&["commit", "-q", "--amend", "--allow-empty", "--no-edit"]);
+    r.git(&["notes", "add", "-m", "First note", "-m", "  indented"]);
+    r.git(&["notes", "--ref=review", "add", "-m", "Looks good"]);
+    r.git(&["config", "notes.displayRef", "refs/notes/review"]);
     let repo = r.load();
     let c = repo.head_commit().unwrap();
     assert_eq!(repo.commit(c).subject, "Subject line");
-    let msg = parterre_core::git::Git::new(r.path())
-        .message(&repo.commit(c).oid)
+    let d = parterre_core::git::Git::new(r.path())
+        .details(&repo.commit(c).oid)
         .unwrap();
-    assert_eq!(msg, "Subject line\n\nBody paragraph\nsecond line");
+    assert_eq!(
+        d.message,
+        "Subject line\n\nBody paragraph\n\tsecond line\nNotes:"
+    );
+    assert_eq!(d.author_date, "2023-11-14 22:14:20 +0000");
+    assert_eq!(d.committer_date, "2023-11-14 22:18:20 +0000");
+    assert_eq!(
+        (d.committer_name.as_str(), d.committer_email.as_str()),
+        ("Other", "test@example.com")
+    );
+    let note = |heading: &str, text: &str| CommitNote {
+        heading: heading.to_owned(),
+        text: text.to_owned(),
+    };
+    assert_eq!(
+        d.notes,
+        [
+            note("Notes", "First note\n\n  indented"),
+            note("Notes (review)", "Looks good")
+        ]
+    );
+}
+
+#[test]
+fn commits_without_notes_have_none() {
+    let mut r = TestRepo::new();
+    r.commit("Plain");
+    let repo = r.load();
+    let c = repo.head_commit().unwrap();
+    let d = parterre_core::git::Git::new(r.path())
+        .details(&repo.commit(c).oid)
+        .unwrap();
+    assert_eq!(d.message, "Plain");
+    assert!(d.notes.is_empty());
 }
 
 #[test]

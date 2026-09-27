@@ -25,7 +25,7 @@ use parterre_core::{Commit, CommitIx, GitRef, Oid, Repo};
 
 use super::compare_window::CompareRequest;
 use super::file_table::{DiffQueue, FileTable, Lister, Listing};
-use super::{Messages, ParterreApp};
+use super::{Details, ParterreApp};
 use crate::settings::LogWindowSettings;
 use crate::text_size;
 use crate::theme::{Palette, text_on};
@@ -169,7 +169,7 @@ enum Pane {
 
 /// What the panes need from the app besides the log window's own state.
 struct Env<'a> {
-    messages: &'a mut Messages,
+    details: &'a mut Details,
     palette: Palette,
     graph: &'a GraphOptions,
     /// The layout and the dividers.
@@ -759,8 +759,9 @@ impl LogWindow {
         }
     }
 
-    /// The selected commit: full hash, author and date, each with a Copy button where it helps,
-    /// then the full message. The text is selectable, and web links open in the browser.
+    /// The selected commit as `git log` shows it: full hash, refs, a merge's parents, author and
+    /// date, each with a Copy button where it helps, the committer where it differs, then the
+    /// full message and the notes. The text is selectable, and web links open in the browser.
     fn details_pane(&mut self, ui: &mut Ui, env: &mut Env, c: &Colors) {
         let Some(view) = &self.view else { return };
         let Some(ix) = view.selected_commit() else {
@@ -779,7 +780,13 @@ impl LogWindow {
         let mut copy = None;
         let mut jump = None;
         let ctx = ui.ctx().clone();
-        let message = env.messages.get(&view.repo.path, commit.oid, &ctx);
+        let details = env.details.get(&view.repo.path, commit.oid, &ctx);
+        let loaded = details.and_then(|d| d.as_ref().ok());
+        let refs: Vec<&GitRef> = view.refs[ix.ix()]
+            .iter()
+            .map(|&r| &view.repo.refs[r])
+            .filter(|r| env.graph.shows(r.kind))
+            .collect();
         ScrollArea::vertical()
             .id_salt(("log-details", commit.oid))
             .auto_shrink(false)
@@ -788,57 +795,79 @@ impl LogWindow {
                     .inner_margin(Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        egui::Grid::new("log-meta")
-                            .num_columns(2)
-                            .spacing(vec2(12.0, 4.0))
-                            .show(ui, |ui| {
-                                ui.weak("Commit");
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(commit.oid.to_hex()).monospace());
-                                    if copy_button(ui, copied == Some(Copied::Hash), c)
-                                        .on_hover_text("Copy the full hash")
-                                        .clicked()
-                                    {
-                                        ui.ctx().copy_text(commit.oid.to_hex());
-                                        copy = Some(Copied::Hash);
-                                    }
-                                });
-                                ui.end_row();
-                                if commit.parents.len() > 1 {
-                                    ui.weak("Merge");
-                                    ui.horizontal(|ui| {
-                                        for &p in &commit.parents {
-                                            if let Some(row) = parent_link(ui, view, p) {
-                                                jump = Some(row);
-                                            }
-                                        }
-                                    });
-                                    ui.end_row();
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        let label_width = field_label_width(ui);
+                        field(ui, label_width, "Commit", |ui| {
+                            ui.label(RichText::new(commit.oid.to_hex()).monospace());
+                            if copy_button(ui, copied == Some(Copied::Hash), c)
+                                .on_hover_text("Copy the full hash")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(commit.oid.to_hex());
+                                copy = Some(Copied::Hash);
+                            }
+                        });
+                        if !refs.is_empty() {
+                            field(ui, label_width, "Refs", |ui| {
+                                for r in &refs {
+                                    badge_widget(ui, r, &env.palette);
                                 }
-                                ui.weak("Author");
-                                ui.horizontal(|ui| {
-                                    ui.label(format!(
-                                        "{} <{}>",
-                                        commit.author_name, commit.author_email
-                                    ));
-                                    if copy_button(ui, copied == Some(Copied::Email), c)
-                                        .on_hover_text("Copy the email address")
-                                        .clicked()
-                                    {
-                                        ui.ctx().copy_text(commit.author_email.clone());
-                                        copy = Some(Copied::Email);
-                                    }
-                                });
-                                ui.end_row();
-                                ui.weak("Date");
-                                ui.label(&commit.author_date);
-                                ui.end_row();
                             });
+                        }
+                        if commit.parents.len() > 1 {
+                            field(ui, label_width, "Merge", |ui| {
+                                for &p in &commit.parents {
+                                    if let Some(row) = parent_link(ui, view, p) {
+                                        jump = Some(row);
+                                    }
+                                }
+                            });
+                        }
+                        field(ui, label_width, "Author", |ui| {
+                            ui.label(format!("{} <{}>", commit.author_name, commit.author_email));
+                            if copy_button(ui, copied == Some(Copied::Email), c)
+                                .on_hover_text("Copy the email address")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(commit.author_email.clone());
+                                copy = Some(Copied::Email);
+                            }
+                        });
+                        // To the minute in local time until git has said more.
+                        let date = loaded.map_or(&commit.author_date, |d| &d.author_date);
+                        field(ui, label_width, "Date", |ui| ui.label(date));
+                        // The committer only where it differs from the author.
+                        if let Some(d) = loaded {
+                            let committer = (d.committer_name.as_str(), d.committer_email.as_str());
+                            if committer != (&commit.author_name, &commit.author_email) {
+                                field(ui, label_width, "Committer", |ui| {
+                                    ui.label(format!("{} <{}>", committer.0, committer.1))
+                                });
+                            }
+                            if d.committer_date != d.author_date {
+                                field(ui, label_width, "Committed", |ui| {
+                                    ui.label(&d.committer_date)
+                                });
+                            }
+                        }
                         ui.add_space(10.0);
-                        match message {
-                            Some(message) => message_ui(ui, message),
+                        match details {
+                            Some(Ok(d)) => {
+                                message_ui(ui, &d.message, true);
+                                for note in &d.notes {
+                                    ui.add_space(10.0);
+                                    ui.weak(&note.heading);
+                                    ui.add_space(2.0);
+                                    message_ui(ui, &note.text, false);
+                                }
+                            }
+                            Some(Err(e)) => {
+                                message_ui(ui, &commit.subject, true);
+                                ui.add_space(6.0);
+                                ui.colored_label(ui.visuals().error_fg_color, e);
+                            }
                             None => {
-                                message_ui(ui, &commit.subject);
+                                message_ui(ui, &commit.subject, true);
                                 ui.spinner();
                             }
                         }
@@ -1120,6 +1149,63 @@ fn copy_button(ui: &mut Ui, copied: bool, c: &Colors) -> Response {
     response
 }
 
+/// Height of a line of the selected commit's fields: that of a Copy button.
+const FIELD: f32 = 20.0;
+/// The names of the selected commit's fields.
+const FIELD_LABELS: [&str; 7] = [
+    "Commit",
+    "Refs",
+    "Merge",
+    "Author",
+    "Date",
+    "Committer",
+    "Committed",
+];
+
+/// The width of the column of field names: the widest name and a gap.
+fn field_label_width(ui: &Ui) -> f32 {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let widest = FIELD_LABELS
+        .iter()
+        .map(|&l| {
+            ui.painter()
+                .layout_no_wrap(l.to_owned(), font.clone(), Color32::PLACEHOLDER)
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    widest + 12.0
+}
+
+/// One of the selected commit's fields: its name in a column `label_width` wide, then what
+/// `add` adds, wrapping onto more lines where it has to.
+fn field<R>(ui: &mut Ui, label_width: f32, label: &str, add: impl FnOnce(&mut Ui) -> R) {
+    debug_assert!(FIELD_LABELS.contains(&label));
+    ui.horizontal_top(|ui| {
+        let centred = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(vec2(label_width, FIELD), centred, |ui| {
+            ui.set_min_size(vec2(label_width, FIELD));
+            ui.weak(label);
+        });
+        let width = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(width, FIELD), centred.with_main_wrap(true), |ui| {
+            ui.set_min_height(FIELD);
+            add(ui);
+        });
+    });
+}
+
+/// A ref's badge (see [`badge`]) laid out in `ui`.
+fn badge_widget(ui: &mut Ui, git_ref: &GitRef, palette: &Palette) {
+    let text = ui.painter().layout_no_wrap(
+        git_ref.name.clone(),
+        FontId::proportional(11.5),
+        Color32::PLACEHOLDER,
+    );
+    let (rect, _) = ui.allocate_exact_size(vec2(text.size().x + 11.0, 17.0), Sense::hover());
+    badge(ui, git_ref, palette, rect.left_center(), rect.width());
+}
+
 /// A merge parent's short hash, as `git log`'s `Merge:` line has it. A link to the parent's
 /// row if the log lists it: returns that row when clicked. Otherwise plain, weak text.
 fn parent_link(ui: &mut Ui, view: &LogView, parent: CommitIx) -> Option<usize> {
@@ -1135,9 +1221,9 @@ fn parent_link(ui: &mut Ui, view: &LogView, parent: CommitIx) -> Option<usize> {
     link.clicked().then_some(row)
 }
 
-/// A commit message, subject in the strong colour, monospaced as in a terminal. The text is
-/// selectable; `http(s)` links are clickable.
-fn message_ui(ui: &mut Ui, message: &str) {
+/// A commit message or note, monospaced as in a terminal; a message's subject in the strong
+/// colour. The text is selectable; `http(s)` links are clickable.
+fn message_ui(ui: &mut Ui, message: &str, subject: bool) {
     let font = FontId::monospace(12.5);
     let text = ui.visuals().text_color();
     let strong = ui.visuals().strong_text_color();
@@ -1155,8 +1241,9 @@ fn message_ui(ui: &mut Ui, message: &str) {
     };
     for (n, line) in message.trim_end().lines().enumerate() {
         let urls = find_urls(line);
-        let color = if n == 0 { strong } else { text };
-        if urls.is_empty() && n > 0 {
+        let first = subject && n == 0;
+        let color = if first { strong } else { text };
+        if urls.is_empty() && !first {
             plain.push_str(if line.is_empty() { " " } else { line });
             plain.push('\n');
             continue;
@@ -1278,7 +1365,7 @@ impl ParterreApp {
             }
             let palette = Palette::new(ui.visuals().dark_mode, &self.settings.branch_colors);
             let mut env = Env {
-                messages: &mut self.messages,
+                details: &mut self.details,
                 palette,
                 graph: &self.settings.graph,
                 settings: &mut self.settings.log_window,

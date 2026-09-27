@@ -6,6 +6,7 @@ use eframe::egui::{
     self, Color32, FontId, Key, Modifiers, PointerButton, Pos2, Rect, RichText, Sense, Ui, Vec2,
     vec2,
 };
+use parterre_core::git::CommitDetails;
 use parterre_core::layout::{Direction, LayoutOptions};
 use parterre_core::physics::DragModel;
 use parterre_core::revgraph::{GraphOptions, RevEdge};
@@ -137,25 +138,26 @@ fn dragged_with(selection: &Selection, anchor: usize) -> Vec<usize> {
     }
 }
 
-/// Full commit messages for tooltips, fetched from git on a worker thread when first needed.
+/// Full commit messages, notes and committers for tooltips and the log, fetched from git on a
+/// worker thread when first needed. A failure is kept as its message.
 #[derive(Debug, Default)]
-struct Messages {
+struct Details {
     /// `None` while loading.
-    cache: std::collections::HashMap<parterre_core::Oid, Option<String>>,
-    rx: Option<std::sync::mpsc::Receiver<(parterre_core::Oid, String)>>,
+    cache: std::collections::HashMap<parterre_core::Oid, Option<Result<CommitDetails, String>>>,
+    rx: Option<std::sync::mpsc::Receiver<(parterre_core::Oid, Result<CommitDetails, String>)>>,
     tx: Option<std::sync::mpsc::Sender<parterre_core::Oid>>,
 }
 
-impl Messages {
-    /// The message of `oid` if already loaded; otherwise requests it.
+impl Details {
+    /// The details of `oid` if already loaded; otherwise requests them.
     fn get(
         &mut self,
         repo_path: &std::path::Path,
         oid: parterre_core::Oid,
         ctx: &egui::Context,
-    ) -> Option<&str> {
-        while let Some(Ok((oid, msg))) = self.rx.as_ref().map(|rx| rx.try_recv()) {
-            self.cache.insert(oid, Some(msg));
+    ) -> Option<&Result<CommitDetails, String>> {
+        while let Some(Ok((oid, details))) = self.rx.as_ref().map(|rx| rx.try_recv()) {
+            self.cache.insert(oid, Some(details));
         }
         if let std::collections::hash_map::Entry::Vacant(slot) = self.cache.entry(oid) {
             slot.insert(None);
@@ -166,8 +168,8 @@ impl Messages {
                 let ctx = ctx.clone();
                 std::thread::spawn(move || {
                     for oid in req_rx {
-                        let msg = git.message(&oid).unwrap_or_else(|e| format!("({e})"));
-                        if res_tx.send((oid, msg)).is_err() {
+                        let details = git.details(&oid).map_err(|e| e.to_string());
+                        if res_tx.send((oid, details)).is_err() {
                             break;
                         }
                         ctx.request_repaint();
@@ -178,7 +180,20 @@ impl Messages {
             });
             let _ = tx.send(oid);
         }
-        self.cache.get(&oid).and_then(|m| m.as_deref())
+        self.cache.get(&oid).and_then(Option::as_ref)
+    }
+
+    /// The full message of `oid` (or why it could not be read) if already loaded.
+    fn message(
+        &mut self,
+        repo_path: &std::path::Path,
+        oid: parterre_core::Oid,
+        ctx: &egui::Context,
+    ) -> Option<String> {
+        self.get(repo_path, oid, ctx).map(|d| match d {
+            Ok(d) => d.message.clone(),
+            Err(e) => format!("({e})"),
+        })
     }
 }
 
@@ -248,7 +263,7 @@ pub struct ParterreApp {
     export: Option<Format>,
     /// The folder exported to last, where the save dialog starts next time.
     export_dir: Option<PathBuf>,
-    messages: Messages,
+    details: Details,
     /// The log window (Show log), and what it keeps while closed.
     log: log_window::LogWindow,
     /// Raise the log window in the next frame (Show log while it is open).
@@ -395,7 +410,7 @@ impl ParterreApp {
             show_about: false,
             export: None,
             export_dir: None,
-            messages: Messages::default(),
+            details: Details::default(),
             log: log_window::LogWindow::default(),
             focus_log: false,
             diffs: diff_window::DiffWindows::default(),
@@ -770,7 +785,7 @@ impl ParterreApp {
         self.status = None;
         self.export = None;
         // Its worker thread asks the old repository's git; dropping it ends the thread.
-        self.messages = Messages::default();
+        self.details = Details::default();
         // The log and the diffs show the old repository's history.
         self.log.close();
         self.diffs.close_all();
@@ -1593,7 +1608,7 @@ impl ParterreApp {
                 .iter()
                 .map(|&r| scene.repo.refs[r].full_name.as_str())
                 .collect();
-            let messages = &mut self.messages;
+            let details = &mut self.details;
             let repo_path = &scene.repo.path;
             let ctx = ui.ctx().clone();
             response.clone().on_hover_ui_at_pointer(|ui| {
@@ -1604,7 +1619,7 @@ impl ParterreApp {
                 ));
                 ui.add_space(4.0);
                 ui.label(RichText::new(&commit.subject).strong());
-                match messages.get(repo_path, commit.oid, &ctx) {
+                match details.message(repo_path, commit.oid, &ctx) {
                     Some(message) => {
                         let body = message.split_once('\n').map_or("", |(_, b)| b.trim());
                         if !body.is_empty() {
