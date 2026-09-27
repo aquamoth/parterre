@@ -22,9 +22,10 @@
 //! commit table, as decided in #111, #112 and #113. Choosing works both ways: a line selects
 //! its commit's row, a row (or `Up`/`Down`) chooses its commit and first line, without
 //! scrolling the text. The Hash cell carries the gutter's age colour; rows of commits that own
-//! no lines are greyed out. A row's menu blames the file at that commit, shows its change to
-//! the file, or shows the log from it. The divider above the pane is remembered for the next
-//! window.
+//! no lines are greyed out. Hovering a row's subject shows the commit's whole message, author
+//! and date, fetched from git the first time (the subject alone until then). A row's menu
+//! blames the file at that commit, shows its change to the file, or shows the log from it. The
+//! divider above the pane is remembered for the next window.
 //!
 //! Find (`Ctrl+F`, #114) looks for text in the lines as in the file, ignoring case as the main
 //! window's find does, in each window on its own. Every place found is highlighted and marked
@@ -49,7 +50,7 @@ use parterre_core::changed_files::FileStatus;
 use parterre_core::file_diff::{FileDiffSpec, Rev, Version, display_column, raw_offset};
 use parterre_core::file_history::{FileHistory, FileLog, HistoryRow, Source};
 use parterre_core::find;
-use parterre_core::git::{Cancel, Git};
+use parterre_core::git::{Cancel, CommitDetails, Git};
 use parterre_core::glyphs;
 use parterre_core::log_graph::LogGraph;
 use parterre_core::repo::cmp_refs_for_display;
@@ -57,13 +58,13 @@ use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{line_number, thousands, word_at};
 use parterre_core::{CommitIx, Oid, Repo};
 
-use super::ParterreApp;
 use super::commit_table::{CommitList, CommitTable, ROW, Row};
 use super::diff_window::{
     Colors, OVERVIEW, SCROLLBAR, colors, hscrollbar, message, overview_background, overview_scale,
     overview_scroll, overview_view,
 };
 use super::log_window::{self, Bar, DIVIDER, HEADING, cell, divider};
+use super::{Details, ParterreApp};
 use crate::settings::{BlameWindowSettings, Settings};
 use crate::text_size;
 use crate::theme::Palette;
@@ -399,6 +400,9 @@ struct BlameWindow {
     cancel: Cancel,
     /// The history pane's selected row and scroll position.
     list: CommitList,
+    /// The whole messages of the history pane's commits, fetched from git the first time a
+    /// row's subject is hovered.
+    details: Details,
     /// The history pane is shown, this tall (with its headings).
     show_history: bool,
     history_height: f32,
@@ -457,6 +461,7 @@ impl BlameWindow {
             listing: Listing::Failed(String::new()),
             cancel: Cancel::new(),
             list: CommitList::default(),
+            details: Details::default(),
             show_history: settings.show_history,
             history_height: settings.history_height,
             options,
@@ -1735,6 +1740,17 @@ impl BlameWindow {
             palette: &env.palette,
         };
         let (repo, spec) = (&*self.repo, &self.spec);
+        let details = &mut self.details;
+        let mut subject_tip = |ui: &mut Ui, i: usize| {
+            let Some(row) = history.and_then(|h| h.history.rows.get(i)) else {
+                return;
+            };
+            let ctx = ui.ctx().clone();
+            let fetched = row
+                .commit
+                .and_then(|oid| details.get(&repo.path, oid, &ctx));
+            message_tip(ui, &MessageTip::new(row, fetched), repo.abbrev_len);
+        };
         let mut action = None;
         let clicks = table.show(
             ui,
@@ -1753,6 +1769,7 @@ impl BlameWindow {
                     action = Some(a);
                 }
             },
+            Some(&mut subject_tip),
         );
         if let Some((text, color)) = status {
             let below = Rect::from_min_max(pos2(rect.left(), rect.top() + HEADING), rect.max);
@@ -2231,6 +2248,86 @@ fn origin_tip(ui: &mut Ui, origin: &Origin, date: &str, abbrev: usize) {
     ui.strong(&origin.summary);
     ui.label(format!("{} <{}>", origin.author, origin.author_email));
     ui.weak(format!("{date}   {}", oid.short(abbrev.max(12))));
+}
+
+/// A tooltip shows this much of a commit message at most, as the graph's tooltips do.
+const TIP_LINES: usize = 40;
+const TIP_CHARS: usize = 4000;
+
+/// What the tooltip over a row's subject shows: the commit's whole message, author and date,
+/// as the log window's details show them. Until git has given the message (or if it failed),
+/// the subject alone, with the date as the log shows it.
+#[derive(Debug, PartialEq, Eq)]
+struct MessageTip<'a> {
+    /// `None` for the working tree changes.
+    commit: Option<Oid>,
+    author: String,
+    date: &'a str,
+    /// At most [`TIP_LINES`] lines and [`TIP_CHARS`] characters of it, and whether there was
+    /// more.
+    message: String,
+    cut: bool,
+    /// Why git could not give the message.
+    error: Option<&'a str>,
+}
+
+impl<'a> MessageTip<'a> {
+    /// For `row`, with what git gave for its commit so far (`None` while fetching).
+    fn new(row: &'a HistoryRow, fetched: Option<&'a Result<CommitDetails, String>>) -> Self {
+        let (message, date, error) = match fetched {
+            Some(Ok(d)) => (d.message.as_str(), d.author_date.as_str(), None),
+            Some(Err(e)) => (
+                row.subject.as_str(),
+                row.author_date.as_str(),
+                Some(e.as_str()),
+            ),
+            None => (row.subject.as_str(), row.author_date.as_str(), None),
+        };
+        let lines: Vec<&str> = message.trim_end().lines().collect();
+        let mut shown = lines[..lines.len().min(TIP_LINES)].join("\n");
+        let mut cut = lines.len() > TIP_LINES;
+        if let Some((at, _)) = shown.char_indices().nth(TIP_CHARS) {
+            shown.truncate(at);
+            cut = true;
+        }
+        MessageTip {
+            commit: row.commit,
+            author: format!("{} <{}>", row.author_name, row.author_email),
+            date,
+            message: shown,
+            cut,
+            error,
+        }
+    }
+}
+
+/// The tooltip over a row's subject ([`MessageTip`]): author, date and hash, then the message
+/// monospaced as the log window's details show it, the subject in the strong colour.
+fn message_tip(ui: &mut Ui, tip: &MessageTip, abbrev: usize) {
+    let Some(oid) = tip.commit else {
+        ui.label("Changes in the working tree, not committed yet.");
+        return;
+    };
+    ui.set_max_width(560.0);
+    ui.label(&tip.author);
+    ui.weak(format!("{}   {}", tip.date, oid.short(abbrev.max(12))));
+    ui.add_space(6.0);
+    let font = FontId::monospace(12.5);
+    let (subject, body) = tip.message.split_once('\n').unwrap_or((&tip.message, ""));
+    let strong = ui.visuals().strong_text_color();
+    ui.add(egui::Label::new(RichText::new(subject).font(font.clone()).color(strong)).wrap());
+    let body = body.trim_start_matches('\n');
+    if !body.is_empty() {
+        ui.add_space(8.0);
+        ui.add(egui::Label::new(RichText::new(body).font(font.clone())).wrap());
+    }
+    if tip.cut {
+        ui.weak("…");
+    }
+    if let Some(e) = tip.error {
+        ui.add_space(6.0);
+        ui.colored_label(ui.visuals().error_fg_color, e);
+    }
 }
 
 /// Colours of the gutter by age, and of the lines of the chosen commit and their marks in the
@@ -3452,5 +3549,66 @@ mod tests {
         w.load = Load::Failed("no".into());
         frame(&ctx, &mut w, vec![ctrl(Key::G)]);
         assert!(!w.go_to.open);
+    }
+
+    #[test]
+    fn hovering_a_rows_subject_fetches_its_whole_message_and_elsewhere_does_not() {
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|s| s.interaction.tooltip_delay = 0.0);
+        let mut w = listed_window();
+        frame(&ctx, &mut w, Vec::new());
+        // Over row 2's author: its own tooltip, nothing fetched.
+        let author = pos2(780.0, row_at(2).y);
+        frame(&ctx, &mut w, vec![egui::Event::PointerMoved(author)]);
+        for _ in 0..3 {
+            frame(&ctx, &mut w, Vec::new());
+        }
+        assert!(!w.details.cache.contains_key(&oid(A)));
+        // Over row 0's subject: B's message is asked for.
+        frame(&ctx, &mut w, vec![egui::Event::PointerMoved(row_at(0))]);
+        for _ in 0..3 {
+            frame(&ctx, &mut w, Vec::new());
+        }
+        assert!(w.details.cache.contains_key(&oid(B)));
+        assert_eq!(w.details.cache.len(), 1);
+    }
+
+    #[test]
+    fn a_subject_tip_shows_the_subject_until_the_whole_message_is_there() {
+        let w = listed_window();
+        let row = &w.history().unwrap().history.rows[0];
+        let fetching = MessageTip::new(row, None);
+        assert_eq!(fetching.message, "s200");
+        assert_eq!(fetching.author, "A B <a@b>");
+        assert_eq!((fetching.cut, fetching.error), (false, None));
+
+        let details = |message: &str| {
+            Ok(CommitDetails {
+                message: message.to_owned(),
+                author_date: "2026-09-27 08:14:19 +0200".into(),
+                committer_name: "C".into(),
+                committer_email: "c@d".into(),
+                committer_date: "2026-09-27 08:14:19 +0200".into(),
+                notes: Vec::new(),
+            })
+        };
+        let fetched = details("s200\n\nWhy it changed,\n  and how.\n");
+        let tip = MessageTip::new(row, Some(&fetched));
+        assert_eq!(tip.message, "s200\n\nWhy it changed,\n  and how.");
+        assert_eq!(tip.date, "2026-09-27 08:14:19 +0200");
+        assert!(!tip.cut);
+
+        // A long message is cut, and says so.
+        let long: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+        let fetched = details(&long);
+        let tip = MessageTip::new(row, Some(&fetched));
+        assert_eq!(tip.message.lines().count(), TIP_LINES);
+        assert!(tip.cut);
+
+        // Git failed: the subject, and why.
+        let failed = Err("no such commit".to_owned());
+        let tip = MessageTip::new(row, Some(&failed));
+        assert_eq!(tip.message, "s200");
+        assert_eq!(tip.error, Some("no such commit"));
     }
 }

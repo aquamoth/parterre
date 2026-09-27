@@ -236,7 +236,7 @@ fn during_a_merge_the_other_sides_commits_are_listed_even_outside_the_snapshot()
     r.commit_all("c1");
     r.branch("side");
     r.write("f.txt", b"1\nS\n");
-    let s1 = r.commit_all("s1");
+    let s1 = r.commit_all("s1\n\nWhy the side changed it.");
     r.checkout("main");
     r.write("g.txt", b"g\n");
     r.commit_all("m1 other file");
@@ -250,6 +250,9 @@ fn during_a_merge_the_other_sides_commits_are_listed_even_outside_the_snapshot()
     assert_eq!(s1_row.source, Source::Log);
     assert_eq!(s1_row.snapshot, None);
     assert!(h.rows[2].snapshot.is_some());
+    // Its whole message, for the row's tooltip, comes by its hash all the same.
+    let details = Git::new(r.path()).details(&oid(&s1).unwrap()).unwrap();
+    assert_eq!(details.message, "s1\n\nWhy the side changed it.");
 }
 
 #[test]

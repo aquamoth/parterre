@@ -95,6 +95,9 @@ pub struct CommitTable<'a> {
     pub palette: &'a Palette,
 }
 
+/// Fills the tooltip over row `i`'s subject.
+pub type SubjectTip<'a> = dyn FnMut(&mut Ui, usize) + 'a;
+
 /// What a click on a row asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Clicks {
@@ -128,8 +131,9 @@ impl Columns {
 
 impl CommitTable<'_> {
     /// The column headings and, unless there are no rows, the rows as `row` describes them;
-    /// `menu` fills a row's menu. A click with either button selects the row. Returns the
-    /// clicks. With no rows, the window can say why below the headings.
+    /// `menu` fills a row's menu, and `subject_tip`, if given, the tooltip over a row's subject.
+    /// A click with either button selects the row. Returns the clicks. With no rows, the window
+    /// can say why below the headings.
     pub fn show<'r>(
         &self,
         ui: &mut Ui,
@@ -137,6 +141,7 @@ impl CommitTable<'_> {
         list: &mut CommitList,
         row: impl Fn(usize) -> Row<'r>,
         mut menu: impl FnMut(&mut Ui, usize),
+        mut subject_tip: Option<&mut SubjectTip>,
     ) -> Clicks {
         let cols = self.columns(ui, c);
         let weak = ui.visuals().weak_text_color();
@@ -264,10 +269,14 @@ impl CommitTable<'_> {
                 let author = Rect::from_x_y_ranges(x[2]..=x[2] + w[2], rect.y_range());
                 let over_author = !r.author.is_empty()
                     && response.hover_pos().is_some_and(|p| author.contains(p));
-                let response = if over_author {
-                    response.on_hover_text(format!("{} <{}>", r.author, r.author_email))
-                } else {
-                    response
+                let subject = Rect::from_x_y_ranges(x[1]..=x[1] + w[1], rect.y_range());
+                let over_subject = response.hover_pos().is_some_and(|p| subject.contains(p));
+                let response = match &mut subject_tip {
+                    _ if over_author => {
+                        response.on_hover_text(format!("{} <{}>", r.author, r.author_email))
+                    }
+                    Some(tip) if over_subject => response.on_hover_ui(|ui| tip(ui, i)),
+                    _ => response,
                 };
                 if response.clicked() || response.secondary_clicked() {
                     clicks.clicked = Some(i);

@@ -654,6 +654,8 @@ impl LogWindow {
                     request = Some(r);
                 }
             },
+            // The details pane shows the whole message.
+            None,
         );
         if commits.is_empty() {
             ui.add_space(24.0);

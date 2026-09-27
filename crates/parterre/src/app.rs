@@ -139,8 +139,9 @@ fn dragged_with(selection: &Selection, anchor: usize) -> Vec<usize> {
     }
 }
 
-/// Full commit messages, notes and committers for tooltips and the log, fetched from git on a
-/// worker thread when first needed. A failure is kept as its message.
+/// Full commit messages, notes and committers for tooltips and the log (and for each blame
+/// window's history pane, which has its own), fetched from git on a worker thread when first
+/// needed. A failure is kept as its message.
 #[derive(Debug, Default)]
 struct Details {
     /// `None` while loading.
