@@ -9,8 +9,9 @@
 #   packaging/linux/install.sh --uninstall  remove all of it again
 #
 # The entry and the menus get the absolute path of the installed binary: a desktop loads an
-# entry only if its Exec can be found, and ~/.local/bin is often not on the session's PATH. On Wayland the
-# entry is the only source of a window's icon, so a running parterre shows it after a restart.
+# entry only if its Exec can be found, and ~/.local/bin is often not on the session's PATH. On
+# Wayland the entry is the only source of a window's icon, so a running parterre shows it after
+# a restart.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -65,10 +66,10 @@ mkdir -p "$(dirname "$dolphin")" "$(dirname "$nemo")" "$(dirname "$nautilus")"
 sed "s|^Exec=parterre |Exec=$bin |" "$fm/dolphin.desktop" > "$dolphin"
 # KDE runs a service menu of the user's own only if it is executable.
 chmod 755 "$dolphin"
-sed "s|^Exec=parterre |Exec=$bin |; s|^Dependencies=parterre;|Dependencies=$bin;|" \
-    "$fm/nemo-folder.nemo_action" > "$nemo"
-sed "s|^Exec=parterre |Exec=$bin |; s|^Dependencies=parterre;|Dependencies=$bin;|" \
-    "$fm/nemo-background.nemo_action" > "$nemo_background"
+for action in "nemo-folder:$nemo" "nemo-background:$nemo_background"; do
+    sed "s|^Exec=parterre |Exec=$bin |; s|^Dependencies=parterre;|Dependencies=$bin;|" \
+        "$fm/${action%%:*}.nemo_action" > "${action#*:}"
+done
 install -m644 "$fm/nautilus.py" "$nautilus"
 install -Dm644 "$root/packaging/icon/parterre.svg" "$hicolor/scalable/apps/$id.svg"
 for s in $sizes; do

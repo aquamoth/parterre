@@ -50,4 +50,8 @@ cargo deb -p parterre --no-build --no-strip --no-dbgsym ${target:+--target "$tar
     --deb-version "$version" -o "$out/"
 cargo generate-rpm -p crates/parterre ${target:+--target "$target"} \
     -s "version = \"$version\"" -o "$out/"
+# The ~ stays inside the packages but not in their file names, which GitHub may rewrite.
+for f in "$out"/parterre*~*; do
+    [ -e "$f" ] && mv "$f" "$(echo "$f" | tr '~' -)"
+done
 ls -l "$out"

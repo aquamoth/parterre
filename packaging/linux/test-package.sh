@@ -42,6 +42,7 @@ for f in \
     /usr/share/icons/hicolor/256x256/apps/$id.png \
     /usr/share/kio/servicemenus/$id.desktop \
     /usr/share/nemo/actions/$id.nemo_action \
+    /usr/share/nemo/actions/$id-background.nemo_action \
     /usr/share/nautilus-python/extensions/parterre.py; do
     test -f "$f" || { echo "missing: $f" >&2; exit 1; }
 done

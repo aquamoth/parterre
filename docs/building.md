@@ -142,7 +142,8 @@ packaging/linux/build-packages.sh --target x86_64-unknown-linux-gnu dist   # as 
 ```
 
 The packages take their version from `parterre --version`, with a pre-release's `-` turned into
-`~` so that `0.5.0~rc1` sorts before `0.5.0` in both dpkg and rpm. The script also writes
+`~` so that `0.5.0~rc1` sorts before `0.5.0` in both dpkg and rpm. The file names keep the `-`,
+since GitHub may rewrite a `~` in a release asset's name. The script also writes
 `THIRD-PARTY-NOTICES.html` and a copy of the AppStream metadata next to the binary, adding an
 entry for the version being packaged when `se.trustfall.parterre.metainfo.xml` has none yet
 (software centres show the newest entry as the version).

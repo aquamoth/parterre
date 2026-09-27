@@ -20,7 +20,7 @@ release filenames. Tag a clean commit on `main`; the root `Cargo.toml` and
    Windows also gets an installer built from the same files,
    `parterre-0.5.0-rc1-x86_64-pc-windows-msvc.msi` (see
    [building.md](building.md#windows-installer)), and Linux a `.deb` and an `.rpm` from the same
-   binary, `parterre_0.5.0~rc1_amd64.deb` and `parterre-0.5.0~rc1-1.x86_64.rpm` (see
+   binary, `parterre_0.5.0-rc1_amd64.deb` and `parterre-0.5.0-rc1-1.x86_64.rpm` (see
    [building.md](building.md#linux-packages)). Before the release is published they are
    installed, run and removed on Debian 12, Ubuntu 22.04 and 24.04, Fedora and openSUSE Leap
    15.6. A tag with a pre-release part publishes a pre-release; its MSI has version `0.5.0`,

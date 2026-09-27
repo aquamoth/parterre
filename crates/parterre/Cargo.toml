@@ -49,9 +49,9 @@ workspace = true
 
 # The .deb and .rpm, built by packaging/linux/build-packages.sh, which first writes the files
 # under target/release/packaging. Paths are relative to this directory, except that both tools
-# take target/release/ to mean the build's own directory, target/<triple>/release/ with --target. Besides git, the dependencies are
-# the display libraries parterre loads at run time, which neither tool can see: EGL or GLX, Wayland,
-# X11 and xkbcommon.
+# take target/release/ to mean the build's own directory, target/<triple>/release/ with
+# --target. Besides git, the dependencies are the display libraries parterre loads at run time,
+# which neither tool can see: EGL or GLX, Wayland, X11 and xkbcommon.
 [package.metadata.deb]
 name = "parterre"
 maintainer = "Mattias Åslund <mattias@trustfall.se>"
