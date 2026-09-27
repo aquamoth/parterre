@@ -3,12 +3,14 @@
 //! close with the repository. The model is [`parterre_core::blame`].
 //!
 //! A gutter on the left names each run of lines from one commit (hash, author, date), shaded
-//! by the commit's age among the file's commits as TortoiseGitBlame shades lines; clicking a
-//! line highlights every line of its commit, and the bar at the bottom describes the commit
-//! under the pointer or chosen. A line's menu goes on from there, as TortoiseGitBlame's does:
-//! blame the version before its commit (in the same window; Back returns), show its commit's
-//! change to the file in a diff window, or show the log from its commit. The toolbar says
-//! whether whitespace changes and moved lines count, remembered for the next window.
+//! by the commit's age among the file's commits as TortoiseGitBlame shades lines. Clicking a
+//! line chooses it and its commit, whose lines are all highlighted; choosing more lines (drag,
+//! Shift+click) keeps the commit of the first, and the chosen commit stays chosen until another
+//! is. The bar at the bottom describes the commit under the pointer or chosen. A line's menu
+//! goes on from there, as TortoiseGitBlame's does: blame the version before its commit (in the
+//! same window; Back returns), show its commit's change to the file in a diff window, or show
+//! the log from its commit. The toolbar says whether whitespace changes and moved lines count,
+//! remembered for the next window.
 //!
 //! Deliberate deviations from TortoiseGitBlame (see #104): no log pane of the file's
 //! history beside the text (the log window shows history), and only whole lines are chosen
@@ -193,9 +195,11 @@ struct BlameWindow {
     options: BlameOptions,
     requested: BlameOptions,
     back: Vec<Visit>,
-    /// Lines chosen, from and to (indices into the lines, either way round). The first one's
-    /// commit is highlighted.
+    /// Lines chosen, from and to (indices into the lines, either way round).
     selection: Option<(usize, usize)>,
+    /// The chosen commit, whose lines are highlighted (`None` inside is uncommitted). Set with
+    /// the line a choice of lines starts at, or on its own ([`BlameWindow::choose_commit`]).
+    chosen: Option<Option<Oid>>,
     /// The mouse is choosing lines.
     dragging: bool,
     /// Choose this line and scroll to it once loaded.
@@ -238,6 +242,7 @@ impl BlameWindow {
             requested: options,
             back: Vec::new(),
             selection: None,
+            chosen: None,
             dragging: false,
             pending_line: None,
             pending_scroll: None,
@@ -319,11 +324,27 @@ impl BlameWindow {
         blame.origins.get(blame.lines.get(i)?.origin)
     }
 
-    /// The commit whose lines are highlighted: the first chosen line's (`None` inside is
-    /// uncommitted).
-    fn highlighted(&self) -> Option<Option<Oid>> {
-        let (a, _) = self.selection?;
-        Some(self.origin(a)?.commit)
+    /// Chooses line `i` and its commit.
+    fn choose_line(&mut self, i: usize) {
+        self.selection = Some((i, i));
+        if let Some(origin) = self.origin(i) {
+            self.chosen = Some(origin.commit);
+        }
+    }
+
+    /// Chooses `commit` (`None` for the uncommitted lines) and its first line, or no line if it
+    /// owns none in this version. The text stays where it is. (For the history pane, #113.)
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn choose_commit(&mut self, commit: Option<Oid>) {
+        self.chosen = Some(commit);
+        self.selection = self.ready().and_then(|r| {
+            let first = r
+                .blame
+                .lines
+                .iter()
+                .position(|l| r.blame.origins[l.origin].commit == commit)?;
+            Some((first, first))
+        });
     }
 
     /// The chosen lines as in the file, each ending with a newline.
@@ -616,6 +637,7 @@ impl BlameWindow {
         if let Some(line) = self.pending_line.take() {
             let line = line.min(n - 1);
             self.selection = Some((line, line));
+            self.chosen = Some(blame.origins[blame.lines[line].origin].commit);
             let above = (area.height() / row_h / 3.0).floor();
             self.scroll_to = Some(((line as f32 - above) * row_h).max(0.0));
         } else if let Some(offset) = self.pending_scroll.take() {
@@ -635,7 +657,7 @@ impl BlameWindow {
         self.hoff = self.hoff.clamp(0.0, hmax);
 
         let selection = self.selection.map(|(a, b)| (a.min(b), a.max(b)));
-        let highlighted = self.highlighted();
+        let highlighted = self.chosen;
         let pointer = ui.input(|i| i.pointer.interact_pos());
         let pressed = ui.input(|i| i.pointer.primary_pressed());
         let (hoff, abbrev) = (self.hoff, self.repo.abbrev_len);
@@ -760,19 +782,20 @@ impl BlameWindow {
         });
         self.scroll = out.state.offset.y;
 
-        // Choosing lines: a press chooses (Shift extends), a drag extends, scrolling past the
-        // edges; a right-click outside the chosen lines chooses its line.
+        // Choosing lines: a press chooses a line and its commit (Shift extends, keeping the
+        // commit), a drag extends, scrolling past the edges; a right-click outside the chosen
+        // lines chooses its line and commit.
         let (down, shift) = ui.input(|i| (i.pointer.primary_down(), i.modifiers.shift));
         if let Some(i) = press {
-            self.selection = match self.selection {
-                Some((a, _)) if shift => Some((a, i)),
-                _ => Some((i, i)),
-            };
+            match self.selection {
+                Some((a, _)) if shift => self.selection = Some((a, i)),
+                _ => self.choose_line(i),
+            }
             self.dragging = true;
         } else if let Some(i) = secondary
             && !selection.is_some_and(|(a, b)| (a..=b).contains(&i))
         {
-            self.selection = Some((i, i));
+            self.choose_line(i);
         }
         if self.dragging {
             if !down {
@@ -838,42 +861,60 @@ impl BlameWindow {
         }
     }
 
-    /// The commit of the line under the pointer, else of the first chosen line: hash, author,
-    /// date and subject.
+    /// The commit of the line under the pointer, else the chosen commit: hash, author, date
+    /// and subject.
     fn info_bar(&self, ui: &Ui, rect: Rect, hovered: Option<usize>, c: &Colors) {
         let painter = ui.painter();
         painter.rect_filled(rect, 0.0, ui.visuals().panel_fill);
         painter.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, c.line));
         let Some(ready) = self.ready() else { return };
-        let Some(i) = hovered.or(self.selection.map(|(a, _)| a)) else {
-            return;
+        let blame = &ready.blame;
+        let shown = match hovered.and_then(|i| blame.lines.get(i)) {
+            Some(line) => Some(line.origin),
+            None => self
+                .chosen
+                .and_then(|commit| blame.origins.iter().position(|o| o.commit == commit)),
         };
-        let Some(line) = ready.blame.lines.get(i) else {
-            return;
-        };
-        let origin = &ready.blame.origins[line.origin];
         let small = FontId::proportional(12.5);
+        let fmt = |color| TextFormat::simple(small.clone(), color);
         let mut job = LayoutJob::default();
-        match origin.commit {
-            Some(oid) => {
-                let fmt = |color| TextFormat::simple(small.clone(), color);
-                job.append(
-                    &oid.short(self.repo.abbrev_len),
-                    0.0,
-                    TextFormat::simple(FontId::monospace(12.0), c.weak),
-                );
-                job.append(&origin.author, 12.0, fmt(c.text));
-                job.append(&ready.dates[line.origin], 12.0, fmt(c.weak));
-                job.append(&origin.summary, 12.0, fmt(c.text));
-                if origin.path != self.spec.path {
-                    job.append(&format!("({})", origin.path), 12.0, fmt(c.weak));
+        match (shown, self.chosen) {
+            (Some(ix), _) => {
+                let origin = &blame.origins[ix];
+                match origin.commit {
+                    Some(oid) => {
+                        job.append(
+                            &oid.short(self.repo.abbrev_len),
+                            0.0,
+                            TextFormat::simple(FontId::monospace(12.0), c.weak),
+                        );
+                        job.append(&origin.author, 12.0, fmt(c.text));
+                        job.append(&ready.dates[ix], 12.0, fmt(c.weak));
+                        job.append(&origin.summary, 12.0, fmt(c.text));
+                        if origin.path != self.spec.path {
+                            job.append(&format!("({})", origin.path), 12.0, fmt(c.weak));
+                        }
+                    }
+                    None => job.append(
+                        "Not committed yet: changed in the working tree",
+                        0.0,
+                        fmt(c.note),
+                    ),
                 }
             }
-            None => job.append(
-                "Not committed yet: changed in the working tree",
-                0.0,
-                TextFormat::simple(small, c.note),
-            ),
+            // A commit chosen on its own that owns no lines here.
+            (None, Some(commit)) => {
+                if let Some(oid) = commit {
+                    job.append(
+                        &oid.short(self.repo.abbrev_len),
+                        0.0,
+                        TextFormat::simple(FontId::monospace(12.0), c.weak),
+                    );
+                }
+                let text = "None of its lines remain in this version";
+                job.append(text, if commit.is_some() { 12.0 } else { 0.0 }, fmt(c.note));
+            }
+            (None, None) => return,
         }
         job.wrap.max_width = rect.width() - 24.0;
         job.wrap.max_rows = 1;
@@ -1243,7 +1284,7 @@ mod tests {
         );
         frame(&ctx, &mut w, vec![button(p, false, false)]);
         assert_eq!(w.selection, Some((2, 2)));
-        assert_eq!(w.highlighted(), Some(Some(Oid::from_hex(A).unwrap())));
+        assert_eq!(w.chosen, Some(Some(Oid::from_hex(A).unwrap())));
 
         let q = at(&ctx, 1);
         frame(
@@ -1254,8 +1295,81 @@ mod tests {
         frame(&ctx, &mut w, vec![egui::Event::PointerMoved(at(&ctx, 3))]);
         frame(&ctx, &mut w, vec![button(at(&ctx, 3), false, false)]);
         assert_eq!(w.selection, Some((1, 3)));
+        // The drag started on B's line: B stays chosen over A's lines.
+        assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
         // Copied as in the file: tabs kept, a newline after each line.
         assert_eq!(w.selected_text().as_deref(), Some("two\tx\nthree\nfour\n"));
+    }
+
+    /// A click at line `i`, pressed and released, with `modifiers`.
+    fn click(ctx: &egui::Context, w: &mut BlameWindow, i: usize, modifiers: Modifiers) {
+        let p = at(ctx, i);
+        let press = egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers,
+        };
+        let changed = egui::Event::ModifiersChanged;
+        frame(
+            ctx,
+            w,
+            vec![changed(modifiers), egui::Event::PointerMoved(p), press],
+        );
+        frame(
+            ctx,
+            w,
+            vec![button(p, false, false), changed(Modifiers::NONE)],
+        );
+    }
+
+    #[test]
+    fn shift_click_chooses_more_lines_and_keeps_the_commit_and_a_second_click_keeps_it() {
+        let ctx = egui::Context::default();
+        let mut w = window();
+        frame(&ctx, &mut w, Vec::new());
+        click(&ctx, &mut w, 1, Modifiers::NONE);
+        click(&ctx, &mut w, 1, Modifiers::NONE);
+        assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
+        click(&ctx, &mut w, 3, Modifiers::SHIFT);
+        assert_eq!(w.selection, Some((1, 3)));
+        assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
+
+        // A right-click inside the chosen lines keeps them; outside, it chooses its line.
+        let p = at(&ctx, 2);
+        frame(
+            &ctx,
+            &mut w,
+            vec![egui::Event::PointerMoved(p), button(p, true, true)],
+        );
+        frame(&ctx, &mut w, vec![button(p, false, true)]);
+        assert_eq!(w.selection, Some((1, 3)));
+        assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
+        let p = at(&ctx, 0);
+        frame(
+            &ctx,
+            &mut w,
+            vec![egui::Event::PointerMoved(p), button(p, true, true)],
+        );
+        frame(&ctx, &mut w, vec![button(p, false, true)]);
+        assert_eq!(w.selection, Some((0, 0)));
+        assert_eq!(w.chosen, Some(Some(Oid::from_hex(A).unwrap())));
+    }
+
+    #[test]
+    fn choosing_a_commit_chooses_its_first_line_without_scrolling() {
+        let mut w = window();
+        w.choose_commit(Some(Oid::from_hex(B).unwrap()));
+        assert_eq!(w.selection, Some((1, 1)));
+        assert_eq!(w.chosen, Some(Some(Oid::from_hex(B).unwrap())));
+        assert_eq!(w.scroll_to, None);
+
+        // A commit that owns no lines here is chosen, with no line.
+        let gone = Oid::from_hex("0123456789abcdef0123456789abcdef01234567").unwrap();
+        w.choose_commit(Some(gone));
+        assert_eq!(w.selection, None);
+        assert_eq!(w.chosen, Some(Some(gone)));
+        assert_eq!(w.scroll_to, None);
     }
 
     #[test]
