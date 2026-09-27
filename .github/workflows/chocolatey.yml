@@ -60,7 +60,10 @@ jobs:
           choco install parterre --version $env:VERSION --source "$PWD\dist" --ignore-dependencies -y --no-progress
           if ($LASTEXITCODE) { throw "choco install failed: $LASTEXITCODE" }
           $exe = "$env:ProgramFiles\parterre\parterre.exe"
-          $actual = & $exe --version
+          # PowerShell doesn't capture the output of a GUI-subsystem program like parterre.exe
+          # (`& $exe` returns nothing), so redirect it to a file.
+          Start-Process $exe --version -Wait -NoNewWindow -RedirectStandardOutput version.txt
+          $actual = "$(Get-Content -Raw version.txt)".Trim()
           Write-Host $actual
           if ($actual -notlike "parterre $env:VERSION (*)") { throw "--version printed '$actual'" }
           $path = [Environment]::GetEnvironmentVariable('Path', 'Machine')
