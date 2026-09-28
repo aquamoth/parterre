@@ -495,13 +495,14 @@ impl DiffWindow {
         if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A)) {
             self.select_all();
         }
-        let (form, next, prev, close) = ui.input_mut(|i| {
+        let (form, prev, next, close) = ui.input_mut(|i| {
             (
                 i.consume_key(Modifiers::COMMAND, Key::D),
-                i.consume_key(Modifiers::COMMAND, Key::ArrowDown)
-                    || i.consume_key(Modifiers::NONE, Key::F7),
+                // Shift+F7 first: a plain F7 would match it too.
                 i.consume_key(Modifiers::COMMAND, Key::ArrowUp)
                     || i.consume_key(Modifiers::SHIFT, Key::F7),
+                i.consume_key(Modifiers::COMMAND, Key::ArrowDown)
+                    || i.consume_key(Modifiers::NONE, Key::F7),
                 i.key_pressed(Key::Escape),
             )
         });
@@ -1137,7 +1138,9 @@ impl DiffWindow {
                 }),
             };
             self.dragging = true;
-        } else if double
+        }
+        // Not only after a press: a quick double-click can end in the frame it started.
+        if double
             && let Some((row, under)) = input.hover
             && let Some(s) = self.selection
             && !s.lines
@@ -1945,6 +1948,48 @@ mod tests {
         assert_eq!(w.current, Some(1));
     }
 
+    #[test]
+    fn f7_goes_to_the_next_change_and_shift_f7_to_the_previous() {
+        let old = numbered(120);
+        let new = old
+            .replace("line 5\n", "line five\n")
+            .replace("line 50\n", "line fifty\n")
+            .replace("line 100\n", "line hundred\n");
+        let mut settings = DiffWindowSettings::default();
+        let mut w = window(&old, &new, &settings);
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut w, &mut settings, Vec::new());
+        frame(&ctx, &mut w, &mut settings, Vec::new());
+        assert_eq!(w.current, Some(0));
+        let steps = [
+            (Modifiers::NONE, Some(1)),
+            (Modifiers::NONE, Some(2)),
+            (Modifiers::SHIFT, Some(1)),
+            (Modifiers::SHIFT, Some(0)),
+        ];
+        for (modifiers, expected) in steps {
+            let f7 = egui::Event::Key {
+                key: Key::F7,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            };
+            // As `show` does: the keys first.
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
+                events: vec![egui::Event::ModifiersChanged(modifiers), f7],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                w.handle_keys(ui, &mut settings);
+                w.contents(ui, &mut settings);
+            });
+            frame(&ctx, &mut w, &mut settings, Vec::new());
+            assert_eq!(w.current, expected, "after F7 with {modifiers:?}");
+        }
+    }
+
     /// Where display column `col` of row `row` starts in the new (right) pane, side by side and
     /// unfolded, with no notes in the header.
     fn at(ctx: &egui::Context, w: &DiffWindow, row: usize, col: usize) -> egui::Pos2 {
@@ -2042,6 +2087,22 @@ mod tests {
             frame(&ctx, &mut w, &mut settings, vec![button(p, false, none)]);
         }
         assert_eq!(w.selected_text().as_deref(), Some("five"));
+
+        // Also when each click comes in a single frame. A second later, not to count as a
+        // triple click.
+        for _ in 0..60 {
+            frame(&ctx, &mut w, &mut settings, Vec::new());
+        }
+        let p = at(&ctx, &w, 1, 10);
+        for _ in 0..2 {
+            let clicked = vec![
+                egui::Event::PointerMoved(p),
+                button(p, true, none),
+                button(p, false, none),
+            ];
+            frame(&ctx, &mut w, &mut settings, clicked);
+        }
+        assert_eq!(w.selected_text().as_deref(), Some("three"));
 
         w.select_all();
         assert_eq!(
