@@ -17,6 +17,11 @@ A line from a node to a parent node, standing for that parent link and any commi
 into it.
 _Avoid_: link, arrow
 
+**Worktree**:
+One of the repository's checkouts that git knows about: the main one and each linked one, each
+with its own folder and its own HEAD. The one parterre opened is one of them.
+_Avoid_: checkout, clone, working copy
+
 ### The log
 
 **Log window**:
