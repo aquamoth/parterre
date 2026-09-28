@@ -177,6 +177,21 @@ pub fn mini_button(ui: &mut Ui, glyph: Glyph) -> Response {
     response
 }
 
+/// A small copy button, which shows a check mark in `done` for a moment after a click
+/// (`copied`). The caller's tooltip says what gets copied.
+pub fn copy_button(ui: &mut Ui, copied: bool, done: Color32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
+    paint_background(ui, rect, &response, false, false);
+    let icon = Rect::from_center_size(rect.center(), Vec2::splat(14.0));
+    if copied {
+        paint_glyph(ui.painter(), icon, glyphs::CHECK, done);
+    } else {
+        let color = ui.visuals().weak_text_color();
+        paint_glyph(ui.painter(), icon, glyphs::COPY, color);
+    }
+    response
+}
+
 /// A text button on a light fill, e.g. "Reset" in the zoom popover.
 pub fn text_button(ui: &mut Ui, text: &str) -> Response {
     let color = if ui.is_enabled() {

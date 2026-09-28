@@ -86,6 +86,8 @@ impl CompareWindow {
     fn open(&mut self, repo: Arc<Repo>, comparison: Comparison, size: Vec2) {
         if self.view.is_none() {
             self.size = size;
+            // The column widths picked last as long as the window is open.
+            self.table.widths = Default::default();
         }
         self.view = Some(CompareView {
             refs: repo.refs_by_commit(),
@@ -241,7 +243,7 @@ impl CompareWindow {
 }
 
 /// One side in the header, centred on `y` between `x.0` and `x.1`: the label, the commit's
-/// ref badges, its short hash and its subject; or "Working tree".
+/// short hash, its ref badges and its subject; or "Working tree".
 fn side(
     ui: &Ui,
     view: &CompareView,
@@ -270,33 +272,35 @@ fn side(
         painter.galley(pos2(x, y - g.size().y / 2.0), g, text);
         return;
     };
-    let commit = view.repo.lookup(&oid);
-    if let Some(ix) = commit {
-        for &r in &view.refs[ix.ix()] {
-            let git_ref = &view.repo.refs[r];
-            if !env.graph.shows(git_ref.kind) || x >= right {
-                continue;
-            }
-            x += badge(ui, git_ref, &env.palette, pos2(x, y), right - x) + 4.0;
+    // The hash first: it is monospace and always as long, so the two sides' hashes line up.
+    let hash = painter.layout_no_wrap(
+        oid.short(view.repo.abbrev_len),
+        FontId::monospace(12.5),
+        weak,
+    );
+    let hash_width = hash.size().x;
+    if x + hash_width > right {
+        return;
+    }
+    painter.galley(pos2(x, y - hash.size().y / 2.0), hash, weak);
+    x += hash_width + 10.0;
+    let Some(ix) = view.repo.lookup(&oid) else {
+        return;
+    };
+    for &r in &view.refs[ix.ix()] {
+        let git_ref = &view.repo.refs[r];
+        if !env.graph.shows(git_ref.kind) || x >= right {
+            continue;
         }
+        x += badge(ui, git_ref, &env.palette, pos2(x, y), right - x) + 4.0;
     }
     if x >= right {
         return;
     }
-    let mut job = LayoutJob::default();
-    job.append(
-        &oid.short(view.repo.abbrev_len),
-        0.0,
-        TextFormat::simple(FontId::monospace(12.5), weak),
+    let mut job = LayoutJob::single_section(
+        view.repo.commit(ix).subject.clone(),
+        TextFormat::simple(FontId::proportional(13.5), text),
     );
-    if let Some(ix) = commit {
-        let subject = &view.repo.commit(ix).subject;
-        job.append(
-            subject,
-            10.0,
-            TextFormat::simple(FontId::proportional(13.5), text),
-        );
-    }
     job.wrap = TextWrapping {
         max_width: right - x,
         max_rows: 1,

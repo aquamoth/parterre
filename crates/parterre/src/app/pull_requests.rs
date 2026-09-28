@@ -294,7 +294,7 @@ fn command_box(ui: &mut egui::Ui, command: &str) {
             ui.allocate_ui_with_layout(row, layout, |ui| {
                 ui.label(egui::RichText::new(command).monospace().size(14.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // "Copied" for a moment after a click.
+                    // A check mark for a moment after a click.
                     let id = egui::Id::new("copied").with(command);
                     let now = ui.input(|i| i.time);
                     let copied_at: Option<f64> = ui.data(|d| d.get_temp(id));
@@ -303,8 +303,11 @@ fn command_box(ui: &mut egui::Ui, command: &str) {
                         ui.ctx()
                             .request_repaint_after(std::time::Duration::from_millis(300));
                     }
-                    let label = if copied { "Copied" } else { "Copy" };
-                    if widgets::text_button(ui, label).clicked() {
+                    let done = super::log_window::colors(ui).added;
+                    if widgets::copy_button(ui, copied, done)
+                        .on_hover_text("Copy the command")
+                        .clicked()
+                    {
                         ui.ctx().copy_text(command.to_owned());
                         ui.data_mut(|d| d.insert_temp(id, now));
                     }

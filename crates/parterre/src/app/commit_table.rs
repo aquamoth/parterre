@@ -1,7 +1,8 @@
 //! The commit table of the log window and of the blame window's history pane: a graph column of
 //! lanes ([`LogGraph`]), then the short hash, the subject with ref badges, the author and the
 //! date, one commit per row. Virtualised; the rows are painted directly. Each window says what a
-//! row shows ([`Row`]) and what its menu offers; the table keeps the selection in view.
+//! row shows ([`Row`]) and what its menu offers; the table keeps the selection in view. The
+//! columns can be resized by dragging the borders between their headings.
 
 use std::sync::Arc;
 
@@ -10,9 +11,11 @@ use eframe::egui::{
     vec2,
 };
 use parterre_core::GitRef;
+use parterre_core::columns::{ColumnWidths, Layout};
 use parterre_core::log::Found;
 use parterre_core::log_graph::{GraphRow, LogGraph};
 
+use super::column_borders::{self, Columns};
 use super::log_window::{CELL_PAD, Colors, HEADING, badge, cell, heading_background};
 use crate::theme::Palette;
 use crate::widgets;
@@ -33,24 +36,68 @@ const DATE_WIDTH: f32 = 128.0;
 const NARROW_LIST: f32 = 720.0;
 const NARROW_AUTHOR_WIDTH: f32 = 128.0;
 const NARROW_DATE_WIDTH: f32 = 118.0;
+/// The columns: graph, hash, subject, author, date. The subject takes what the others leave,
+/// and no less than this.
+const SUBJECT: usize = 2;
+const SUBJECT_MIN: f32 = 80.0;
 
 /// The selected row of a commit table and its scroll position.
 #[derive(Debug, Default)]
 pub struct CommitList {
+    /// The row clicked last, which the window shows the details of.
     pub selected: Option<usize>,
+    /// A second selected row, selected before `selected` (with Ctrl+ or Shift+click, in tables
+    /// that allow a pair).
+    pub other: Option<usize>,
     /// Scroll the selected row into view in the next frame (only if it is out of view).
     pub reveal: bool,
     /// The scroll offset and the height of the rows in the last frame, for keeping the
     /// selection in view and for paging.
     pub scroll: f32,
     pub height: f32,
+    /// The column widths the user picked.
+    pub widths: ColumnWidths,
 }
 
 impl CommitList {
-    /// Selects row `i` (or none) and keeps it in view.
+    /// Selects row `i` (or none), alone, and keeps it in view.
     pub fn select(&mut self, i: Option<usize>) {
         self.selected = i;
+        self.other = None;
         self.reveal = true;
+    }
+
+    /// The two selected rows, in the order they were selected.
+    pub fn pair(&self) -> Option<(usize, usize)> {
+        Some((self.other?, self.selected?))
+    }
+
+    pub fn is_selected(&self, i: usize) -> bool {
+        self.selected == Some(i) || self.other == Some(i)
+    }
+
+    /// A click on row `i`. A plain click selects it alone. With `add` (Ctrl or Shift held) it
+    /// is selected besides the row selected before, making a pair; a third row takes the place
+    /// of the earlier of the two, and one of a pair clicked again leaves just the other. A
+    /// right-click (`secondary`) keeps the selection if it is on a selected row, so that its
+    /// menu can compare the pair.
+    pub fn click(&mut self, i: usize, add: bool, secondary: bool) {
+        if secondary {
+            if !self.is_selected(i) {
+                (self.selected, self.other) = (Some(i), None);
+            }
+            return;
+        }
+        match self.selected {
+            _ if !add => (self.selected, self.other) = (Some(i), None),
+            Some(s) if s == i => {
+                if let Some(o) = self.other.take() {
+                    self.selected = Some(o);
+                }
+            }
+            _ if self.other == Some(i) => self.other = None,
+            s => (self.other, self.selected) = (s, Some(i)),
+        }
     }
 
     /// The rows a page up or down moves: those in view, less one.
@@ -96,6 +143,8 @@ pub struct CommitTable<'a> {
     pub graph: &'a LogGraph,
     pub abbrev_len: usize,
     pub palette: &'a Palette,
+    /// Ctrl+ and Shift+click select a second row ([`CommitList::other`]).
+    pub pairs: bool,
 }
 
 /// Fills the tooltip over row `i`'s subject.
@@ -104,38 +153,24 @@ pub type SubjectTip<'a> = dyn FnMut(&mut Ui, usize) + 'a;
 /// What a click on a row asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Clicks {
-    /// A click with either button: the row is now the selected one.
+    /// A click with either button (see [`CommitList::click`]).
     pub clicked: Option<usize>,
     pub double_clicked: Option<usize>,
 }
 
-/// Where the columns are: x and width of the hash, subject, author and date, after the graph
-/// column.
-struct Columns {
-    graph: f32,
-    hash: f32,
-    author: f32,
-    date: f32,
-}
-
-impl Columns {
-    fn at(&self, left: f32, width: f32) -> ([f32; 4], [f32; 4]) {
-        let (width, left) = (width - self.graph, left + self.graph);
-        let subject = (width - self.hash - self.author - self.date).max(80.0);
-        let x = [
-            left,
-            left + self.hash,
-            left + self.hash + subject,
-            left + self.hash + subject + self.author,
-        ];
-        (x, [self.hash, subject, self.author, self.date])
+fn columns(layout: &Layout) -> Columns<'_> {
+    Columns {
+        layout,
+        flex: SUBJECT,
+        flex_min: SUBJECT_MIN,
     }
 }
 
 impl CommitTable<'_> {
     /// The column headings and, unless there are no rows, the rows as `row` describes them;
-    /// `menu` fills a row's menu, and `subject_tip`, if given, the tooltip over a row's subject.
-    /// A click with either button selects the row. Returns the clicks. With no rows, the window
+    /// `menu` fills a row's menu, given the selection, and `subject_tip`, if given, the tooltip
+    /// over a row's subject. A click with either button selects the row (see
+    /// [`CommitList::click`]). Returns the clicks. With no rows, the window
     /// can say why below the headings.
     pub fn show<'r>(
         &self,
@@ -143,15 +178,28 @@ impl CommitTable<'_> {
         c: &Colors,
         list: &mut CommitList,
         row: impl Fn(usize) -> Row<'r>,
-        mut menu: impl FnMut(&mut Ui, usize),
+        mut menu: impl FnMut(&mut Ui, usize, &CommitList),
         mut subject_tip: Option<&mut SubjectTip>,
     ) -> Clicks {
-        let cols = self.columns(ui, c);
+        if self.graph.lanes == 0 {
+            list.widths.reset(0, SUBJECT);
+        }
+        let defaults = self.default_widths(ui, c, &list.widths);
+        let layout = |widths: &ColumnWidths, rect: Rect| {
+            widths.layout(&defaults, SUBJECT, SUBJECT_MIN, rect.left(), rect.width())
+        };
         let weak = ui.visuals().weak_text_color();
         let text = ui.visuals().text_color();
         let mono = FontId::monospace(12.0);
         let body = egui::TextStyle::Body.resolve(ui.style());
-        headings(ui, &cols, c);
+        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADING), Sense::hover());
+        heading_background(ui, head, c);
+        // The borders; then the columns as dragged, in this frame.
+        let before = layout(&list.widths, head);
+        let active = column_borders::drag(ui, self.id, head, &columns(&before), &mut list.widths);
+        let cols = layout(&list.widths, head);
+        headings(ui, head, &cols);
+        column_borders::paint(ui, head, &columns(&cols), active, c);
         if self.rows == 0 {
             return Clicks::default();
         }
@@ -177,13 +225,14 @@ impl CommitTable<'_> {
             }
         }
         let mut clicks = Clicks::default();
+        let add = self.pairs && ui.input(|i| i.modifiers.command || i.modifiers.shift);
         let output = area.show_rows(ui, ROW, self.rows, |ui, range| {
             let graph = self.graph.rows(range.clone());
             for (i, graph) in range.zip(&graph) {
                 let r = row(i);
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
-                let selected = list.selected == Some(i);
+                let selected = list.is_selected(i);
                 let bg = if selected {
                     Some(c.selected_bg)
                 } else if response.hovered() {
@@ -208,10 +257,13 @@ impl CommitTable<'_> {
                         (faint, faint)
                     }
                 };
-                let (x, w) = cols.at(rect.left(), rect.width());
+                // Hash, subject, author and date, after the graph.
+                let cols = layout(&list.widths, rect);
+                let x: [f32; 4] = std::array::from_fn(|k| cols.x[k + 1]);
+                let w: [f32; 4] = std::array::from_fn(|k| cols.w[k + 1]);
                 let y = rect.center().y;
                 let painter = ui.painter();
-                let graph_rect = Rect::from_min_size(rect.min, vec2(cols.graph, ROW));
+                let graph_rect = Rect::from_min_size(rect.min, vec2(cols.w[0], ROW));
                 paint_graph(painter, graph_rect, graph, c, bg);
                 let put = |g: Arc<Galley>, x: f32, color| {
                     painter.galley(pos2(x, y - g.size().y / 2.0), g, color);
@@ -289,6 +341,7 @@ impl CommitTable<'_> {
                 };
                 if response.clicked() || response.secondary_clicked() {
                     clicks.clicked = Some(i);
+                    list.click(i, add, response.secondary_clicked());
                 }
                 if response.double_clicked() {
                     clicks.double_clicked = Some(i);
@@ -298,22 +351,20 @@ impl CommitTable<'_> {
                     .show(|ui| {
                         crate::menu::fit_window(ui, |ui| {
                             ui.set_min_width(crate::menu::MIN_WIDTH);
-                            menu(ui, i);
+                            menu(ui, i, list);
                         });
                     });
             }
         });
         list.scroll = output.state.offset.y;
         list.height = output.inner_rect.height();
-        if let Some(i) = clicks.clicked {
-            list.selected = Some(i);
-        }
         clicks
     }
 
-    /// The columns' widths in the width available: the graph only as wide as leaves the
-    /// subject its room.
-    fn columns(&self, ui: &Ui, c: &Colors) -> Columns {
+    /// The columns' widths in the width available, as the layout has them before the user
+    /// drags any: the graph only as wide as leaves the subject its room, given the other
+    /// columns in `widths`. A table without lanes has no graph column.
+    fn default_widths(&self, ui: &Ui, c: &Colors, widths: &ColumnWidths) -> [f32; 5] {
         let digit = ui
             .painter()
             .layout_no_wrap("0".into(), FontId::monospace(12.0), c.line)
@@ -329,15 +380,11 @@ impl CommitTable<'_> {
             0.0
         } else {
             let lanes = self.graph.lanes.min(GRAPH_MAX_LANES) as f32 * GRAPH_LANE;
-            let room = ui.available_width() - hash - author - date - GRAPH_SUBJECT_ROOM;
+            let others = widths.get(1, hash) + widths.get(3, author) + widths.get(4, date);
+            let room = ui.available_width() - others - GRAPH_SUBJECT_ROOM;
             lanes.min(room.max(3.0 * GRAPH_LANE)) + 2.0 * GRAPH_PAD
         };
-        Columns {
-            graph,
-            hash,
-            author,
-            date,
-        }
+        [graph, hash, 0.0, author, date]
     }
 }
 
@@ -356,16 +403,15 @@ fn paint_found(
     painter.rect_filled(place, 2.0, fill);
 }
 
-/// The column headings: Graph (where it fits), Hash, Subject, Author, Date.
-fn headings(ui: &mut Ui, cols: &Columns, c: &Colors) {
+/// The column headings in `head`: Graph (where it fits), Hash, Subject, Author, Date.
+fn headings(ui: &Ui, head: Rect, cols: &Layout) {
     let weak = ui.visuals().weak_text_color();
-    let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADING), Sense::hover());
-    heading_background(ui, head, c);
-    let (x, w) = cols.at(head.left(), head.width());
+    let x: [f32; 4] = std::array::from_fn(|k| cols.x[k + 1]);
+    let w: [f32; 4] = std::array::from_fn(|k| cols.w[k + 1]);
     let title = ui
         .painter()
         .layout_no_wrap("Graph".into(), FontId::proportional(12.0), weak);
-    if title.size().x + 2.0 * GRAPH_PAD <= cols.graph {
+    if title.size().x + 2.0 * GRAPH_PAD <= cols.w[0] {
         ui.painter().galley(
             pos2(
                 head.left() + GRAPH_PAD,
@@ -473,5 +519,80 @@ fn paint_graph(
         painter.circle_stroke(centre, R, Stroke::new(1.8, color(row.lane)));
     } else {
         painter.circle_filled(centre, R, color(row.lane));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list(selected: Option<usize>, other: Option<usize>) -> CommitList {
+        CommitList {
+            selected,
+            other,
+            ..CommitList::default()
+        }
+    }
+
+    fn after(
+        mut l: CommitList,
+        i: usize,
+        add: bool,
+        secondary: bool,
+    ) -> (Option<usize>, Option<usize>) {
+        l.click(i, add, secondary);
+        (l.selected, l.other)
+    }
+
+    #[test]
+    fn a_plain_click_selects_one_row() {
+        assert_eq!(
+            after(list(Some(1), Some(4)), 2, false, false),
+            (Some(2), None)
+        );
+        assert_eq!(after(list(None, None), 2, false, false), (Some(2), None));
+    }
+
+    #[test]
+    fn an_added_click_makes_a_pair_in_the_order_selected() {
+        let mut l = list(Some(1), None);
+        l.click(5, true, false);
+        assert_eq!(l.pair(), Some((1, 5)));
+        // A third row takes the place of the earlier.
+        l.click(3, true, false);
+        assert_eq!(l.pair(), Some((5, 3)));
+        assert_eq!(after(list(None, None), 2, true, false), (Some(2), None));
+    }
+
+    #[test]
+    fn an_added_click_on_one_of_a_pair_leaves_the_other() {
+        assert_eq!(
+            after(list(Some(5), Some(1)), 5, true, false),
+            (Some(1), None)
+        );
+        assert_eq!(
+            after(list(Some(5), Some(1)), 1, true, false),
+            (Some(5), None)
+        );
+        assert_eq!(after(list(Some(5), None), 5, true, false), (Some(5), None));
+    }
+
+    #[test]
+    fn a_right_click_keeps_the_pair_it_is_on() {
+        assert_eq!(
+            after(list(Some(5), Some(1)), 1, false, true),
+            (Some(5), Some(1))
+        );
+        assert_eq!(
+            after(list(Some(5), Some(1)), 2, false, true),
+            (Some(2), None)
+        );
+    }
+
+    #[test]
+    fn selecting_by_key_leaves_one_row() {
+        let mut l = list(Some(5), Some(1));
+        l.select(Some(6));
+        assert_eq!((l.selected, l.other), (Some(6), None));
     }
 }
