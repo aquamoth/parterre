@@ -12,6 +12,13 @@
 //! endings count unless whitespace changes are ignored, and a note says when they differ;
 //! changed words pair similar lines rather than lines by position; the change marks are an
 //! overview strip on the right instead of a locator bar on the left.
+//!
+//! Find (`Ctrl+F`, #86) looks for text in the lines the form shows, as the blame window's find
+//! does: as in the file, ignoring case, in each window on its own. Side by side, an unchanged
+//! line counts once. Every place found is highlighted and marked in the overview strip, the
+//! one gone to stronger; Enter and `F3` go to the next, round the end, scrolling it into view
+//! and opening the fold it is in (around it, as far as a change keeps). Esc in the find field
+//! leaves it; elsewhere it closes the window.
 
 use std::sync::{Arc, mpsc};
 
@@ -23,9 +30,11 @@ use eframe::egui::{
 use parterre_core::blame::BlameSpec;
 use parterre_core::changed_files::FileStatus;
 use parterre_core::file_diff::{
-    Content, DiffLine, DiffOptions, FileDiff, FileDiffSpec, LineKind, LoadedDiff, Note, Rev, Row,
-    Shown, Version, Whitespace, WordMode, fold, fold_lines,
+    self, CONTEXT_LINES, Content, DiffLine, DiffOptions, FileDiff, FileDiffSpec, Found, LineKind,
+    LoadedDiff, Note, Rev, Row, Shown, Version, Whitespace, WordMode, display_column, fold,
+    fold_lines,
 };
+use parterre_core::find;
 use parterre_core::glyphs;
 use parterre_core::text::word_at;
 use parterre_core::{Oid, Repo};
@@ -199,6 +208,22 @@ impl Selection {
     }
 }
 
+/// Find in the text (Ctrl+F), in this window alone: the query, where it occurs in the form's
+/// rows, and the place gone to.
+#[derive(Debug, Default)]
+struct Find {
+    query: String,
+    /// The last query searched for, which Ctrl+F offers again after Esc cleared the field.
+    last: String,
+    matches: Vec<Found>,
+    /// The place gone to (an index into `matches`).
+    current: Option<usize>,
+    /// Focus the field and select the query in the next frame.
+    focus: bool,
+    /// Scroll the current place into view in the next frame.
+    reveal: bool,
+}
+
 /// What the pointer did in the rows this frame, for the window to act on afterwards.
 #[derive(Default)]
 struct RowInput {
@@ -257,6 +282,10 @@ struct DiffWindow {
     blame: Option<(BlameSpec, Option<usize>)>,
     /// Once loaded, scroll to the change at this line (from 0) of the new version.
     goto: Option<usize>,
+    find: Find,
+    /// The first row drawn last frame, where finding starts from, and the scroll offset.
+    top: usize,
+    offset: f32,
 }
 
 impl DiffWindow {
@@ -323,6 +352,9 @@ impl DiffWindow {
             title_theme: None,
             blame: None,
             goto: None,
+            find: Find::default(),
+            top: 0,
+            offset: 0.0,
         }
     }
 
@@ -357,6 +389,7 @@ impl DiffWindow {
                 Err(e) => Load::Failed(e),
             };
             self.dirty = true;
+            self.refind();
         }
         // Options changed while the worker ran, or since.
         if let Load::Ready(ready) = &mut self.load
@@ -368,6 +401,7 @@ impl DiffWindow {
             self.selection = None;
             self.dirty = true;
             self.jump = Some(self.current.unwrap_or(0));
+            self.refind();
         }
     }
 
@@ -456,6 +490,120 @@ impl DiffWindow {
             self.dirty = true;
             self.selection = None;
             self.jump = Some(self.current.unwrap_or(0));
+            self.refind();
+        }
+    }
+
+    /// Opens the fold row `row` of the form is hidden in, if it is, around it: as many rows as
+    /// a change keeps.
+    fn unfold_at(&mut self, row: usize) {
+        self.refresh();
+        let Some(Shown::Fold(_)) = self.shown.get(shown_index(&self.shown, row)) else {
+            return;
+        };
+        let Some(ready) = self.ready() else { return };
+        let (rows, _) = Self::rows_and_changes(&ready.diff, self.form);
+        // Folded rows are unchanged, so they have a new line.
+        let Some(n) = rows.get(row).and_then(|r| r.new) else {
+            return;
+        };
+        let context = CONTEXT_LINES as u32;
+        self.open.push(n.saturating_sub(context)..n + context + 1);
+        self.dirty = true;
+        self.refresh();
+    }
+
+    fn find_id(&self) -> egui::Id {
+        egui::Id::new(("diff-find", self.id))
+    }
+
+    /// The chosen characters, if they are within one line.
+    fn selected_in_line(&self) -> Option<String> {
+        let s = self.selection?;
+        let (a, b) = s.ordered();
+        (!s.lines && a.0 == b.0 && b.1 != LINE_END)
+            .then(|| self.selected_text())
+            .flatten()
+    }
+
+    /// Ctrl+F: focuses the find field with the chosen characters, if they are on one line, or
+    /// else the last query, selected so that typing replaces it.
+    fn open_find(&mut self) {
+        let query = self
+            .selected_in_line()
+            .unwrap_or_else(|| self.find.last.clone());
+        if query != self.find.query {
+            self.find.query = query;
+            self.query_changed();
+        }
+        self.find.focus = true;
+    }
+
+    /// Esc in the find field, or its clear button: empties it, and leaves it.
+    fn close_find(&mut self, ctx: &egui::Context) {
+        self.find.query.clear();
+        self.refind();
+        ctx.memory_mut(|m| m.surrender_focus(self.find_id()));
+    }
+
+    /// Finds the query in the rows of the form, with nothing gone to yet.
+    fn refind(&mut self) {
+        self.find.current = None;
+        self.find.matches = match self.ready() {
+            Some(r) => {
+                let (rows, _) = Self::rows_and_changes(&r.diff, self.form);
+                let side = self.form == DiffForm::SideBySide;
+                file_diff::find(&r.diff, rows, side, &self.find.query)
+            }
+            None => Vec::new(),
+        };
+    }
+
+    /// The query was typed: goes to its first place at or after the top of the view.
+    fn query_changed(&mut self) {
+        self.refind();
+        if !self.find.query.is_empty() {
+            self.find.last = self.find.query.clone();
+        }
+        self.find.current = find::first_from(&self.find.matches, self.top);
+        self.find.reveal = true;
+    }
+
+    /// Enter, F3 (`forward`), Shift+Enter, Shift+F3: goes to the next or previous place,
+    /// round the ends.
+    fn find_step(&mut self, forward: bool) {
+        self.find.current = find::step(&self.find.matches, self.find.current, forward, self.top);
+        self.find.reveal = true;
+    }
+
+    /// The find field, with how many places the query was found at.
+    fn find_field(&mut self, ui: &mut Ui, width: f32) {
+        let n = self.find.matches.len();
+        let count = match (self.find.current, n) {
+            (_, 0) => "No matches".to_owned(),
+            (Some(c), n) => format!("{} of {n}", c + 1),
+            (None, 1) => "1 match".to_owned(),
+            (None, n) => format!("{n} matches"),
+        };
+        let focus = std::mem::take(&mut self.find.focus);
+        let find = widgets::Find {
+            id: self.find_id(),
+            width,
+            hint: "Find in the diff",
+            count: &count,
+            keys: ["Shift+Enter, Shift+F3", "Enter, F3", "Esc"],
+            focus,
+            select: focus,
+        };
+        let found = widgets::find_field(ui, &find, &mut self.find.query);
+        if found.changed {
+            self.query_changed();
+        }
+        if found.cleared {
+            self.close_find(ui.ctx());
+        }
+        if found.next || found.previous {
+            self.find_step(found.next);
         }
     }
 
@@ -484,8 +632,33 @@ impl DiffWindow {
         self.jump = Some(target);
     }
 
-    /// Esc closes; Ctrl+D switches the form; Ctrl+Down/Up and F7/Shift+F7 move between changes.
+    /// Ctrl+F finds, F3 and Shift+F3 go to the next and previous place, and Esc in the find
+    /// field leaves it; elsewhere Esc closes. Ctrl+D switches the form; Ctrl+Down/Up and
+    /// F7/Shift+F7 move between changes; Ctrl+A chooses every line. While the find field has
+    /// the focus, other keys are its own.
     fn handle_keys(&mut self, ui: &Ui, settings: &mut DiffWindowSettings) {
+        let id = self.find_id();
+        // egui drops the focus on Esc before the frame starts.
+        let in_find = ui.memory(|m| m.has_focus(id) || m.had_focus_last_frame(id));
+        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
+            self.open_find();
+        }
+        // Shift+F3 first: a plain F3 would match it too.
+        let (previous, next) = ui.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::SHIFT, Key::F3),
+                i.consume_key(Modifiers::NONE, Key::F3),
+            )
+        });
+        if previous || next {
+            self.find_step(next);
+        }
+        if in_find {
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                self.close_find(ui.ctx());
+            }
+            return;
+        }
         if ui.ctx().egui_wants_keyboard_input() {
             return;
         }
@@ -564,7 +737,8 @@ impl DiffWindow {
         ui.allocate_rect(body, Sense::hover());
     }
 
-    /// Form, changes, folding, word mode and whitespace, left to right.
+    /// Form, changes, folding and whitespace on the left; find in the middle; word mode and
+    /// Blame on the right.
     fn toolbar(&mut self, ui: &mut Ui, settings: &mut DiffWindowSettings, c: &Colors) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), TOOLBAR), Sense::hover());
         ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
@@ -651,20 +825,6 @@ impl DiffWindow {
         }
         ui.add_space(14.0);
 
-        ui.label(
-            RichText::new("Words")
-                .size(12.5)
-                .color(ui.visuals().weak_text_color()),
-        );
-        let mut words = self.options.words;
-        let items = WordMode::ALL.map(|m| (m, m.label()));
-        widgets::text_segmented(ui, &mut words, &items);
-        if words != self.options.words {
-            self.options.words = words;
-            settings.words = words;
-        }
-        ui.add_space(14.0);
-
         let spaces = [
             (Whitespace::Compare, glyphs::WHITESPACE_COMPARE),
             (Whitespace::IgnoreChanges, glyphs::WHITESPACE_IGNORE_CHANGES),
@@ -690,7 +850,6 @@ impl DiffWindow {
             self.options.whitespace = ws;
             settings.whitespace = ws;
         }
-        let _ = c;
 
         let why = if self.spec.is_submodule() {
             Some("A submodule has no lines to blame")
@@ -699,6 +858,10 @@ impl DiffWindow {
         } else {
             None
         };
+        let _ = c;
+        // Right to left from here: Blame and word mode at the right edge, about as wide as the
+        // tools on the left, so that the find field between them can be centred.
+        let toolbar = rect;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let r = ui.add_enabled_ui(why.is_none(), |ui| widgets::text_button(ui, "Blame"));
             let r = match why {
@@ -714,6 +877,40 @@ impl DiffWindow {
             if r.clicked() {
                 self.blame = self.blame_spec();
             }
+
+            ui.add_space(14.0);
+
+            let mut words = self.options.words;
+            let items = WordMode::ALL.map(|m| (m, m.label()));
+            widgets::text_segmented(ui, &mut words, &items);
+            if words != self.options.words {
+                self.options.words = words;
+                settings.words = words;
+            }
+            ui.label(
+                RichText::new("Words")
+                    .size(12.5)
+                    .color(ui.visuals().weak_text_color()),
+            );
+
+            // Find, centred in the window as in the others, if it fits between the tools;
+            // else in the middle of the room there is, squeezed rather than the tools.
+            let room = ui.available_rect_before_wrap();
+            let width = (room.width() - 16.0).clamp(60.0, 380.0);
+            let (lo, hi) = (room.left() + 8.0, room.right() - 8.0 - width);
+            let left = if lo <= hi {
+                (toolbar.center().x - width / 2.0).clamp(lo, hi)
+            } else {
+                room.center().x - width / 2.0
+            };
+            let at = Rect::from_center_size(
+                pos2(left + width / 2.0, toolbar.center().y),
+                vec2(width, widgets::BUTTON),
+            );
+            let layout = egui::Layout::left_to_right(egui::Align::Center);
+            ui.scope_builder(UiBuilder::new().max_rect(at).layout(layout), |ui| {
+                self.find_field(ui, width);
+            });
         });
     }
 
@@ -827,6 +1024,14 @@ impl DiffWindow {
         {
             self.jump = Some(k);
         }
+        // The place found gone to, out of its fold first.
+        let found = std::mem::take(&mut self.find.reveal)
+            .then(|| self.find.current.and_then(|k| self.find.matches.get(k)))
+            .flatten()
+            .cloned();
+        if let Some(m) = &found {
+            self.unfold_at(m.row);
+        }
         let positions = self.positions.clone();
         let Load::Ready(ready) = &self.load else {
             return;
@@ -866,6 +1071,21 @@ impl DiffWindow {
         );
 
         let (rows, _) = Self::rows_and_changes(diff, form);
+        // The place found gone to: into view, a third of the way down if it was out of it, and
+        // sideways too.
+        if let Some(m) = found {
+            let at = shown_index(&self.shown, m.row);
+            if let Some(offset) = reveal(at, self.offset, area.height(), row_h) {
+                self.scroll_to = Some(offset);
+            }
+            let (x0, x1) = (
+                m.columns.start as f32 * char_w,
+                m.columns.end as f32 * char_w,
+            );
+            if x0 < self.hoff || x1 > self.hoff + text_w - char_w {
+                self.hoff = if x1 < text_w - char_w { 0.0 } else { x0 - 80.0 };
+            }
+        }
         let mut scroll = ScrollArea::vertical()
             .auto_shrink(false)
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -898,6 +1118,19 @@ impl DiffWindow {
             font: font.clone(),
         };
         let shown = &self.shown;
+        let query = self.find.query.as_str();
+        let current = self.find.current.and_then(|k| self.find.matches.get(k));
+        // The columns of the place gone to in row `r`'s line of a version, if it is there: an
+        // unchanged line's other version shows it too, if it is the same text (it counted once).
+        let twins = |r: usize| match (diff.line(rows[r], Some(true)), diff.line(rows[r], None)) {
+            (Some(o), Some(n)) => o.kind == LineKind::Same && o.raw == n.raw,
+            _ => false,
+        };
+        let current_at = |r: usize, old: bool| {
+            current
+                .filter(|m| m.row == r && (m.old == old || twins(r)))
+                .map(|m| m.columns.clone())
+        };
         let selection = self.selection;
         let dragging = self.dragging;
         let pointer = ui.input(|i| i.pointer.interact_pos());
@@ -946,9 +1179,13 @@ impl DiffWindow {
                         .map(|(column, xs, numbers)| {
                             let half = Rect::from_x_y_ranges(xs, rect.y_range());
                             let line = diff.line(row, column.side());
-                            let sel =
-                                selection.and_then(|s| Some((s.columns(column, r)?, s.lines)));
-                            let at = paint_line(ui, half, line, numbers, &geometry, sel, c);
+                            let marks = Marks {
+                                chosen: selection
+                                    .and_then(|s| Some((s.columns(column, r)?, s.lines))),
+                                query,
+                                current: current_at(r, column == Column::Old),
+                            };
+                            let at = paint_line(ui, half, line, numbers, &geometry, &marks, c);
                             (column, half, gutter, at)
                         })
                         .collect();
@@ -970,7 +1207,12 @@ impl DiffWindow {
                             None => unified_version(line, p.x, rect.left(), gutter, extend, ctrl),
                         });
                     let numbers = Numbers::Both(row.old, row.new, lit);
-                    let at = paint_line(ui, rect, line, numbers, &geometry, sel, c);
+                    let marks = Marks {
+                        chosen: sel,
+                        query,
+                        current: current_at(r, row.new.is_none()),
+                    };
+                    let at = paint_line(ui, rect, line, numbers, &geometry, &marks, c);
                     // The version is settled below, when a press starts choosing.
                     vec![(Column::New, rect, 2.0 * gutter, at)]
                 };
@@ -1026,6 +1268,10 @@ impl DiffWindow {
         // The change in view: the one jumped to while the view stays put, else the last one
         // at or above the reading line (as far down as a jump puts a change).
         let offset = out.state.offset.y;
+        self.offset = offset;
+        if let Some(r) = input.first {
+            self.top = r;
+        }
         if let Some(k) = jumped {
             self.current = Some(k);
             self.pinned = Some(offset);
@@ -1044,7 +1290,19 @@ impl DiffWindow {
             out.inner_rect.height(),
             out.content_size.y,
         );
-        overview(ui, strip, diff, rows, &self.shown, side, view, row_h, c);
+        let found = &self.find.matches;
+        overview(
+            ui,
+            strip,
+            diff,
+            rows,
+            &self.shown,
+            found,
+            side,
+            view,
+            row_h,
+            c,
+        );
         self.select(ui, &input, area, out.state.offset.y, row_h);
         if let Some(lines) = input.fold {
             self.open.push(lines);
@@ -1227,6 +1485,14 @@ impl DiffWindow {
         });
     }
 
+    /// What Ctrl+C copies from the text, unless the find field has the focus (then it copies
+    /// from the field).
+    fn copied(&self, ui: &Ui) -> Option<String> {
+        let copy = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+        let in_find = ui.memory(|m| m.has_focus(self.find_id()));
+        (copy && !in_find).then(|| self.selected_text()).flatten()
+    }
+
     /// Shows the window; returns nothing, but sets `closed` when it was closed. Ctrl+wheel and
     /// Ctrl+plus, minus and 0 change `text_size`.
     fn show(
@@ -1279,9 +1545,7 @@ impl DiffWindow {
                     self.closed = true;
                 }
             }
-            if ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)))
-                && let Some(text) = self.selected_text()
-            {
+            if let Some(text) = self.copied(ui) {
                 ui.ctx().copy_text(text);
             }
             egui::CentralPanel::default()
@@ -1343,19 +1607,27 @@ struct TextAt {
     origin: egui::Pos2,
 }
 
+/// What is marked in a line's text: the chosen characters (display columns, the end may be
+/// [`LINE_END`]; and whether whole lines were chosen, on the numbers), and every place `query`
+/// occurs, the one gone to (its columns, `current`) stronger.
+struct Marks<'a> {
+    chosen: Option<(std::ops::Range<usize>, bool)>,
+    query: &'a str,
+    current: Option<std::ops::Range<usize>>,
+}
+
 /// Paints one line (or a filler, for `None`) into `rect`: line numbers, marker, text, and
-/// the chosen characters `sel` (display columns, the end may be [`LINE_END`]; and whether
-/// whole lines were chosen, on the numbers). Returns where the text went.
+/// what is marked in it. Returns where the text went.
 fn paint_line(
     ui: &Ui,
     rect: Rect,
     line: Option<&DiffLine>,
     numbers: Numbers,
     g: &Geometry,
-    sel: Option<(std::ops::Range<usize>, bool)>,
+    marks: &Marks,
     c: &Colors,
 ) -> Option<TextAt> {
-    let (sel, whole) = match sel {
+    let (sel, whole) = match marks.chosen.clone() {
         Some((range, lines)) => (Some(range), lines),
         None => (None, false),
     };
@@ -1431,9 +1703,18 @@ fn paint_line(
     let clip = Rect::from_min_max(pos2(x, rect.top()), rect.max).intersect(ui.clip_rect());
     let text = painter.with_clip_rect(clip);
     let origin = pos2(x - g.hoff, y);
+    let at = |col: usize| origin.x + galley.pos_from_cursor(egui::text::CCursor::new(col)).min.x;
+    for m in find::find([&line.raw], marks.query) {
+        let cols = display_column(&line.raw, m.range.start)..display_column(&line.raw, m.range.end);
+        let fill = if marks.current.as_ref() == Some(&cols) {
+            c.found_current
+        } else {
+            c.found
+        };
+        let place = Rect::from_x_y_ranges(at(cols.start)..=at(cols.end), rect.y_range());
+        text.rect_filled(place, 0.0, fill);
+    }
     if let Some(sel) = sel {
-        let at =
-            |col: usize| origin.x + galley.pos_from_cursor(egui::text::CCursor::new(col)).min.x;
         let x0 = at(sel.start);
         let x1 = if sel.end == LINE_END {
             // Past the end, a little, to show the line break is included.
@@ -1487,7 +1768,8 @@ fn fold_row(ui: &Ui, rect: Rect, lines: usize, hovered: bool, c: &Colors) {
     painter.galley(rect.center() - g.size() / 2.0, g, color);
 }
 
-/// The overview strip: every change's place in the whole diff, and the part in view.
+/// The overview strip: every change's place in the whole diff, the places `found`, and the part
+/// in view.
 #[allow(clippy::too_many_arguments)]
 fn overview(
     ui: &Ui,
@@ -1495,6 +1777,7 @@ fn overview(
     diff: &FileDiff,
     rows: &[Row],
     shown: &[Shown],
+    found: &[Found],
     side: bool,
     view: (f32, f32, f32),
     row_h: f32,
@@ -1532,7 +1815,30 @@ fn overview(
             mark(i, LineKind::Added);
         }
     }
+    // The rows the query was found in (a fold, if hidden in one), over the changes.
+    let mut marked = None;
+    for m in found {
+        let i = shown_index(shown, m.row);
+        if marked == Some(i) {
+            continue;
+        }
+        marked = Some(i);
+        let y = strip.top() + i as f32 * scale;
+        let place = Rect::from_min_max(
+            pos2(strip.left() + 3.0, y),
+            pos2(strip.right() - 2.0, y + scale.max(2.0)),
+        );
+        painter.rect_filled(place, 0.0, c.found_mark);
+    }
     overview_view(ui, strip, view, c);
+}
+
+/// Where row `row` of the form is among the `shown` rows: its own, or the fold it is in.
+fn shown_index(shown: &[Shown], row: usize) -> usize {
+    shown.partition_point(|s| match s {
+        Shown::Row(r) => *r < row,
+        Shown::Fold(hidden) => hidden.end <= row,
+    })
 }
 
 /// The height of a row in an overview strip of `rows` rows: a text shorter than the window is
@@ -1593,6 +1899,16 @@ pub(super) fn overview_scroll(
     ui.ctx().request_repaint();
     let row = (p.y - strip.top()) / overview_scale(strip, rows, row_h);
     Some(row * row_h - height / 2.0)
+}
+
+/// The scroll offset that brings row `i` into view a third of the way down, if it is out of
+/// view at `scroll` in text `height` tall.
+pub(super) fn reveal(i: usize, scroll: f32, height: f32, row_h: f32) -> Option<f32> {
+    let y = i as f32 * row_h;
+    (y < scroll || y + row_h > scroll + height).then(|| {
+        let above = (height / row_h / 3.0).floor();
+        ((i as f32 - above) * row_h).max(0.0)
+    })
 }
 
 /// A horizontal scrollbar in `track` for an offset `hoff` of at most `hmax`, `visible` being
@@ -1700,6 +2016,10 @@ pub(super) struct Colors {
     pub(super) selected_fg: Color32,
     /// Behind chosen text.
     pub(super) selection: Color32,
+    /// Behind the places found, the one gone to, and their marks in the overview strip.
+    pub(super) found: Color32,
+    pub(super) found_current: Color32,
+    pub(super) found_mark: Color32,
     pub(super) thumb: Color32,
     pub(super) thumb_hover: Color32,
 }
@@ -1729,6 +2049,9 @@ pub(super) fn colors(ui: &Ui) -> Colors {
             selected_bg: t.on_bg,
             selected_fg: Color32::from_rgb(0xcf, 0xe5, 0xff),
             selection: Color32::from_rgba_unmultiplied(0x35, 0x84, 0xe4, 110),
+            found: Color32::from_rgba_unmultiplied(0xd0, 0x9a, 0x1c, 80),
+            found_current: Color32::from_rgba_unmultiplied(0xc2, 0x6a, 0x00, 200),
+            found_mark: Color32::from_rgb(0xf0, 0xa0, 0x30),
             thumb: Color32::from_white_alpha(50),
             thumb_hover: Color32::from_white_alpha(90),
         }
@@ -1752,6 +2075,9 @@ pub(super) fn colors(ui: &Ui) -> Colors {
             selected_bg: t.on_bg,
             selected_fg: Color32::from_rgb(0x0b, 0x3d, 0x7a),
             selection: Color32::from_rgba_unmultiplied(0x35, 0x84, 0xe4, 80),
+            found: Color32::from_rgba_unmultiplied(0xff, 0xcc, 0x33, 130),
+            found_current: Color32::from_rgba_unmultiplied(0xff, 0x8c, 0x00, 190),
+            found_mark: Color32::from_rgb(0xe0, 0x82, 0x00),
             thumb: Color32::from_black_alpha(45),
             thumb_hover: Color32::from_black_alpha(90),
         }
@@ -1888,9 +2214,12 @@ mod tests {
         // As `show` does, less the viewport. Nothing is rendered, so the texture updates are
         // discarded.
         w.poll();
-        ctx.run_ui(input, |ui| w.contents(ui, settings))
-            .textures_delta
-            .clear();
+        ctx.run_ui(input, |ui| {
+            w.handle_keys(ui, settings);
+            w.contents(ui, settings);
+        })
+        .textures_delta
+        .clear();
     }
 
     fn click(at: egui::Pos2) -> [Vec<egui::Event>; 2] {
@@ -2230,5 +2559,196 @@ mod tests {
         frame(&ctx, &mut w, &mut settings, Vec::new());
         assert!(!w.fold && !settings.fold);
         assert_eq!(folds(&w), 0);
+    }
+
+    fn key_with(key: Key, modifiers: Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn key(key: Key) -> egui::Event {
+        key_with(key, Modifiers::NONE)
+    }
+
+    fn ctrl(key: Key) -> egui::Event {
+        key_with(key, Modifiers::COMMAND)
+    }
+
+    fn typed(text: &str) -> egui::Event {
+        egui::Event::Text(text.into())
+    }
+
+    /// The places found, as row, version and the text found there.
+    fn found(w: &DiffWindow) -> Vec<(usize, char, String)> {
+        let ready = w.ready().unwrap();
+        let (rows, _) = DiffWindow::rows_and_changes(&ready.diff, w.form);
+        w.find
+            .matches
+            .iter()
+            .map(|m| {
+                let line = ready.diff.line(rows[m.row], Some(m.old)).unwrap();
+                let text = line.text.chars().collect::<Vec<_>>()[m.columns.clone()]
+                    .iter()
+                    .collect();
+                (m.row, if m.old { '-' } else { '+' }, text)
+            })
+            .collect()
+    }
+
+    fn has_find_focus(ctx: &egui::Context, w: &DiffWindow) -> bool {
+        ctx.memory(|m| m.has_focus(w.find_id()))
+    }
+
+    #[test]
+    fn ctrl_f_finds_as_typed_and_f3_and_enter_go_round_the_places() {
+        let mut settings = DiffWindowSettings {
+            fold: false,
+            words: WordMode::Position,
+            ..DiffWindowSettings::default()
+        };
+        let mut w = window("one\ntwo\nfour\n", "one\nTWO\nfour\n", &settings);
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut w, &mut settings, Vec::new());
+        frame(&ctx, &mut w, &mut settings, vec![ctrl(Key::F)]);
+        assert!(has_find_focus(&ctx, &w));
+        // Any case; an unchanged line once, the changed row on both sides.
+        frame(&ctx, &mut w, &mut settings, vec![typed("O")]);
+        assert_eq!(w.find.query, "O");
+        assert_eq!(
+            found(&w),
+            [
+                (0, '+', "o".into()),
+                (1, '-', "o".into()),
+                (1, '+', "O".into()),
+                (2, '+', "o".into()),
+            ]
+        );
+        assert_eq!(w.find.current, Some(0));
+        // Enter and F3 go on, round the end; Shift goes back.
+        frame(&ctx, &mut w, &mut settings, vec![key(Key::Enter)]);
+        assert_eq!(w.find.current, Some(1));
+        assert!(has_find_focus(&ctx, &w));
+        for _ in 0..3 {
+            frame(&ctx, &mut w, &mut settings, vec![key(Key::F3)]);
+        }
+        assert_eq!(w.find.current, Some(0));
+        let shift = Modifiers::SHIFT;
+        frame_with(
+            &ctx,
+            &mut w,
+            &mut settings,
+            vec![key_with(Key::F3, shift)],
+            shift,
+        );
+        assert_eq!(w.find.current, Some(3));
+        // F3 works outside the field too.
+        ctx.memory_mut(|m| m.surrender_focus(w.find_id()));
+        frame(&ctx, &mut w, &mut settings, vec![key(Key::F3)]);
+        assert_eq!(w.find.current, Some(0));
+
+        // The other form finds in its own rows.
+        w.set_form(DiffForm::Unified);
+        frame(&ctx, &mut w, &mut settings, Vec::new());
+        assert_eq!(
+            found(&w),
+            [
+                (0, '+', "o".into()),
+                (1, '-', "o".into()),
+                (2, '+', "O".into()),
+                (3, '+', "o".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn going_to_a_place_in_a_fold_opens_it_around_the_place_and_scrolls_to_it() {
+        let old = numbered(300).replace("line 150\n", "a needle\n");
+        let new = old
+            .replace("line 5\n", "line five\n")
+            .replace("line 290\n", "line two hundred and ninety\n");
+        let mut settings = DiffWindowSettings::default();
+        let mut w = window(&old, &new, &settings);
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut w, &mut settings, Vec::new());
+        let side = &w.ready().unwrap().diff.side;
+        let row = side.iter().position(|r| r.new == Some(149)).unwrap();
+        assert!(!w.shown.contains(&Shown::Row(row)), "folded at first");
+        frame(&ctx, &mut w, &mut settings, vec![ctrl(Key::F)]);
+        frame(&ctx, &mut w, &mut settings, vec![typed("NEEDLE")]);
+        assert_eq!(found(&w), [(row, '+', "needle".into())]);
+        assert_eq!(w.find.current, Some(0));
+        // Opened with the context a change keeps, still folded on either side.
+        let at = w.shown.iter().position(|s| *s == Shown::Row(row)).unwrap();
+        let context = parterre_core::file_diff::CONTEXT_LINES;
+        assert_eq!(w.shown[at - context - 1], Shown::Fold(8..row - context));
+        assert!(matches!(w.shown[at + context + 1], Shown::Fold(_)));
+
+        // Unfolded, the rows don't fit: going to it again scrolls it into view.
+        w.toggle_fold(&mut settings);
+        w.toggle_fold(&mut settings);
+        frame(&ctx, &mut w, &mut settings, Vec::new());
+        frame(&ctx, &mut w, &mut settings, Vec::new());
+        assert!(w.top < 10, "at the first change, top {}", w.top);
+        frame(&ctx, &mut w, &mut settings, vec![key(Key::F3)]);
+        for _ in 0..2 {
+            frame(&ctx, &mut w, &mut settings, Vec::new());
+        }
+        assert!(
+            w.top <= row && row < w.top + 20,
+            "row {row} in view, top {}",
+            w.top
+        );
+    }
+
+    #[test]
+    fn esc_in_the_find_field_leaves_it_and_only_then_closes_the_window() {
+        let (ctx, mut w, mut settings) = text_window();
+        frame(&ctx, &mut w, &mut settings, vec![ctrl(Key::F)]);
+        frame(&ctx, &mut w, &mut settings, vec![typed("f")]);
+        assert_eq!(w.find.matches.len(), 2);
+        frame(&ctx, &mut w, &mut settings, vec![key(Key::Escape)]);
+        assert!(!w.closed);
+        assert!(!has_find_focus(&ctx, &w));
+        assert_eq!(w.find.query, "");
+        assert!(w.find.matches.is_empty());
+        frame(&ctx, &mut w, &mut settings, vec![key(Key::Escape)]);
+        assert!(w.closed);
+    }
+
+    #[test]
+    fn ctrl_f_offers_the_chosen_characters_or_the_last_query_and_ctrl_c_stays_in_the_field() {
+        let (ctx, mut w, mut settings) = text_window();
+        // Characters chosen in one line: they are the query.
+        let (a, b) = (at(&ctx, &w, 2, 1), at(&ctx, &w, 2, 4));
+        drag(&ctx, &mut w, &mut settings, a, b);
+        frame(&ctx, &mut w, &mut settings, vec![ctrl(Key::F)]);
+        assert_eq!(w.find.query, "our");
+        assert_eq!(found(&w), [(2, '+', "our".into())]);
+        frame(&ctx, &mut w, &mut settings, vec![key(Key::Escape)]);
+
+        // Otherwise the last query, selected: a paste replaces it, less its line break.
+        let (a, b) = (at(&ctx, &w, 0, 1), at(&ctx, &w, 1, 1));
+        drag(&ctx, &mut w, &mut settings, a, b);
+        frame(&ctx, &mut w, &mut settings, vec![ctrl(Key::F)]);
+        assert_eq!(w.find.query, "our");
+        let paste = egui::Event::Paste("three\n".into());
+        frame(&ctx, &mut w, &mut settings, vec![paste]);
+        assert_eq!(w.find.query, "three");
+        // Ctrl+A and Ctrl+C in the field are the field's.
+        let chosen = w.selection;
+        frame(&ctx, &mut w, &mut settings, vec![ctrl(Key::A)]);
+        assert_eq!(w.selection, chosen);
+        let copied = std::cell::Cell::new(None);
+        let input = egui::RawInput {
+            events: vec![egui::Event::Copy],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| copied.set(Some(w.copied(ui))));
+        assert_eq!(copied.take(), Some(None));
     }
 }

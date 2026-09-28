@@ -10,6 +10,7 @@ use eframe::egui::{
     vec2,
 };
 use parterre_core::GitRef;
+use parterre_core::log::Found;
 use parterre_core::log_graph::{GraphRow, LogGraph};
 
 use super::log_window::{CELL_PAD, Colors, HEADING, badge, cell, heading_background};
@@ -82,6 +83,8 @@ pub struct Row<'a> {
     pub date: &'a str,
     /// Drawn in fainter colours throughout.
     pub greyed: bool,
+    /// Where a find query is in the hash and the subject, highlighted.
+    pub found: Found,
 }
 
 /// A commit table: how many rows, their graph column, and where its state is kept.
@@ -217,11 +220,12 @@ impl CommitTable<'_> {
                     let cell_rect = Rect::from_x_y_ranges(x[0]..=x[0] + w[0], rect.y_range());
                     painter.rect_filled(cell_rect, 0.0, fill);
                 }
-                put(
-                    cell(ui, &r.hash, mono.clone(), fg_weak, w[0]),
-                    x[0] + CELL_PAD,
-                    fg_weak,
-                );
+                let g = cell(ui, &r.hash, mono.clone(), fg_weak, w[0]);
+                let digits = r.found.hash.min(r.hash.chars().count());
+                if digits > 0 {
+                    paint_found(painter, &g, pos2(x[0] + CELL_PAD, y), 0..digits, c.found);
+                }
+                put(g, x[0] + CELL_PAD, fg_weak);
 
                 // The mark, ref badges and tag, then the subject and the note in what is left.
                 let mut left = x[1] + CELL_PAD;
@@ -245,6 +249,11 @@ impl CommitTable<'_> {
                 if left < right {
                     let g = cell(ui, r.subject, body.clone(), fg, right - left);
                     let end = left + g.size().x;
+                    for place in &r.found.subject {
+                        let chars = |b: usize| r.subject[..b].chars().count();
+                        let place = chars(place.start)..chars(place.end);
+                        paint_found(painter, &g, pos2(left, y), place, c.found);
+                    }
                     put(g, left, fg);
                     if let Some(note) = &r.note
                         && end + 6.0 < right
@@ -330,6 +339,21 @@ impl CommitTable<'_> {
             date,
         }
     }
+}
+
+/// Highlights characters `chars` of `g`, drawn left-centred at `at`.
+fn paint_found(
+    painter: &egui::Painter,
+    g: &Galley,
+    at: egui::Pos2,
+    chars: std::ops::Range<usize>,
+    fill: Color32,
+) {
+    let x = |i| at.x + g.pos_from_cursor(egui::text::CCursor::new(i)).min.x;
+    let (x0, x1) = (x(chars.start), x(chars.end));
+    let y = at.y - g.size().y / 2.0;
+    let place = Rect::from_x_y_ranges(x0..=x1, y..=y + g.size().y);
+    painter.rect_filled(place, 2.0, fill);
 }
 
 /// The column headings: Graph (where it fits), Hash, Subject, Author, Date.

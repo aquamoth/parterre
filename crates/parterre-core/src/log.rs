@@ -9,7 +9,7 @@ use std::collections::BinaryHeap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::repo::{CommitIx, GitRef, RefKind, Repo};
+use crate::repo::{Commit, CommitIx, GitRef, RefKind, Repo};
 
 /// What the log lists: the commits reachable from any of `tips` but from none of `exclude`,
 /// like `git log <tips> ^<exclude>`.
@@ -405,6 +405,62 @@ impl PartialOrd for Ready {
     }
 }
 
+/// The fewest hex digits a find query needs to match the start of a hash, as git's shortest
+/// abbreviation; fewer would match a sixteenth of the commits a digit.
+pub const FIND_HASH_MIN: usize = 4;
+
+/// Where a find query occurs in a commit's row of the log ([`find_in`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Found {
+    /// How many hex digits of the hash, from its start, the query is.
+    pub hash: usize,
+    /// Where in the subject, as byte ranges ([`crate::find::find`]).
+    pub subject: Vec<std::ops::Range<usize>>,
+}
+
+impl Found {
+    pub fn is_empty(&self) -> bool {
+        self.hash == 0 && self.subject.is_empty()
+    }
+}
+
+/// Where `query` occurs in `commit`: the start of its hash, if the query (blanks around it
+/// left out) is at least [`FIND_HASH_MIN`] hex digits, in either case; and every place in its
+/// subject, ignoring case, as the other finds do.
+pub fn find_in(commit: &Commit, query: &str) -> Found {
+    let hex = query.trim().to_ascii_lowercase();
+    let hash = if hex.len() >= FIND_HASH_MIN
+        && hex.bytes().all(|b| b.is_ascii_hexdigit())
+        && commit.oid.to_hex().starts_with(&hex)
+    {
+        hex.len()
+    } else {
+        0
+    };
+    let subject = if query.trim().is_empty() {
+        Vec::new()
+    } else {
+        crate::find::find([&commit.subject], query)
+            .into_iter()
+            .map(|m| m.range)
+            .collect()
+    };
+    Found { hash, subject }
+}
+
+/// The rows of a log's `commits` that `query` occurs in ([`find_in`]).
+pub fn find(repo: &Repo, commits: &[CommitIx], query: &str) -> Vec<usize> {
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
+    commits
+        .iter()
+        .enumerate()
+        .filter(|&(_, &c)| !find_in(repo.commit(c), query).is_empty())
+        .map(|(i, _)| i)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,5 +662,53 @@ mod tests {
         assert!(out.windows(2).all(|w| w[0].0 + 1 == w[1].0));
         // Generous: debug builds on slow CI. Release takes a few milliseconds.
         assert!(took.as_secs() < 5, "took {took:?}");
+    }
+
+    #[test]
+    fn finds_in_subjects_and_hash_prefixes() {
+        let commit = |hex: &str, subject: &str| Commit {
+            oid: Oid::from_hex(&format!("{hex:0<40}")).unwrap(),
+            parents: Vec::new(),
+            truncated: false,
+            empty_tree: false,
+            author_name: "Deadbeef Dan".into(),
+            author_email: String::new(),
+            author_time: 0,
+            author_date: String::new(),
+            commit_time: 0,
+            subject: subject.into(),
+        };
+        let commits = vec![
+            commit("deadbeef", "Fix the Parser"),
+            commit("0123abcd", "parser: parse, parse again"),
+            commit("abcdef01", "Add dead code"),
+        ];
+        let repo = Repo::new(
+            "/x".into(),
+            commits,
+            Vec::new(),
+            Head::Detached(CommitIx(0)),
+        );
+        let rows = ixs(&[0, 1, 2]);
+
+        // The subject anywhere, ignoring case, every place in it.
+        assert_eq!(find(&repo, &rows, "PARSE"), [0, 1]);
+        let places = find_in(repo.commit(CommitIx(1)), "parse");
+        assert_eq!(places.hash, 0);
+        assert_eq!(places.subject, [0..5, 8..13, 15..20]);
+
+        // A hash by its start, from 4 hex digits, ignoring case and blanks around it.
+        assert_eq!(find(&repo, &rows, " DEADB "), [0]);
+        assert_eq!(find_in(repo.commit(CommitIx(0)), "DEADB").hash, 5);
+        assert_eq!(find(&repo, &rows, "0123"), [1]);
+        // Shorter, or not at the start: only the subjects count ("dead" is in commit 2's).
+        assert_eq!(find(&repo, &rows, "dead"), [0, 2]);
+        assert_eq!(find_in(repo.commit(CommitIx(0)), "dead").hash, 4);
+        assert_eq!(find(&repo, &rows, "abcd"), [2]);
+        assert_eq!(find(&repo, &rows, "dea"), [2]);
+        // Not the author.
+        assert!(find(&repo, &rows, "Dan").is_empty());
+        assert!(find(&repo, &rows, "").is_empty());
+        assert!(find(&repo, &rows, "  ").is_empty());
     }
 }
