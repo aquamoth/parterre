@@ -212,8 +212,6 @@ struct RowInput {
     /// Rows drawn this frame, first and last.
     first: Option<usize>,
     last: Option<usize>,
-    /// Unified: the version a press where the pointer is would choose.
-    version: Option<Column>,
 }
 
 #[derive(Debug)]
@@ -495,13 +493,14 @@ impl DiffWindow {
         if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A)) {
             self.select_all();
         }
-        let (form, next, prev, close) = ui.input_mut(|i| {
+        let (form, prev, next, close) = ui.input_mut(|i| {
             (
                 i.consume_key(Modifiers::COMMAND, Key::D),
-                i.consume_key(Modifiers::COMMAND, Key::ArrowDown)
-                    || i.consume_key(Modifiers::NONE, Key::F7),
+                // Shift+F7 first: a plain F7 would match it too.
                 i.consume_key(Modifiers::COMMAND, Key::ArrowUp)
                     || i.consume_key(Modifiers::SHIFT, Key::F7),
+                i.consume_key(Modifiers::COMMAND, Key::ArrowDown)
+                    || i.consume_key(Modifiers::NONE, Key::F7),
                 i.key_pressed(Key::Escape),
             )
         });
@@ -909,6 +908,8 @@ impl DiffWindow {
                 i.modifiers.command,
             )
         });
+        // With Shift, a press extends the selection, in its version.
+        let extend = selection.filter(|_| shift).map(|s| s.column);
         let mut input = RowInput::default();
         let mut child = ui.new_child(UiBuilder::new().max_rect(area));
         child.set_clip_rect(area.intersect(ui.clip_rect()));
@@ -960,7 +961,15 @@ impl DiffWindow {
                     let sel = selection
                         .filter(|s| diff.line(row, s.column.side()).is_some())
                         .and_then(|s| Some((s.columns(s.column, r)?, s.lines)));
-                    let numbers = Numbers::Both(row.old, row.new);
+                    // The version a press chooses, lit in the numbers of the row under the
+                    // pointer; while choosing, the chosen one.
+                    let lit = pointer
+                        .filter(|p| rect.intersect(ui.clip_rect()).contains(*p))
+                        .map(|p| match selection.filter(|_| dragging) {
+                            Some(s) => s.column,
+                            None => unified_version(line, p.x, rect.left(), gutter, extend, ctrl),
+                        });
+                    let numbers = Numbers::Both(row.old, row.new, lit);
                     let at = paint_line(ui, rect, line, numbers, &geometry, sel, c);
                     // The version is settled below, when a press starts choosing.
                     vec![(Column::New, rect, 2.0 * gutter, at)]
@@ -995,30 +1004,19 @@ impl DiffWindow {
                     if !on_numbers {
                         let _ = response.clone().on_hover_cursor(egui::CursorIcon::Text);
                     }
-                    // The version a press here chooses: side by side, the pane; unified,
-                    // the selection's with Shift, else the line's (Ctrl takes the old
-                    // version of an unchanged line), or on the numbers, their version.
+                    // The version a press here chooses: side by side, the pane.
                     let column = if side {
                         *column
-                    } else if let Some(s) = selection.filter(|_| shift) {
-                        s.column
-                    } else if on_numbers {
-                        // The old numbers come first, then the new.
-                        if p.x < half.left() + gutter {
-                            Column::Old
-                        } else {
-                            Column::New
-                        }
                     } else {
-                        match diff.line(row, None).map(|l| l.kind) {
-                            Some(LineKind::Removed) => Column::Old,
-                            Some(LineKind::Same) if ctrl => Column::Old,
-                            _ => Column::New,
-                        }
+                        unified_version(
+                            diff.line(row, None),
+                            p.x,
+                            half.left(),
+                            gutter,
+                            extend,
+                            ctrl,
+                        )
                     };
-                    if !side {
-                        input.version = Some(column);
-                    }
                     if pressed && response.hovered() {
                         input.press = Some((r, column, char_at(at), on_numbers));
                     }
@@ -1048,17 +1046,6 @@ impl DiffWindow {
         );
         overview(ui, strip, diff, rows, &self.shown, side, view, row_h, c);
         self.select(ui, &input, area, out.state.offset.y, row_h);
-        // Unified: a sign by the pointer says which version choosing takes.
-        let badge = if self.dragging {
-            self.selection
-                .map(|s| s.column)
-                .filter(|_| form == DiffForm::Unified)
-        } else {
-            input.version
-        };
-        if let (Some(version), Some(p)) = (badge, ui.input(|i| i.pointer.hover_pos())) {
-            version_badge(ui, p, version, c);
-        }
         if let Some(lines) = input.fold {
             self.open.push(lines);
             self.dirty = true;
@@ -1137,7 +1124,9 @@ impl DiffWindow {
                 }),
             };
             self.dragging = true;
-        } else if double
+        }
+        // Not only after a press: a quick double-click can end in the frame it started.
+        if double
             && let Some((row, under)) = input.hover
             && let Some(s) = self.selection
             && !s.lines
@@ -1313,10 +1302,39 @@ struct Geometry {
     font: FontId,
 }
 
-/// The line numbers a row shows: its own line's, or both sides' (unified).
+/// The line numbers a row shows: its own line's, or both sides' (unified), with the version
+/// choosing would take lit.
 enum Numbers {
     Own,
-    Both(Option<u32>, Option<u32>),
+    Both(Option<u32>, Option<u32>, Option<Column>),
+}
+
+/// Unified: the version a press at `x` on a row starting at `left` chooses. On the numbers
+/// (old first, then new), theirs; on the text, the line's, the new version of an unchanged
+/// line unless Ctrl is held. With Shift (`extend`), the selection's.
+fn unified_version(
+    line: Option<&DiffLine>,
+    x: f32,
+    left: f32,
+    gutter: f32,
+    extend: Option<Column>,
+    ctrl: bool,
+) -> Column {
+    if let Some(column) = extend {
+        return column;
+    }
+    if x < left + 2.0 * gutter {
+        return if x < left + gutter {
+            Column::Old
+        } else {
+            Column::New
+        };
+    }
+    match line.map(|l| l.kind) {
+        Some(LineKind::Removed) => Column::Old,
+        Some(LineKind::Same) if ctrl => Column::Old,
+        _ => Column::New,
+    }
 }
 
 /// Where a line's text was drawn, for finding the character under the pointer.
@@ -1353,13 +1371,18 @@ fn paint_line(
     };
     painter.rect_filled(rect, 0.0, bg);
     let y = rect.top() + 1.5;
-    let number = |x: f32, no: Option<u32>| {
+    let number = |x: f32, no: Option<u32>, lit: Option<Color32>| {
         let Some(ix) = no else { return };
         let cell = Rect::from_min_size(pos2(x, rect.top()), vec2(g.gutter, g.row_h));
-        if whole {
+        let color = if whole {
             painter.rect_filled(cell, 0.0, c.selected_bg);
-        }
-        let color = if whole { c.selected_fg } else { c.weak };
+            c.selected_fg
+        } else if let Some(tint) = lit {
+            painter.rect_filled(cell, 0.0, tint);
+            c.text
+        } else {
+            c.weak
+        };
         let text = (ix + 1).to_string();
         let galley = painter.layout_no_wrap(text, g.font.clone(), color);
         painter.galley(pos2(x + g.gutter - 8.0 - galley.size().x, y), galley, color);
@@ -1367,13 +1390,13 @@ fn paint_line(
     let mut x = rect.left();
     match numbers {
         Numbers::Own => {
-            number(x, Some(line.no - 1));
+            number(x, Some(line.no - 1), None);
             x += g.gutter;
         }
-        Numbers::Both(old, new) => {
-            number(x, old);
+        Numbers::Both(old, new, lit) => {
+            number(x, old, (lit == Some(Column::Old)).then_some(c.removed_word));
             x += g.gutter;
-            number(x, new);
+            number(x, new, (lit == Some(Column::New)).then_some(c.added_word));
             x += g.gutter;
         }
     }
@@ -1438,26 +1461,6 @@ fn fold_button(ui: &mut Ui, on: bool, opened: bool) -> egui::Response {
         (false, _) => (glyphs::UNFOLD, false),
     };
     widgets::icon_button(ui, glyph, tinted)
-}
-
-/// A small green `+` (new version) or red `−` (old version) at the lower right of the
-/// pointer, a quiet reminder of which version choosing text takes in the unified form. egui
-/// can't change the cursor's image, so the sign is drawn beside it, above everything else.
-fn version_badge(ui: &Ui, pointer: egui::Pos2, version: Column, c: &Colors) {
-    let painter = ui.ctx().layer_painter(egui::LayerId::new(
-        egui::Order::Tooltip,
-        egui::Id::new("diff-version-badge"),
-    ));
-    let center = pointer + vec2(10.0, 12.0);
-    let (color, plus) = match version {
-        Column::Old => (c.removed, false),
-        Column::New => (c.added, true),
-    };
-    let stroke = Stroke::new(1.5, color);
-    painter.hline(center.x - 3.0..=center.x + 3.0, center.y, stroke);
-    if plus {
-        painter.vline(center.x, center.y - 3.0..=center.y + 3.0, stroke);
-    }
 }
 
 /// A fold: `n unchanged lines`, across the row.
@@ -1945,6 +1948,48 @@ mod tests {
         assert_eq!(w.current, Some(1));
     }
 
+    #[test]
+    fn f7_goes_to_the_next_change_and_shift_f7_to_the_previous() {
+        let old = numbered(120);
+        let new = old
+            .replace("line 5\n", "line five\n")
+            .replace("line 50\n", "line fifty\n")
+            .replace("line 100\n", "line hundred\n");
+        let mut settings = DiffWindowSettings::default();
+        let mut w = window(&old, &new, &settings);
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut w, &mut settings, Vec::new());
+        frame(&ctx, &mut w, &mut settings, Vec::new());
+        assert_eq!(w.current, Some(0));
+        let steps = [
+            (Modifiers::NONE, Some(1)),
+            (Modifiers::NONE, Some(2)),
+            (Modifiers::SHIFT, Some(1)),
+            (Modifiers::SHIFT, Some(0)),
+        ];
+        for (modifiers, expected) in steps {
+            let f7 = egui::Event::Key {
+                key: Key::F7,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            };
+            // As `show` does: the keys first.
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
+                events: vec![egui::Event::ModifiersChanged(modifiers), f7],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                w.handle_keys(ui, &mut settings);
+                w.contents(ui, &mut settings);
+            });
+            frame(&ctx, &mut w, &mut settings, Vec::new());
+            assert_eq!(w.current, expected, "after F7 with {modifiers:?}");
+        }
+    }
+
     /// Where display column `col` of row `row` starts in the new (right) pane, side by side and
     /// unfolded, with no notes in the header.
     fn at(ctx: &egui::Context, w: &DiffWindow, row: usize, col: usize) -> egui::Pos2 {
@@ -2042,6 +2087,22 @@ mod tests {
             frame(&ctx, &mut w, &mut settings, vec![button(p, false, none)]);
         }
         assert_eq!(w.selected_text().as_deref(), Some("five"));
+
+        // Also when each click comes in a single frame. A second later, not to count as a
+        // triple click.
+        for _ in 0..60 {
+            frame(&ctx, &mut w, &mut settings, Vec::new());
+        }
+        let p = at(&ctx, &w, 1, 10);
+        for _ in 0..2 {
+            let clicked = vec![
+                egui::Event::PointerMoved(p),
+                button(p, true, none),
+                button(p, false, none),
+            ];
+            frame(&ctx, &mut w, &mut settings, clicked);
+        }
+        assert_eq!(w.selected_text().as_deref(), Some("three"));
 
         w.select_all();
         assert_eq!(

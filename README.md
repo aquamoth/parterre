@@ -127,8 +127,9 @@ old or the new text (double-click for a word, `Shift`+click to extend, `Ctrl+A` 
 click line numbers for whole lines, then `Ctrl+C` copies it as it is in the file, tabs kept.
 In the unified form you choose in one version: the one of the line you start on (a removed
 line, or the old numbers, for the old version; `Ctrl` on an unchanged line for the old one
-too), shown by a small `+` or `−` beside the pointer. Lines of the other version are left out. Files go through git's
-textconv filters, as `git show` does; binary files and submodules say what changed instead.
+too), shown by its line number lighting up on the row under the pointer. Lines of the other
+version are left out. Files go through git's textconv filters, as `git show` does; binary files
+and submodules say what changed instead.
 
 **Comparing two commits** lists the files they differ in, in a window with the same table;
 double-click one for its diff. Right-click a node for *Compare with HEAD*, *Compare with
