@@ -1738,6 +1738,7 @@ impl BlameWindow {
             graph: history.map_or(&no_graph, |h| &h.graph),
             abbrev_len: self.repo.abbrev_len,
             palette: &env.palette,
+            pairs: false,
         };
         let (repo, spec) = (&*self.repo, &self.spec);
         let details = &mut self.details;
@@ -1760,7 +1761,7 @@ impl BlameWindow {
                 Some(h) => history_row(h, i, repo, env.graph, &bc),
                 None => Row::default(),
             },
-            |ui, i| {
+            |ui, i, _| {
                 let (Some(h), Some(ready)) = (history, ready) else {
                     return;
                 };

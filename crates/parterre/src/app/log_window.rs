@@ -16,6 +16,10 @@
 //! main window's find does, so the details follow; Enter and `F3` go to the next, round the
 //! end. Every place is highlighted in the list. Esc in the find field leaves it; elsewhere it
 //! closes the window.
+//!
+//! Ctrl+ or Shift+click selects a second commit, and the menu of either compares the two, in
+//! the order they were selected, as the graph's Compare revisions does (#127). The details and
+//! files follow the one clicked last; the mark for comparison is left alone.
 
 use std::sync::Arc;
 
@@ -784,6 +788,7 @@ impl LogWindow {
             graph,
             abbrev_len: repo.abbrev_len,
             palette: &env.palette,
+            pairs: true,
         };
         let head = repo.head_commit().map(|c| repo.commit(c).oid);
         let (marked, shows) = (env.marked, |r: &&GitRef| env.graph.shows(r.kind));
@@ -811,9 +816,20 @@ impl LogWindow {
                     ..Row::default()
                 }
             },
-            |ui, i| {
+            |ui, i, list| {
                 let commit = repo.commit(commits[i]);
-                if let Some(r) = row_menu(ui, commit, marked, head, repo.has_working_tree) {
+                // The selected pair, if this row is one of them.
+                let pair = list
+                    .pair()
+                    .filter(|_| list.is_selected(i))
+                    .map(|(a, b)| (repo.commit(commits[a]).oid, repo.commit(commits[b]).oid));
+                let env = MenuEnv {
+                    marked,
+                    head,
+                    pair,
+                    working_tree: repo.has_working_tree,
+                };
+                if let Some(r) = row_menu(ui, commit, &env) {
                     request = Some(r);
                 }
             },
@@ -997,16 +1013,35 @@ impl LogWindow {
     }
 }
 
-/// The menu of a commit row: marking and comparing, and copying. Says what was picked.
-fn row_menu(
-    ui: &mut Ui,
-    commit: &Commit,
-    marked: Option<&(Oid, String)>,
+/// What a row's menu needs to know besides the commit.
+struct MenuEnv<'a> {
+    marked: Option<&'a (Oid, String)>,
     head: Option<Oid>,
+    /// The two selected commits, in the order they were selected, when the row is one of them.
+    pair: Option<(Oid, Oid)>,
     working_tree: bool,
-) -> Option<CompareRequest> {
+}
+
+/// The menu of a commit row: comparing and marking, and copying. Says what was picked.
+fn row_menu(ui: &mut Ui, commit: &Commit, env: &MenuEnv) -> Option<CompareRequest> {
+    let MenuEnv {
+        marked,
+        head,
+        pair,
+        working_tree,
+    } = *env;
     let oid = commit.oid;
     let mut request = None;
+    // As the graph's Compare revisions on two nodes; the mark is left alone.
+    let compare = ui
+        .add_enabled(pair.is_some(), egui::Button::new("Compare revisions"))
+        .on_disabled_hover_text("Ctrl+click a second commit first");
+    if compare.clicked()
+        && let Some((first, second)) = pair
+    {
+        request = Some(CompareRequest::Compare(first, second));
+        ui.close();
+    }
     let is_marked = marked.is_some_and(|(m, _)| *m == oid);
     let (text, mark) = if is_marked {
         ("Clear the mark", None)
@@ -1500,6 +1535,7 @@ impl ParterreApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::commit_table::ROW;
     use parterre_core::log_layout::Dividers;
 
     #[test]
@@ -1611,6 +1647,18 @@ mod tests {
     }
 
     fn frame(ctx: &egui::Context, w: &mut LogWindow, events: Vec<egui::Event>) {
+        frame_with(ctx, w, events, Modifiers::NONE);
+    }
+
+    /// A frame with `modifiers` held.
+    fn frame_with(
+        ctx: &egui::Context,
+        w: &mut LogWindow,
+        events: Vec<egui::Event>,
+        modifiers: Modifiers,
+    ) {
+        let mut events = events;
+        events.insert(0, egui::Event::ModifiersChanged(modifiers));
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1100.0, 760.0))),
             events,
@@ -1655,6 +1703,41 @@ mod tests {
 
     fn selected(w: &LogWindow) -> Option<usize> {
         w.view.as_ref()?.list.selected
+    }
+
+    /// Clicks commit row `row` (in the default layout the list is at the top) with `modifiers`.
+    fn click_row(ctx: &egui::Context, w: &mut LogWindow, row: usize, modifiers: Modifiers) {
+        let pos = pos2(300.0, 40.0 + HEADING + (row as f32 + 0.5) * ROW);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        frame_with(ctx, w, vec![egui::Event::PointerMoved(pos)], modifiers);
+        frame_with(ctx, w, vec![button(true)], modifiers);
+        frame_with(ctx, w, vec![button(false)], modifiers);
+    }
+
+    #[test]
+    fn ctrl_and_shift_click_select_a_pair_of_commits() {
+        let ctx = egui::Context::default();
+        let mut w = window(&["e", "d", "c", "b", "a"]);
+        frame(&ctx, &mut w, Vec::new());
+        click_row(&ctx, &mut w, 1, Modifiers::NONE);
+        click_row(&ctx, &mut w, 3, Modifiers::COMMAND);
+        let pair = |w: &LogWindow| w.view.as_ref().unwrap().list.pair();
+        assert_eq!(pair(&w), Some((1, 3)));
+        assert_eq!(selected(&w), Some(3), "the details follow the last clicked");
+        click_row(&ctx, &mut w, 2, Modifiers::SHIFT);
+        assert_eq!(pair(&w), Some((3, 2)));
+        // A plain click or a key leaves one.
+        click_row(&ctx, &mut w, 4, Modifiers::NONE);
+        assert_eq!(pair(&w), None);
+        click_row(&ctx, &mut w, 0, Modifiers::COMMAND);
+        assert_eq!(pair(&w), Some((4, 0)));
+        frame(&ctx, &mut w, vec![key(Key::ArrowDown)]);
+        assert_eq!((pair(&w), selected(&w)), (None, Some(1)));
     }
 
     fn has_find_focus(ctx: &egui::Context) -> bool {
