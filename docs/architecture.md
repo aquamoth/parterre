@@ -112,8 +112,9 @@ crates/parterre        the binary (eframe/egui)
      - One deliberate exception: git hides an empty-tree root even when it carries a label;
        parterre shows it.
    - *Branchings and merges* reproduces TortoiseGit's chain collapse.
-3. **Measure** (`scene.rs`): node boxes use TortoiseGit's geometry: one row per ref, or an
-   8-digit hash; 20 px side margins and 5 px top and bottom margins; monospace 12 px.
+3. **Measure** (`scene.rs`): node boxes use TortoiseGit's geometry: one row per ref, or the
+   short hash where there is none, then one row per pull request; 20 px side margins and 5 px
+   top and bottom margins; monospace 12 px.
 4. **Lay out** (`layout/`): rank → split wide layers → layered graph with dummies (optionally
    bundled per parent) → crossing minimisation → L1 coordinates → variable layer gaps →
    rotate to the chosen direction.

@@ -20,6 +20,7 @@ pub const CORNER_RADIUS: f32 = 6.0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowKind {
+    /// The commit's short hash, on nodes that no ref labels.
     Hash,
     Ref {
         kind: RefKind,
@@ -137,8 +138,9 @@ impl Scene {
                     },
                     width: 0.0,
                 });
-                let mut rows: Vec<Row> = refs.chain(pulls).collect();
-                // Like a ref, a pull request stands in for the hash.
+                let mut rows: Vec<Row> = refs.collect();
+                // Only refs stand in for the hash. Other labels (pull requests) go below the
+                // refs, or below the hash where there are none.
                 if rows.is_empty() {
                     rows.push(Row {
                         label: repo.commit(node.commit).oid.short(repo.abbrev_len),
@@ -146,6 +148,7 @@ impl Scene {
                         width: 0.0,
                     });
                 }
+                rows.extend(pulls);
                 for row in &mut rows {
                     row.width = text_width(&row.label);
                 }
@@ -410,9 +413,21 @@ mod tests {
                 pr_row("12", 0, false)
             ]
         );
-        // A commit with no refs shows the pull request instead of its hash.
-        assert_eq!(rows(1), [pr_row("9", 1, true)]);
+        // A commit with no refs shows its hash, then the pull request.
+        let hash = "01".repeat(20)[..repo.abbrev_len].to_owned();
+        assert_eq!(rows(1), [(hash, RowKind::Hash), pr_row("9", 1, true)]);
+        assert_eq!(input.visuals[1].size.y, 2.0 * input.row_height);
         assert_eq!(input.pull_requests.len(), 2);
+
+        // Its hash row is the node's, its pull request's row the pull request's.
+        let scene = input.lay_out();
+        let rect = scene.node_rect(1);
+        let hash_row = pos2(rect.center().x, rect.min.y + 0.5 * scene.row_height);
+        let pull_request_row = pos2(rect.center().x, rect.min.y + 1.5 * scene.row_height);
+        assert_eq!(scene.node_at(hash_row), Some(1));
+        assert_eq!(scene.pull_request_at(hash_row), None);
+        assert_eq!(scene.node_at(pull_request_row), Some(1));
+        assert_eq!(scene.pull_request_at(pull_request_row), Some(1));
 
         // Turned off, nothing of them shows.
         settings.graph.show_pull_requests = false;
