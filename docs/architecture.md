@@ -4,10 +4,10 @@ parterre is a Cargo workspace with two crates:
 
 ```
 crates/parterre-core   GUI-free; everything testable lives here
-  git.rs               run `git log` / `git for-each-ref`, parse into a Repo; changed files
-                       of a commit (`git diff-tree`)
-  repo.rs              Repo snapshot: commits (with parent indices), refs, HEAD, git's hash
-                       length
+  git.rs               run `git log` / `git for-each-ref` / `git worktree list`, parse into a
+                       Repo; changed files of a commit (`git diff-tree`)
+  repo.rs              Repo snapshot: commits (with parent indices), refs, HEAD, worktrees,
+                       git's hash length
   log.rs               log query: tips and exclusions → commits in `git log --date-order`
                        order, from the snapshot alone
   log_layout.rs        the log window's four fixed layouts and their divider positions
@@ -32,7 +32,8 @@ crates/parterre-core   GUI-free; everything testable lives here
                        origin (and its parent), signed in with `gh auth token`, within a
                        rate-limit budget; HTTPS through ureq behind the `github` feature
   recent.rs            the recently opened repositories
-  watch.rs             fingerprint of the files git keeps refs in, for reloading by itself
+  watch.rs             fingerprint of the files git keeps refs and worktrees in, for
+                       reloading by itself
   glyphs.rs            toolbar and menu icons as SVG path data, and a path flattener
   layout/              layered (Sugiyama) layout
     rank.rs            layer assignment (network simplex / longest path / chronological),
@@ -83,6 +84,7 @@ crates/parterre        the binary (eframe/egui)
   system_theme.rs      light or dark desktop preference on Linux (XDG portal)
   menu.rs              the look of menus and popovers, menu items
   browser.rs           opens github.com pages with the platform's opener
+  file_manager.rs      opens a worktree's folder in the platform's file manager
   widgets.rs           icon buttons, segmented buttons, switches, text fields
   settings.rs          persisted settings and the Classic/Modern looks
   automation.rs        --screenshot / --demo-drag / --demo-menu / --demo-open / --demo-log /
@@ -105,6 +107,10 @@ crates/parterre        the binary (eframe/egui)
      start history, and show only where one of their base branch's refs is shown. As labels
      they make their heads nodes, like tags. They are loaded from GitHub on a worker thread
      (`forge`), separately from the snapshot, which stays what git has.
+   - Worktrees, while shown: a branch another worktree has checked out is shown even where
+     the local-branch switch or the hide list would leave it out, and starts history. A
+     detached worktree's HEAD starts history too and labels its commit, below the hash. The
+     snapshot always holds the commits of every worktree's HEAD, so the switch needs no git.
    - *Labelled commits* reproduces `git log --simplify-by-decoration`, including
      `simplify_merges` (redundant parents dropped) and empty-tree roots (TREESAME).
      The node sets are identical on the 15k-commit Apps repository and on 400 random

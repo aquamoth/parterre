@@ -9,7 +9,7 @@ use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, TextureId, Vec2, Vie
 use crate::raster::{self, PixelRect};
 use crate::render::{
     ARROW_LEN, Marks, arrowhead_points, edge_path, node_rows, paint_scene, pull_request_label,
-    row_colors,
+    row_colors, row_worktree, worktree_label,
 };
 use crate::scene::{CORNER_RADIUS, FONT_SIZE, MARGIN_X, RowKind, Scene};
 use crate::settings::Settings;
@@ -166,18 +166,30 @@ pub fn to_svg(scene: &Scene, settings: &Settings, palette: &Palette) -> String {
                 hex(fill),
                 hex(border)
             );
-            // Pull requests' numbers are right-aligned, after their glyph.
+            // Pull requests' numbers are right-aligned, after their glyph; worktrees' names
+            // follow theirs.
             let (x, anchor) = match row.kind {
                 RowKind::PullRequest { .. } => {
                     let (end, icon) = pull_request_label(row_rect, row.width, 1.0);
                     svg.push_str(&svg_glyph(glyphs::PULL_REQUEST, icon, text));
                     (end.x, "end")
                 }
+                RowKind::Worktree(_) => {
+                    let (start, icon) = worktree_label(row_rect, 1.0);
+                    svg.push_str(&svg_glyph(glyphs::FOLDER, icon, text));
+                    (start.x, "start")
+                }
                 _ => (row_rect.min.x + MARGIN_X, "start"),
+            };
+            // A worktree whose folder is gone is struck through.
+            let struck = if row_worktree(row).is_some_and(|c| c.missing) {
+                r#" text-decoration="line-through""#
+            } else {
+                ""
             };
             let _ = writeln!(
                 svg,
-                r#"<text x="{:.1}" y="{:.1}" text-anchor="{anchor}" dominant-baseline="central" fill="{}">{}</text>"#,
+                r#"<text x="{:.1}" y="{:.1}" text-anchor="{anchor}" dominant-baseline="central" fill="{}"{struck}>{}</text>"#,
                 x,
                 row_rect.center().y,
                 hex(text),

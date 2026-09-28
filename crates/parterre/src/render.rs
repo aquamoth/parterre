@@ -5,7 +5,9 @@ use eframe::egui::{
     vec2,
 };
 
-use crate::scene::{CORNER_RADIUS, FONT_SIZE, MARGIN_X, Row, RowKind, Scene, to_pos};
+use crate::scene::{
+    CORNER_RADIUS, Checkout, FONT_SIZE, MARGIN_X, Row, RowKind, Scene, WORKTREE_GLYPH, to_pos,
+};
 use crate::settings::{Arrows, EdgeStyle, Settings};
 use crate::theme::{Palette, text_on};
 use crate::view::View;
@@ -125,7 +127,7 @@ pub fn paint_scene(
             if !draw_text {
                 continue;
             }
-            if let RowKind::PullRequest { index, .. } = row.kind {
+            let label = if let RowKind::PullRequest { index, .. } = row.kind {
                 // The label's lengths all grow with the zoom, so this keeps them their size
                 // on screen, whatever the text size.
                 let (end, icon) = pull_request_label(row_rect, row.width, fixed(zoom));
@@ -137,6 +139,11 @@ pub fn paint_scene(
                     let stroke = Stroke::new(fixed(zoom.max(1.0)), text);
                     painter.hline(number.x_range(), y, stroke);
                 }
+                number
+            } else if let RowKind::Worktree(_) = row.kind {
+                let (start, icon) = worktree_label(row_rect, fixed(zoom));
+                widgets::paint_glyph(painter, icon, glyphs::FOLDER, text);
+                painter.text(start, Align2::LEFT_CENTER, &row.label, font.clone(), text)
             } else {
                 painter.text(
                     Pos2::new(row_rect.min.x + fixed(MARGIN_X * zoom), row_rect.center().y),
@@ -144,7 +151,12 @@ pub fn paint_scene(
                     &row.label,
                     font.clone(),
                     text,
-                );
+                )
+            };
+            // A worktree whose folder is gone is struck through.
+            if row_worktree(row).is_some_and(|c| c.missing) {
+                let stroke = Stroke::new(fixed(zoom.max(1.0)), text);
+                painter.hline(label.x_range(), label.center().y, stroke);
             }
         }
 
@@ -533,19 +545,60 @@ pub fn pull_request_label(row: Rect, width: f32, zoom: f32) -> (Pos2, Rect) {
     (end, icon)
 }
 
+/// Where a worktree's label goes in its row: the start of its name, level with the row's
+/// middle, and the folder glyph's box before it.
+pub fn worktree_label(row: Rect, zoom: f32) -> (Pos2, Rect) {
+    let left = row.min.x + MARGIN_X * zoom;
+    let side = FONT_SIZE * zoom;
+    let icon = Rect::from_center_size(
+        Pos2::new(left + side / 2.0, row.center().y),
+        Vec2::splat(side),
+    );
+    (
+        Pos2::new(left + WORKTREE_GLYPH * zoom, row.center().y),
+        icon,
+    )
+}
+
+/// The worktree a row stands for, if any.
+pub fn row_worktree(row: &Row) -> Option<Checkout> {
+    match row.kind {
+        RowKind::Worktree(c)
+        | RowKind::Ref {
+            worktree: Some(c), ..
+        } => Some(c),
+        _ => None,
+    }
+}
+
 /// Fill, border and text colour of a row.
 pub fn row_colors(row: &Row, palette: &Palette) -> (Color32, Color32, Color32) {
     let fill = row_fill(row, palette);
     match &row.kind {
         RowKind::Hash => (fill, palette.plain_border, palette.plain_text),
-        RowKind::Ref { .. } | RowKind::PullRequest { .. } => (fill, fill, text_on(fill)),
+        RowKind::Ref { .. } | RowKind::Worktree(_) | RowKind::PullRequest { .. } => {
+            (fill, fill, text_on(fill))
+        }
     }
 }
 
 fn row_fill(row: &Row, palette: &Palette) -> Color32 {
     match &row.kind {
         RowKind::Hash => palette.plain_fill,
-        RowKind::Ref { kind, head } => palette.ref_fill(*kind, *head, &row.label),
+        // The current branch stays red; a worktree's colour goes before the branch colours.
+        RowKind::Ref {
+            head: false,
+            worktree: Some(c),
+            ..
+        }
+        | RowKind::Worktree(c) => {
+            if c.missing {
+                palette.missing_worktree
+            } else {
+                palette.worktree
+            }
+        }
+        RowKind::Ref { kind, head, .. } => palette.ref_fill(*kind, *head, &row.label),
         RowKind::PullRequest { draft: false, .. } => palette.pull_request,
         RowKind::PullRequest { draft: true, .. } => palette.draft_pull_request,
     }

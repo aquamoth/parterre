@@ -953,6 +953,13 @@ impl ParterreApp {
             && !self.pull_requests.needs_sign_in()
     }
 
+    /// True if the repository has worktrees besides the open one.
+    pub(super) fn has_other_worktrees(&self) -> bool {
+        self.repo
+            .as_ref()
+            .is_some_and(|r| r.worktrees.iter().any(|w| !w.open))
+    }
+
     /// Turns pull requests off if they are active, else on, asking GitHub now.
     pub(super) fn toggle_pull_requests(&mut self) {
         if self.pull_requests_active() {
@@ -1618,6 +1625,21 @@ impl ParterreApp {
                 .iter()
                 .map(|&r| scene.repo.refs[r].full_name.as_str())
                 .collect();
+            let worktrees: Vec<String> = scene
+                .worktrees_on(node)
+                .into_iter()
+                .map(|k| {
+                    let w = &scene.repo.worktrees[k];
+                    let state = if w.missing {
+                        " (the folder is gone)"
+                    } else if w.locked {
+                        " (locked)"
+                    } else {
+                        ""
+                    };
+                    format!("Worktree {}{state}", w.path.display())
+                })
+                .collect();
             let details = &mut self.details;
             let repo_path = &scene.repo.path;
             let ctx = ui.ctx().clone();
@@ -1645,6 +1667,10 @@ impl ParterreApp {
                 if !refs.is_empty() {
                     ui.add_space(4.0);
                     ui.label(RichText::new(refs.join("\n")).weak());
+                }
+                if !worktrees.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(worktrees.join("\n")).weak());
                 }
                 if hidden > 0 {
                     ui.label(RichText::new(format!("{hidden} commits collapsed below")).weak());
@@ -1697,6 +1723,7 @@ impl ParterreApp {
             && self.pull_requests.origin().is_some()
             && !self.pull_requests.needs_sign_in()
             && self.pull_requests.list().is_some();
+        let worktrees_shown = self.settings.graph.show_worktrees;
         egui::Popup::context_menu(&response)
             .style(menu::style)
             .show(|ui| {
@@ -1814,6 +1841,43 @@ impl ParterreApp {
                             }
                         }
                     }
+                    // The worktrees here: the open one at HEAD, and those shown on the node.
+                    let worktrees: Vec<&parterre_core::Worktree> = if worktrees_shown {
+                        let open = n
+                            .is_head
+                            .then(|| scene.repo.worktrees.iter().find(|w| w.open));
+                        let shown = scene.worktrees_on(node);
+                        let shown = shown.into_iter().map(|k| &scene.repo.worktrees[k]);
+                        open.flatten().into_iter().chain(shown).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    // With more than one, each item names its folder.
+                    let named = |what: &str, w: &parterre_core::Worktree| {
+                        if worktrees.len() > 1 {
+                            format!("{what} ({})", w.name())
+                        } else {
+                            what.to_owned()
+                        }
+                    };
+                    if worktrees_shown {
+                        // Greyed out rather than left out, so the menu keeps its shape.
+                        if worktrees.is_empty() {
+                            ui.add_enabled(false, egui::Button::new("Open folder"))
+                                .on_disabled_hover_text("No worktree is checked out here");
+                        }
+                        for w in &worktrees {
+                            let path = w.path.display().to_string();
+                            let open = ui
+                                .add_enabled(!w.missing, egui::Button::new(named("Open folder", w)))
+                                .on_hover_text(&path)
+                                .on_disabled_hover_text(format!("The folder is gone: {path}"));
+                            if open.clicked() {
+                                action = Some(MenuAction::OpenFolder(w.path.clone()));
+                                ui.close();
+                            }
+                        }
+                    }
                     menu::separator(ui);
                     let commit = scene.repo.commit(n.commit);
                     // Right-clicking selects the node, so Ctrl+C would copy the same hash.
@@ -1839,6 +1903,12 @@ impl ParterreApp {
                     if ui.button("Copy subject").clicked() {
                         ui.ctx().copy_text(commit.subject.clone());
                         ui.close();
+                    }
+                    for w in &worktrees {
+                        if ui.button(named("Copy folder path", w)).clicked() {
+                            ui.ctx().copy_text(w.path.display().to_string());
+                            ui.close();
+                        }
                     }
                     menu::separator(ui);
                     if ui
@@ -1885,6 +1955,11 @@ impl ParterreApp {
             Some(MenuAction::Compare(request)) => self.compare_request(request),
             Some(MenuAction::OpenPullRequest(url)) => {
                 if let Err(e) = crate::browser::open(&url) {
+                    self.status = Some((e, true));
+                }
+            }
+            Some(MenuAction::OpenFolder(dir)) => {
+                if let Err(e) = crate::file_manager::open(&dir) {
                     self.status = Some((e, true));
                 }
             }
@@ -1995,6 +2070,46 @@ impl ParterreApp {
                             parterre_core::glyphs::PULL_REQUEST,
                             text,
                         );
+                        ui.label(what);
+                    });
+                }
+                swatch(
+                    ui,
+                    palette.worktree,
+                    "feature/y",
+                    "Branch checked out in another worktree",
+                );
+                for (fill, what) in [
+                    (palette.worktree, "Another worktree's detached HEAD"),
+                    (palette.missing_worktree, "Worktree whose folder is gone"),
+                ] {
+                    ui.horizontal(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
+                        let text = crate::theme::text_on(fill);
+                        ui.painter().rect_filled(rect, 4.0, fill);
+                        // As in the graph: the folder's name after the glyph.
+                        let icon = Rect::from_center_size(
+                            rect.left_center() + vec2(14.0, 0.0),
+                            Vec2::splat(12.0),
+                        );
+                        crate::widgets::paint_glyph(
+                            ui.painter(),
+                            icon,
+                            parterre_core::glyphs::FOLDER,
+                            text,
+                        );
+                        let name = ui.painter().text(
+                            rect.left_center() + vec2(24.0, 0.0),
+                            egui::Align2::LEFT_CENTER,
+                            "wt-fix",
+                            FontId::monospace(12.0),
+                            text,
+                        );
+                        if fill == palette.missing_worktree {
+                            let y = name.center().y;
+                            ui.painter()
+                                .hline(name.x_range(), y, egui::Stroke::new(1.0, text));
+                        }
                         ui.label(what);
                     });
                 }
@@ -2217,6 +2332,8 @@ enum MenuAction {
     Compare(CompareRequest),
     /// Open a pull request's page in the browser.
     OpenPullRequest(String),
+    /// Open a worktree's folder in the file manager.
+    OpenFolder(std::path::PathBuf),
 }
 
 impl eframe::App for ParterreApp {

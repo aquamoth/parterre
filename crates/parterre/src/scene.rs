@@ -17,6 +17,8 @@ pub const FONT_SIZE: f32 = 12.0;
 pub const MARGIN_X: f32 = 20.0;
 pub const MARGIN_Y: f32 = 5.0;
 pub const CORNER_RADIUS: f32 = 6.0;
+/// The room a worktree's folder glyph takes before its name, at 100%: the glyph and a gap.
+pub const WORKTREE_GLYPH: f32 = FONT_SIZE + 4.0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowKind {
@@ -25,20 +27,31 @@ pub enum RowKind {
     Ref {
         kind: RefKind,
         head: bool,
+        /// The worktree that has this branch checked out, while worktrees are shown (not the
+        /// open one, whose branch is HEAD's).
+        worktree: Option<Checkout>,
     },
+    /// A worktree whose detached HEAD this commit is. Its label is the folder's name, drawn
+    /// after the folder glyph.
+    Worktree(Checkout),
     /// An open pull request whose head this commit is: [`Scene::pull_requests`]`[index]`. Its
     /// label is the number, drawn after the pull-request glyph.
-    PullRequest {
-        index: usize,
-        draft: bool,
-    },
+    PullRequest { index: usize, draft: bool },
+}
+
+/// A worktree a row stands for: [`Repo::worktrees`]`[index]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Checkout {
+    pub index: usize,
+    /// Its folder is gone.
+    pub missing: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct Row {
     pub label: String,
     pub kind: RowKind,
-    /// The label's width at 100%.
+    /// The label's width at 100% (with the glyph before it, for a worktree).
     pub width: f32,
 }
 
@@ -115,6 +128,11 @@ impl Scene {
         // repository (`Repo::abbrev_len`), like the log window. Deliberate deviation:
         // TortoiseGit always shows 8 digits.
         let hash_width = text_width(&"8".repeat(repo.abbrev_len));
+        let checkout = |index: usize| Checkout {
+            index,
+            missing: repo.worktrees[index].missing,
+        };
+        let worktrees_shown = settings.graph.show_worktrees;
         let visuals: Vec<NodeVisual> = graph
             .nodes
             .iter()
@@ -126,9 +144,18 @@ impl Scene {
                         kind: RowKind::Ref {
                             kind: r.kind,
                             head: r.is_head,
+                            worktree: worktrees_shown
+                                .then(|| repo.worktrees_on(&r.full_name).next())
+                                .flatten()
+                                .map(checkout),
                         },
                         width: 0.0,
                     }
+                });
+                let worktrees = node.worktrees.iter().map(|&index| Row {
+                    label: repo.worktrees[index].name(),
+                    kind: RowKind::Worktree(checkout(index)),
+                    width: 0.0,
                 });
                 let pulls = node.pull_requests.iter().map(|&index| Row {
                     label: pull_requests[index].number.to_string(),
@@ -139,8 +166,8 @@ impl Scene {
                     width: 0.0,
                 });
                 let mut rows: Vec<Row> = refs.collect();
-                // Only refs stand in for the hash. Other labels (pull requests) go below the
-                // refs, or below the hash where there are none.
+                // Only refs stand in for the hash. Other labels (worktrees, pull requests) go
+                // below the refs, or below the hash where there are none.
                 if rows.is_empty() {
                     rows.push(Row {
                         label: repo.commit(node.commit).oid.short(repo.abbrev_len),
@@ -148,9 +175,12 @@ impl Scene {
                         width: 0.0,
                     });
                 }
-                rows.extend(pulls);
+                rows.extend(worktrees.chain(pulls));
                 for row in &mut rows {
                     row.width = text_width(&row.label);
+                    if let RowKind::Worktree(_) = row.kind {
+                        row.width += WORKTREE_GLYPH;
+                    }
                 }
                 let widest = rows.iter().map(|r| r.width).fold(hash_width, f32::max);
                 let size = vec2(widest + 2.0 * MARGIN_X, row_height * rows.len() as f32);
@@ -241,6 +271,22 @@ impl Scene {
             RowKind::PullRequest { index, .. } => Some(index),
             _ => None,
         }
+    }
+
+    /// The worktrees shown on `node`, in row order: those with its branches checked out,
+    /// then the detached ones.
+    pub fn worktrees_on(&self, node: usize) -> Vec<usize> {
+        self.visuals[node]
+            .rows
+            .iter()
+            .filter_map(|row| match row.kind {
+                RowKind::Worktree(c)
+                | RowKind::Ref {
+                    worktree: Some(c), ..
+                } => Some(c.index),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Topmost node under a world position.
@@ -407,7 +453,8 @@ mod tests {
                     "origin/main".to_owned(),
                     RowKind::Ref {
                         kind: RefKind::RemoteBranch,
-                        head: false
+                        head: false,
+                        worktree: None,
                     }
                 ),
                 pr_row("12", 0, false)
@@ -438,5 +485,124 @@ mod tests {
                 .iter()
                 .all(|r| !matches!(r.kind, RowKind::PullRequest { .. }))
         }));
+    }
+
+    #[test]
+    fn worktrees_colour_their_branches_and_label_their_detached_heads() {
+        let commit = |n: u8, parents: Vec<CommitIx>| parterre_core::Commit {
+            oid: Oid::from_hex(&format!("{n:02x}").repeat(20)).unwrap(),
+            parents,
+            truncated: false,
+            empty_tree: false,
+            author_name: String::new(),
+            author_email: String::new(),
+            author_time: 0,
+            author_date: String::new(),
+            commit_time: n.into(),
+            subject: String::new(),
+        };
+        let git_ref = |full_name: &str, target: u32, is_head: bool| {
+            let (kind, name) = parterre_core::git::classify_ref(full_name);
+            parterre_core::GitRef {
+                full_name: full_name.into(),
+                name,
+                kind,
+                target: CommitIx(target),
+                annotated: false,
+                is_head,
+            }
+        };
+        let worktree =
+            |path: &str, head: u32, branch: Option<&str>, missing, open| parterre_core::Worktree {
+                path: path.into(),
+                head: Some(CommitIx(head)),
+                branch: branch.map(str::to_owned),
+                locked: false,
+                missing,
+                open,
+            };
+        // main (0, HEAD) - topic (1) - the root (2), with topic and the root checked out
+        // elsewhere, the root in a worktree whose folder is gone.
+        let mut repo = Repo::new(
+            "/src/main".into(),
+            vec![
+                commit(2, vec![CommitIx(1)]),
+                commit(1, vec![CommitIx(2)]),
+                commit(0, Vec::new()),
+            ],
+            vec![
+                git_ref("refs/heads/main", 0, true),
+                git_ref("refs/heads/topic", 1, false),
+            ],
+            Head::Branch {
+                name: "refs/heads/main".into(),
+                target: Some(CommitIx(0)),
+            },
+        );
+        repo.worktrees = vec![
+            worktree("/src/main", 0, Some("refs/heads/main"), false, true),
+            worktree("/src/wt-topic", 1, Some("refs/heads/topic"), false, false),
+            worktree("/src/wt-gone", 2, None, true, false),
+        ];
+        let repo = Arc::new(repo);
+        let mut settings = Settings::default();
+        settings.graph.show_worktrees = true;
+        let prepare = |settings: &Settings| {
+            Scene::prepare(&repo, settings, None, &mut |s| s.len() as f32, 10.0)
+        };
+        let input = prepare(&settings);
+        let rows = |i: usize| -> Vec<(String, RowKind)> {
+            input.visuals[i]
+                .rows
+                .iter()
+                .map(|r| (r.label.clone(), r.kind.clone()))
+                .collect()
+        };
+        let branch = |name: &str, head, worktree| {
+            let kind = RefKind::LocalBranch;
+            (
+                name.to_owned(),
+                RowKind::Ref {
+                    kind,
+                    head,
+                    worktree,
+                },
+            )
+        };
+        // The open worktree's branch is HEAD's, and nothing more.
+        assert_eq!(rows(0), [branch("main", true, None)]);
+        let topic = Checkout {
+            index: 1,
+            missing: false,
+        };
+        assert_eq!(rows(1), [branch("topic", false, Some(topic))]);
+        // A detached worktree labels its commit below the hash, with its folder's name.
+        let gone = Checkout {
+            index: 2,
+            missing: true,
+        };
+        let hash = "00".repeat(20)[..repo.abbrev_len].to_owned();
+        assert_eq!(
+            rows(2),
+            [
+                (hash, RowKind::Hash),
+                ("wt-gone".to_owned(), RowKind::Worktree(gone))
+            ]
+        );
+        assert_eq!(input.visuals[2].rows[1].width, 7.0 + WORKTREE_GLYPH);
+
+        let scene = input.lay_out();
+        assert!(scene.worktrees_on(0).is_empty());
+        assert_eq!(scene.worktrees_on(1), [1]);
+        assert_eq!(scene.worktrees_on(2), [2]);
+
+        // Turned off, the branch is a plain one and the detached worktree isn't shown.
+        settings.graph.show_worktrees = false;
+        let input = prepare(&settings);
+        assert_eq!(
+            input.visuals[1].rows[0].kind,
+            branch("topic", false, None).1
+        );
+        assert_eq!(input.visuals[2].rows.len(), 1);
     }
 }
