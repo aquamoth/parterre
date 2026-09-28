@@ -737,7 +737,8 @@ impl DiffWindow {
         ui.allocate_rect(body, Sense::hover());
     }
 
-    /// Form, changes, folding, word mode and whitespace, left to right.
+    /// Form, changes, folding and whitespace on the left; find in the middle; word mode and
+    /// Blame on the right.
     fn toolbar(&mut self, ui: &mut Ui, settings: &mut DiffWindowSettings, c: &Colors) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), TOOLBAR), Sense::hover());
         ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
@@ -824,20 +825,6 @@ impl DiffWindow {
         }
         ui.add_space(14.0);
 
-        ui.label(
-            RichText::new("Words")
-                .size(12.5)
-                .color(ui.visuals().weak_text_color()),
-        );
-        let mut words = self.options.words;
-        let items = WordMode::ALL.map(|m| (m, m.label()));
-        widgets::text_segmented(ui, &mut words, &items);
-        if words != self.options.words {
-            self.options.words = words;
-            settings.words = words;
-        }
-        ui.add_space(14.0);
-
         let spaces = [
             (Whitespace::Compare, glyphs::WHITESPACE_COMPARE),
             (Whitespace::IgnoreChanges, glyphs::WHITESPACE_IGNORE_CHANGES),
@@ -863,7 +850,6 @@ impl DiffWindow {
             self.options.whitespace = ws;
             settings.whitespace = ws;
         }
-        let _ = c;
 
         let why = if self.spec.is_submodule() {
             Some("A submodule has no lines to blame")
@@ -872,6 +858,10 @@ impl DiffWindow {
         } else {
             None
         };
+        let _ = c;
+        // Right to left from here: Blame and word mode at the right edge, about as wide as the
+        // tools on the left, so that the find field between them can be centred.
+        let toolbar = rect;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let r = ui.add_enabled_ui(why.is_none(), |ui| widgets::text_button(ui, "Blame"));
             let r = match why {
@@ -888,18 +878,39 @@ impl DiffWindow {
                 self.blame = self.blame_spec();
             }
 
-            // Find, in the middle of what is left, as in the main window.
-            let room = ui.available_width();
-            ui.allocate_ui_with_layout(
-                vec2(room, widgets::BUTTON),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    // Narrow windows squeeze the field rather than the tools.
-                    let width = (room - 16.0).clamp(60.0, 380.0);
-                    ui.add_space(((room - width) / 2.0).max(0.0));
-                    self.find_field(ui, width);
-                },
+            ui.add_space(14.0);
+
+            let mut words = self.options.words;
+            let items = WordMode::ALL.map(|m| (m, m.label()));
+            widgets::text_segmented(ui, &mut words, &items);
+            if words != self.options.words {
+                self.options.words = words;
+                settings.words = words;
+            }
+            ui.label(
+                RichText::new("Words")
+                    .size(12.5)
+                    .color(ui.visuals().weak_text_color()),
             );
+
+            // Find, centred in the window as in the others, if it fits between the tools;
+            // else in the middle of the room there is, squeezed rather than the tools.
+            let room = ui.available_rect_before_wrap();
+            let width = (room.width() - 16.0).clamp(60.0, 380.0);
+            let (lo, hi) = (room.left() + 8.0, room.right() - 8.0 - width);
+            let left = if lo <= hi {
+                (toolbar.center().x - width / 2.0).clamp(lo, hi)
+            } else {
+                room.center().x - width / 2.0
+            };
+            let at = Rect::from_center_size(
+                pos2(left + width / 2.0, toolbar.center().y),
+                vec2(width, widgets::BUTTON),
+            );
+            let layout = egui::Layout::left_to_right(egui::Align::Center);
+            ui.scope_builder(UiBuilder::new().max_rect(at).layout(layout), |ui| {
+                self.find_field(ui, width);
+            });
         });
     }
 
