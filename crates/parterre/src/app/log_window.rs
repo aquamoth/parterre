@@ -29,6 +29,7 @@ use eframe::egui::{
     Rect, RichText, ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use parterre_core::blame::BlameSpec;
+use parterre_core::columns::ColumnWidths;
 use parterre_core::file_diff::{FileDiffSpec, Rev};
 use parterre_core::find;
 use parterre_core::glyphs::{self, Glyph};
@@ -184,8 +185,10 @@ impl LogView {
         query.tips = map(&self.query.tips);
         query.exclude = map(&self.query.exclude);
         let (scroll, height) = (self.list.scroll, self.list.height);
+        let widths = std::mem::take(&mut self.list.widths);
         *self = LogView::new(self.id, repo, query, options);
         (self.list.scroll, self.list.height) = (scroll, height);
+        self.list.widths = widths;
         if let Some(oid) = selected {
             let at = self.repo.lookup(&oid);
             if let Some(i) = self.commits.iter().position(|&c| Some(c) == at) {
@@ -424,11 +427,19 @@ pub(super) fn colors(ui: &Ui) -> Colors {
 impl LogWindow {
     /// Shows `query` on `repo`, in place of what the window showed before.
     fn open(&mut self, repo: Arc<Repo>, query: LogQuery, options: LogOptions, size: Vec2) {
-        if self.view.is_none() {
-            self.size = size;
-        }
+        // The column widths picked last as long as the window is open.
+        let widths = match self.view.take() {
+            Some(view) => view.list.widths,
+            None => {
+                self.size = size;
+                self.table.widths = ColumnWidths::default();
+                ColumnWidths::default()
+            }
+        };
         self.opened += 1;
-        self.view = Some(LogView::new(self.opened, repo, query, options));
+        let mut view = LogView::new(self.opened, repo, query, options);
+        view.list.widths = widths;
+        self.view = Some(view);
         self.refind();
     }
 
@@ -1717,6 +1728,61 @@ mod tests {
         frame_with(ctx, w, vec![egui::Event::PointerMoved(pos)], modifiers);
         frame_with(ctx, w, vec![button(true)], modifiers);
         frame_with(ctx, w, vec![button(false)], modifiers);
+    }
+
+    #[test]
+    fn dragging_a_heading_border_resizes_the_column() {
+        let ctx = egui::Context::default();
+        let mut w = window(&["c", "b", "a"]);
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        let picked = |w: &LogWindow, i| w.view.as_ref().unwrap().list.widths.picked(i);
+        // The border between the hash and the subject sizes the hash.
+        let id = Id::new(("log-commits", w.view.as_ref().unwrap().id)).with(("column-border", 1));
+        let border = ctx.read_response(id).expect("the border is there").rect;
+        let at = border.center();
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame(&ctx, &mut w, vec![egui::Event::PointerMoved(at)]);
+        frame(&ctx, &mut w, vec![button(at, true)]);
+        for dx in [10.0, 20.0, 40.0] {
+            frame(
+                &ctx,
+                &mut w,
+                vec![egui::Event::PointerMoved(at + vec2(dx, 0.0))],
+            );
+        }
+        frame(&ctx, &mut w, vec![button(at + vec2(40.0, 0.0), false)]);
+        frame(&ctx, &mut w, Vec::new());
+        let moved = ctx.read_response(id).unwrap().rect.center().x;
+        assert!(
+            (moved - (at.x + 40.0)).abs() < 0.5,
+            "{moved} vs {}",
+            at.x + 40.0
+        );
+        assert!(picked(&w, 1).is_some());
+        assert_eq!(picked(&w, 0), None);
+        // Another log in the open window keeps the width; a window opened again doesn't.
+        let repo = w.view.as_ref().unwrap().repo.clone();
+        w.open(
+            repo.clone(),
+            LogQuery::commit(CommitIx(1)),
+            LogOptions::default(),
+            vec2(1100.0, 760.0),
+        );
+        assert!(picked(&w, 1).is_some());
+        w.view = None;
+        w.open(
+            repo,
+            LogQuery::commit(CommitIx(1)),
+            LogOptions::default(),
+            vec2(1100.0, 760.0),
+        );
+        assert_eq!(picked(&w, 1), None);
     }
 
     #[test]

@@ -17,6 +17,7 @@ use parterre_core::{Oid, Repo};
 
 mod auto_reload;
 mod blame_window;
+mod column_borders;
 mod commit_table;
 mod compare_window;
 mod diff_window;

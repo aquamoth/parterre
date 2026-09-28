@@ -13,6 +13,8 @@ crates/parterre-core   GUI-free; everything testable lives here
   log_layout.rs        the log window's four fixed layouts and their divider positions
   changed_files.rs     changed-file types, `diff-tree -z` parser, files-before-folders order,
                        the log window's file filter and column sort
+  columns.rs           tables' column widths: one column takes what the others leave, the
+                       others as the layout says until the user drags their border
   compare.rs           comparing two commits, or a commit and the working tree: which goes
                        left, and the files between them (`git diff-tree A B`, `git diff A`,
                        or from `git merge-base`)
@@ -64,6 +66,8 @@ crates/parterre        the binary (eframe/egui)
                        commit): two commits and the files they differ in
     commit_table.rs    the commit table (graph column, hash, subject with refs, author,
                        date) the log window and the blame window's history pane share
+    column_borders.rs  the borders between the column headings of both tables, dragged to
+                       resize a column and double-clicked to reset it
     blame_window.rs    blame windows: a file's lines with a gutter naming their commits,
                        shaded by age; a line's menu blames the version before (a new window),
                        shows its change, or its log; the history pane below lists the

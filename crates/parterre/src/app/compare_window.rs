@@ -86,6 +86,8 @@ impl CompareWindow {
     fn open(&mut self, repo: Arc<Repo>, comparison: Comparison, size: Vec2) {
         if self.view.is_none() {
             self.size = size;
+            // The column widths picked last as long as the window is open.
+            self.table.widths = Default::default();
         }
         self.view = Some(CompareView {
             refs: repo.refs_by_commit(),

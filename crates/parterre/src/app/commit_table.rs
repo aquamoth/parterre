@@ -1,7 +1,8 @@
 //! The commit table of the log window and of the blame window's history pane: a graph column of
 //! lanes ([`LogGraph`]), then the short hash, the subject with ref badges, the author and the
 //! date, one commit per row. Virtualised; the rows are painted directly. Each window says what a
-//! row shows ([`Row`]) and what its menu offers; the table keeps the selection in view.
+//! row shows ([`Row`]) and what its menu offers; the table keeps the selection in view. The
+//! columns can be resized by dragging the borders between their headings.
 
 use std::sync::Arc;
 
@@ -10,9 +11,11 @@ use eframe::egui::{
     vec2,
 };
 use parterre_core::GitRef;
+use parterre_core::columns::{ColumnWidths, Layout};
 use parterre_core::log::Found;
 use parterre_core::log_graph::{GraphRow, LogGraph};
 
+use super::column_borders::{self, Columns};
 use super::log_window::{CELL_PAD, Colors, HEADING, badge, cell, heading_background};
 use crate::theme::Palette;
 use crate::widgets;
@@ -33,6 +36,10 @@ const DATE_WIDTH: f32 = 128.0;
 const NARROW_LIST: f32 = 720.0;
 const NARROW_AUTHOR_WIDTH: f32 = 128.0;
 const NARROW_DATE_WIDTH: f32 = 118.0;
+/// The columns: graph, hash, subject, author, date. The subject takes what the others leave,
+/// and no less than this.
+const SUBJECT: usize = 2;
+const SUBJECT_MIN: f32 = 80.0;
 
 /// The selected row of a commit table and its scroll position.
 #[derive(Debug, Default)]
@@ -48,6 +55,8 @@ pub struct CommitList {
     /// selection in view and for paging.
     pub scroll: f32,
     pub height: f32,
+    /// The column widths the user picked.
+    pub widths: ColumnWidths,
 }
 
 impl CommitList {
@@ -149,26 +158,11 @@ pub struct Clicks {
     pub double_clicked: Option<usize>,
 }
 
-/// Where the columns are: x and width of the hash, subject, author and date, after the graph
-/// column.
-struct Columns {
-    graph: f32,
-    hash: f32,
-    author: f32,
-    date: f32,
-}
-
-impl Columns {
-    fn at(&self, left: f32, width: f32) -> ([f32; 4], [f32; 4]) {
-        let (width, left) = (width - self.graph, left + self.graph);
-        let subject = (width - self.hash - self.author - self.date).max(80.0);
-        let x = [
-            left,
-            left + self.hash,
-            left + self.hash + subject,
-            left + self.hash + subject + self.author,
-        ];
-        (x, [self.hash, subject, self.author, self.date])
+fn columns(layout: &Layout) -> Columns<'_> {
+    Columns {
+        layout,
+        flex: SUBJECT,
+        flex_min: SUBJECT_MIN,
     }
 }
 
@@ -187,12 +181,25 @@ impl CommitTable<'_> {
         mut menu: impl FnMut(&mut Ui, usize, &CommitList),
         mut subject_tip: Option<&mut SubjectTip>,
     ) -> Clicks {
-        let cols = self.columns(ui, c);
+        if self.graph.lanes == 0 {
+            list.widths.reset(0, SUBJECT);
+        }
+        let defaults = self.default_widths(ui, c, &list.widths);
+        let layout = |widths: &ColumnWidths, rect: Rect| {
+            widths.layout(&defaults, SUBJECT, SUBJECT_MIN, rect.left(), rect.width())
+        };
         let weak = ui.visuals().weak_text_color();
         let text = ui.visuals().text_color();
         let mono = FontId::monospace(12.0);
         let body = egui::TextStyle::Body.resolve(ui.style());
-        headings(ui, &cols, c);
+        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADING), Sense::hover());
+        heading_background(ui, head, c);
+        // The borders; then the columns as dragged, in this frame.
+        let before = layout(&list.widths, head);
+        let active = column_borders::drag(ui, self.id, head, &columns(&before), &mut list.widths);
+        let cols = layout(&list.widths, head);
+        headings(ui, head, &cols);
+        column_borders::paint(ui, head, &columns(&cols), active, c);
         if self.rows == 0 {
             return Clicks::default();
         }
@@ -250,10 +257,13 @@ impl CommitTable<'_> {
                         (faint, faint)
                     }
                 };
-                let (x, w) = cols.at(rect.left(), rect.width());
+                // Hash, subject, author and date, after the graph.
+                let cols = layout(&list.widths, rect);
+                let x: [f32; 4] = std::array::from_fn(|k| cols.x[k + 1]);
+                let w: [f32; 4] = std::array::from_fn(|k| cols.w[k + 1]);
                 let y = rect.center().y;
                 let painter = ui.painter();
-                let graph_rect = Rect::from_min_size(rect.min, vec2(cols.graph, ROW));
+                let graph_rect = Rect::from_min_size(rect.min, vec2(cols.w[0], ROW));
                 paint_graph(painter, graph_rect, graph, c, bg);
                 let put = |g: Arc<Galley>, x: f32, color| {
                     painter.galley(pos2(x, y - g.size().y / 2.0), g, color);
@@ -351,9 +361,10 @@ impl CommitTable<'_> {
         clicks
     }
 
-    /// The columns' widths in the width available: the graph only as wide as leaves the
-    /// subject its room.
-    fn columns(&self, ui: &Ui, c: &Colors) -> Columns {
+    /// The columns' widths in the width available, as the layout has them before the user
+    /// drags any: the graph only as wide as leaves the subject its room, given the other
+    /// columns in `widths`. A table without lanes has no graph column.
+    fn default_widths(&self, ui: &Ui, c: &Colors, widths: &ColumnWidths) -> [f32; 5] {
         let digit = ui
             .painter()
             .layout_no_wrap("0".into(), FontId::monospace(12.0), c.line)
@@ -369,15 +380,11 @@ impl CommitTable<'_> {
             0.0
         } else {
             let lanes = self.graph.lanes.min(GRAPH_MAX_LANES) as f32 * GRAPH_LANE;
-            let room = ui.available_width() - hash - author - date - GRAPH_SUBJECT_ROOM;
+            let others = widths.get(1, hash) + widths.get(3, author) + widths.get(4, date);
+            let room = ui.available_width() - others - GRAPH_SUBJECT_ROOM;
             lanes.min(room.max(3.0 * GRAPH_LANE)) + 2.0 * GRAPH_PAD
         };
-        Columns {
-            graph,
-            hash,
-            author,
-            date,
-        }
+        [graph, hash, 0.0, author, date]
     }
 }
 
@@ -396,16 +403,15 @@ fn paint_found(
     painter.rect_filled(place, 2.0, fill);
 }
 
-/// The column headings: Graph (where it fits), Hash, Subject, Author, Date.
-fn headings(ui: &mut Ui, cols: &Columns, c: &Colors) {
+/// The column headings in `head`: Graph (where it fits), Hash, Subject, Author, Date.
+fn headings(ui: &Ui, head: Rect, cols: &Layout) {
     let weak = ui.visuals().weak_text_color();
-    let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADING), Sense::hover());
-    heading_background(ui, head, c);
-    let (x, w) = cols.at(head.left(), head.width());
+    let x: [f32; 4] = std::array::from_fn(|k| cols.x[k + 1]);
+    let w: [f32; 4] = std::array::from_fn(|k| cols.w[k + 1]);
     let title = ui
         .painter()
         .layout_no_wrap("Graph".into(), FontId::proportional(12.0), weak);
-    if title.size().x + 2.0 * GRAPH_PAD <= cols.graph {
+    if title.size().x + 2.0 * GRAPH_PAD <= cols.w[0] {
         ui.painter().galley(
             pos2(
                 head.left() + GRAPH_PAD,
