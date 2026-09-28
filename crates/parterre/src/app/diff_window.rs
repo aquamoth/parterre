@@ -1445,21 +1445,34 @@ fn fold_button(ui: &mut Ui, on: bool, opened: bool) -> egui::Response {
 
 /// A small green `+` (new version) or red `−` (old version) at the lower right of the
 /// pointer, a quiet reminder of which version choosing text takes in the unified form. egui
-/// can't change the cursor's image, so the sign is drawn beside it, above everything else.
+/// can't change the cursor's image, so the sign is drawn beside it, above everything else: clear
+/// of the text cursor at the system's pointer size, on a chip of the pane's colour so that it
+/// stands out from any pointer colour.
 fn version_badge(ui: &Ui, pointer: egui::Pos2, version: Column, c: &Colors) {
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
         egui::Order::Tooltip,
         egui::Id::new("diff-version-badge"),
     ));
-    let center = pointer + vec2(10.0, 12.0);
+    // The text cursor is a tall, narrow I centred on the pointer, in a square of this size.
+    let size = crate::pointer::size();
+    let arm = 3.0 * (size / 32.0).max(1.0);
+    let center = pointer + vec2(0.3 * size + arm + 2.0, 0.45 * size + 2.0);
     let (color, plus) = match version {
         Column::Old => (c.removed, false),
         Column::New => (c.added, true),
     };
+    let chip = Rect::from_center_size(center, egui::Vec2::splat(2.0 * arm + 6.0));
+    painter.rect(
+        chip,
+        3.0,
+        c.pane,
+        Stroke::new(1.0, c.line),
+        egui::StrokeKind::Inside,
+    );
     let stroke = Stroke::new(1.5, color);
-    painter.hline(center.x - 3.0..=center.x + 3.0, center.y, stroke);
+    painter.hline(center.x - arm..=center.x + arm, center.y, stroke);
     if plus {
-        painter.vline(center.x, center.y - 3.0..=center.y + 3.0, stroke);
+        painter.vline(center.x, center.y - arm..=center.y + arm, stroke);
     }
 }
 

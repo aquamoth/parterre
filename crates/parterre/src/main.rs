@@ -12,6 +12,7 @@ mod file_dialog;
 mod frame_pacing;
 mod icon;
 mod menu;
+mod pointer;
 mod raster;
 mod render;
 mod scene;
