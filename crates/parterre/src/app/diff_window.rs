@@ -212,8 +212,6 @@ struct RowInput {
     /// Rows drawn this frame, first and last.
     first: Option<usize>,
     last: Option<usize>,
-    /// Unified: the version a press where the pointer is would choose.
-    version: Option<Column>,
 }
 
 #[derive(Debug)]
@@ -910,6 +908,8 @@ impl DiffWindow {
                 i.modifiers.command,
             )
         });
+        // With Shift, a press extends the selection, in its version.
+        let extend = selection.filter(|_| shift).map(|s| s.column);
         let mut input = RowInput::default();
         let mut child = ui.new_child(UiBuilder::new().max_rect(area));
         child.set_clip_rect(area.intersect(ui.clip_rect()));
@@ -961,7 +961,15 @@ impl DiffWindow {
                     let sel = selection
                         .filter(|s| diff.line(row, s.column.side()).is_some())
                         .and_then(|s| Some((s.columns(s.column, r)?, s.lines)));
-                    let numbers = Numbers::Both(row.old, row.new);
+                    // The version a press chooses, lit in the numbers of the row under the
+                    // pointer; while choosing, the chosen one.
+                    let lit = pointer
+                        .filter(|p| rect.intersect(ui.clip_rect()).contains(*p))
+                        .map(|p| match selection.filter(|_| dragging) {
+                            Some(s) => s.column,
+                            None => unified_version(line, p.x, rect.left(), gutter, extend, ctrl),
+                        });
+                    let numbers = Numbers::Both(row.old, row.new, lit);
                     let at = paint_line(ui, rect, line, numbers, &geometry, sel, c);
                     // The version is settled below, when a press starts choosing.
                     vec![(Column::New, rect, 2.0 * gutter, at)]
@@ -996,30 +1004,19 @@ impl DiffWindow {
                     if !on_numbers {
                         let _ = response.clone().on_hover_cursor(egui::CursorIcon::Text);
                     }
-                    // The version a press here chooses: side by side, the pane; unified,
-                    // the selection's with Shift, else the line's (Ctrl takes the old
-                    // version of an unchanged line), or on the numbers, their version.
+                    // The version a press here chooses: side by side, the pane.
                     let column = if side {
                         *column
-                    } else if let Some(s) = selection.filter(|_| shift) {
-                        s.column
-                    } else if on_numbers {
-                        // The old numbers come first, then the new.
-                        if p.x < half.left() + gutter {
-                            Column::Old
-                        } else {
-                            Column::New
-                        }
                     } else {
-                        match diff.line(row, None).map(|l| l.kind) {
-                            Some(LineKind::Removed) => Column::Old,
-                            Some(LineKind::Same) if ctrl => Column::Old,
-                            _ => Column::New,
-                        }
+                        unified_version(
+                            diff.line(row, None),
+                            p.x,
+                            half.left(),
+                            gutter,
+                            extend,
+                            ctrl,
+                        )
                     };
-                    if !side {
-                        input.version = Some(column);
-                    }
                     if pressed && response.hovered() {
                         input.press = Some((r, column, char_at(at), on_numbers));
                     }
@@ -1049,17 +1046,6 @@ impl DiffWindow {
         );
         overview(ui, strip, diff, rows, &self.shown, side, view, row_h, c);
         self.select(ui, &input, area, out.state.offset.y, row_h);
-        // Unified: a sign by the pointer says which version choosing takes.
-        let badge = if self.dragging {
-            self.selection
-                .map(|s| s.column)
-                .filter(|_| form == DiffForm::Unified)
-        } else {
-            input.version
-        };
-        if let (Some(version), Some(p)) = (badge, ui.input(|i| i.pointer.hover_pos())) {
-            version_badge(ui, p, version, c);
-        }
         if let Some(lines) = input.fold {
             self.open.push(lines);
             self.dirty = true;
@@ -1316,10 +1302,39 @@ struct Geometry {
     font: FontId,
 }
 
-/// The line numbers a row shows: its own line's, or both sides' (unified).
+/// The line numbers a row shows: its own line's, or both sides' (unified), with the version
+/// choosing would take lit.
 enum Numbers {
     Own,
-    Both(Option<u32>, Option<u32>),
+    Both(Option<u32>, Option<u32>, Option<Column>),
+}
+
+/// Unified: the version a press at `x` on a row starting at `left` chooses. On the numbers
+/// (old first, then new), theirs; on the text, the line's, the new version of an unchanged
+/// line unless Ctrl is held. With Shift (`extend`), the selection's.
+fn unified_version(
+    line: Option<&DiffLine>,
+    x: f32,
+    left: f32,
+    gutter: f32,
+    extend: Option<Column>,
+    ctrl: bool,
+) -> Column {
+    if let Some(column) = extend {
+        return column;
+    }
+    if x < left + 2.0 * gutter {
+        return if x < left + gutter {
+            Column::Old
+        } else {
+            Column::New
+        };
+    }
+    match line.map(|l| l.kind) {
+        Some(LineKind::Removed) => Column::Old,
+        Some(LineKind::Same) if ctrl => Column::Old,
+        _ => Column::New,
+    }
 }
 
 /// Where a line's text was drawn, for finding the character under the pointer.
@@ -1356,13 +1371,18 @@ fn paint_line(
     };
     painter.rect_filled(rect, 0.0, bg);
     let y = rect.top() + 1.5;
-    let number = |x: f32, no: Option<u32>| {
+    let number = |x: f32, no: Option<u32>, lit: Option<Color32>| {
         let Some(ix) = no else { return };
         let cell = Rect::from_min_size(pos2(x, rect.top()), vec2(g.gutter, g.row_h));
-        if whole {
+        let color = if whole {
             painter.rect_filled(cell, 0.0, c.selected_bg);
-        }
-        let color = if whole { c.selected_fg } else { c.weak };
+            c.selected_fg
+        } else if let Some(tint) = lit {
+            painter.rect_filled(cell, 0.0, tint);
+            c.text
+        } else {
+            c.weak
+        };
         let text = (ix + 1).to_string();
         let galley = painter.layout_no_wrap(text, g.font.clone(), color);
         painter.galley(pos2(x + g.gutter - 8.0 - galley.size().x, y), galley, color);
@@ -1370,13 +1390,13 @@ fn paint_line(
     let mut x = rect.left();
     match numbers {
         Numbers::Own => {
-            number(x, Some(line.no - 1));
+            number(x, Some(line.no - 1), None);
             x += g.gutter;
         }
-        Numbers::Both(old, new) => {
-            number(x, old);
+        Numbers::Both(old, new, lit) => {
+            number(x, old, (lit == Some(Column::Old)).then_some(c.removed_word));
             x += g.gutter;
-            number(x, new);
+            number(x, new, (lit == Some(Column::New)).then_some(c.added_word));
             x += g.gutter;
         }
     }
@@ -1441,39 +1461,6 @@ fn fold_button(ui: &mut Ui, on: bool, opened: bool) -> egui::Response {
         (false, _) => (glyphs::UNFOLD, false),
     };
     widgets::icon_button(ui, glyph, tinted)
-}
-
-/// A small green `+` (new version) or red `−` (old version) at the lower right of the
-/// pointer, a quiet reminder of which version choosing text takes in the unified form. egui
-/// can't change the cursor's image, so the sign is drawn beside it, above everything else: clear
-/// of the text cursor at the system's pointer size, on a chip of the pane's colour so that it
-/// stands out from any pointer colour.
-fn version_badge(ui: &Ui, pointer: egui::Pos2, version: Column, c: &Colors) {
-    let painter = ui.ctx().layer_painter(egui::LayerId::new(
-        egui::Order::Tooltip,
-        egui::Id::new("diff-version-badge"),
-    ));
-    // The text cursor is a tall, narrow I centred on the pointer, in a square of this size.
-    let size = crate::pointer::size();
-    let arm = 3.0 * (size / 32.0).max(1.0);
-    let center = pointer + vec2(0.3 * size + arm + 2.0, 0.45 * size + 2.0);
-    let (color, plus) = match version {
-        Column::Old => (c.removed, false),
-        Column::New => (c.added, true),
-    };
-    let chip = Rect::from_center_size(center, egui::Vec2::splat(2.0 * arm + 6.0));
-    painter.rect(
-        chip,
-        3.0,
-        c.pane,
-        Stroke::new(1.0, c.line),
-        egui::StrokeKind::Inside,
-    );
-    let stroke = Stroke::new(1.5, color);
-    painter.hline(center.x - arm..=center.x + arm, center.y, stroke);
-    if plus {
-        painter.vline(center.x, center.y - arm..=center.y + arm, stroke);
-    }
 }
 
 /// A fold: `n unchanged lines`, across the row.
