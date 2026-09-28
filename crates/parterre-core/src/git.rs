@@ -17,7 +17,7 @@ use crate::changed_files::{ChangedFile, parse_diff_tree};
 use crate::file_diff::{Content, FileDiffSpec, LoadedDiff, Rev, Version, decode};
 use crate::file_history::{self, FileLog};
 use crate::oid::Oid;
-use crate::repo::{Commit, CommitIx, DEFAULT_ABBREV_LEN, GitRef, Head, RefKind, Repo};
+use crate::repo::{Commit, CommitIx, DEFAULT_ABBREV_LEN, GitRef, Head, RefKind, Repo, Worktree};
 
 mod program;
 
@@ -289,8 +289,17 @@ impl Git {
         let ref_format = format!(
             "--format=%(refname){FIELD}%(objecttype){FIELD}%(objectname){FIELD}%(*objecttype){FIELD}%(*objectname){FIELD}%(symref)"
         );
-        let listing = git.run(&["for-each-ref", &ref_format])?;
-        let mut raw_refs = parse_refs(&listing);
+        let (listing, worktrees) = std::thread::scope(|s| {
+            // Listed alongside the refs, and before the walk, which starts from their HEADs
+            // too. A git that can't list them (before 2.7) gives none.
+            let worktrees = s.spawn(|| git.run(&["worktree", "list", "--porcelain"]));
+            (git.run(&["for-each-ref", &ref_format]), worktrees.join())
+        });
+        let mut raw_refs = parse_refs(&listing?);
+        let raw_worktrees = match worktrees {
+            Ok(Ok(out)) => parse_worktrees(&out),
+            _ => Vec::new(),
+        };
         // Tags of tags: let git peel them all the way to a commit.
         let nested: Vec<usize> = (0..raw_refs.len())
             .filter(|&i| raw_refs[i].commit.is_none())
@@ -319,6 +328,8 @@ impl Git {
 
         let mut starts: Vec<Oid> = raw_refs.iter().filter_map(|r| r.commit).collect();
         starts.extend(head_oid);
+        // Other worktrees' detached HEADs, which no ref may reach.
+        starts.extend(raw_worktrees.iter().filter_map(|w| w.head));
         starts.sort_unstable();
         starts.dedup();
         let (log, abbrev_len) = std::thread::scope(|s| {
@@ -387,9 +398,26 @@ impl Git {
                 is_head: true,
             });
         }
+        let worktrees = raw_worktrees
+            .into_iter()
+            .filter(|w| !w.bare)
+            .map(|w| {
+                let path = PathBuf::from(w.path);
+                Worktree {
+                    head: w.head.and_then(|o| lookup(&o)),
+                    branch: w.branch,
+                    locked: w.locked,
+                    // A locked worktree is never prunable, even with its folder gone.
+                    missing: w.prunable || !path.is_dir(),
+                    open: has_working_tree && same_folder(&path, &root),
+                    path,
+                }
+            })
+            .collect();
         let mut repo = Repo::new(root, commits, refs, head);
         repo.abbrev_len = abbrev_len;
         repo.has_working_tree = has_working_tree;
+        repo.worktrees = worktrees;
         Ok(repo)
     }
 
@@ -993,6 +1021,61 @@ fn parse_refs(out: &str) -> Vec<RawRef> {
     refs
 }
 
+/// A worktree as listed by `git worktree list --porcelain`, before its commit is looked up.
+#[derive(Debug, PartialEq, Eq)]
+struct RawWorktree {
+    path: String,
+    /// `None` for an unborn branch (git lists the null id) and for a bare repository.
+    head: Option<Oid>,
+    branch: Option<String>,
+    bare: bool,
+    locked: bool,
+    prunable: bool,
+}
+
+/// Parses `git worktree list --porcelain`: one record per worktree, a line per attribute.
+/// Not `-z`, which git lacks before 2.36 (Ubuntu 22.04 has 2.34), so a path with a newline in
+/// it can't be read. `locked` and `prunable` are listed from git 2.31 on.
+fn parse_worktrees(out: &str) -> Vec<RawWorktree> {
+    let mut worktrees: Vec<RawWorktree> = Vec::new();
+    for line in out.lines() {
+        let (label, value) = line.split_once(' ').unwrap_or((line, ""));
+        if label == "worktree" {
+            worktrees.push(RawWorktree {
+                path: value.to_owned(),
+                head: None,
+                branch: None,
+                bare: false,
+                locked: false,
+                prunable: false,
+            });
+            continue;
+        }
+        let Some(w) = worktrees.last_mut() else {
+            continue;
+        };
+        match label {
+            "HEAD" => w.head = Oid::from_hex(value).filter(|_| value.bytes().any(|b| b != b'0')),
+            "branch" => w.branch = Some(value.to_owned()),
+            "bare" => w.bare = true,
+            "locked" => w.locked = true,
+            "prunable" => w.prunable = true,
+            _ => {}
+        }
+    }
+    worktrees
+}
+
+/// True if `a` and `b` are the same folder. git prints both paths the same way, but a symlink
+/// or a letter's case on Windows can come between them.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
 /// Classifies a full ref name and produces its display name.
 pub fn classify_ref(full_name: &str) -> (RefKind, String) {
     let strip = |prefix: &str| full_name.strip_prefix(prefix).map(str::to_owned);
@@ -1018,6 +1101,45 @@ pub fn classify_ref(full_name: &str) -> (RefKind, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_worktree_listings() {
+        let oid = "1".repeat(40);
+        let null = "0".repeat(40);
+        let out = [
+            "worktree C:/src/main",
+            &format!("HEAD {oid}"),
+            "branch refs/heads/main",
+            "",
+            "worktree C:/src/wt space/ö",
+            &format!("HEAD {oid}"),
+            "detached",
+            "locked on usb",
+            "",
+            "worktree /tmp/orphan",
+            &format!("HEAD {null}"),
+            "branch refs/heads/orph",
+            "prunable gitdir file points to non-existent location",
+            "",
+            "worktree /srv/bare.git",
+            "bare",
+            "",
+        ]
+        .join("\n");
+        let w = parse_worktrees(&out);
+        assert_eq!(w.len(), 4);
+        assert_eq!(w[0].path, "C:/src/main");
+        assert_eq!(w[0].head, Oid::from_hex(&oid));
+        assert_eq!(w[0].branch.as_deref(), Some("refs/heads/main"));
+        assert_eq!(
+            (w[1].path.as_str(), w[1].branch.as_deref()),
+            ("C:/src/wt space/ö", None)
+        );
+        assert!(w[1].locked && !w[1].prunable);
+        assert_eq!(w[2].head, None, "an unborn branch has no head");
+        assert!(w[2].prunable && !w[2].locked);
+        assert!(w[3].bare && w[3].head.is_none());
+    }
 
     #[test]
     fn classifies_refs() {

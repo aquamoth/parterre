@@ -84,6 +84,33 @@ pub enum Head {
     Detached(CommitIx),
 }
 
+/// One of the repository's worktrees (`git worktree list`). A bare main repository isn't one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Worktree {
+    /// Its folder, as git lists it.
+    pub path: PathBuf,
+    /// The commit checked out. `None` for an unborn branch.
+    pub head: Option<CommitIx>,
+    /// The branch checked out (`refs/heads/topic`); `None` if HEAD is detached.
+    pub branch: Option<String>,
+    /// Locked against pruning (`git worktree lock`).
+    pub locked: bool,
+    /// Its folder is gone.
+    pub missing: bool,
+    /// The worktree parterre opened.
+    pub open: bool,
+}
+
+impl Worktree {
+    /// Its folder's name, e.g. `t3code-42df6b45`.
+    pub fn name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
+}
+
 /// The order refs on one commit are shown in: a detached HEAD first, then TortoiseGit's order,
 /// by full ref name (heads, remotes, stash, tags).
 pub fn cmp_refs_for_display(a: &GitRef, b: &GitRef) -> Ordering {
@@ -108,6 +135,8 @@ pub struct Repo {
     /// False for a bare repository (or one opened inside its `.git` directory): there are no
     /// files on disk to compare with.
     pub has_working_tree: bool,
+    /// The worktrees, the main one first (empty if git can't list them).
+    pub worktrees: Vec<Worktree>,
     by_oid: HashMap<Oid, CommitIx>,
 }
 
@@ -125,6 +154,7 @@ impl Repo {
             head,
             abbrev_len: DEFAULT_ABBREV_LEN,
             has_working_tree: true,
+            worktrees: Vec::new(),
             by_oid,
         }
     }
@@ -190,8 +220,18 @@ impl Repo {
         on
     }
 
-    /// True if both snapshots have the same refs pointing at the same commits, and the same
-    /// HEAD. The commits are then the same too, as a snapshot holds exactly what its refs reach.
+    /// The worktrees other than the open one that have the branch `full_name` checked out.
+    pub fn worktrees_on<'a>(&'a self, full_name: &'a str) -> impl Iterator<Item = usize> + 'a {
+        self.worktrees
+            .iter()
+            .enumerate()
+            .filter(move |(_, w)| !w.open && w.branch.as_deref() == Some(full_name))
+            .map(|(i, _)| i)
+    }
+
+    /// True if both snapshots have the same refs pointing at the same commits, the same HEAD
+    /// and the same worktrees. The commits are then the same too, as a snapshot holds exactly
+    /// what its refs and worktrees reach.
     pub fn same_refs(&self, other: &Repo) -> bool {
         let refs = |repo: &Repo| -> Vec<(String, Oid, bool)> {
             repo.refs
@@ -206,7 +246,25 @@ impl Repo {
             };
             (branch, repo.head_commit().map(|c| repo.commit(c).oid))
         };
-        head(self) == head(other) && refs(self) == refs(other)
+        // Heads by id, as commit indices differ between snapshots.
+        let worktrees = |repo: &Repo| -> Vec<(Worktree, Option<Oid>)> {
+            repo.worktrees
+                .iter()
+                .map(|w| {
+                    let head = w.head.map(|c| repo.commit(c).oid);
+                    (
+                        Worktree {
+                            head: None,
+                            ..w.clone()
+                        },
+                        head,
+                    )
+                })
+                .collect()
+        };
+        head(self) == head(other)
+            && refs(self) == refs(other)
+            && worktrees(self) == worktrees(other)
     }
 
     /// Display name for the repository (directory name).

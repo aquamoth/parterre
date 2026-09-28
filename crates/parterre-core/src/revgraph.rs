@@ -81,6 +81,10 @@ pub struct GraphOptions {
     pub hide_branches: String,
     /// Label the heads of open pull requests (see [`PullRequestHead`]). Not in TortoiseGit.
     pub show_pull_requests: bool,
+    /// Show the other worktrees (see [`Repo::worktrees`]): the branches they have checked
+    /// out, even where the local-branch switch or [`GraphOptions::hide_branches`] would hide
+    /// them, and the detached HEADs, which start history like branches. Not in TortoiseGit.
+    pub show_worktrees: bool,
 }
 
 impl Default for GraphOptions {
@@ -98,6 +102,7 @@ impl Default for GraphOptions {
             ref_filter: String::new(),
             hide_branches: String::new(),
             show_pull_requests: true,
+            show_worktrees: false,
         }
     }
 }
@@ -124,6 +129,12 @@ impl GraphOptions {
                 && !hidden.matches(r.kind, &r.name))
     }
 
+    /// True if something named `name` that no hide list applies to (a worktree) starts
+    /// history: it passes the name filter, and not only the current branch is shown.
+    pub fn starts_history_named(&self, name: &str) -> bool {
+        !self.current_branch_only && self.filter_matches(name)
+    }
+
     pub fn shows(&self, kind: RefKind) -> bool {
         match kind {
             RefKind::LocalBranch => self.show_local_branches,
@@ -148,6 +159,9 @@ pub struct RevNode {
     /// Indices into the [`PullRequestHead`]s given to [`build_with_pull_requests`] of the pull
     /// requests whose head this commit is, in the order given.
     pub pull_requests: Vec<usize>,
+    /// Indices into [`Repo::worktrees`] of the other worktrees whose detached HEAD this
+    /// commit is, while worktrees are shown. (A worktree on a branch is shown by the branch.)
+    pub worktrees: Vec<usize>,
 }
 
 /// Where an open pull request is shown: its head commit, if that is in the repository, and the
@@ -269,12 +283,23 @@ pub fn build_with_pull_requests(
     let n = repo.commits.len();
     let head = repo.head_commit().map(CommitIx::ix);
 
+    // Branches checked out in other worktrees, shown whatever the switches and hide list say.
+    let in_worktree: Vec<bool> = repo
+        .refs
+        .iter()
+        .map(|r| {
+            options.show_worktrees
+                && r.kind == RefKind::LocalBranch
+                && repo.worktrees_on(&r.full_name).next().is_some()
+        })
+        .collect();
+
     // Visible refs, which commits they decorate, and per-commit parent restrictions.
     let mut refs_on: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut decorated = vec![false; n];
     let mut first_parent_only = vec![options.first_parent_only; n];
     for (i, r) in repo.refs.iter().enumerate() {
-        if !(options.shows(r.kind) || r.is_head) {
+        if !(options.shows(r.kind) || r.is_head || in_worktree[i]) {
             continue;
         }
         let t = r.target.ix();
@@ -296,14 +321,29 @@ pub fn build_with_pull_requests(
     };
 
     // Commits reachable from the refs that start history (visible, passing the filters and
-    // not hidden).
+    // not hidden), and from other worktrees' detached HEADs. Worktrees pass the hide list
+    // (which is for bulk branches nobody checks out) but not the name filter or "current
+    // branch only".
     let hidden = BranchPatterns::parse(&options.hide_branches);
-    let starts_history = |i: usize| options.starts_history(&repo.refs[i], &hidden);
+    let unhidden = BranchPatterns::default();
+    let starts_history = |i: usize| {
+        let r = &repo.refs[i];
+        options.starts_history(r, if in_worktree[i] { &unhidden } else { &hidden })
+    };
+    let detached: Vec<(usize, usize)> = repo
+        .worktrees
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| options.show_worktrees && !w.open && w.branch.is_none())
+        .filter_map(|(k, w)| Some((k, w.head?.ix())))
+        .filter(|&(k, c)| c < n && options.starts_history_named(&repo.worktrees[k].name()))
+        .collect();
     let mut visible = vec![false; n];
     let mut stack: Vec<usize> = (0..n)
         .filter(|&c| refs_on[c].iter().any(|&i| starts_history(i)))
         .collect();
     stack.extend(head);
+    stack.extend(detached.iter().map(|&(_, c)| c));
     let mut visible_commits = 0;
     while let Some(c) = stack.pop() {
         if !visible[c] {
@@ -339,6 +379,13 @@ pub fn build_with_pull_requests(
                 decorated[c] = true;
             }
         }
+    }
+
+    // Detached worktrees label their HEADs, and make them nodes, as branches do.
+    let mut worktrees_on: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(k, c) in &detached {
+        worktrees_on[c].push(k);
+        decorated[c] = true;
     }
 
     // Child counts, merge children, and a parents-first order (reverse Kahn from the tips).
@@ -431,6 +478,7 @@ pub fn build_with_pull_requests(
             is_head: Some(c) == head,
             is_merge: kept_edges[c].len() > 1,
             pull_requests: std::mem::take(&mut pulls_on[c]),
+            worktrees: std::mem::take(&mut worktrees_on[c]),
         });
     }
 

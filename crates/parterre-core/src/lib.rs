@@ -27,4 +27,4 @@ pub mod text_size;
 pub mod watch;
 
 pub use oid::Oid;
-pub use repo::{Commit, CommitIx, GitRef, Head, RefKind, Repo};
+pub use repo::{Commit, CommitIx, GitRef, Head, RefKind, Repo, Worktree};
