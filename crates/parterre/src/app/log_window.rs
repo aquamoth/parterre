@@ -10,6 +10,12 @@
 //! The window is handed a [`LogQuery`] and knows nothing about the revision graph. Its three panes are
 //! separate functions that a [`LogLayout`] arranges; the layout is picked in the header or in
 //! the settings, and it and the dividers of each layout are saved with the settings.
+//!
+//! Find (`Ctrl+F`), in the middle of the header, looks for text in the subjects and for the
+//! start of a hash ([`parterre_core::log::find`]). Going to a place selects its commit, as the
+//! main window's find does, so the details follow; Enter and `F3` go to the next, round the
+//! end. Every place is highlighted in the list. Esc in the find field leaves it; elsewhere it
+//! closes the window.
 
 use std::sync::Arc;
 
@@ -20,8 +26,9 @@ use eframe::egui::{
 };
 use parterre_core::blame::BlameSpec;
 use parterre_core::file_diff::{FileDiffSpec, Rev};
+use parterre_core::find;
 use parterre_core::glyphs::{self, Glyph};
-use parterre_core::log::{LogOptions, LogOrder, LogQuery};
+use parterre_core::log::{self, LogOptions, LogOrder, LogQuery};
 use parterre_core::log_graph::LogGraph;
 use parterre_core::log_layout::LogLayout;
 use parterre_core::revgraph::GraphOptions;
@@ -83,6 +90,20 @@ pub struct LogWindow {
     requests: Vec<CompareRequest>,
     /// Blame windows asked for, for the app to take.
     blames: Vec<(Arc<Repo>, BlameSpec)>,
+    /// Find in the list, kept when Show log replaces the contents.
+    find: Find,
+}
+
+/// Find in the log (Ctrl+F): the query and the rows it occurs in. The place gone to is the
+/// selected row, when it is one of them.
+#[derive(Debug, Default)]
+struct Find {
+    query: String,
+    /// The last query searched for, which Ctrl+F offers again after Esc cleared the field.
+    last: String,
+    matches: Vec<usize>,
+    /// Focus the field and select the query in the next frame.
+    focus: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -337,6 +358,8 @@ pub(super) struct Colors {
     pub(super) added: Color32,
     pub(super) removed: Color32,
     pub(super) renamed: Color32,
+    /// Behind where a find query is.
+    pub(super) found: Color32,
     /// The graph column's lanes, in turn.
     pub(super) lanes: [Color32; 8],
 }
@@ -355,6 +378,7 @@ pub(super) fn colors(ui: &Ui) -> Colors {
             added: Color32::from_rgb(0x7b, 0xd8, 0x8f),
             removed: Color32::from_rgb(0xff, 0x8a, 0x80),
             renamed: Color32::from_rgb(0xd1, 0xa5, 0xff),
+            found: Color32::from_rgba_unmultiplied(0xd0, 0x9a, 0x1c, 80),
             lanes: [
                 Color32::from_rgb(0xef, 0x53, 0x50),
                 Color32::from_rgb(0x42, 0xa5, 0xf5),
@@ -378,6 +402,7 @@ pub(super) fn colors(ui: &Ui) -> Colors {
             added: Color32::from_rgb(0x2e, 0x7d, 0x32),
             removed: Color32::from_rgb(0xc6, 0x28, 0x28),
             renamed: Color32::from_rgb(0x6a, 0x1b, 0x9a),
+            found: Color32::from_rgba_unmultiplied(0xff, 0xcc, 0x33, 130),
             lanes: [
                 Color32::from_rgb(0xd3, 0x2f, 0x2f),
                 Color32::from_rgb(0x19, 0x76, 0xd2),
@@ -400,6 +425,7 @@ impl LogWindow {
         }
         self.opened += 1;
         self.view = Some(LogView::new(self.opened, repo, query, options));
+        self.refind();
     }
 
     pub fn is_open(&self) -> bool {
@@ -434,6 +460,7 @@ impl LogWindow {
         if let Some(view) = &mut self.view {
             view.reload(repo.clone());
         }
+        self.refind();
     }
 
     /// The window's title: `<repo> – Log`.
@@ -446,9 +473,123 @@ impl LogWindow {
         format!("{name} – Log")
     }
 
-    /// Esc closes; the arrow keys, Page Up/Down, Home and End move the selection. Only while
-    /// no text field has the keyboard.
+    fn find_id() -> Id {
+        Id::new("log-find")
+    }
+
+    /// Ctrl+F: focuses the find field with the last query, selected so that typing replaces
+    /// it.
+    fn open_find(&mut self) {
+        if self.find.query.is_empty() && !self.find.last.is_empty() {
+            self.find.query = self.find.last.clone();
+            self.query_changed();
+        }
+        self.find.focus = true;
+    }
+
+    /// Esc in the find field, or its clear button: empties it, and leaves it.
+    fn close_find(&mut self, ctx: &egui::Context) {
+        self.find.query.clear();
+        self.refind();
+        ctx.memory_mut(|m| m.surrender_focus(Self::find_id()));
+    }
+
+    /// Finds the query in the list.
+    fn refind(&mut self) {
+        self.find.matches = match &self.view {
+            Some(v) => log::find(&v.repo, &v.commits, &self.find.query),
+            None => Vec::new(),
+        };
+    }
+
+    /// The place gone to: the selected row, if the query is in it (an index into the matches).
+    fn find_current(&self) -> Option<usize> {
+        let selected = self.view.as_ref()?.list.selected?;
+        self.find.matches.binary_search(&selected).ok()
+    }
+
+    /// The query was typed: selects the first row it is in from the selected one on (which
+    /// stays selected while it still matches), round the end.
+    fn query_changed(&mut self) {
+        self.refind();
+        if !self.find.query.trim().is_empty() {
+            self.find.last = self.find.query.clone();
+        }
+        let Some(view) = &mut self.view else { return };
+        let from = view.list.selected.unwrap_or(0);
+        if let Some(k) = find::first_from(&self.find.matches, from) {
+            view.list.select(Some(self.find.matches[k]));
+        }
+    }
+
+    /// Enter, F3 (`forward`), Shift+Enter, Shift+F3: selects the next or previous row the
+    /// query is in, round the ends.
+    fn find_step(&mut self, forward: bool) {
+        let current = self.find_current();
+        let Some(view) = &mut self.view else { return };
+        let from = view.list.selected.unwrap_or(0);
+        if let Some(k) = find::step(&self.find.matches, current, forward, from) {
+            view.list.select(Some(self.find.matches[k]));
+        }
+    }
+
+    /// The find field, with how many rows the query was found in.
+    fn find_field(&mut self, ui: &mut Ui, width: f32) {
+        let n = self.find.matches.len();
+        let count = match (self.find_current(), n) {
+            (_, 0) => "No matches".to_owned(),
+            (Some(c), n) => format!("{} of {n}", c + 1),
+            (None, 1) => "1 match".to_owned(),
+            (None, n) => format!("{n} matches"),
+        };
+        let focus = std::mem::take(&mut self.find.focus);
+        let find = widgets::Find {
+            id: Self::find_id(),
+            width,
+            hint: "Find subjects, hashes",
+            count: &count,
+            keys: ["Shift+Enter, Shift+F3", "Enter, F3", "Esc"],
+            focus,
+            select: focus,
+        };
+        let found = widgets::find_field(ui, &find, &mut self.find.query);
+        if found.changed {
+            self.query_changed();
+        }
+        if found.cleared {
+            self.close_find(ui.ctx());
+        }
+        if found.next || found.previous {
+            self.find_step(found.next);
+        }
+    }
+
+    /// Ctrl+F finds, F3 and Shift+F3 go to the next and previous place, and Esc in the find
+    /// field leaves it; elsewhere Esc closes. The arrow keys, Page Up/Down, Home and End move
+    /// the selection, only while no text field has the keyboard.
     fn handle_keys(&mut self, ui: &Ui) {
+        let id = Self::find_id();
+        // egui drops the focus on Esc before the frame starts.
+        let in_find = ui.memory(|m| m.has_focus(id) || m.had_focus_last_frame(id));
+        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
+            self.open_find();
+        }
+        // Shift+F3 first: a plain F3 would match it too.
+        let (previous, next) = ui.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::SHIFT, Key::F3),
+                i.consume_key(Modifiers::NONE, Key::F3),
+            )
+        });
+        if previous || next {
+            self.find_step(next);
+        }
+        if in_find {
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                self.close_find(ui.ctx());
+            }
+            return;
+        }
         if ui.ctx().egui_wants_keyboard_input() {
             return;
         }
@@ -492,14 +633,16 @@ impl LogWindow {
             && view.options != env.settings.options
         {
             view.set_options(env.settings.options);
+            self.refind();
         }
         let body = ui.available_rect_before_wrap();
         self.body(ui, body, env);
         self.diffs.confirm_many(ui, Id::new("log-many-diffs"));
     }
 
-    /// The range at the top left, as TortoiseGit shows it; on the right the commit count, the
-    /// walk options, the layout picker and the button that resets the layout's dividers.
+    /// The range at the top left, as TortoiseGit shows it; find in the middle; on the right the
+    /// commit count, the walk options, the layout picker and the button that resets the
+    /// layout's dividers.
     fn header(&mut self, ui: &mut Ui, c: &Colors, env: &mut Env) {
         let Some(view) = &self.view else { return };
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
@@ -552,8 +695,18 @@ impl LogWindow {
         let count = format!("{} commit{}", thousands(n), if n == 1 { "" } else { "s" });
         let count = painter.layout_no_wrap(count, FontId::proportional(13.0), weak);
         let count_left = tools_left - 14.0 - count.size().x;
+        // Find, centred in the window if it fits between the range (given some room) and the
+        // count; else in the middle of the room there is, squeezed.
+        let room = Rangef::new(rect.left() + 12.0 + 140.0, count_left - 14.0);
+        let width = (room.span() - 16.0).clamp(60.0, 380.0);
+        let (lo, hi) = (room.min + 8.0, room.max - 8.0 - width);
+        let find_left = if lo <= hi {
+            (rect.center().x - width / 2.0).clamp(lo, hi)
+        } else {
+            room.center() - width / 2.0
+        };
         job.wrap = TextWrapping {
-            max_width: (count_left - rect.left() - 36.0).max(0.0),
+            max_width: (find_left - rect.left() - 36.0).max(0.0),
             max_rows: 1,
             break_anywhere: true,
             overflow_character: Some('…'),
@@ -569,6 +722,14 @@ impl LogWindow {
             count,
             weak,
         );
+        let at = Rect::from_center_size(
+            pos2(find_left + width / 2.0, rect.center().y),
+            vec2(width, widgets::BUTTON),
+        );
+        let layout = egui::Layout::left_to_right(egui::Align::Center);
+        ui.scope_builder(UiBuilder::new().max_rect(at).layout(layout), |ui| {
+            self.find_field(ui, width);
+        });
     }
 
     /// The panes where the layout puts them, and the dividers between them.
@@ -626,6 +787,7 @@ impl LogWindow {
         };
         let head = repo.head_commit().map(|c| repo.commit(c).oid);
         let (marked, shows) = (env.marked, |r: &&GitRef| env.graph.shows(r.kind));
+        let query = self.find.query.as_str();
         let mut request = None;
         table.show(
             ui,
@@ -645,6 +807,7 @@ impl LogWindow {
                     author: &commit.author_name,
                     author_email: &commit.author_email,
                     date: &commit.author_date,
+                    found: log::find_in(commit, query),
                     ..Row::default()
                 }
             },
@@ -1427,5 +1590,168 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A log window showing a line of commits with these subjects, newest first, the first
+    /// selected; commit `i`'s hash starts with `i` then `a`s.
+    fn window(subjects: &[&str]) -> LogWindow {
+        let n = subjects.len() as u32;
+        let commits = subjects
+            .iter()
+            .enumerate()
+            .map(|(i, subject)| Commit {
+                oid: Oid::from_hex(&format!("{i:x}{:a<39}", "")).unwrap(),
+                parents: if (i as u32) + 1 < n {
+                    vec![CommitIx(i as u32 + 1)]
+                } else {
+                    Vec::new()
+                },
+                truncated: false,
+                empty_tree: false,
+                author_name: String::new(),
+                author_email: String::new(),
+                author_time: 100 - i as i64,
+                author_date: String::new(),
+                commit_time: 100 - i as i64,
+                subject: (*subject).into(),
+            })
+            .collect();
+        let repo = Repo::new(
+            "/nowhere".into(),
+            commits,
+            Vec::new(),
+            parterre_core::repo::Head::Detached(CommitIx(0)),
+        );
+        let mut w = LogWindow::default();
+        let query = LogQuery::commit(CommitIx(0));
+        w.open(
+            Arc::new(repo),
+            query,
+            LogOptions::default(),
+            vec2(1100.0, 760.0),
+        );
+        w
+    }
+
+    fn frame(ctx: &egui::Context, w: &mut LogWindow, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1100.0, 760.0))),
+            events,
+            ..Default::default()
+        };
+        let (mut details, graph) = (Details::default(), GraphOptions::default());
+        let mut settings = LogWindowSettings::default();
+        ctx.run_ui(input, |ui| {
+            let mut env = Env {
+                details: &mut details,
+                palette: Palette::new(false, &[]),
+                graph: &graph,
+                settings: &mut settings,
+                marked: None,
+            };
+            w.handle_keys(ui);
+            if w.is_open() {
+                w.contents(ui, &mut env);
+            }
+        })
+        .textures_delta
+        .clear();
+    }
+
+    fn key_with(key: Key, modifiers: Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn key(key: Key) -> egui::Event {
+        key_with(key, Modifiers::NONE)
+    }
+
+    fn typed(text: &str) -> egui::Event {
+        egui::Event::Text(text.into())
+    }
+
+    fn selected(w: &LogWindow) -> Option<usize> {
+        w.view.as_ref()?.list.selected
+    }
+
+    fn has_find_focus(ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.has_focus(LogWindow::find_id()))
+    }
+
+    #[test]
+    fn ctrl_f_finds_subjects_and_hashes_and_selects_the_commits() {
+        let ctx = egui::Context::default();
+        let mut w = window(&[
+            "Fix the parser",
+            "Docs",
+            "parser: faster",
+            "More docs",
+            "Parse",
+        ]);
+        frame(&ctx, &mut w, Vec::new());
+        assert_eq!(selected(&w), Some(0));
+        frame(&ctx, &mut w, vec![key_with(Key::F, Modifiers::COMMAND)]);
+        assert!(has_find_focus(&ctx));
+        // The selected row stays while it matches; the first after it is gone to otherwise.
+        frame(&ctx, &mut w, vec![typed("PARSE")]);
+        assert_eq!(w.find.matches, [0, 2, 4]);
+        assert_eq!(selected(&w), Some(0));
+        frame(&ctx, &mut w, vec![typed("r:")]);
+        assert_eq!(w.find.matches, [2]);
+        assert_eq!(selected(&w), Some(2));
+        // Enter and F3 go on, round the end; Shift goes back.
+        frame(&ctx, &mut w, vec![key(Key::Backspace), key(Key::Backspace)]);
+        assert_eq!(w.find.matches, [0, 2, 4]);
+        frame(&ctx, &mut w, vec![key(Key::Enter)]);
+        assert_eq!(selected(&w), Some(4));
+        assert!(has_find_focus(&ctx));
+        frame(&ctx, &mut w, vec![key(Key::F3)]);
+        assert_eq!(selected(&w), Some(0));
+        let shift = Modifiers::SHIFT;
+        let held = egui::Event::ModifiersChanged(shift);
+        frame(&ctx, &mut w, vec![held, key_with(Key::F3, shift)]);
+        frame(
+            &ctx,
+            &mut w,
+            vec![egui::Event::ModifiersChanged(Modifiers::NONE)],
+        );
+        assert_eq!(selected(&w), Some(4));
+        // From a row that isn't a place, F3 goes to the next one after it.
+        w.view.as_mut().unwrap().list.select(Some(1));
+        ctx.memory_mut(|m| m.surrender_focus(LogWindow::find_id()));
+        frame(&ctx, &mut w, vec![key(Key::F3)]);
+        assert_eq!(selected(&w), Some(2));
+
+        // The start of a hash: commit 3's is "3aaa…".
+        frame(&ctx, &mut w, vec![key_with(Key::F, Modifiers::COMMAND)]);
+        frame(&ctx, &mut w, vec![typed("3AAA")]);
+        assert_eq!(w.find.matches, [3]);
+        assert_eq!(selected(&w), Some(3));
+    }
+
+    #[test]
+    fn esc_in_the_find_field_leaves_it_and_only_then_closes_the_window() {
+        let ctx = egui::Context::default();
+        let mut w = window(&["one", "two"]);
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, vec![key_with(Key::F, Modifiers::COMMAND)]);
+        frame(&ctx, &mut w, vec![typed("o")]);
+        assert_eq!(w.find.matches, [0, 1]);
+        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        assert!(w.is_open());
+        assert!(!has_find_focus(&ctx));
+        assert!(w.find.query.is_empty() && w.find.matches.is_empty());
+        // Ctrl+F offers the last query again.
+        frame(&ctx, &mut w, vec![key_with(Key::F, Modifiers::COMMAND)]);
+        assert_eq!(w.find.query, "o");
+        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        assert!(!w.is_open());
     }
 }

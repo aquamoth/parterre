@@ -51,6 +51,13 @@ impl Place for Match {
     }
 }
 
+/// A line found as a whole, known by its number alone (the log's rows).
+impl Place for usize {
+    fn line(&self) -> usize {
+        *self
+    }
+}
+
 /// `text` in lower case, and for each of its bytes (and its end) the byte in `text` where the
 /// character it came from starts (and `text`'s end).
 fn fold(text: &str) -> (String, Vec<usize>) {
