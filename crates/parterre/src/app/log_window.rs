@@ -22,7 +22,7 @@ use std::sync::Arc;
 use eframe::egui::text::{LayoutJob, TextFormat, TextWrapping};
 use eframe::egui::{
     self, Color32, CornerRadius, CursorIcon, FontId, Galley, Id, Key, Margin, Modifiers, Rangef,
-    Rect, Response, RichText, ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
+    Rect, RichText, ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use parterre_core::blame::BlameSpec;
 use parterre_core::file_diff::{FileDiffSpec, Rev};
@@ -49,7 +49,7 @@ pub(super) const HEADING: f32 = 26.0;
 /// Thickness of the draggable dividers between panes.
 pub(super) const DIVIDER: f32 = 6.0;
 pub(super) const CELL_PAD: f32 = 8.0;
-/// How long a Copy button says "Copied".
+/// How long a copy button shows a check mark.
 const COPIED_SECONDS: f64 = 1.2;
 
 fn viewport_id() -> egui::ViewportId {
@@ -80,7 +80,7 @@ pub struct LogWindow {
     size: Vec2,
     /// The theme last given to the window's title bar.
     title_theme: Option<egui::SystemTheme>,
-    /// What was copied last, and when (for the "Copied" feedback).
+    /// What was copied last, and when (for the check mark on its copy button).
     copied: Option<(Copied, f64)>,
     /// How many logs were opened, to give each its own scroll positions.
     opened: u64,
@@ -828,7 +828,7 @@ impl LogWindow {
     }
 
     /// The selected commit as `git log` shows it: full hash, refs, a merge's parents, author and
-    /// date, each with a Copy button where it helps, the committer where it differs, then the
+    /// date, each with a copy button where it helps, the committer where it differs, then the
     /// full message and the notes. The text is selectable, and web links open in the browser.
     fn details_pane(&mut self, ui: &mut Ui, env: &mut Env, c: &Colors) {
         let Some(view) = &self.view else { return };
@@ -867,7 +867,7 @@ impl LogWindow {
                         let label_width = field_label_width(ui);
                         field(ui, label_width, "Commit", |ui| {
                             ui.label(RichText::new(commit.oid.to_hex()).monospace());
-                            if copy_button(ui, copied == Some(Copied::Hash), c)
+                            if widgets::copy_button(ui, copied == Some(Copied::Hash), c.added)
                                 .on_hover_text("Copy the full hash")
                                 .clicked()
                             {
@@ -893,7 +893,7 @@ impl LogWindow {
                         }
                         field(ui, label_width, "Author", |ui| {
                             ui.label(format!("{} <{}>", commit.author_name, commit.author_email));
-                            if copy_button(ui, copied == Some(Copied::Email), c)
+                            if widgets::copy_button(ui, copied == Some(Copied::Email), c.added)
                                 .on_hover_text("Copy the email address")
                                 .clicked()
                             {
@@ -1257,30 +1257,7 @@ pub fn layout_picker(ui: &mut Ui, current: LogLayout) -> Option<LogLayout> {
     })
 }
 
-/// A small, flat "Copy" button, which says "Copied" for a moment after a click.
-fn copy_button(ui: &mut Ui, copied: bool, c: &Colors) -> Response {
-    let (text, color) = if copied {
-        ("Copied", c.added)
-    } else {
-        ("Copy", ui.visuals().weak_text_color())
-    };
-    let g = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), FontId::proportional(12.0), color);
-    let (rect, response) = ui.allocate_exact_size(vec2(g.size().x + 12.0, 20.0), Sense::click());
-    if response.hovered() {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(5), c.hover);
-    }
-    ui.painter().galley(
-        pos2(rect.left() + 6.0, rect.center().y - g.size().y / 2.0),
-        g,
-        color,
-    );
-    response
-}
-
-/// Height of a line of the selected commit's fields: that of a Copy button.
+/// Height of a line of the selected commit's fields: that of a copy button.
 const FIELD: f32 = 20.0;
 /// The names of the selected commit's fields.
 const FIELD_LABELS: [&str; 7] = [
