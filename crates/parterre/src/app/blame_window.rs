@@ -61,7 +61,7 @@ use parterre_core::{CommitIx, Oid, Repo};
 use super::commit_table::{CommitList, CommitTable, ROW, Row};
 use super::diff_window::{
     Colors, OVERVIEW, SCROLLBAR, colors, hscrollbar, message, overview_background, overview_scale,
-    overview_scroll, overview_view,
+    overview_scroll, overview_view, reveal,
 };
 use super::log_window::{self, Bar, DIVIDER, HEADING, cell, divider};
 use super::{Details, ParterreApp};
@@ -1440,9 +1440,9 @@ impl BlameWindow {
                         break;
                     }
                     let fill = if current == Some(k) {
-                        bc.found_current
+                        c.found_current
                     } else {
-                        bc.found
+                        c.found
                     };
                     let place =
                         Rect::from_x_y_ranges(x(m.range.start)..=x(m.range.end), rect.y_range());
@@ -1542,7 +1542,7 @@ impl BlameWindow {
                 pos2(strip.left() + 3.0, strip.top() + y0),
                 pos2(strip.right() - 2.0, strip.top() + y0 + scale.max(2.0)),
             );
-            ui.painter().rect_filled(mark, 0.0, bc.found_mark);
+            ui.painter().rect_filled(mark, 0.0, c.found_mark);
         }
         overview_view(ui, strip, view, c);
         let id = egui::Id::new(("blame-overview", self.id));
@@ -2190,16 +2190,6 @@ fn runs(n: usize, owned: impl Fn(usize) -> bool) -> Vec<std::ops::Range<usize>> 
     runs
 }
 
-/// The scroll offset that brings line `i` into view a third of the way down, if it is out of
-/// view at `scroll` in text `height` tall.
-fn reveal(i: usize, scroll: f32, height: f32, row_h: f32) -> Option<f32> {
-    let y = i as f32 * row_h;
-    (y < scroll || y + row_h > scroll + height).then(|| {
-        let above = (height / row_h / 3.0).floor();
-        ((i as f32 - above) * row_h).max(0.0)
-    })
-}
-
 /// Sizes of a blame's rows and columns, from the text size and the number of lines.
 struct Metrics {
     row_h: f32,
@@ -2337,10 +2327,6 @@ struct BlameColors {
     new: Color32,
     commit: Color32,
     mark: Color32,
-    /// Behind the places found, the one gone to, and their marks in the overview strip.
-    found: Color32,
-    found_current: Color32,
-    found_mark: Color32,
 }
 
 impl BlameColors {
@@ -2365,9 +2351,6 @@ fn blame_colors(ui: &Ui) -> BlameColors {
             new: Color32::from_rgb(0x5c, 0x45, 0x12),
             commit: Color32::from_rgba_unmultiplied(0x35, 0x84, 0xe4, 40),
             mark: Color32::from_rgb(0x62, 0xa0, 0xea),
-            found: Color32::from_rgba_unmultiplied(0xd0, 0x9a, 0x1c, 80),
-            found_current: Color32::from_rgba_unmultiplied(0xc2, 0x6a, 0x00, 200),
-            found_mark: Color32::from_rgb(0xf0, 0xa0, 0x30),
         }
     } else {
         BlameColors {
@@ -2375,9 +2358,6 @@ fn blame_colors(ui: &Ui) -> BlameColors {
             new: Color32::from_rgb(0xff, 0xd9, 0x80),
             commit: Color32::from_rgba_unmultiplied(0x35, 0x84, 0xe4, 26),
             mark: Color32::from_rgb(0x1c, 0x71, 0xd8),
-            found: Color32::from_rgba_unmultiplied(0xff, 0xcc, 0x33, 130),
-            found_current: Color32::from_rgba_unmultiplied(0xff, 0x8c, 0x00, 190),
-            found_mark: Color32::from_rgb(0xe0, 0x82, 0x00),
         }
     }
 }
@@ -3044,9 +3024,6 @@ mod tests {
             new: Color32::from_rgb(200, 100, 50),
             commit: Color32::TRANSPARENT,
             mark: Color32::TRANSPARENT,
-            found: Color32::TRANSPARENT,
-            found_current: Color32::TRANSPARENT,
-            found_mark: Color32::TRANSPARENT,
         };
         assert_eq!(c.age(0.0), c.old);
         assert_eq!(c.age(1.0), c.new);

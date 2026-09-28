@@ -902,6 +902,54 @@ pub fn fold_lines(rows: &[Row], hidden: &Range<usize>) -> Option<Range<u32>> {
     Some(first..last + 1)
 }
 
+/// A place a query was found in a diff ([`find`]): a row of a form, the version of the line it
+/// is in, and display columns of the line's text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub row: usize,
+    pub old: bool,
+    pub columns: Range<usize>,
+}
+
+impl crate::find::Place for Found {
+    fn line(&self) -> usize {
+        self.row
+    }
+}
+
+/// Every place `query` occurs in the lines a form's `rows` show, as [`crate::find::find`]
+/// finds them in the lines as in the file, in reading order. Side by side, a row's old line
+/// comes before its new one, and an unchanged line counts once, as its new version, unless its
+/// versions differ (in whitespace that doesn't count). Unified, each row shows one line.
+pub fn find(diff: &FileDiff, rows: &[Row], side_by_side: bool, query: &str) -> Vec<Found> {
+    let mut lines = Vec::new();
+    for (r, &row) in rows.iter().enumerate() {
+        let old = row.old.map(|i| &diff.old[i as usize]);
+        let new = row.new.map(|i| &diff.new[i as usize]);
+        if side_by_side {
+            if let Some(o) = old
+                && !(o.kind == LineKind::Same && new.is_some_and(|n| n.raw == o.raw))
+            {
+                lines.push((r, true, o));
+            }
+            if let Some(n) = new {
+                lines.push((r, false, n));
+            }
+        } else if let Some(line) = new.or(old) {
+            lines.push((r, new.is_none(), line));
+        }
+    }
+    crate::find::find(lines.iter().map(|(_, _, l)| &l.raw), query)
+        .into_iter()
+        .map(|m| {
+            let (row, old, line) = lines[m.line];
+            let columns =
+                display_column(&line.raw, m.range.start)..display_column(&line.raw, m.range.end);
+            Found { row, old, columns }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1387,5 +1435,74 @@ mod tests {
         assert!(FileDiffSpec::of_commit(c, Some(p), &deleted).new.is_none());
         // A root commit has nothing to compare with.
         assert!(FileDiffSpec::of_commit(c, None, &file).old.is_none());
+    }
+
+    /// The places found, as row, version and the text found there.
+    fn places(d: &FileDiff, side_by_side: bool, query: &str) -> Vec<(usize, char, String)> {
+        let rows = if side_by_side { &d.side } else { &d.unified };
+        find(d, rows, side_by_side, query)
+            .into_iter()
+            .map(|f| {
+                let line = d.line(rows[f.row], Some(f.old)).unwrap();
+                let text = line.text.chars().collect::<Vec<_>>()[f.columns]
+                    .iter()
+                    .collect();
+                (f.row, if f.old { '-' } else { '+' }, text)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finds_in_the_lines_a_form_shows_in_reading_order() {
+        let old = "same foo\nwas foo\n\tFoo\n";
+        let new = "same foo\nnow FOO foo\n\tFoo\n";
+        let d = FileDiff::new(old, new, opts(WordMode::Position, Whitespace::Compare));
+        // Side by side: a row's old line before its new one; an unchanged line once, as its
+        // new version. Columns are of the text as shown, tabs expanded.
+        assert_eq!(
+            places(&d, true, "foo"),
+            [
+                (0, '+', "foo".into()),
+                (1, '-', "foo".into()),
+                (1, '+', "FOO".into()),
+                (1, '+', "foo".into()),
+                (2, '+', "Foo".into()),
+            ]
+        );
+        assert_eq!(find(&d, &d.side, true, "foo")[4].columns, 4..7);
+        // Unified: each row's one line.
+        assert_eq!(
+            places(&d, false, "foo"),
+            [
+                (0, '+', "foo".into()),
+                (1, '-', "foo".into()),
+                (2, '+', "FOO".into()),
+                (2, '+', "foo".into()),
+                (3, '+', "Foo".into()),
+            ]
+        );
+        // Found as in the file: a tab is a tab.
+        assert_eq!(places(&d, true, "\tf"), [(2, '+', "    F".into())]);
+        assert!(find(&d, &d.side, true, "").is_empty());
+
+        // Stepping goes by row.
+        let found = find(&d, &d.side, true, "foo");
+        assert_eq!(crate::find::first_from(&found, 2), Some(4));
+        assert_eq!(crate::find::step(&found, None, false, 1), Some(0));
+    }
+
+    #[test]
+    fn an_unchanged_line_whose_versions_differ_counts_twice_side_by_side() {
+        // Unchanged only because whitespace doesn't count.
+        let d = FileDiff::new(
+            "a  foo\n",
+            "a foo\n",
+            opts(WordMode::Similar, Whitespace::IgnoreAll),
+        );
+        assert_eq!(
+            places(&d, true, "foo"),
+            [(0, '-', "foo".into()), (0, '+', "foo".into())]
+        );
+        assert_eq!(places(&d, false, "foo"), [(0, '+', "foo".into())]);
     }
 }

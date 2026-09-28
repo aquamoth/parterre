@@ -1,6 +1,6 @@
-//! Finding text in the lines of a file, as the blame window's find field does (and the diff
-//! window's will, #86): every place a query occurs, ignoring case as the main window's find
-//! does, and stepping from one to the next or previous, round the ends.
+//! Finding text in the lines of a file, as the blame and diff windows' find fields do: every
+//! place a query occurs, ignoring case as the main window's find does, and stepping from one
+//! to the next or previous, round the ends.
 
 use std::ops::Range;
 
@@ -40,6 +40,17 @@ pub fn find<S: AsRef<str>>(lines: impl IntoIterator<Item = S>, query: &str) -> V
     found
 }
 
+/// A place found, by the line it is on, for stepping with [`first_from`] and [`step`].
+pub trait Place {
+    fn line(&self) -> usize;
+}
+
+impl Place for Match {
+    fn line(&self) -> usize {
+        self.line
+    }
+}
+
 /// `text` in lower case, and for each of its bytes (and its end) the byte in `text` where the
 /// character it came from starts (and `text`'s end).
 fn fold(text: &str) -> (String, Vec<usize>) {
@@ -55,19 +66,19 @@ fn fold(text: &str) -> (String, Vec<usize>) {
 }
 
 /// The first match at or after line `line`, else the first of all (going round the end).
-pub fn first_from(matches: &[Match], line: usize) -> Option<usize> {
+pub fn first_from<P: Place>(matches: &[P], line: usize) -> Option<usize> {
     if matches.is_empty() {
         return None;
     }
-    let at = matches.partition_point(|m| m.line < line);
+    let at = matches.partition_point(|m| m.line() < line);
     Some(if at < matches.len() { at } else { 0 })
 }
 
 /// The match after `current` (`forward`) or before it, going round the ends. With none
 /// current, the first at or after line `line` going forward, or the last before it going
 /// back.
-pub fn step(
-    matches: &[Match],
+pub fn step<P: Place>(
+    matches: &[P],
     current: Option<usize>,
     forward: bool,
     line: usize,
@@ -81,7 +92,7 @@ pub fn step(
         (Some(c), false) => (c + n - 1) % n,
         (None, true) => first_from(matches, line)?,
         (None, false) => {
-            let at = matches.partition_point(|m| m.line < line);
+            let at = matches.partition_point(|m| m.line() < line);
             (at + n - 1) % n
         }
     })
@@ -154,7 +165,7 @@ mod tests {
         assert_eq!(step(&matches, Some(3), true, 0), Some(0));
         assert_eq!(step(&matches, Some(0), false, 0), Some(3));
         assert_eq!(step(&matches, Some(2), false, 0), Some(1));
-        assert_eq!(step(&[], Some(0), true, 0), None);
+        assert_eq!(step::<Match>(&[], Some(0), true, 0), None);
     }
 
     #[test]
@@ -165,7 +176,7 @@ mod tests {
         assert_eq!(first_from(&matches, 6), Some(3));
         // Past the last: round to the first.
         assert_eq!(first_from(&matches, 10), Some(0));
-        assert_eq!(first_from(&[], 3), None);
+        assert_eq!(first_from::<Match>(&[], 3), None);
         assert_eq!(step(&matches, None, true, 6), Some(3));
         assert_eq!(step(&matches, None, false, 6), Some(2));
         assert_eq!(step(&matches, None, false, 0), Some(3));
