@@ -33,7 +33,7 @@ use parterre_core::log_graph::LogGraph;
 use parterre_core::log_layout::LogLayout;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{find_urls, thousands};
-use parterre_core::{Commit, CommitIx, GitRef, Oid, Repo};
+use parterre_core::{Commit, CommitIx, GitRef, Label, Oid, Repo, Worktree};
 
 use super::commit_table::{CommitList, CommitTable, Row};
 use super::compare_window::CompareRequest;
@@ -786,7 +786,7 @@ impl LogWindow {
             palette: &env.palette,
         };
         let head = repo.head_commit().map(|c| repo.commit(c).oid);
-        let (marked, shows) = (env.marked, |r: &&GitRef| env.graph.shows(r.kind));
+        let marked = env.marked;
         let query = self.find.query.as_str();
         let mut request = None;
         table.show(
@@ -798,11 +798,7 @@ impl LogWindow {
                 Row {
                     hash: commit.oid.short(repo.abbrev_len),
                     marked: marked.is_some_and(|(m, _)| *m == commit.oid),
-                    refs: refs[commits[i].ix()]
-                        .iter()
-                        .map(|&r| &repo.refs[r])
-                        .filter(shows)
-                        .collect(),
+                    refs: badges(repo, &refs[commits[i].ix()], Some(commits[i]), env.graph),
                     subject: &commit.subject,
                     author: &commit.author_name,
                     author_email: &commit.author_email,
@@ -850,11 +846,7 @@ impl LogWindow {
         let ctx = ui.ctx().clone();
         let details = env.details.get(&view.repo.path, commit.oid, &ctx);
         let loaded = details.and_then(|d| d.as_ref().ok());
-        let refs: Vec<&GitRef> = view.refs[ix.ix()]
-            .iter()
-            .map(|&r| &view.repo.refs[r])
-            .filter(|r| env.graph.shows(r.kind))
-            .collect();
+        let refs = badges(&view.repo, &view.refs[ix.ix()], Some(ix), env.graph);
         ScrollArea::vertical()
             .id_salt(("log-details", commit.oid))
             .auto_shrink(false)
@@ -1077,26 +1069,97 @@ pub(super) fn cell(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32
     ui.painter().layout_job(job)
 }
 
-/// A ref's badge in the graph's label colour, left-centred at `at` and at most `max_width`
-/// wide. Returns its width.
+/// A label before a commit's subject, as in the graph: a ref, or another worktree's detached
+/// HEAD.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Badge<'a> {
+    /// A ref, and the other worktree that has it checked out, while worktrees are shown.
+    Ref(&'a GitRef, Option<&'a Worktree>),
+    Worktree(&'a Worktree),
+}
+
+impl Badge<'_> {
+    fn text(&self) -> String {
+        match self {
+            Badge::Ref(r, _) => r.name.clone(),
+            Badge::Worktree(w) => w.name(),
+        }
+    }
+}
+
+/// Width of a worktree badge's folder glyph and the gap after it.
+const BADGE_GLYPH: f32 = 11.0 + 3.0;
+
+/// The badges of a commit of the snapshot (`None` for one outside it) with the refs `refs`
+/// (indices into [`Repo::refs`], in display order): the refs `graph` shows and, while it
+/// shows worktrees, the other worktrees there, worktrees first ([`Repo::labels`]).
+pub(super) fn badges<'a>(
+    repo: &'a Repo,
+    refs: &[usize],
+    commit: Option<CommitIx>,
+    graph: &GraphOptions,
+) -> Vec<Badge<'a>> {
+    let shown = graph.show_worktrees;
+    let refs: Vec<usize> = refs
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let r = &repo.refs[i];
+            graph.shows(r.kind) || (shown && repo.worktrees_on(&r.full_name).next().is_some())
+        })
+        .collect();
+    let detached: Vec<usize> = match commit {
+        Some(c) if shown => repo.detached_worktrees_at(c).collect(),
+        _ => Vec::new(),
+    };
+    repo.labels(&refs, &detached, shown)
+        .into_iter()
+        .map(|label| match label {
+            Label::Ref { index, worktree } => {
+                Badge::Ref(&repo.refs[index], worktree.map(|k| &repo.worktrees[k]))
+            }
+            Label::Worktree(k) => Badge::Worktree(&repo.worktrees[k]),
+        })
+        .collect()
+}
+
+/// A badge in the graph's label colour, left-centred at `at` and at most `max_width` wide.
+/// Returns its width.
 pub(super) fn badge(
     ui: &Ui,
-    git_ref: &GitRef,
+    badge: &Badge,
     palette: &Palette,
     at: egui::Pos2,
     max_width: f32,
 ) -> f32 {
-    let fill = palette.ref_fill(git_ref.kind, git_ref.is_head, &git_ref.name);
+    let worktree_fill = |w: &Worktree| {
+        if w.missing {
+            palette.missing_worktree
+        } else {
+            palette.worktree
+        }
+    };
+    // As in the graph: the current branch stays red, and a gone folder is struck through.
+    let (fill, worktree) = match *badge {
+        Badge::Ref(r, Some(w)) if !r.is_head => (worktree_fill(w), Some(w)),
+        Badge::Ref(r, _) => (palette.ref_fill(r.kind, r.is_head, &r.name), None),
+        Badge::Worktree(w) => (worktree_fill(w), Some(w)),
+    };
+    let glyph = if let Badge::Worktree(_) = badge {
+        BADGE_GLYPH
+    } else {
+        0.0
+    };
     let color = text_on(fill);
     let pad = 5.0;
     let g = cell(
         ui,
-        &git_ref.name,
+        &badge.text(),
         FontId::proportional(11.5),
         color,
-        max_width - 2.0 * pad,
+        max_width - 2.0 * pad - glyph,
     );
-    let size = vec2(g.size().x + 2.0 * pad, 17.0);
+    let size = vec2(g.size().x + 2.0 * pad + glyph, 17.0);
     let rect = Rect::from_min_size(pos2(at.x, at.y - size.y / 2.0), size);
     let painter = ui.painter();
     painter.rect(
@@ -1106,11 +1169,24 @@ pub(super) fn badge(
         Stroke::new(1.0, Color32::from_black_alpha(64)),
         egui::StrokeKind::Inside,
     );
-    painter.galley(
-        pos2(rect.left() + pad, rect.center().y - g.size().y / 2.0),
-        g,
-        color,
+    if glyph > 0.0 {
+        let icon = Rect::from_center_size(
+            pos2(rect.left() + pad + 5.5, rect.center().y),
+            Vec2::splat(11.0),
+        );
+        widgets::paint_glyph(painter, icon, glyphs::FOLDER, color);
+    }
+    let text = Rect::from_min_size(
+        pos2(
+            rect.left() + pad + glyph,
+            rect.center().y - g.size().y / 2.0,
+        ),
+        g.size(),
     );
+    painter.galley(text.min, g, color);
+    if worktree.is_some_and(|w| w.missing) {
+        painter.hline(text.x_range(), text.center().y, Stroke::new(1.0, color));
+    }
     size.x
 }
 
@@ -1326,15 +1402,22 @@ fn field<R>(ui: &mut Ui, label_width: f32, label: &str, add: impl FnOnce(&mut Ui
     });
 }
 
-/// A ref's badge (see [`badge`]) laid out in `ui`.
-fn badge_widget(ui: &mut Ui, git_ref: &GitRef, palette: &Palette) {
-    let text = ui.painter().layout_no_wrap(
-        git_ref.name.clone(),
-        FontId::proportional(11.5),
-        Color32::PLACEHOLDER,
-    );
-    let (rect, _) = ui.allocate_exact_size(vec2(text.size().x + 11.0, 17.0), Sense::hover());
-    badge(ui, git_ref, palette, rect.left_center(), rect.width());
+/// A badge (see [`badge`]) laid out in `ui`.
+fn badge_widget(ui: &mut Ui, b: &Badge, palette: &Palette) {
+    let text =
+        ui.painter()
+            .layout_no_wrap(b.text(), FontId::proportional(11.5), Color32::PLACEHOLDER);
+    let glyph = if let Badge::Worktree(_) = b {
+        BADGE_GLYPH
+    } else {
+        0.0
+    };
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(text.size().x + 11.0 + glyph, 17.0), Sense::hover());
+    badge(ui, b, palette, rect.left_center(), rect.width());
+    if let Badge::Ref(_, Some(w)) | Badge::Worktree(w) = b {
+        response.on_hover_text(format!("Worktree {}", w.path.display()));
+    }
 }
 
 /// A merge parent's short hash, as `git log`'s `Merge:` line has it. A link to the parent's

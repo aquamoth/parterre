@@ -84,7 +84,8 @@ crates/parterre        the binary (eframe/egui)
   system_theme.rs      light or dark desktop preference on Linux (XDG portal)
   menu.rs              the look of menus and popovers, menu items
   browser.rs           opens github.com pages with the platform's opener
-  file_manager.rs      opens a worktree's folder in the platform's file manager
+  file_manager.rs      opens a worktree's folder in the platform's file manager, or a
+                       terminal there
   widgets.rs           icon buttons, segmented buttons, switches, text fields
   settings.rs          persisted settings and the Classic/Modern looks
   automation.rs        --screenshot / --demo-drag / --demo-menu / --demo-open / --demo-log /
@@ -109,7 +110,7 @@ crates/parterre        the binary (eframe/egui)
      (`forge`), separately from the snapshot, which stays what git has.
    - Worktrees, while shown: a branch another worktree has checked out is shown even where
      the local-branch switch or the hide list would leave it out, and starts history. A
-     detached worktree's HEAD starts history too and labels its commit, below the hash. The
+     detached worktree's HEAD starts history too and labels its commit, above the hash. The
      snapshot always holds the commits of every worktree's HEAD, so the switch needs no git.
    - *Labelled commits* reproduces `git log --simplify-by-decoration`, including
      `simplify_merges` (redundant parents dropped) and empty-tree roots (TREESAME).

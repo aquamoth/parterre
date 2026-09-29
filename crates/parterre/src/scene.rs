@@ -8,7 +8,7 @@ use parterre_core::forge::{PullRequest, PullRequests};
 use parterre_core::layout::{self, Layout, LayoutEdge, LayoutInput, LayoutOptions, Point};
 use parterre_core::physics::{DragModel, Net};
 use parterre_core::revgraph::{self, RevGraph};
-use parterre_core::{RefKind, Repo};
+use parterre_core::{Label, RefKind, Repo};
 
 use crate::settings::Settings;
 
@@ -137,45 +137,45 @@ impl Scene {
             .nodes
             .iter()
             .map(|node| {
-                let refs = node.refs.iter().map(|&i| {
-                    let r = &repo.refs[i];
-                    Row {
-                        label: r.name.clone(),
-                        kind: RowKind::Ref {
-                            kind: r.kind,
-                            head: r.is_head,
-                            worktree: worktrees_shown
-                                .then(|| repo.worktrees_on(&r.full_name).next())
-                                .flatten()
-                                .map(checkout),
+                let labels = repo.labels(&node.refs, &node.worktrees, worktrees_shown);
+                let mut rows: Vec<Row> = labels
+                    .iter()
+                    .map(|&label| match label {
+                        Label::Ref { index, worktree } => {
+                            let r = &repo.refs[index];
+                            Row {
+                                label: r.name.clone(),
+                                kind: RowKind::Ref {
+                                    kind: r.kind,
+                                    head: r.is_head,
+                                    worktree: worktree.map(checkout),
+                                },
+                                width: 0.0,
+                            }
+                        }
+                        Label::Worktree(index) => Row {
+                            label: repo.worktrees[index].name(),
+                            kind: RowKind::Worktree(checkout(index)),
+                            width: 0.0,
                         },
-                        width: 0.0,
-                    }
-                });
-                let worktrees = node.worktrees.iter().map(|&index| Row {
-                    label: repo.worktrees[index].name(),
-                    kind: RowKind::Worktree(checkout(index)),
-                    width: 0.0,
-                });
-                let pulls = node.pull_requests.iter().map(|&index| Row {
-                    label: pull_requests[index].number.to_string(),
-                    kind: RowKind::PullRequest {
-                        index,
-                        draft: pull_requests[index].draft,
-                    },
-                    width: 0.0,
-                });
-                let mut rows: Vec<Row> = refs.collect();
-                // Only refs stand in for the hash. Other labels (worktrees, pull requests) go
-                // below the refs, or below the hash where there are none.
-                if rows.is_empty() {
+                    })
+                    .collect();
+                // Only refs stand in for the hash. Worktrees go above it, pull requests below.
+                if node.refs.is_empty() {
                     rows.push(Row {
                         label: repo.commit(node.commit).oid.short(repo.abbrev_len),
                         kind: RowKind::Hash,
                         width: 0.0,
                     });
                 }
-                rows.extend(worktrees.chain(pulls));
+                rows.extend(node.pull_requests.iter().map(|&index| Row {
+                    label: pull_requests[index].number.to_string(),
+                    kind: RowKind::PullRequest {
+                        index,
+                        draft: pull_requests[index].draft,
+                    },
+                    width: 0.0,
+                }));
                 for row in &mut rows {
                     row.width = text_width(&row.label);
                     if let RowKind::Worktree(_) = row.kind {
@@ -521,8 +521,8 @@ mod tests {
                 missing,
                 open,
             };
-        // main (0, HEAD) - topic (1) - the root (2), with topic and the root checked out
-        // elsewhere, the root in a worktree whose folder is gone.
+        // main (0, HEAD) - topic (1, also `a-first`) - the root (2), with topic and the root
+        // checked out elsewhere, the root in a worktree whose folder is gone.
         let mut repo = Repo::new(
             "/src/main".into(),
             vec![
@@ -532,6 +532,7 @@ mod tests {
             ],
             vec![
                 git_ref("refs/heads/main", 0, true),
+                git_ref("refs/heads/a-first", 1, false),
                 git_ref("refs/heads/topic", 1, false),
             ],
             Head::Branch {
@@ -575,8 +576,15 @@ mod tests {
             index: 1,
             missing: false,
         };
-        assert_eq!(rows(1), [branch("topic", false, Some(topic))]);
-        // A detached worktree labels its commit below the hash, with its folder's name.
+        // Worktrees first.
+        assert_eq!(
+            rows(1),
+            [
+                branch("topic", false, Some(topic)),
+                branch("a-first", false, None)
+            ]
+        );
+        // A detached worktree labels its commit above the hash, with its folder's name.
         let gone = Checkout {
             index: 2,
             missing: true,
@@ -585,11 +593,11 @@ mod tests {
         assert_eq!(
             rows(2),
             [
-                (hash, RowKind::Hash),
-                ("wt-gone".to_owned(), RowKind::Worktree(gone))
+                ("wt-gone".to_owned(), RowKind::Worktree(gone)),
+                (hash, RowKind::Hash)
             ]
         );
-        assert_eq!(input.visuals[2].rows[1].width, 7.0 + WORKTREE_GLYPH);
+        assert_eq!(input.visuals[2].rows[0].width, 7.0 + WORKTREE_GLYPH);
 
         let scene = input.lay_out();
         assert!(scene.worktrees_on(0).is_empty());
@@ -599,9 +607,17 @@ mod tests {
         // Turned off, the branch is a plain one and the detached worktree isn't shown.
         settings.graph.show_worktrees = false;
         let input = prepare(&settings);
+        let kinds: Vec<RowKind> = input.visuals[1]
+            .rows
+            .iter()
+            .map(|r| r.kind.clone())
+            .collect();
         assert_eq!(
-            input.visuals[1].rows[0].kind,
-            branch("topic", false, None).1
+            kinds,
+            [
+                branch("a-first", false, None).1,
+                branch("topic", false, None).1
+            ]
         );
         assert_eq!(input.visuals[2].rows.len(), 1);
     }

@@ -2056,11 +2056,7 @@ fn history_row<'a>(
     Row {
         hash,
         hash_fill: h.ages[i].filter(|_| row.owns_lines).map(|age| bc.age(age)),
-        refs: h.refs[i]
-            .iter()
-            .map(|&r| &repo.refs[r])
-            .filter(|r| graph.shows(r.kind))
-            .collect(),
+        refs: super::log_window::badges(repo, &h.refs[i], row.snapshot, graph),
         tag: (row.commit.is_some() && row.snapshot.is_none()).then_some("not in the graph"),
         subject,
         note: match &row.source {

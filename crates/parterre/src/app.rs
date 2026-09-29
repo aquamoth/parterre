@@ -1751,81 +1751,83 @@ impl ParterreApp {
                     let n = &scene.graph.nodes[node];
                     let oid_of = |n: usize| scene.repo.commit(scene.graph.nodes[n].commit).oid;
                     let oid = oid_of(node);
-                    // Two nodes: Compare revisions, in selection order; one: against HEAD.
-                    let head = scene.repo.head_commit().map(|c| scene.repo.commit(c).oid);
-                    let (label, pair) = match *group.as_slice() {
-                        [a, b] => ("Compare revisions", Some((oid_of(a), oid_of(b)))),
-                        [_] => (
-                            "Compare with HEAD",
-                            head.filter(|&h| h != oid).map(|h| (oid, h)),
-                        ),
-                        _ => ("Compare revisions", None),
-                    };
-                    let why = if group.len() > 2 {
-                        "Select one or two nodes"
-                    } else {
-                        "This is HEAD"
-                    };
-                    let compare = ui
-                        .add_enabled(pair.is_some(), egui::Button::new(label))
-                        .on_disabled_hover_text(why);
-                    if compare.clicked()
-                        && let Some((a, b)) = pair
-                    {
-                        action = Some(MenuAction::Compare(CompareRequest::Compare(a, b)));
-                        ui.close();
-                    }
-                    let working_tree = scene.repo.has_working_tree;
-                    let why = if !working_tree {
-                        "A bare repository has no working tree"
-                    } else {
-                        "Select one node"
-                    };
-                    let with_working_tree = ui
-                        .add_enabled(
-                            group.len() == 1 && working_tree,
-                            egui::Button::new("Compare with working tree"),
-                        )
-                        .on_disabled_hover_text(why);
-                    if with_working_tree.clicked() {
-                        action = Some(MenuAction::Compare(CompareRequest::WorkingTree(oid)));
-                        ui.close();
-                    }
-                    let is_marked = marked.as_ref().is_some_and(|(m, _)| *m == oid);
-                    let (text, mark) = if is_marked {
-                        ("Clear the mark", None)
-                    } else {
-                        ("Mark for comparison", Some(oid))
-                    };
-                    let mark_item = ui
-                        .add_enabled(group.len() == 1, egui::Button::new(text))
-                        .on_disabled_hover_text("Select one node");
-                    if mark_item.clicked() {
-                        action = Some(MenuAction::Compare(CompareRequest::Mark(mark)));
-                        ui.close();
-                    }
-                    let other = marked
-                        .as_ref()
-                        .filter(|(m, _)| *m != oid && group.len() == 1);
-                    let label = other.map_or("Compare with marked".to_owned(), |(_, name)| {
-                        format!("Compare with marked ({name})")
+                    menu::plain_submenu(ui, "Compare", |ui| {
+                        // Two nodes: Compare revisions, in selection order; one: against HEAD.
+                        let head = scene.repo.head_commit().map(|c| scene.repo.commit(c).oid);
+                        let (label, pair) = match *group.as_slice() {
+                            [a, b] => ("Compare revisions", Some((oid_of(a), oid_of(b)))),
+                            [_] => (
+                                "Compare with HEAD",
+                                head.filter(|&h| h != oid).map(|h| (oid, h)),
+                            ),
+                            _ => ("Compare revisions", None),
+                        };
+                        let why = if group.len() > 2 {
+                            "Select one or two nodes"
+                        } else {
+                            "This is HEAD"
+                        };
+                        let compare = ui
+                            .add_enabled(pair.is_some(), egui::Button::new(label))
+                            .on_disabled_hover_text(why);
+                        if compare.clicked()
+                            && let Some((a, b)) = pair
+                        {
+                            action = Some(MenuAction::Compare(CompareRequest::Compare(a, b)));
+                            ui.close();
+                        }
+                        let working_tree = scene.repo.has_working_tree;
+                        let why = if !working_tree {
+                            "A bare repository has no working tree"
+                        } else {
+                            "Select one node"
+                        };
+                        let with_working_tree = ui
+                            .add_enabled(
+                                group.len() == 1 && working_tree,
+                                egui::Button::new("Compare with working tree"),
+                            )
+                            .on_disabled_hover_text(why);
+                        if with_working_tree.clicked() {
+                            action = Some(MenuAction::Compare(CompareRequest::WorkingTree(oid)));
+                            ui.close();
+                        }
+                        let is_marked = marked.as_ref().is_some_and(|(m, _)| *m == oid);
+                        let (text, mark) = if is_marked {
+                            ("Clear the mark", None)
+                        } else {
+                            ("Mark for comparison", Some(oid))
+                        };
+                        let mark_item = ui
+                            .add_enabled(group.len() == 1, egui::Button::new(text))
+                            .on_disabled_hover_text("Select one node");
+                        if mark_item.clicked() {
+                            action = Some(MenuAction::Compare(CompareRequest::Mark(mark)));
+                            ui.close();
+                        }
+                        let other = marked
+                            .as_ref()
+                            .filter(|(m, _)| *m != oid && group.len() == 1);
+                        let label = other.map_or("Compare with marked".to_owned(), |(_, name)| {
+                            format!("Compare with marked ({name})")
+                        });
+                        let why = if group.len() > 1 {
+                            "Select one node"
+                        } else if is_marked {
+                            "This is the marked commit"
+                        } else {
+                            "Mark a commit for comparison first"
+                        };
+                        let with_marked = ui
+                            .add_enabled(other.is_some(), egui::Button::new(label))
+                            .on_disabled_hover_text(why);
+                        if with_marked.clicked()
+                            && let Some(&(m, _)) = other
+                        {
+                            action = Some(MenuAction::Compare(CompareRequest::Compare(m, oid)));
+                            ui.close();
+                        }
                     });
-                    let why = if group.len() > 1 {
-                        "Select one node"
-                    } else if is_marked {
-                        "This is the marked commit"
-                    } else {
-                        "Mark a commit for comparison first"
-                    };
-                    let with_marked = ui
-                        .add_enabled(other.is_some(), egui::Button::new(label))
-                        .on_disabled_hover_text(why);
-                    if with_marked.clicked()
-                        && let Some(&(m, _)) = other
-                    {
-                        action = Some(MenuAction::Compare(CompareRequest::Compare(m, oid)));
-                        ui.close();
-                    }
                     if pull_requests_shown {
                         // Greyed out rather than left out, so the menu keeps its shape.
                         if n.pull_requests.is_empty() {
@@ -1852,64 +1854,80 @@ impl ParterreApp {
                     } else {
                         Vec::new()
                     };
-                    // With more than one, each item names its folder.
-                    let named = |what: &str, w: &parterre_core::Worktree| {
-                        if worktrees.len() > 1 {
-                            format!("{what} ({})", w.name())
-                        } else {
-                            what.to_owned()
-                        }
-                    };
                     if worktrees_shown {
-                        // Greyed out rather than left out, so the menu keeps its shape.
-                        if worktrees.is_empty() {
-                            ui.add_enabled(false, egui::Button::new("Open folder"))
-                                .on_disabled_hover_text("No worktree is checked out here");
-                        }
-                        for w in &worktrees {
-                            let path = w.path.display().to_string();
-                            let open = ui
-                                .add_enabled(!w.missing, egui::Button::new(named("Open folder", w)))
-                                .on_hover_text(&path)
-                                .on_disabled_hover_text(format!("The folder is gone: {path}"));
-                            if open.clicked() {
-                                action = Some(MenuAction::OpenFolder(w.path.clone()));
-                                ui.close();
+                        for (what, opener) in [
+                            ("Open in file system", Opener::FileManager),
+                            ("Open in terminal", Opener::Terminal),
+                        ] {
+                            // One worktree: the item opens it. Several: a submenu names them.
+                            let mut open_item =
+                                |ui: &mut Ui, label: &str, w: &parterre_core::Worktree| {
+                                    let path = w.path.display().to_string();
+                                    let open = ui
+                                        .add_enabled(!w.missing, egui::Button::new(label))
+                                        .on_hover_text(&path)
+                                        .on_disabled_hover_text(format!(
+                                            "The folder is gone: {path}"
+                                        ));
+                                    if open.clicked() {
+                                        action = Some(MenuAction::Open(opener, w.path.clone()));
+                                        ui.close();
+                                    }
+                                };
+                            match worktrees.as_slice() {
+                                // Greyed out rather than left out, so the menu keeps its shape.
+                                [] => {
+                                    ui.add_enabled(false, egui::Button::new(what))
+                                        .on_disabled_hover_text("No worktree is checked out here");
+                                }
+                                [w] => open_item(ui, what, w),
+                                several => menu::plain_submenu(ui, what, |ui| {
+                                    for w in several {
+                                        open_item(ui, &w.name(), w);
+                                    }
+                                }),
                             }
                         }
                     }
                     menu::separator(ui);
                     let commit = scene.repo.commit(n.commit);
-                    // Right-clicking selects the node, so Ctrl+C would copy the same hash.
-                    let copy_hash = if group.len() > 1 { "" } else { "Ctrl+C" };
-                    if ui.add(item("Copy hash", copy_hash)).clicked() {
-                        ui.ctx().copy_text(commit.oid.to_hex());
-                        ui.close();
-                    }
-                    if ui.button("Copy ref names").clicked() {
-                        let names: Vec<&str> = n
-                            .refs
-                            .iter()
-                            .map(|&r| scene.repo.refs[r].full_name.as_str())
-                            .collect();
-                        let text = if names.is_empty() {
-                            commit.oid.to_hex()
-                        } else {
-                            names.join("\n")
-                        };
-                        ui.ctx().copy_text(text);
-                        ui.close();
-                    }
-                    if ui.button("Copy subject").clicked() {
-                        ui.ctx().copy_text(commit.subject.clone());
-                        ui.close();
-                    }
-                    for w in &worktrees {
-                        if ui.button(named("Copy folder path", w)).clicked() {
-                            ui.ctx().copy_text(w.path.display().to_string());
+                    menu::plain_submenu(ui, "Copy", |ui| {
+                        // Right-clicking selects the node, so Ctrl+C would copy the same hash.
+                        let copy_hash = if group.len() > 1 { "" } else { "Ctrl+C" };
+                        if ui.add(item("Hash", copy_hash)).clicked() {
+                            ui.ctx().copy_text(commit.oid.to_hex());
                             ui.close();
                         }
-                    }
+                        if ui.button("Ref names").clicked() {
+                            let names: Vec<&str> = n
+                                .refs
+                                .iter()
+                                .map(|&r| scene.repo.refs[r].full_name.as_str())
+                                .collect();
+                            let text = if names.is_empty() {
+                                commit.oid.to_hex()
+                            } else {
+                                names.join("\n")
+                            };
+                            ui.ctx().copy_text(text);
+                            ui.close();
+                        }
+                        if ui.button("Subject").clicked() {
+                            ui.ctx().copy_text(commit.subject.clone());
+                            ui.close();
+                        }
+                        for w in &worktrees {
+                            let label = if worktrees.len() > 1 {
+                                format!("Folder path ({})", w.name())
+                            } else {
+                                "Folder path".to_owned()
+                            };
+                            if ui.button(label).clicked() {
+                                ui.ctx().copy_text(w.path.display().to_string());
+                                ui.close();
+                            }
+                        }
+                    });
                     menu::separator(ui);
                     if ui
                         .button("Select subtree")
@@ -1958,8 +1976,12 @@ impl ParterreApp {
                     self.status = Some((e, true));
                 }
             }
-            Some(MenuAction::OpenFolder(dir)) => {
-                if let Err(e) = crate::file_manager::open(&dir) {
+            Some(MenuAction::Open(opener, dir)) => {
+                let opened = match opener {
+                    Opener::FileManager => crate::file_manager::open(&dir),
+                    Opener::Terminal => crate::file_manager::open_terminal(&dir),
+                };
+                if let Err(e) = opened {
                     self.status = Some((e, true));
                 }
             }
@@ -2332,8 +2354,15 @@ enum MenuAction {
     Compare(CompareRequest),
     /// Open a pull request's page in the browser.
     OpenPullRequest(String),
-    /// Open a worktree's folder in the file manager.
-    OpenFolder(std::path::PathBuf),
+    /// Open a worktree's folder in the file manager or a terminal.
+    Open(Opener, std::path::PathBuf),
+}
+
+/// What opens a worktree's folder.
+#[derive(Clone, Copy, Debug)]
+enum Opener {
+    FileManager,
+    Terminal,
 }
 
 impl eframe::App for ParterreApp {

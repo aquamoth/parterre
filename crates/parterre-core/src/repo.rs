@@ -111,6 +111,19 @@ impl Worktree {
     }
 }
 
+/// A label on a commit (see [`Repo::labels`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Label {
+    /// An index into [`Repo::refs`], and into [`Repo::worktrees`] the other worktree that has
+    /// the branch checked out, while worktrees are shown.
+    Ref {
+        index: usize,
+        worktree: Option<usize>,
+    },
+    /// An index into [`Repo::worktrees`]: another worktree whose detached HEAD this is.
+    Worktree(usize),
+}
+
 /// The order refs on one commit are shown in: a detached HEAD first, then TortoiseGit's order,
 /// by full ref name (heads, remotes, stash, tags).
 pub fn cmp_refs_for_display(a: &GitRef, b: &GitRef) -> Ordering {
@@ -227,6 +240,48 @@ impl Repo {
             .enumerate()
             .filter(move |(_, w)| !w.open && w.branch.as_deref() == Some(full_name))
             .map(|(i, _)| i)
+    }
+
+    /// The worktrees other than the open one whose detached HEAD is `commit`.
+    pub fn detached_worktrees_at(&self, commit: CommitIx) -> impl Iterator<Item = usize> + '_ {
+        self.worktrees
+            .iter()
+            .enumerate()
+            .filter(move |(_, w)| !w.open && w.branch.is_none() && w.head == Some(commit))
+            .map(|(i, _)| i)
+    }
+
+    /// A commit's labels, worktrees first: `refs` (indices into [`Repo::refs`], in
+    /// [`cmp_refs_for_display`] order) and the `detached` worktrees at it. HEAD comes first,
+    /// then, with `worktrees_shown`, the branches other worktrees have checked out, then the
+    /// detached worktrees, then the other refs.
+    pub fn labels(&self, refs: &[usize], detached: &[usize], worktrees_shown: bool) -> Vec<Label> {
+        let label = |index: usize| Label::Ref {
+            index,
+            worktree: worktrees_shown
+                .then(|| self.worktrees_on(&self.refs[index].full_name).next())
+                .flatten(),
+        };
+        let refs: Vec<Label> = refs.iter().map(|&i| label(i)).collect();
+        let is_head =
+            |l: &Label| matches!(*l, Label::Ref { index, .. } if self.refs[index].is_head);
+        let in_worktree = |l: &Label| {
+            matches!(
+                l,
+                Label::Ref {
+                    worktree: Some(_),
+                    ..
+                }
+            )
+        };
+        let head = refs.iter().filter(|l| is_head(l));
+        let worktrees = refs.iter().filter(|l| !is_head(l) && in_worktree(l));
+        let others = refs.iter().filter(|l| !is_head(l) && !in_worktree(l));
+        head.chain(worktrees)
+            .copied()
+            .chain(detached.iter().map(|&k| Label::Worktree(k)))
+            .chain(others.copied())
+            .collect()
     }
 
     /// True if both snapshots have the same refs pointing at the same commits, the same HEAD

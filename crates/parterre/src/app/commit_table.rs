@@ -9,11 +9,10 @@ use eframe::egui::{
     self, Color32, CornerRadius, FontId, Galley, Id, Rect, ScrollArea, Sense, Stroke, Ui, pos2,
     vec2,
 };
-use parterre_core::GitRef;
 use parterre_core::log::Found;
 use parterre_core::log_graph::{GraphRow, LogGraph};
 
-use super::log_window::{CELL_PAD, Colors, HEADING, badge, cell, heading_background};
+use super::log_window::{Badge, CELL_PAD, Colors, HEADING, badge, cell, heading_background};
 use crate::theme::Palette;
 use crate::widgets;
 
@@ -70,8 +69,8 @@ pub struct Row<'a> {
     pub hash_fill: Option<Color32>,
     /// Marked for comparison: a ribbon before the refs.
     pub marked: bool,
-    /// The ref badges before the subject, in order.
-    pub refs: Vec<&'a GitRef>,
+    /// The badges (refs and worktrees) before the subject, in order.
+    pub refs: Vec<Badge<'a>>,
     /// An outlined tag before the subject, in the weak colour ("not in the graph").
     pub tag: Option<&'a str>,
     pub subject: &'a str,
@@ -235,11 +234,11 @@ impl CommitTable<'_> {
                     widgets::paint_ribbon(painter, ribbon, self.palette.marked, Stroke::NONE);
                     left += 16.0;
                 }
-                for git_ref in &r.refs {
+                for b in &r.refs {
                     if left >= right {
                         break;
                     }
-                    left += badge(ui, git_ref, self.palette, pos2(left, y), right - left) + 4.0;
+                    left += badge(ui, b, self.palette, pos2(left, y), right - left) + 4.0;
                 }
                 if let Some(tag) = r.tag
                     && left < right
