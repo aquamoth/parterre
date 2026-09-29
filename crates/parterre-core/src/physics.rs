@@ -376,9 +376,7 @@ impl Net {
             node_edges[child as usize].push(e as u32);
             if parent != child {
                 node_edges[parent as usize].push(e as u32);
-                if layout.edge_first_parent.get(e) == Some(&true)
-                    && first_parent[child as usize] == NO_NODE
-                {
+                if layout.edge_first_parent[e] && first_parent[child as usize] == NO_NODE {
                     first_parent[child as usize] = parent;
                 }
             }
@@ -885,40 +883,50 @@ impl Net {
     /// that rest away (so that [`Net::restore`] can tell them from new commits): node, rest
     /// offset from the layout, moved by hand. For saving; see [`Net::restore`].
     pub fn rest_offsets(&self) -> impl Iterator<Item = (usize, Point, bool)> + '_ {
-        let zero = Point::default();
         (0..self.node_count)
-            .filter(move |&i| {
+            .filter(|&i| {
                 self.moved[i]
-                    || self.home[i] != zero
-                    || self.parents(i).any(|p| self.home[p as usize] != zero)
+                    || self.is_displaced(i)
+                    || self.parents(i).any(|p| self.is_displaced(p as usize))
             })
             .map(|i| (i, self.home[i], self.moved[i]))
     }
 
     /// The parents of `node`.
     fn parents(&self, node: usize) -> impl Iterator<Item = u32> + '_ {
-        self.node_edges[node].iter().filter_map(move |&e| {
-            let chain = &self.chains[e as usize];
-            let (child, parent) = (chain[0], chain[chain.len() - 1]);
-            (child as usize == node && parent != child).then_some(parent)
-        })
+        let node = node as u32;
+        self.edge_ends(node)
+            .filter_map(move |(child, parent)| (child == node).then_some(parent))
     }
 
     /// The children of `node`.
     fn children(&self, node: usize) -> impl Iterator<Item = u32> + '_ {
-        self.node_edges[node].iter().filter_map(move |&e| {
+        let node = node as u32;
+        self.edge_ends(node)
+            .filter_map(move |(child, parent)| (parent == node).then_some(child))
+    }
+
+    /// (child, parent) of every edge at `node`, leaving out loops.
+    fn edge_ends(&self, node: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.node_edges[node as usize].iter().filter_map(|&e| {
             let chain = &self.chains[e as usize];
             let (child, parent) = (chain[0], chain[chain.len() - 1]);
-            (parent as usize == node && parent != child).then_some(child)
+            (parent != child).then_some((child, parent))
         })
     }
 
     /// Puts nodes at saved rest offsets from the layout at once (the edges at them follow).
-    /// A node that was not saved but has a parent resting away from the layout is a new
-    /// commit (see [`Net::rest_offsets`]); it keeps its place beside its first parent, taking
-    /// on its displacement, and moves on against the flow if that leaves it not clear above a
-    /// parent. Meant for a fresh net; not recorded for undo.
-    pub fn restore(&mut self, saved: impl IntoIterator<Item = (usize, Point, bool)>) {
+    /// With `place_new_commits`, a node that was not saved but has a parent resting away from
+    /// the layout is a new commit (see [`Net::rest_offsets`]); it keeps its place beside its
+    /// first parent, taking on its displacement, and moves on against the flow if that leaves
+    /// it not clear above a parent. Without, for offsets saved without the children of
+    /// displaced nodes, only the saved nodes move. Meant for a fresh net; not recorded for
+    /// undo.
+    pub fn restore(
+        &mut self,
+        saved: impl IntoIterator<Item = (usize, Point, bool)>,
+        place_new_commits: bool,
+    ) {
         self.cancel_grab();
         let mut by = HashMap::new();
         for (node, offset, moved) in saved {
@@ -927,7 +935,9 @@ impl Net {
                 self.moved[node] = moved;
             }
         }
-        self.place_new_nodes(&mut by);
+        if place_new_commits {
+            self.place_new_nodes(&mut by);
+        }
         for (p, _, after) in self.shifted_homes(&by) {
             let p = p as usize;
             self.set_home(p, after);
@@ -953,7 +963,7 @@ impl Net {
             )
         };
         // The new commits: children of saved nodes that rest away, and their children in turn.
-        let mut new: Vec<u32> = Vec::new();
+        let mut new_commits: Vec<u32> = Vec::new();
         let mut seen: HashSet<u32> = HashSet::new();
         let mut queue: Vec<u32> = by
             .keys()
@@ -963,16 +973,15 @@ impl Net {
         while let Some(p) = queue.pop() {
             for c in self.children(p as usize) {
                 if !by.contains_key(&c) && seen.insert(c) {
-                    new.push(c);
+                    new_commits.push(c);
                     queue.push(c);
                 }
             }
         }
         // Parents first: they lie farther along the flow.
-        let depth = |p: u32| dot(self.origin[p as usize], self.flow);
-        new.sort_unstable_by(|&a, &b| depth(b).total_cmp(&depth(a)));
-        let across = Point::new(self.flow.x.abs(), self.flow.y.abs());
-        for c in new {
+        let along_flow = |p: u32| dot(self.origin[p as usize], self.flow);
+        new_commits.sort_unstable_by(|&a, &b| along_flow(b).total_cmp(&along_flow(a)));
+        for c in new_commits {
             let ci = c as usize;
             let first = self.first_parent[ci];
             let mut d = if first == NO_NODE {
@@ -986,7 +995,7 @@ impl Net {
                 if apart <= 0.0 {
                     continue;
                 }
-                let needed = (dot(add(self.half[ci], self.half[pi]), across) + FLOW_GAP).min(apart);
+                let needed = self.flow_gap(ci, pi, apart);
                 let have = apart + dot(sub(rest(by, p), d), self.flow);
                 if have < needed {
                     d = sub(d, scale(self.flow, needed - have));
@@ -1914,8 +1923,7 @@ impl Net {
         if !s.along_edge || a == b || dot(s.offset, flow) <= 0.0 || rest <= 0.0 {
             return None;
         }
-        let across = Point::new(flow.x.abs(), flow.y.abs());
-        let needed = (dot(add(self.half[a], self.half[b]), across) + FLOW_GAP).min(rest);
+        let needed = self.flow_gap(a, b, rest);
         let have = dot(
             sub(
                 add(self.origin[b], target[b]),
@@ -1924,6 +1932,12 @@ impl Net {
             flow,
         );
         Some(have - needed)
+    }
+
+    /// How far along the flow the older end `b` of an edge segment stays beyond its newer end
+    /// `a` (see [`Net::keep_flow_order`]), where they are `rest` apart at rest.
+    fn flow_gap(&self, a: usize, b: usize, rest: f32) -> f32 {
+        (self.depth(a) + self.depth(b) + FLOW_GAP).min(rest)
     }
 
     /// Puts segment `s` back in order by moving its end `moved` (`s.b` on along the flow, or
@@ -2774,7 +2788,7 @@ mod tests {
         let saved: Vec<(usize, Point, bool)> = net.rest_offsets().collect();
         assert!(saved.iter().any(|&(i, _, moved)| i == 3 && moved));
         let (_, mut fresh) = chain_net();
-        fresh.restore(saved);
+        fresh.restore(saved, true);
         assert!(!fresh.is_awake(), "restores at once");
         for i in 0..5 {
             assert!(close(fresh.node_pos(i), net.node_pos(i)), "node {i}");
@@ -2790,7 +2804,7 @@ mod tests {
     /// nodes as `net` (at the same indices) and new ones after them.
     fn reload(net: &Net, input: &LayoutInput) -> (Layout, Net) {
         let (l, mut fresh) = net_for(input);
-        fresh.restore(net.rest_offsets().collect::<Vec<_>>());
+        fresh.restore(net.rest_offsets().collect::<Vec<_>>(), true);
         (l, fresh)
     }
 
@@ -2825,6 +2839,20 @@ mod tests {
             close(fresh.node_pos(0), l.nodes[0]),
             "an old child that stayed put stays put"
         );
+    }
+
+    #[test]
+    fn offsets_saved_without_the_children_leave_the_rest_in_the_layout() {
+        // 0 -> 1 -> 2, and 1 moved: an older save lists only 1.
+        let (l, mut net) = net_for(&LayoutInput {
+            sizes: vec![Point::new(60.0, 20.0); 3],
+            times: vec![3, 2, 1],
+            edges: vec![edge(0, 1), edge(1, 2)],
+            priority: Vec::new(),
+        });
+        net.restore([(1, Point::new(300.0, 0.0), true)], false);
+        assert!(close(net.node_pos(0), l.nodes[0]));
+        assert!(net.is_moved(1));
     }
 
     #[test]
