@@ -1199,6 +1199,7 @@ impl ParterreApp {
 
     fn status_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
+            crate::prototype_operation_dialog::status_bar(ui);
             if self.is_laying_out() {
                 ui.spinner();
                 ui.label("Laying out…");
@@ -1565,6 +1566,7 @@ impl ParterreApp {
             &self.settings,
             &marks,
         );
+        crate::prototype_operation_dialog::paint(&painter, canvas, &self.view, scene);
 
         if let Some(band) = band {
             painter.rect(
@@ -1828,6 +1830,7 @@ impl ParterreApp {
                         .map(|k| &scene.repo.worktrees[k])
                         .collect();
                     menu::separator(ui);
+                    crate::prototype_operation_dialog::node_menu(ui, scene, node);
                     // Greyed out rather than left out, so the menu keeps its shape.
                     if !(pull_requests_shown || worktrees_shown) {
                         ui.add_enabled(false, egui::Button::new("Open"))
@@ -2428,6 +2431,8 @@ impl eframe::App for ParterreApp {
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         self.about_window(&ctx);
+        crate::prototype_operation_dialog::from_env(ctx.input(|i| i.time));
+        crate::prototype_operation_dialog::show(&ctx, self.repo.as_deref());
 
         // Scripted runs wait for the graph, unless there is none to wait for, and for the diffs
         // and the pull requests (and the layout with them) being loaded.

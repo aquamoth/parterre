@@ -300,6 +300,8 @@ impl ParterreApp {
     }
 
     fn main_menu(&mut self, ui: &mut Ui) {
+        crate::prototype_operation_dialog::main_menu(ui);
+        menu::separator(ui);
         if menu::item(ui, "Open folder…", "Ctrl+O", Mark::None).clicked() {
             self.pick_folder = true;
         }
