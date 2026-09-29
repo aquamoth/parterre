@@ -127,9 +127,19 @@ pub fn item(ui: &mut Ui, label: &str, shortcut: &str, mark: Mark) -> Response {
 
 /// An item opening a submenu, lined up with [`item`]s, with a chevron on the right.
 pub fn submenu(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui)) {
+    let button = Button::new((Atom::custom(Id::new("menu-mark"), Vec2::splat(MARK)), label));
+    submenu_button(ui, button, content);
+}
+
+/// An item opening a submenu, lined up with plain buttons (a node's menu), with a chevron on
+/// the right.
+pub fn plain_submenu(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui)) {
+    submenu_button(ui, Button::new(label), content);
+}
+
+fn submenu_button(ui: &mut Ui, button: Button, content: impl FnOnce(&mut Ui)) {
     const ARROW: f32 = 12.0;
-    let button = Button::new((Atom::custom(Id::new("menu-mark"), Vec2::splat(MARK)), label))
-        .right_text(Atom::custom(Id::new("menu-arrow"), Vec2::splat(ARROW)));
+    let button = button.right_text(Atom::custom(Id::new("menu-arrow"), Vec2::splat(ARROW)));
     let (response, _) = egui::containers::menu::SubMenuButton::from_button(button)
         .ui(ui, |ui| fit_window(ui, content));
     let padding = ui.spacing().button_padding.x;

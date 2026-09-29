@@ -81,3 +81,58 @@ fn linked_worktree_sees_its_own_head_and_shared_refs() {
         r.commit("b");
     }));
 }
+
+#[test]
+fn fingerprint_follows_other_worktrees() {
+    let mut r = TestRepo::new();
+    r.commit("a");
+    r.commit("b");
+    let others = tempfile::tempdir().expect("tempdir");
+    let wt = others.path().join("wt");
+    let wt_arg = wt.to_string_lossy().into_owned();
+    let storage = RefStorage::locate(r.path()).expect("locate");
+    let in_wt = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&wt)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    assert!(changes(&storage, || {
+        r.git(&["worktree", "add", "-q", "--detach", &wt_arg, "HEAD~1"]);
+    }));
+    assert!(!changes(&storage, || {
+        std::fs::write(wt.join("untracked"), "x").expect("write");
+        in_wt(&["status"]);
+    }));
+    assert!(changes(&storage, || in_wt(&[
+        "checkout", "-q", "--detach", "main"
+    ])));
+    assert!(changes(&storage, || {
+        in_wt(&["commit", "-q", "--allow-empty", "-m", "c"]);
+    }));
+    assert!(changes(&storage, || {
+        r.git(&["worktree", "lock", &wt_arg]);
+    }));
+    assert!(changes(&storage, || {
+        r.git(&["worktree", "unlock", &wt_arg]);
+    }));
+    assert!(changes(&storage, || {
+        std::fs::remove_dir_all(&wt).expect("delete the worktree");
+    }));
+    assert!(changes(&storage, || {
+        r.git(&["worktree", "prune"]);
+    }));
+    // The same from inside a linked worktree: a checkout in the main one.
+    r.git(&["worktree", "add", "-q", "--detach", &wt_arg]);
+    let linked = RefStorage::locate(&wt).expect("locate");
+    assert!(changes(&linked, || r.checkout("HEAD~1")));
+}

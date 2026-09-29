@@ -290,6 +290,11 @@ impl ParterreApp {
                     super::toolbar::PULL_REQUESTS_TIP,
                     &mut s.graph.show_pull_requests,
                 );
+                rows.switch(
+                    "Worktrees",
+                    super::toolbar::WORKTREES_TIP,
+                    &mut s.graph.show_worktrees,
+                );
                 let tags = s.graph.show_tags;
                 rows.row(
                     "Tags make nodes",

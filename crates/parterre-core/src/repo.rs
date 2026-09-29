@@ -84,6 +84,46 @@ pub enum Head {
     Detached(CommitIx),
 }
 
+/// One of the repository's worktrees (`git worktree list`). A bare main repository isn't one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Worktree {
+    /// Its folder, as git lists it.
+    pub path: PathBuf,
+    /// The commit checked out. `None` for an unborn branch.
+    pub head: Option<CommitIx>,
+    /// The branch checked out (`refs/heads/topic`); `None` if HEAD is detached.
+    pub branch: Option<String>,
+    /// Locked against pruning (`git worktree lock`).
+    pub locked: bool,
+    /// Its folder is gone.
+    pub missing: bool,
+    /// The worktree parterre opened.
+    pub open: bool,
+}
+
+impl Worktree {
+    /// Its folder's name, e.g. `t3code-42df6b45`.
+    pub fn name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
+}
+
+/// A label on a commit (see [`Repo::labels`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Label {
+    /// An index into [`Repo::refs`], and into [`Repo::worktrees`] the worktree that has it
+    /// checked out (for HEAD, the open one), while worktrees are shown.
+    Ref {
+        index: usize,
+        worktree: Option<usize>,
+    },
+    /// An index into [`Repo::worktrees`]: another worktree whose detached HEAD this is.
+    Worktree(usize),
+}
+
 /// The order refs on one commit are shown in: a detached HEAD first, then TortoiseGit's order,
 /// by full ref name (heads, remotes, stash, tags).
 pub fn cmp_refs_for_display(a: &GitRef, b: &GitRef) -> Ordering {
@@ -108,6 +148,8 @@ pub struct Repo {
     /// False for a bare repository (or one opened inside its `.git` directory): there are no
     /// files on disk to compare with.
     pub has_working_tree: bool,
+    /// The worktrees, the main one first (empty if git can't list them).
+    pub worktrees: Vec<Worktree>,
     by_oid: HashMap<Oid, CommitIx>,
 }
 
@@ -125,6 +167,7 @@ impl Repo {
             head,
             abbrev_len: DEFAULT_ABBREV_LEN,
             has_working_tree: true,
+            worktrees: Vec::new(),
             by_oid,
         }
     }
@@ -190,8 +233,65 @@ impl Repo {
         on
     }
 
-    /// True if both snapshots have the same refs pointing at the same commits, and the same
-    /// HEAD. The commits are then the same too, as a snapshot holds exactly what its refs reach.
+    /// The worktrees other than the open one that have the branch `full_name` checked out.
+    pub fn worktrees_on<'a>(&'a self, full_name: &'a str) -> impl Iterator<Item = usize> + 'a {
+        self.worktrees
+            .iter()
+            .enumerate()
+            .filter(move |(_, w)| !w.open && w.branch.as_deref() == Some(full_name))
+            .map(|(i, _)| i)
+    }
+
+    /// The worktrees other than the open one whose detached HEAD is `commit`.
+    pub fn detached_worktrees_at(&self, commit: CommitIx) -> impl Iterator<Item = usize> + '_ {
+        self.worktrees
+            .iter()
+            .enumerate()
+            .filter(move |(_, w)| !w.open && w.branch.is_none() && w.head == Some(commit))
+            .map(|(i, _)| i)
+    }
+
+    /// A commit's labels, worktrees first: `refs` (indices into [`Repo::refs`], in
+    /// [`cmp_refs_for_display`] order) and the `detached` worktrees at it. HEAD comes first,
+    /// then, with `worktrees_shown`, the branches other worktrees have checked out, then the
+    /// detached worktrees, then the other refs. With `worktrees_shown`, every ref a worktree
+    /// has checked out names it: HEAD the open one.
+    pub fn labels(&self, refs: &[usize], detached: &[usize], worktrees_shown: bool) -> Vec<Label> {
+        let open = self.worktrees.iter().position(|w| w.open);
+        let label = |index: usize| {
+            let r = &self.refs[index];
+            let worktree = match worktrees_shown {
+                false => None,
+                true if r.is_head => open,
+                true => self.worktrees_on(&r.full_name).next(),
+            };
+            Label::Ref { index, worktree }
+        };
+        let refs: Vec<Label> = refs.iter().map(|&i| label(i)).collect();
+        let is_head =
+            |l: &Label| matches!(*l, Label::Ref { index, .. } if self.refs[index].is_head);
+        let in_worktree = |l: &Label| {
+            matches!(
+                l,
+                Label::Ref {
+                    worktree: Some(_),
+                    ..
+                }
+            )
+        };
+        let head = refs.iter().filter(|l| is_head(l));
+        let worktrees = refs.iter().filter(|l| !is_head(l) && in_worktree(l));
+        let others = refs.iter().filter(|l| !is_head(l) && !in_worktree(l));
+        head.chain(worktrees)
+            .copied()
+            .chain(detached.iter().map(|&k| Label::Worktree(k)))
+            .chain(others.copied())
+            .collect()
+    }
+
+    /// True if both snapshots have the same refs pointing at the same commits, the same HEAD
+    /// and the same worktrees. The commits are then the same too, as a snapshot holds exactly
+    /// what its refs and worktrees reach.
     pub fn same_refs(&self, other: &Repo) -> bool {
         let refs = |repo: &Repo| -> Vec<(String, Oid, bool)> {
             repo.refs
@@ -206,7 +306,25 @@ impl Repo {
             };
             (branch, repo.head_commit().map(|c| repo.commit(c).oid))
         };
-        head(self) == head(other) && refs(self) == refs(other)
+        // Heads by id, as commit indices differ between snapshots.
+        let worktrees = |repo: &Repo| -> Vec<(Worktree, Option<Oid>)> {
+            repo.worktrees
+                .iter()
+                .map(|w| {
+                    let head = w.head.map(|c| repo.commit(c).oid);
+                    (
+                        Worktree {
+                            head: None,
+                            ..w.clone()
+                        },
+                        head,
+                    )
+                })
+                .collect()
+        };
+        head(self) == head(other)
+            && refs(self) == refs(other)
+            && worktrees(self) == worktrees(other)
     }
 
     /// Display name for the repository (directory name).

@@ -88,6 +88,9 @@ pub struct Palette {
     /// Open pull requests, and draft ones. Not in TortoiseGit.
     pub pull_request: Color32,
     pub draft_pull_request: Color32,
+    /// Other worktrees' detached HEADs, and those whose folder is gone. Not in TortoiseGit.
+    pub worktree: Color32,
+    pub missing_worktree: Color32,
     pub selection: Color32,
     pub search_hit: Color32,
     /// The commit marked for comparison. Not in TortoiseGit's graph, which has no mark.
@@ -131,6 +134,10 @@ impl Palette {
             // Pale blue next to TortoiseGit's pale ref colours; drafts greyer.
             pull_request: Color32::from_rgb(0xB6, 0xD9, 0xFF),
             draft_pull_request: Color32::from_rgb(0xD2, 0xDA, 0xE2),
+            // Cyan, apart from the ref kinds' colours and the pull requests' pale blue; a
+            // gone folder greyer.
+            worktree: Color32::from_rgb(0x00, 0xB4, 0xD8),
+            missing_worktree: Color32::from_rgb(0xB4, 0xCC, 0xD2),
             selection: Color32::from_rgb(0, 120, 215),
             search_hit: Color32::from_rgb(255, 140, 0),
             marked: Color32::from_rgb(190, 30, 140),
@@ -156,6 +163,8 @@ impl Palette {
             other_ref: invert_lightness(l.other_ref),
             pull_request: invert_lightness(l.pull_request),
             draft_pull_request: invert_lightness(l.draft_pull_request),
+            worktree: invert_lightness(l.worktree),
+            missing_worktree: invert_lightness(l.missing_worktree),
             selection: Color32::from_rgb(80, 170, 255),
             search_hit: Color32::from_rgb(255, 160, 40),
             marked: Color32::from_rgb(255, 105, 190),

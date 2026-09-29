@@ -1,11 +1,14 @@
 //! Painting a [`Scene`]: TortoiseGit-style nodes (one coloured row per ref) and edges.
 
+use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
     Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2,
     vec2,
 };
 
-use crate::scene::{CORNER_RADIUS, FONT_SIZE, MARGIN_X, Row, RowKind, Scene, to_pos};
+use crate::scene::{
+    CORNER_RADIUS, Checkout, FONT_SIZE, MARGIN_X, Row, RowKind, Scene, WORKTREE_GLYPH, to_pos,
+};
 use crate::settings::{Arrows, EdgeStyle, Settings};
 use crate::theme::{Palette, text_on};
 use crate::view::View;
@@ -137,6 +140,20 @@ pub fn paint_scene(
                     let stroke = Stroke::new(fixed(zoom.max(1.0)), text);
                     painter.hline(number.x_range(), y, stroke);
                 }
+            } else if let Some(c) = row_worktree(row) {
+                // A detached worktree's name is in italics: it is no branch.
+                let (start, icon) = worktree_label(row_rect, fixed(zoom));
+                widgets::paint_glyph(painter, icon, worktree_glyph(c), text);
+                let format = TextFormat {
+                    font_id: font.clone(),
+                    color: text,
+                    italics: matches!(row.kind, RowKind::Worktree(_)),
+                    ..TextFormat::default()
+                };
+                let galley =
+                    painter.layout_job(LayoutJob::single_section(row.label.clone(), format));
+                let at = Pos2::new(start.x, start.y - galley.size().y / 2.0);
+                painter.galley(at, galley, text);
             } else {
                 painter.text(
                     Pos2::new(row_rect.min.x + fixed(MARGIN_X * zoom), row_rect.center().y),
@@ -533,19 +550,64 @@ pub fn pull_request_label(row: Rect, width: f32, zoom: f32) -> (Pos2, Rect) {
     (end, icon)
 }
 
+/// Where a worktree's label goes in its row: the start of its name, level with the row's
+/// middle, and the folder glyph's box before it.
+pub fn worktree_label(row: Rect, zoom: f32) -> (Pos2, Rect) {
+    let left = row.min.x + MARGIN_X * zoom;
+    let side = FONT_SIZE * zoom;
+    let icon = Rect::from_center_size(
+        Pos2::new(left + side / 2.0, row.center().y),
+        Vec2::splat(side),
+    );
+    (
+        Pos2::new(left + WORKTREE_GLYPH * zoom, row.center().y),
+        icon,
+    )
+}
+
+/// The glyph before a worktree's label: a folder, crossed out if it is gone.
+pub fn worktree_glyph(c: Checkout) -> glyphs::Glyph {
+    if c.missing {
+        glyphs::FOLDER_GONE
+    } else {
+        glyphs::FOLDER
+    }
+}
+
+/// The worktree a row stands for, if any.
+pub fn row_worktree(row: &Row) -> Option<Checkout> {
+    match row.kind {
+        RowKind::Worktree(c)
+        | RowKind::Ref {
+            worktree: Some(c), ..
+        } => Some(c),
+        _ => None,
+    }
+}
+
 /// Fill, border and text colour of a row.
 pub fn row_colors(row: &Row, palette: &Palette) -> (Color32, Color32, Color32) {
     let fill = row_fill(row, palette);
     match &row.kind {
         RowKind::Hash => (fill, palette.plain_border, palette.plain_text),
-        RowKind::Ref { .. } | RowKind::PullRequest { .. } => (fill, fill, text_on(fill)),
+        RowKind::Ref { .. } | RowKind::Worktree(_) | RowKind::PullRequest { .. } => {
+            (fill, fill, text_on(fill))
+        }
     }
 }
 
 fn row_fill(row: &Row, palette: &Palette) -> Color32 {
     match &row.kind {
         RowKind::Hash => palette.plain_fill,
-        RowKind::Ref { kind, head } => palette.ref_fill(*kind, *head, &row.label),
+        // Only a detached worktree has a colour of its own: it stands in for HEAD.
+        RowKind::Worktree(c) => {
+            if c.missing {
+                palette.missing_worktree
+            } else {
+                palette.worktree
+            }
+        }
+        RowKind::Ref { kind, head, .. } => palette.ref_fill(*kind, *head, &row.label),
         RowKind::PullRequest { draft: false, .. } => palette.pull_request,
         RowKind::PullRequest { draft: true, .. } => palette.draft_pull_request,
     }

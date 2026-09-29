@@ -9,6 +9,7 @@ mod browser;
 mod console;
 mod export;
 mod file_dialog;
+mod file_manager;
 mod frame_pacing;
 mod icon;
 mod menu;
@@ -101,6 +102,10 @@ struct Cli {
     /// the settings (needs a signed-in gh; not with --export).
     #[arg(long)]
     pull_requests: bool,
+
+    /// Show the other worktrees, even if turned off in the settings.
+    #[arg(long)]
+    worktrees: bool,
 
     /// Colour theme.
     #[arg(long, value_enum)]
@@ -450,6 +455,9 @@ fn apply_cli(cli: &Cli, s: &mut settings::Settings) {
     }
     if cli.pull_requests {
         s.graph.show_pull_requests = true;
+    }
+    if cli.worktrees {
+        s.graph.show_worktrees = true;
     }
     if let Some(mode) = cli.drag_mode {
         s.net.model = match mode {

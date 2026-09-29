@@ -173,6 +173,14 @@ pub const PULL_REQUEST: Glyph = &[
     ring(19.0, 18.0, 3.0),
     Part::Path("M15 9 12 6l3-3M12 6h5a2 2 0 0 1 2 2v7"),
 ];
+/// Worktrees: Lucide's folder. Also marks the labels of worktrees in the graph.
+pub const FOLDER: Glyph = &[Part::Path(FOLDER_OUTLINE)];
+/// A worktree whose folder is gone: Lucide's folder-x.
+pub const FOLDER_GONE: Glyph = &[
+    Part::Path(FOLDER_OUTLINE),
+    Part::Path("m9.5 10.5 5 5m0-5-5 5"),
+];
+const FOLDER_OUTLINE: &str = "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z";
 /// Reset: Lucide's rotate-ccw.
 pub const RESET: Glyph = &[Part::Path(
     "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5",

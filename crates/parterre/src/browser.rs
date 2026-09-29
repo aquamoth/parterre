@@ -15,13 +15,16 @@ pub fn open(url: &str) -> Result<(), String> {
             "not opening {url}: only {ALLOWED} pages are opened"
         ));
     }
-    let mut cmd = opener(url);
+    spawn(opener(url)).map_err(|e| format!("could not open {url}: {e}"))
+}
+
+/// Starts `cmd` with no input or output, and doesn't wait for it: an opener may run as long as
+/// what it opens.
+pub fn spawn(mut cmd: Command) -> std::io::Result<()> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("could not open {url}: {e}"))?;
+    let mut child = cmd.spawn()?;
     // Reaped in the background, so no zombie is left behind.
     std::thread::spawn(move || child.wait());
     Ok(())

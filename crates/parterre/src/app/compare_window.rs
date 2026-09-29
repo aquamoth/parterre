@@ -22,7 +22,7 @@ use parterre_core::{Oid, Repo};
 
 use super::ParterreApp;
 use super::file_table::{DiffQueue, FileTable, Lister, Listing};
-use super::log_window::{Colors, badge, colors};
+use super::log_window::{Colors, badge, badges, colors};
 use crate::settings::CompareWindowSettings;
 use crate::text_size;
 use crate::theme::Palette;
@@ -287,12 +287,11 @@ fn side(
     let Some(ix) = view.repo.lookup(&oid) else {
         return;
     };
-    for &r in &view.refs[ix.ix()] {
-        let git_ref = &view.repo.refs[r];
-        if !env.graph.shows(git_ref.kind) || x >= right {
-            continue;
+    for b in badges(&view.repo, &view.refs[ix.ix()], Some(ix), env.graph) {
+        if x >= right {
+            break;
         }
-        x += badge(ui, git_ref, &env.palette, pos2(x, y), right - x) + 4.0;
+        x += badge(ui, &b, &env.palette, pos2(x, y), right - x) + 4.0;
     }
     if x >= right {
         return;

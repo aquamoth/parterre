@@ -166,6 +166,7 @@ fn all_options() -> Vec<GraphOptions> {
                 first_parent_only: bits & 64 != 0,
                 current_branch_only: bits % 11 == 3,
                 show_pull_requests: bits % 4 != 1,
+                show_worktrees: bits % 7 == 2,
                 ref_filter: match bits % 5 {
                     0 => "r1".into(),
                     1 => "r2, r3".into(),

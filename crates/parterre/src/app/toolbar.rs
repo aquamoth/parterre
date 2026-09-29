@@ -101,6 +101,7 @@ impl ParterreApp {
                 }
             }
             self.pull_requests_button(ui);
+            self.worktrees_button(ui);
             let response = widgets::popover_button(ui, Id::new(FILTER_ID), None, false);
             let response = tip(response, "Filter branches", "");
             popover(&response, RectAlign::BOTTOM_START)
@@ -172,6 +173,17 @@ impl ParterreApp {
             .on_disabled_hover_text(NO_PULL_REQUESTS_TIP);
         if response.clicked() {
             self.toggle_pull_requests();
+        }
+    }
+
+    /// Shows or hides the worktrees.
+    fn worktrees_button(&mut self, ui: &mut Ui) {
+        let on = self.settings.graph.show_worktrees;
+        let response = widgets::icon_button(ui, glyphs::FOLDER, on);
+        let verb = if on { "Hide" } else { "Show" };
+        let response = tip_explained(response, &format!("{verb} worktrees"), "", WORKTREES_TIP);
+        if response.clicked() {
+            self.settings.graph.show_worktrees = !on;
         }
     }
 
@@ -404,6 +416,10 @@ impl ParterreApp {
             if item.clicked() {
                 self.toggle_pull_requests();
             }
+            let on = self.settings.graph.show_worktrees;
+            if menu::item(ui, "Worktrees", "", Mark::Check(on)).clicked() {
+                self.settings.graph.show_worktrees = !on;
+            }
         });
         menu::submenu(ui, "Filter", |ui| {
             let g = &mut self.settings.graph;
@@ -581,6 +597,9 @@ pub(super) const PULL_REQUESTS_TIP: &str = "Open pull requests of origin on GitH
     fetched. Click one to open it. Asks GitHub only when gh is signed in (gh auth login).";
 pub(super) const NO_PULL_REQUESTS_TIP: &str =
     "Pull requests: only for repositories whose origin is on GitHub, for now.";
+pub(super) const WORKTREES_TIP: &str = "The repository's worktrees, marked with a folder: \
+    the branches they have checked out, even where hidden, and other worktrees' detached \
+    HEADs in a colour of their own. Right-click one to open it.";
 pub(super) const REMEMBER_TIP: &str =
     "Keep nodes where you moved them, per repository, across runs and relayouts.";
 

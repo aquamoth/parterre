@@ -55,6 +55,7 @@ parterre --look classic            # straight, unbundled edges like TortoiseGit
 parterre --hide 'pipeline/*,release/*'        # leave out build and release branches
 parterre --branch-color 'feature/*=#9b59b6'   # colour branches by name (repeatable)
 parterre --pull-requests           # show GitHub pull requests even if turned off in settings
+parterre --worktrees               # show worktrees even if turned off in settings
 parterre --export graph.svg        # write an SVG without opening a window
 parterre --export graph.png --zoom 2   # or a PNG (or .webp), here at 200%
 parterre --help                    # all options
@@ -78,7 +79,7 @@ In the window:
 | `Ctrl+F`, then `Enter` / `F3` | Find branches, tags, hashes, subjects or authors |
 | `L`, double-click a node | Show log: the node's history, or with two nodes selected the commits between them (first..second) |
 | Click a pull request's number | Open the pull request on GitHub |
-| Right-click a node | Show log; compare with HEAD, two nodes, or the commit marked for comparison; open its pull requests; copy its hash, ref names or subject; select its subtree; return it to the layout |
+| Right-click a node | Show log; compare with HEAD, two nodes, or the commit marked for comparison; open its pull requests; open its worktrees in the file system or a terminal; copy its hash, ref names or worktree folder's path; select its subtree; return it to the layout |
 | `R` | Return all nodes to the layout |
 | `Esc` | Clear the selection |
 | `F5` | Reload the repository (it also reloads by itself when branches, tags or HEAD change) |
@@ -107,6 +108,11 @@ parterre adds:
   shown, turning them on there says why. A pull request shows once
   its branch has been fetched and its base branch is shown. parterre asks GitHub about the
   fetched branches only, at most once a minute per repository, and never without signing in.
+- worktrees (off by default; the toolbar's folder button), marked with a folder
+  and first on their commits, in the graph and in the log: the branches they have checked
+  out, even where hidden, and detached ones in cyan, with the folder's name in italics. A
+  worktree whose folder is gone gets a crossed-out folder. Right-click one to open it in the
+  file system or a terminal.
 - light and dark themes
 - rearranging by hand: drag modes, multi-selection, undo
 
@@ -132,9 +138,9 @@ version are left out. Files go through git's textconv filters, as `git show` doe
 and submodules say what changed instead.
 
 **Comparing two commits** lists the files they differ in, in a window with the same table;
-double-click one for its diff. Right-click a node for *Compare with HEAD*, *Compare with
-working tree* (your uncommitted changes, staged or not; `F5` lists them again), or with two
-nodes selected *Compare revisions*. To compare commits far apart, *Mark for comparison* one (from
+double-click one for its diff. Right-click a node for *Compare* › *HEAD*, *Working tree*
+(your uncommitted changes, staged or not; `F5` lists them again), or with two nodes selected
+*Selected revisions*. To compare commits far apart, *Mark for comparison* one (from
 the node menu or by right-clicking a row in the log) and pick *Compare with marked* on the
 other, from any log. A range log's *Compare files* compares its two ends. The window's
 *Since common ancestor* shows only what the right-hand side changed since the two forked, as
