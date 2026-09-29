@@ -29,13 +29,11 @@ pub fn storage_file() -> Option<std::path::PathBuf> {
 // The storage keys still carry the old name, so settings saved before the rename keep loading.
 pub const STORAGE_KEY: &str = "gitgraph-settings";
 /// Storage key for remembered node positions: repository path -> commit hash -> rest offset
-/// from the layout, and whether the node was moved by hand. The children of displaced nodes
-/// are listed too, so that commits missing from it are new (see
-/// `parterre_core::physics::Net::rest_offsets`).
-pub const MOVES_KEY: &str = "parterre-rest-offsets";
-/// The same before the children of displaced nodes were listed. Repositories still saved so are
-/// put back without placing new commits, and from then on saved under [`MOVES_KEY`].
-pub const UNLISTED_MOVES_KEY: &str = "gitgraph-rest-offsets";
+/// from the layout, and whether the node was moved by hand. Lists the children of displaced
+/// nodes too, so that commits missing from it are new (see
+/// `parterre_core::physics::Net::rest_offsets`); in older saves an untouched child of a
+/// displaced node counts as new once.
+pub const MOVES_KEY: &str = "gitgraph-rest-offsets";
 /// Storage key for the recently opened repositories, newest first.
 pub const RECENT_KEY: &str = "parterre-recent-repositories";
 /// The format before nodes gave way to each other: only dropped (pinned) nodes and offsets.
@@ -64,28 +62,22 @@ fn copy_storage(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-/// Loads remembered node positions: those saved under [`MOVES_KEY`], and those of other
-/// repositories saved in an older format (see [`UNLISTED_MOVES_KEY`]), converted.
-pub fn load_moves(storage: &dyn eframe::Storage) -> (RememberedMoves, RememberedMoves) {
-    let moves: RememberedMoves = eframe::get_value(storage, MOVES_KEY).unwrap_or_default();
-    let mut unlisted: RememberedMoves = eframe::get_value(storage, UNLISTED_MOVES_KEY)
-        .unwrap_or_else(|| {
-            let old: std::collections::HashMap<
-                String,
-                std::collections::HashMap<String, (f32, f32)>,
-            > = eframe::get_value(storage, OLD_MOVES_KEY).unwrap_or_default();
-            old.into_iter()
-                .map(|(repo, nodes)| {
-                    let nodes = nodes
-                        .into_iter()
-                        .map(|(hex, (dx, dy))| (hex, (dx, dy, true)))
-                        .collect();
-                    (repo, nodes)
-                })
-                .collect()
-        });
-    unlisted.retain(|repo, _| !moves.contains_key(repo));
-    (moves, unlisted)
+/// Loads remembered node positions, converting the older format.
+pub fn load_moves(storage: &dyn eframe::Storage) -> RememberedMoves {
+    if let Some(moves) = eframe::get_value(storage, MOVES_KEY) {
+        return moves;
+    }
+    let old: std::collections::HashMap<String, std::collections::HashMap<String, (f32, f32)>> =
+        eframe::get_value(storage, OLD_MOVES_KEY).unwrap_or_default();
+    old.into_iter()
+        .map(|(repo, nodes)| {
+            let nodes = nodes
+                .into_iter()
+                .map(|(hex, (dx, dy))| (hex, (dx, dy, true)))
+                .collect();
+            (repo, nodes)
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -346,56 +338,6 @@ impl Default for Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[derive(Default)]
-    struct MemoryStorage(std::collections::HashMap<String, String>);
-
-    impl eframe::Storage for MemoryStorage {
-        fn get_string(&self, key: &str) -> Option<String> {
-            self.0.get(key).cloned()
-        }
-
-        fn set_string(&mut self, key: &str, value: String) {
-            self.0.insert(key.into(), value);
-        }
-
-        fn remove_string(&mut self, key: &str) {
-            self.0.remove(key);
-        }
-
-        fn flush(&mut self) {}
-    }
-
-    fn remembered(repo: &str, hex: &str) -> RememberedMoves {
-        [(repo.into(), [(hex.into(), (1.0, 2.0, true))].into())].into()
-    }
-
-    #[test]
-    fn moves_saved_before_the_children_were_listed_load_apart() {
-        let mut storage = MemoryStorage::default();
-        let mut unlisted = remembered("a", "1");
-        unlisted.extend(remembered("b", "2"));
-        eframe::set_value(&mut storage, UNLISTED_MOVES_KEY, &unlisted);
-        eframe::set_value(&mut storage, MOVES_KEY, &remembered("b", "3"));
-        let (moves, unlisted) = load_moves(&storage);
-        assert_eq!(moves, remembered("b", "3"));
-        assert_eq!(
-            unlisted,
-            remembered("a", "1"),
-            "b is saved in the newer format"
-        );
-    }
-
-    #[test]
-    fn moves_saved_before_nodes_gave_way_load_as_unlisted() {
-        let mut storage = MemoryStorage::default();
-        let old: std::collections::HashMap<String, std::collections::HashMap<String, (f32, f32)>> =
-            [("a".into(), [("1".into(), (1.0, 2.0))].into())].into();
-        eframe::set_value(&mut storage, OLD_MOVES_KEY, &old);
-        let (moves, unlisted) = load_moves(&storage);
-        assert!(moves.is_empty());
-        assert_eq!(unlisted, remembered("a", "1"));
-    }
 
     #[test]
     fn copies_old_storage_once() {

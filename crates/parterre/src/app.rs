@@ -38,9 +38,7 @@ use crate::frame_pacing::FrameLimiter;
 use crate::menu;
 use crate::render::{self, Marks};
 use crate::scene::{FONT_SIZE, Scene, to_point};
-use crate::settings::{
-    MOVES_KEY, RECENT_KEY, RememberedMoves, STORAGE_KEY, Settings, UNLISTED_MOVES_KEY, load_moves,
-};
+use crate::settings::{MOVES_KEY, RECENT_KEY, RememberedMoves, STORAGE_KEY, Settings, load_moves};
 use crate::system_theme::SystemTheme;
 use crate::text_size;
 use crate::theme::{Palette, ThemeChoice};
@@ -287,8 +285,6 @@ pub struct ParterreApp {
     marked: Option<(Oid, String)>,
     /// Dragged nodes of every repository, kept when `remember_moves` is on.
     moves: RememberedMoves,
-    /// The same for repositories saved in an older format (see [`UNLISTED_MOVES_KEY`]).
-    unlisted_moves: RememberedMoves,
     /// Moved nodes to put back in the next scene: after a reload, when `remember_moves` is
     /// off.
     carried_moves: Option<std::collections::HashMap<String, (f32, f32, bool)>>,
@@ -345,7 +341,7 @@ impl ParterreApp {
         settings.log_window.dividers = settings.log_window.dividers.clamped();
         settings.text_size = parterre_core::text_size::sanitize(settings.text_size);
         cc.egui_ctx.set_zoom_factor(settings.text_size);
-        let (moves, unlisted_moves) = cc
+        let moves: RememberedMoves = cc
             .storage
             .filter(|_| persist)
             .map(load_moves)
@@ -429,7 +425,6 @@ impl ParterreApp {
             focus_compare: false,
             marked: None,
             moves,
-            unlisted_moves,
             carried_moves: None,
             watcher: None,
             pull_requests: pull_requests::PullRequestLoader::default(),
@@ -581,17 +576,11 @@ impl ParterreApp {
     /// freshly laid-out scene.
     fn restore_moves(&mut self) {
         let carried = self.carried_moves.take();
-        let key = self.repo_key();
-        let mut unlisted = false;
-        let moves = if !self.settings.remember_moves {
-            carried
-        } else if let Some(moves) = key.as_ref().and_then(|key| self.moves.get(key)) {
-            Some(moves.clone())
+        let moves = if self.settings.remember_moves {
+            self.repo_key()
+                .and_then(|key| self.moves.get(&key).cloned())
         } else {
-            unlisted = true;
-            key.as_ref()
-                .and_then(|key| self.unlisted_moves.get(key))
-                .cloned()
+            carried
         };
         let Some(moves) = moves else { return };
         let Some(scene) = &mut self.scene else { return };
@@ -608,12 +597,7 @@ impl ParterreApp {
                 ))
             })
             .collect();
-        scene.net.restore(saved, !unlisted);
-        // Saved in an older format: remember them in the newer one from now on.
-        if unlisted && let Some(key) = &key {
-            self.unlisted_moves.remove(key);
-            self.record_moves();
-        }
+        scene.net.restore(saved);
     }
 
     /// Where the current scene's moved nodes rest, by commit (see
@@ -2478,8 +2462,6 @@ impl eframe::App for ParterreApp {
         if self.persist {
             eframe::set_value(storage, STORAGE_KEY, &self.settings);
             eframe::set_value(storage, MOVES_KEY, &self.moves);
-            // Even when empty: the oldest format is only read where this one is missing.
-            eframe::set_value(storage, UNLISTED_MOVES_KEY, &self.unlisted_moves);
             eframe::set_value(storage, RECENT_KEY, &self.recent);
         }
     }

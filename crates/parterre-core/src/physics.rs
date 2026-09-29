@@ -916,17 +916,11 @@ impl Net {
     }
 
     /// Puts nodes at saved rest offsets from the layout at once (the edges at them follow).
-    /// With `place_new_commits`, a node that was not saved but has a parent resting away from
-    /// the layout is a new commit (see [`Net::rest_offsets`]); it keeps its place beside its
-    /// first parent, taking on its displacement, and moves on against the flow if that leaves
-    /// it not clear above a parent. Without, for offsets saved without the children of
-    /// displaced nodes, only the saved nodes move. Meant for a fresh net; not recorded for
-    /// undo.
-    pub fn restore(
-        &mut self,
-        saved: impl IntoIterator<Item = (usize, Point, bool)>,
-        place_new_commits: bool,
-    ) {
+    /// A node that was not saved but has a parent resting away from the layout is a new
+    /// commit (see [`Net::rest_offsets`]); it keeps its place beside its first parent, taking
+    /// on its displacement, and moves on against the flow if that leaves it not clear above a
+    /// parent. Meant for a fresh net; not recorded for undo.
+    pub fn restore(&mut self, saved: impl IntoIterator<Item = (usize, Point, bool)>) {
         self.cancel_grab();
         let mut by = HashMap::new();
         for (node, offset, moved) in saved {
@@ -935,9 +929,7 @@ impl Net {
                 self.moved[node] = moved;
             }
         }
-        if place_new_commits {
-            self.place_new_nodes(&mut by);
-        }
+        self.place_new_nodes(&mut by);
         for (p, _, after) in self.shifted_homes(&by) {
             let p = p as usize;
             self.set_home(p, after);
@@ -2788,7 +2780,7 @@ mod tests {
         let saved: Vec<(usize, Point, bool)> = net.rest_offsets().collect();
         assert!(saved.iter().any(|&(i, _, moved)| i == 3 && moved));
         let (_, mut fresh) = chain_net();
-        fresh.restore(saved, true);
+        fresh.restore(saved);
         assert!(!fresh.is_awake(), "restores at once");
         for i in 0..5 {
             assert!(close(fresh.node_pos(i), net.node_pos(i)), "node {i}");
@@ -2804,7 +2796,7 @@ mod tests {
     /// nodes as `net` (at the same indices) and new ones after them.
     fn reload(net: &Net, input: &LayoutInput) -> (Layout, Net) {
         let (l, mut fresh) = net_for(input);
-        fresh.restore(net.rest_offsets().collect::<Vec<_>>(), true);
+        fresh.restore(net.rest_offsets().collect::<Vec<_>>());
         (l, fresh)
     }
 
@@ -2839,20 +2831,6 @@ mod tests {
             close(fresh.node_pos(0), l.nodes[0]),
             "an old child that stayed put stays put"
         );
-    }
-
-    #[test]
-    fn offsets_saved_without_the_children_leave_the_rest_in_the_layout() {
-        // 0 -> 1 -> 2, and 1 moved: an older save lists only 1.
-        let (l, mut net) = net_for(&LayoutInput {
-            sizes: vec![Point::new(60.0, 20.0); 3],
-            times: vec![3, 2, 1],
-            edges: vec![edge(0, 1), edge(1, 2)],
-            priority: Vec::new(),
-        });
-        net.restore([(1, Point::new(300.0, 0.0), true)], false);
-        assert!(close(net.node_pos(0), l.nodes[0]));
-        assert!(net.is_moved(1));
     }
 
     #[test]
