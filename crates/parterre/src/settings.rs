@@ -29,7 +29,10 @@ pub fn storage_file() -> Option<std::path::PathBuf> {
 // The storage keys still carry the old name, so settings saved before the rename keep loading.
 pub const STORAGE_KEY: &str = "gitgraph-settings";
 /// Storage key for remembered node positions: repository path -> commit hash -> rest offset
-/// from the layout, and whether the node was moved by hand.
+/// from the layout, and whether the node was moved by hand. Lists the children of displaced
+/// nodes too, so that commits missing from it are new (see
+/// `parterre_core::physics::Net::rest_offsets`); in older saves an untouched child of a
+/// displaced node counts as new once.
 pub const MOVES_KEY: &str = "gitgraph-rest-offsets";
 /// Storage key for the recently opened repositories, newest first.
 pub const RECENT_KEY: &str = "parterre-recent-repositories";

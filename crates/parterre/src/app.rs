@@ -600,7 +600,8 @@ impl ParterreApp {
         scene.net.restore(saved);
     }
 
-    /// Where the current scene's moved nodes rest, by commit.
+    /// Where the current scene's moved nodes rest, by commit (see
+    /// [`parterre_core::physics::Net::rest_offsets`]).
     fn rest_offsets(&self) -> Option<std::collections::HashMap<String, (f32, f32, bool)>> {
         let scene = self.scene.as_ref()?;
         let offsets = scene

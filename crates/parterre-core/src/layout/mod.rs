@@ -177,6 +177,8 @@ pub struct Layout {
     pub edges: Vec<Vec<Point>>,
     /// (child, parent) node of every edge.
     pub edge_ends: Vec<(u32, u32)>,
+    /// Whether every edge leads to its child's first parent.
+    pub edge_first_parent: Vec<bool>,
     /// Identity of every bend point of every edge (same id = the same point, shared by
     /// bundled edges). Parallel to the interior points of [`Layout::edges`].
     pub edge_bends: Vec<Vec<u32>>,
@@ -315,6 +317,7 @@ pub fn layout(input: &LayoutInput, options: &LayoutOptions) -> Layout {
         nodes,
         edges,
         edge_ends: input.edges.iter().map(|e| (e.child, e.parent)).collect(),
+        edge_first_parent: input.edges.iter().map(|e| e.first_parent).collect(),
         edge_bends: graph.chains.clone(),
         layers,
         crossings,
