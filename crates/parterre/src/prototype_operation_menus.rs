@@ -632,11 +632,7 @@ fn entries(repo: &Repo, r: &GitRef, cur: &Current) -> Vec<Entry> {
                 format!("Rebase {into} onto {n}"),
                 rebase(repo, r.target, &n, cur),
             );
-            add(
-                Verb::Delete,
-                format!("Delete {n} on the remote…"),
-                delete_remote(repo, r),
-            );
+            add(Verb::Delete, format!("Delete {n}…"), delete_remote(repo, r));
         }
         _ => {}
     }
@@ -776,7 +772,7 @@ fn by_verb(ui: &mut Ui, repo: &Repo, commit: CommitIx, branches: &[&GitRef], cur
     commit_items(ui, repo, commit);
 }
 
-/// C: the label right-clicked decides.
+/// C: the label right-clicked decides. One section, *Advanced* at its bottom.
 fn label_clicked(
     ui: &mut Ui,
     repo: &Repo,
@@ -785,45 +781,20 @@ fn label_clicked(
     cur: &Current,
     clicked: Clicked,
 ) {
-    let header = |ui: &mut Ui, text: String| {
-        ui.add_space(2.0);
-        ui.label(RichText::new(text).weak().size(12.0));
-        ui.add_space(2.0);
-    };
     match clicked {
-        Clicked::Worktree(w) => {
-            header(ui, format!("Worktree {}", repo.worktrees[w].name()));
-            worktree_items(ui, repo, w, false);
-        }
+        Clicked::Worktree(w) => worktree_items(ui, repo, w, false),
         Clicked::Ref(name) if branches.iter().any(|r| r.name == name) => {
             let r = branches.iter().find(|r| r.name == name).unwrap();
-            header(ui, format!("Branch {}", r.name));
-            let list = entries(repo, r, cur);
-            if list.is_empty() {
-                ui.label(RichText::new("The current branch").weak());
-            }
-            let mut last = None;
+            // Advanced: setting the upstream, and deleting a remote branch.
             let (advanced, list): (Vec<Entry>, Vec<Entry>) =
-                list.into_iter().partition(|e| e.verb == Verb::Upstream);
-            let mut advanced = Some(advanced).filter(|a| !a.is_empty());
+                entries(repo, r, cur).into_iter().partition(|e| {
+                    e.verb == Verb::Upstream
+                        || e.verb == Verb::Delete && r.kind == RefKind::RemoteBranch
+                });
             for e in list {
-                if e.verb == Verb::Delete
-                    && let Some(advanced) = advanced.take()
-                {
-                    crate::menu::plain_submenu(ui, "Advanced", |ui| {
-                        for e in advanced {
-                            item(ui, &e.full, e.offer);
-                        }
-                    });
-                }
-                let group = matches!(e.verb, Verb::Push | Verb::Pull | Verb::Upstream);
-                if last.is_some_and(|g| g != group) || last.is_some() && e.verb == Verb::Delete {
-                    crate::menu::separator(ui);
-                }
-                last = Some(group);
                 item(ui, &e.full, e.offer);
             }
-            if let Some(advanced) = advanced {
+            if !advanced.is_empty() {
                 crate::menu::plain_submenu(ui, "Advanced", |ui| {
                     for e in advanced {
                         item(ui, &e.full, e.offer);
@@ -831,16 +802,7 @@ fn label_clicked(
                 });
             }
         }
-        _ => {
-            header(
-                ui,
-                format!(
-                    "Commit {}   (right-click a label for its menu)",
-                    hash(repo, commit)
-                ),
-            );
-            commit_items(ui, repo, commit);
-        }
+        _ => commit_items(ui, repo, commit),
     }
 }
 
