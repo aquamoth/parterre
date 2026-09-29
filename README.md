@@ -55,7 +55,7 @@ parterre --look classic            # straight, unbundled edges like TortoiseGit
 parterre --hide 'pipeline/*,release/*'        # leave out build and release branches
 parterre --branch-color 'feature/*=#9b59b6'   # colour branches by name (repeatable)
 parterre --pull-requests           # show GitHub pull requests even if turned off in settings
-parterre --worktrees               # show the other worktrees even if turned off in settings
+parterre --worktrees               # show worktrees even if turned off in settings
 parterre --export graph.svg        # write an SVG without opening a window
 parterre --export graph.png --zoom 2   # or a PNG (or .webp), here at 200%
 parterre --help                    # all options
@@ -108,7 +108,7 @@ parterre adds:
   shown, turning them on there says why. A pull request shows once
   its branch has been fetched and its base branch is shown. parterre asks GitHub about the
   fetched branches only, at most once a minute per repository, and never without signing in.
-- the other worktrees (off by default; the toolbar's folder button), marked with a folder
+- worktrees (off by default; the toolbar's folder button), marked with a folder
   and first on their commits, in the graph and in the log: the branches they have checked
   out, even where hidden, and detached ones in cyan, with the folder's name in italics. A
   worktree whose folder is gone gets a crossed-out folder. Right-click one to open it in the

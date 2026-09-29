@@ -953,13 +953,6 @@ impl ParterreApp {
             && !self.pull_requests.needs_sign_in()
     }
 
-    /// True if the repository has worktrees besides the open one.
-    pub(super) fn has_other_worktrees(&self) -> bool {
-        self.repo
-            .as_ref()
-            .is_some_and(|r| r.worktrees.iter().any(|w| !w.open))
-    }
-
     /// Turns pull requests off if they are active, else on, asking GitHub now.
     pub(super) fn toggle_pull_requests(&mut self) {
         if self.pull_requests_active() {
@@ -1826,17 +1819,12 @@ impl ParterreApp {
                             ui.close();
                         }
                     });
-                    // The worktrees here: the open one at HEAD, and those shown on the node.
-                    let worktrees: Vec<&parterre_core::Worktree> = if worktrees_shown {
-                        let open = n
-                            .is_head
-                            .then(|| scene.repo.worktrees.iter().find(|w| w.open));
-                        let shown = scene.worktrees_on(node);
-                        let shown = shown.into_iter().map(|k| &scene.repo.worktrees[k]);
-                        open.flatten().into_iter().chain(shown).collect()
-                    } else {
-                        Vec::new()
-                    };
+                    // The worktrees shown on the node, the open one at HEAD among them.
+                    let worktrees: Vec<&parterre_core::Worktree> = scene
+                        .worktrees_on(node)
+                        .into_iter()
+                        .map(|k| &scene.repo.worktrees[k])
+                        .collect();
                     menu::separator(ui);
                     // Greyed out rather than left out, so the menu keeps its shape.
                     if !(pull_requests_shown || worktrees_shown) {

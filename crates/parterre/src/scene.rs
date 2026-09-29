@@ -27,8 +27,8 @@ pub enum RowKind {
     Ref {
         kind: RefKind,
         head: bool,
-        /// The worktree that has this branch checked out, while worktrees are shown (not the
-        /// open one, whose branch is HEAD's). Its name then follows the folder glyph.
+        /// The worktree that has this checked out (for HEAD, the open one), while worktrees
+        /// are shown. Its name then follows the folder glyph.
         worktree: Option<Checkout>,
     },
     /// A worktree whose detached HEAD this commit is. Its label is the folder's name, drawn
@@ -574,8 +574,12 @@ mod tests {
                 },
             )
         };
-        // The open worktree's branch is HEAD's, and nothing more.
-        assert_eq!(rows(0), [branch("main", true, None)]);
+        // The open worktree's branch is HEAD's, and red as ever.
+        let open = Checkout {
+            index: 0,
+            missing: false,
+        };
+        assert_eq!(rows(0), [branch("main", true, Some(open))]);
         let topic = Checkout {
             index: 1,
             missing: false,
@@ -604,7 +608,7 @@ mod tests {
         assert_eq!(input.visuals[2].rows[0].width, 7.0 + WORKTREE_GLYPH);
 
         let scene = input.lay_out();
-        assert!(scene.worktrees_on(0).is_empty());
+        assert_eq!(scene.worktrees_on(0), [0]);
         assert_eq!(scene.worktrees_on(1), [1]);
         assert_eq!(scene.worktrees_on(2), [2]);
 

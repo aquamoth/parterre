@@ -176,16 +176,12 @@ impl ParterreApp {
         }
     }
 
-    /// Shows or hides the other worktrees; greyed out if there are none.
+    /// Shows or hides the worktrees.
     fn worktrees_button(&mut self, ui: &mut Ui) {
-        let available = self.has_other_worktrees();
-        let on = available && self.settings.graph.show_worktrees;
-        let response = ui
-            .add_enabled_ui(available, |ui| widgets::icon_button(ui, glyphs::FOLDER, on))
-            .inner;
+        let on = self.settings.graph.show_worktrees;
+        let response = widgets::icon_button(ui, glyphs::FOLDER, on);
         let verb = if on { "Hide" } else { "Show" };
-        let response = tip_explained(response, &format!("{verb} worktrees"), "", WORKTREES_TIP)
-            .on_disabled_hover_text(NO_WORKTREES_TIP);
+        let response = tip_explained(response, &format!("{verb} worktrees"), "", WORKTREES_TIP);
         if response.clicked() {
             self.settings.graph.show_worktrees = !on;
         }
@@ -420,13 +416,8 @@ impl ParterreApp {
             if item.clicked() {
                 self.toggle_pull_requests();
             }
-            let available = self.has_other_worktrees();
-            let on = available && self.settings.graph.show_worktrees;
-            let item = ui.add_enabled_ui(available, |ui| {
-                menu::item(ui, "Worktrees", "", Mark::Check(on))
-            });
-            let item = item.inner.on_disabled_hover_text(NO_WORKTREES_TIP);
-            if item.clicked() {
+            let on = self.settings.graph.show_worktrees;
+            if menu::item(ui, "Worktrees", "", Mark::Check(on)).clicked() {
                 self.settings.graph.show_worktrees = !on;
             }
         });
@@ -606,11 +597,9 @@ pub(super) const PULL_REQUESTS_TIP: &str = "Open pull requests of origin on GitH
     fetched. Click one to open it. Asks GitHub only when gh is signed in (gh auth login).";
 pub(super) const NO_PULL_REQUESTS_TIP: &str =
     "Pull requests: only for repositories whose origin is on GitHub, for now.";
-pub(super) const WORKTREES_TIP: &str = "The repository's other worktrees, marked with a \
-    folder: the branches they have checked out, even where hidden, and their detached HEADs \
-    in a colour of their own. Right-click one to open it.";
-pub(super) const NO_WORKTREES_TIP: &str =
-    "Worktrees: this repository has no other worktrees (git worktree add).";
+pub(super) const WORKTREES_TIP: &str = "The repository's worktrees, marked with a folder: \
+    the branches they have checked out, even where hidden, and other worktrees' detached \
+    HEADs in a colour of their own. Right-click one to open it.";
 pub(super) const REMEMBER_TIP: &str =
     "Keep nodes where you moved them, per repository, across runs and relayouts.";
 

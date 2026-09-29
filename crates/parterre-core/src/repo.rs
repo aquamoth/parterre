@@ -114,8 +114,8 @@ impl Worktree {
 /// A label on a commit (see [`Repo::labels`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Label {
-    /// An index into [`Repo::refs`], and into [`Repo::worktrees`] the other worktree that has
-    /// the branch checked out, while worktrees are shown.
+    /// An index into [`Repo::refs`], and into [`Repo::worktrees`] the worktree that has it
+    /// checked out (for HEAD, the open one), while worktrees are shown.
     Ref {
         index: usize,
         worktree: Option<usize>,
@@ -254,13 +254,18 @@ impl Repo {
     /// A commit's labels, worktrees first: `refs` (indices into [`Repo::refs`], in
     /// [`cmp_refs_for_display`] order) and the `detached` worktrees at it. HEAD comes first,
     /// then, with `worktrees_shown`, the branches other worktrees have checked out, then the
-    /// detached worktrees, then the other refs.
+    /// detached worktrees, then the other refs. With `worktrees_shown`, every ref a worktree
+    /// has checked out names it: HEAD the open one.
     pub fn labels(&self, refs: &[usize], detached: &[usize], worktrees_shown: bool) -> Vec<Label> {
-        let label = |index: usize| Label::Ref {
-            index,
-            worktree: worktrees_shown
-                .then(|| self.worktrees_on(&self.refs[index].full_name).next())
-                .flatten(),
+        let open = self.worktrees.iter().position(|w| w.open);
+        let label = |index: usize| {
+            let r = &self.refs[index];
+            let worktree = match worktrees_shown {
+                false => None,
+                true if r.is_head => open,
+                true => self.worktrees_on(&r.full_name).next(),
+            };
+            Label::Ref { index, worktree }
         };
         let refs: Vec<Label> = refs.iter().map(|&i| label(i)).collect();
         let is_head =
