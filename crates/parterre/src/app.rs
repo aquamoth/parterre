@@ -1752,15 +1752,12 @@ impl ParterreApp {
                     let oid_of = |n: usize| scene.repo.commit(scene.graph.nodes[n].commit).oid;
                     let oid = oid_of(node);
                     menu::plain_submenu(ui, "Compare", |ui| {
-                        // Two nodes: Compare revisions, in selection order; one: against HEAD.
+                        // Two nodes: with each other, in selection order; one: with HEAD.
                         let head = scene.repo.head_commit().map(|c| scene.repo.commit(c).oid);
                         let (label, pair) = match *group.as_slice() {
-                            [a, b] => ("Compare revisions", Some((oid_of(a), oid_of(b)))),
-                            [_] => (
-                                "Compare with HEAD",
-                                head.filter(|&h| h != oid).map(|h| (oid, h)),
-                            ),
-                            _ => ("Compare revisions", None),
+                            [a, b] => ("Selected revisions", Some((oid_of(a), oid_of(b)))),
+                            [_] => ("HEAD", head.filter(|&h| h != oid).map(|h| (oid, h))),
+                            _ => ("Selected revisions", None),
                         };
                         let why = if group.len() > 2 {
                             "Select one or two nodes"
@@ -1785,7 +1782,7 @@ impl ParterreApp {
                         let with_working_tree = ui
                             .add_enabled(
                                 group.len() == 1 && working_tree,
-                                egui::Button::new("Compare with working tree"),
+                                egui::Button::new("Working tree"),
                             )
                             .on_disabled_hover_text(why);
                         if with_working_tree.clicked() {
@@ -1877,8 +1874,8 @@ impl ParterreApp {
                                 return;
                             }
                             for (what, opener) in [
-                                ("In file system", Opener::FileManager),
-                                ("In terminal", Opener::Terminal),
+                                ("File system", Opener::FileManager),
+                                ("Terminal", Opener::Terminal),
                             ] {
                                 // One worktree: the item opens it. Several: a submenu names them.
                                 let mut open_item =
@@ -1916,7 +1913,7 @@ impl ParterreApp {
                     menu::plain_submenu(ui, "Copy", |ui| {
                         // Right-clicking selects the node, so Ctrl+C would copy the same hash.
                         let copy_hash = if group.len() > 1 { "" } else { "Ctrl+C" };
-                        if ui.add(item("Hash", copy_hash)).clicked() {
+                        if ui.add(item("Commit hash", copy_hash)).clicked() {
                             ui.ctx().copy_text(commit.oid.to_hex());
                             ui.close();
                         }
@@ -1932,10 +1929,6 @@ impl ParterreApp {
                                 names.join("\n")
                             };
                             ui.ctx().copy_text(text);
-                            ui.close();
-                        }
-                        if ui.button("Subject").clicked() {
-                            ui.ctx().copy_text(commit.subject.clone());
                             ui.close();
                         }
                         let copy_path = |ui: &mut Ui, label: &str, w: &parterre_core::Worktree| {
