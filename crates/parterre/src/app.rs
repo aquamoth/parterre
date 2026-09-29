@@ -1210,6 +1210,12 @@ impl ParterreApp {
                 ui.separator();
             }
             if let Some(scene) = &self.scene {
+                // PROTOTYPE (upstreams): the ahead|behind marker.
+                let node = self
+                    .hovered
+                    .or_else(|| crate::prototype_upstreams::fake_hover(scene))
+                    .or(self.selection.current());
+                crate::prototype_upstreams::status_ui(ui, scene, node);
                 if self.selection.len() > 1 {
                     ui.label(format!("{} nodes selected ·", self.selection.len()));
                 }
@@ -1565,6 +1571,18 @@ impl ParterreApp {
             &self.settings,
             &marks,
         );
+        crate::prototype_upstreams::paint(
+            &painter,
+            canvas,
+            &self.view,
+            scene,
+            &palette,
+            &self.settings,
+            marks
+                .hovered
+                .or_else(|| crate::prototype_upstreams::fake_hover(scene)),
+            &marks.selected,
+        );
 
         if let Some(band) = band {
             painter.rect(
@@ -1782,6 +1800,15 @@ impl ParterreApp {
                             .on_disabled_hover_text(why);
                         if with_working_tree.clicked() {
                             action = Some(MenuAction::Compare(CompareRequest::WorkingTree(oid)));
+                            ui.close();
+                        }
+                        // PROTOTYPE (upstreams): the branch against its upstream.
+                        if group.len() == 1
+                            && let Some((name, up, local)) =
+                                crate::prototype_upstreams::upstream_of(scene, node)
+                            && ui.button(format!("Upstream ({name})")).clicked()
+                        {
+                            action = Some(MenuAction::Compare(CompareRequest::Compare(up, local)));
                             ui.close();
                         }
                         menu::separator(ui);

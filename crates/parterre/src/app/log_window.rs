@@ -1210,7 +1210,15 @@ pub(super) fn badge(
         overflow_character: Some('…'),
     };
     let g = ui.painter().layout_job(job);
-    let size = vec2(g.size().x + 2.0 * pad + glyph, 17.0);
+    // PROTOTYPE (upstreams): ahead/behind counts after a local branch's name.
+    let counts = match *badge {
+        Badge::Ref(r, _) => crate::prototype_upstreams::counts(&r.full_name),
+        Badge::Worktree(_) => None,
+    };
+    let counts_w = counts.map_or(0.0, |c| {
+        crate::prototype_upstreams::counts_width(ui.painter(), c)
+    });
+    let size = vec2(g.size().x + 2.0 * pad + glyph + counts_w, 17.0);
     let rect = Rect::from_min_size(pos2(at.x, at.y - size.y / 2.0), size);
     let painter = ui.painter();
     painter.rect(
@@ -1240,6 +1248,10 @@ pub(super) fn badge(
         g,
         color,
     );
+    if let Some(c) = counts {
+        let at = pos2(rect.right() - pad - counts_w, rect.center().y);
+        crate::prototype_upstreams::paint_counts(painter, at, c, color);
+    }
     size.x
 }
 
@@ -1442,8 +1454,16 @@ fn badge_widget(ui: &mut Ui, b: &Badge, palette: &Palette) {
     } else {
         0.0
     };
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(text.size().x + 11.0 + glyph, 17.0), Sense::hover());
+    let counts = match b {
+        Badge::Ref(r, _) => crate::prototype_upstreams::counts(&r.full_name).map_or(0.0, |c| {
+            crate::prototype_upstreams::counts_width(ui.painter(), c)
+        }),
+        Badge::Worktree(_) => 0.0,
+    };
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(text.size().x + 11.0 + glyph + counts, 17.0),
+        Sense::hover(),
+    );
     badge(ui, b, palette, rect.left_center(), rect.width());
     if let Badge::Ref(_, Some(w)) | Badge::Worktree(w) = b {
         response.on_hover_text(format!("Worktree {}", w.path.display()));

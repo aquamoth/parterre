@@ -283,6 +283,25 @@ pub fn edge_path(
     (path.len() >= 2).then_some(path)
 }
 
+/// PROTOTYPE (upstreams): the path an edge from `child` to `parent` (screen boxes) would take
+/// with no bend points, in `style`.
+pub fn link_path(
+    scene: &Scene,
+    child: Rect,
+    parent: Rect,
+    style: EdgeStyle,
+    zoom: f32,
+) -> Vec<Pos2> {
+    let f = scene.layout.direction.flow();
+    let flow = vec2(f.x, f.y);
+    let pts = [child.center(), parent.center()];
+    let hook = HOOK_LEN * zoom;
+    match style {
+        EdgeStyle::Straight => straight_path(&pts, child, parent, flow, hook, false),
+        EdgeStyle::Curved => curved_path(&pts, child, parent, flow, hook, false),
+    }
+}
+
 /// The two triangles of an arrowhead for `path`, or `None` without arrows.
 pub fn arrowhead_points(path: &[Pos2], arrows: Arrows, len: f32) -> Option<[[Pos2; 3]; 2]> {
     let n = path.len();

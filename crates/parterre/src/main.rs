@@ -13,6 +13,7 @@ mod file_manager;
 mod frame_pacing;
 mod icon;
 mod menu;
+mod prototype_upstreams;
 mod raster;
 mod render;
 mod scene;

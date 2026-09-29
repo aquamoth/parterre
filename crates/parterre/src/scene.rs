@@ -121,7 +121,8 @@ impl Scene {
             .into_iter()
             .map(|(head, pr)| (head, pr.clone()))
             .unzip();
-        let graph = revgraph::build_with_pull_requests(repo, &settings.graph, &heads);
+        let extra = crate::prototype_upstreams::extra_nodes(repo);
+        let graph = revgraph::build_with_extra_nodes(repo, &settings.graph, &heads, &extra);
 
         let row_height = text_height + 2.0 * MARGIN_Y;
         // Commits without refs show their hash as long as git abbreviates it in this

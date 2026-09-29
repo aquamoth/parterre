@@ -280,6 +280,17 @@ pub fn build_with_pull_requests(
     options: &GraphOptions,
     pull_requests: &[PullRequestHead],
 ) -> RevGraph {
+    build_with_extra_nodes(repo, options, pull_requests, &[])
+}
+
+/// PROTOTYPE (upstreams): as [`build_with_pull_requests`], with `extra` commits made nodes
+/// where they are shown anyway.
+pub fn build_with_extra_nodes(
+    repo: &Repo,
+    options: &GraphOptions,
+    pull_requests: &[PullRequestHead],
+    extra: &[CommitIx],
+) -> RevGraph {
     let n = repo.commits.len();
     let head = repo.head_commit().map(CommitIx::ix);
 
@@ -386,6 +397,11 @@ pub fn build_with_pull_requests(
     for &(k, c) in &detached {
         worktrees_on[c].push(k);
         decorated[c] = true;
+    }
+    for c in extra.iter().map(|c| c.ix()) {
+        if c < n && visible[c] {
+            decorated[c] = true;
+        }
     }
 
     // Child counts, merge children, and a parents-first order (reverse Kahn from the tips).
