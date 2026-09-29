@@ -1759,11 +1759,10 @@ impl ParterreApp {
                         }
                         return;
                     };
-                    crate::prototype_operation_menus::menu(
+                    crate::prototype_operation_menus::node_menu(
                         ui,
                         &scene.repo,
                         scene.graph.nodes[node].commit,
-                        true,
                     );
                     // Greyed out rather than left out, so the menu keeps its shape.
                     let show_log = ui

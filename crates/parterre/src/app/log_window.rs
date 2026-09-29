@@ -824,7 +824,7 @@ impl LogWindow {
                 }
             },
             |ui, i, list| {
-                crate::prototype_operation_menus::menu(ui, repo, commits[i], false);
+                crate::prototype_operation_menus::row_menu(ui, repo, commits[i]);
                 let commit = repo.commit(commits[i]);
                 // The selected pair, if this row is one of them.
                 let pair = list
