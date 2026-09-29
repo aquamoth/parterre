@@ -306,7 +306,7 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State {
-        show: 0,
+        show: 1,
         run: None,
         in_progress: None,
         notes: Vec::new(),
