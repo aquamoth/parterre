@@ -3,16 +3,17 @@
 //! (aquamoth/parterre#146). Nothing runs git: the scenarios in the ☰ menu play back scripted
 //! output on a timer.
 //!
-//! Two things vary, each switched in the bar at the bottom of the main window:
-//! - How an operation runs:
-//!   - A, a modal dialog: the command, git's output as it comes, the result.
-//!   - B, a window that doesn't block: move it aside and keep using the graph.
-//!   - C, the status bar: a spinner and git's last line; failures open a dialog, and the whole
-//!     output is a click away.
-//! - How an operation in progress (a merge or rebase that stopped) shows in the graph:
-//!   - 1, an extra row under the node, like a worktree's.
-//!   - 2, a banner across the top of the graph, with Continue and Abort.
-//!   - 3, a badge on the node's corner, as a shell prompt shows `main|MERGING`.
+//! How an operation runs (round 2, as asked): a quick local one shows a notification that
+//! turns green and closes itself after 5 s. A network one shows a modal with git's output,
+//! which closes into a green or red notification when done. Clicking a notification opens its
+//! details and keeps it. Failures (red) and stops on conflicts (orange) stay until closed.
+//! Notifications stack, bottom right.
+//!
+//! How an operation in progress (a merge or rebase that stopped) shows in the graph, switched
+//! in the bar at the bottom:
+//! - 1, an extra row under the node, like a worktree's.
+//! - 2, a banner across the top of the graph, with Continue and Abort.
+//! - 3, a badge on the node's corner, as a shell prompt shows `main|MERGING`.
 
 use std::cell::RefCell;
 
@@ -24,11 +25,6 @@ use parterre_core::Repo;
 use crate::scene::{FONT_SIZE, Scene};
 use crate::view::View;
 
-const RUNNERS: [&str; 3] = [
-    "A — modal dialog",
-    "B — window that doesn't block",
-    "C — status bar",
-];
 const SHOWS: [&str; 3] = ["1 — row under the node", "2 — banner", "3 — badge"];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -238,8 +234,8 @@ fn scenarios() -> Vec<Scenario> {
                 Line(400, "error: gpg failed to sign the data"),
                 Line(50, "fatal: failed to write commit object"),
                 End(Failed(
-                    "The revert wasn't committed",
-                    "Git couldn't sign the commit. The revert's changes are staged in main but not committed, and there's no revert in progress to continue. Commit them yourself once signing works, or discard them.",
+                    "Revert of 1a2b3c4 not committed",
+                    "Git couldn't sign the revert, so nothing was committed. The revert's changes are left staged in main: commit them once signing works, or unstage them. Parterre changed nothing else.",
                 )),
             ],
         },
@@ -276,22 +272,46 @@ struct Run {
     open: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Tone {
+    Running,
+    Success,
+    Failure,
+    Stopped,
+}
+
+/// A notification in the stack, bottom right.
+#[derive(Clone, Debug)]
+struct Note {
+    id: u64,
+    tone: Tone,
+    title: String,
+    summary: String,
+    command: &'static str,
+    output: Vec<String>,
+    created: f64,
+    /// Clicked: its details were opened, so it no longer closes by itself.
+    pinned: bool,
+}
+
 struct State {
-    runner: usize,
     show: usize,
     run: Option<Run>,
     in_progress: Option<InProgress>,
-    /// C: the last operation's whole output, in a window.
-    output_window: bool,
+    notes: Vec<Note>,
+    next: u64,
+    /// The notification whose details are open.
+    details: Option<u64>,
 }
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State {
-        runner: 0,
         show: 0,
         run: None,
         in_progress: None,
-        output_window: false,
+        notes: Vec::new(),
+        next: 0,
+        details: None,
     });
 }
 
@@ -309,7 +329,7 @@ fn start(scenario: Scenario, now: f64) {
             outcome: None,
             ended: None,
             prompt: None,
-            open: s.runner != 2,
+            open: true,
         });
     });
 }
@@ -590,42 +610,38 @@ fn capital(s: &str) -> String {
         .unwrap_or_default()
 }
 
-/// C: the running operation in the status bar.
-pub fn status_bar(ui: &mut Ui) {
-    let line = with(|s| {
-        if s.runner != 2 {
-            return None;
-        }
-        let run = s.run.as_ref()?;
-        Some((
-            run.outcome.is_none(),
-            run.scenario.title,
-            match &run.outcome {
-                None => run.output.last().cloned().unwrap_or_default(),
-                Some(Outcome::Done(t)) => (*t).to_owned(),
-                Some(Outcome::Failed(t, _)) => (*t).to_owned(),
-                Some(Outcome::Stopped(t, _)) => (*t).to_owned(),
-            },
-        ))
-    });
-    let Some((running, title, last)) = line else {
+/// The status bar isn't used any more (round 1's C).
+pub fn status_bar(_ui: &mut Ui) {}
+
+/// Turns the finished operation, if any, into its notification.
+fn finish(s: &mut State, now: f64) {
+    if !s.run.as_ref().is_some_and(|r| r.outcome.is_some()) {
         return;
+    }
+    let run = s.run.take().unwrap();
+    if run.scenario.command.is_empty() {
+        return;
+    }
+    let (tone, title, summary) = match run.outcome.unwrap() {
+        Outcome::Done(t) => (Tone::Success, run.scenario.title.to_owned(), t.to_owned()),
+        Outcome::Failed(t, why) => (Tone::Failure, t.to_owned(), why.to_owned()),
+        Outcome::Stopped(t, _) => (Tone::Stopped, run.scenario.title.to_owned(), t.to_owned()),
     };
-    if running {
-        ui.spinner();
-    }
-    ui.label(RichText::new(title).strong());
-    ui.label(last);
-    if ui.small_button("Output").clicked() {
-        with(|s| s.output_window = true);
-    }
-    if running && ui.small_button("Cancel").clicked() {
-        with(|s| s.run = None);
-    }
-    ui.separator();
+    s.next += 1;
+    s.notes.push(Note {
+        id: s.next,
+        tone,
+        title,
+        summary,
+        command: run.scenario.command,
+        output: run.output,
+        created: now,
+        pinned: false,
+    });
 }
 
-/// Plays the operation forward and shows it, the prompts, the banner and the variant bar.
+/// Plays the operation forward and shows it, the prompts, the notifications, the banner and
+/// the variant bar.
 pub fn show(ctx: &egui::Context, repo: Option<&Repo>) {
     let now = ctx.input(|i| i.time);
     with(|s| {
@@ -636,17 +652,23 @@ pub fn show(ctx: &egui::Context, repo: Option<&Repo>) {
     if let Some(ip) = PENDING_IP.with(|p| p.borrow_mut().take()) {
         with(|s| s.in_progress = Some(ip));
     }
-    let running = with(|s| {
-        s.run
-            .as_ref()
-            .is_some_and(|r| r.outcome.is_none() && r.prompt.is_none())
+    with(|s| finish(s, now));
+    // Green ones close by themselves after 5 s, unless their details were opened.
+    with(|s| {
+        s.notes
+            .retain(|n| n.tone != Tone::Success || n.pinned || now - n.created < 5.0)
     });
-    if running {
-        ctx.request_repaint();
+    let busy = with(|s| {
+        s.run.as_ref().is_some_and(|r| r.prompt.is_none())
+            || s.notes.iter().any(|n| n.tone == Tone::Success && !n.pinned)
+    });
+    if busy {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
     prompt(ctx);
-    dialog(ctx, now);
-    output_window(ctx);
+    network_dialog(ctx, now);
+    notifications(ctx, now);
+    details(ctx);
     banner(ctx, repo);
     variant_bar(ctx);
 }
@@ -658,7 +680,11 @@ fn prompt(ctx: &egui::Context) {
     let mut answer: Option<bool> = None;
     egui::Modal::new(egui::Id::new("prototype-askpass")).show(ctx, |ui| {
         ui.set_width(460.0);
-        ui.label(RichText::new("PROTOTYPE: parterre's askpass").small().color(Color32::from_rgb(200, 120, 0)));
+        ui.label(
+            RichText::new("PROTOTYPE: parterre's askpass (only when you have none of your own)")
+                .small()
+                .color(Color32::from_rgb(200, 120, 0)),
+        );
         match p {
             Prompt::Username => {
                 ui.heading("Sign in to github.com");
@@ -672,8 +698,15 @@ fn prompt(ctx: &egui::Context) {
             }
             Prompt::HostKey => {
                 ui.heading("Unknown host");
-                ui.label("The authenticity of host 'git.example.com (203.0.113.7)' can't be established.");
-                ui.label(RichText::new("ED25519 key fingerprint is SHA256:x3Jm0Kq3vL6tWc2YhX9pZs1eRb8uNf4aTg7dQo5iEk.").monospace());
+                ui.label(
+                    "The authenticity of host 'git.example.com (203.0.113.7)' can't be established.",
+                );
+                ui.label(
+                    RichText::new(
+                        "ED25519 key fingerprint is SHA256:x3Jm0Kq3vL6tWc2YhX9pZs1eRb8uNf4aTg7dQo5iEk.",
+                    )
+                    .monospace(),
+                );
                 ui.label("Trust it and connect? Only if you know this fingerprint is right.");
             }
             Prompt::Passphrase => {
@@ -684,7 +717,11 @@ fn prompt(ctx: &egui::Context) {
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            let ok = if p == Prompt::HostKey { "Trust and connect" } else { "OK" };
+            let ok = if p == Prompt::HostKey {
+                "Trust and connect"
+            } else {
+                "OK"
+            };
             if ui.button(ok).clicked() {
                 answer = Some(true);
             }
@@ -703,7 +740,6 @@ fn prompt(ctx: &egui::Context) {
             }
             Some(false) => {
                 run.prompt = None;
-                run.open = true;
                 run.output
                     .push("fatal: could not read Username: terminal prompts disabled".to_owned());
                 run.outcome = Some(Outcome::Failed(
@@ -716,42 +752,18 @@ fn prompt(ctx: &egui::Context) {
     });
 }
 
-fn dialog(ctx: &egui::Context, now: f64) {
-    let runner = with(|s| s.runner);
-    let Some((title, command, network, output, outcome, ended, open)) = with(|s| {
-        s.run.as_ref().map(|r| {
-            (
-                r.scenario.title,
-                r.scenario.command,
-                r.scenario.network,
-                r.output.clone(),
-                r.outcome.clone(),
-                r.ended,
-                r.open,
-            )
-        })
+/// A network operation while it runs: a modal with git's output, and Cancel.
+fn network_dialog(ctx: &egui::Context, now: f64) {
+    let Some((title, command, output)) = with(|s| {
+        s.run
+            .as_ref()
+            .filter(|r| r.scenario.network && r.outcome.is_none())
+            .map(|r| (r.scenario.title, r.scenario.command, r.output.clone()))
     }) else {
         return;
     };
-    if !open || command.is_empty() {
-        if command.is_empty() {
-            with(|s| s.run = None);
-        }
-        return;
-    }
-    // Quick local operations that worked close by themselves; network ones wait for Close.
-    if let (Some(Outcome::Done(_)), Some(t), false) = (&outcome, ended, network)
-        && now - t > 0.8
-    {
-        with(|s| s.run = None);
-        return;
-    }
-    if matches!(outcome, Some(Outcome::Done(_))) && !network {
-        ctx.request_repaint();
-    }
-    let mut close = false;
     let mut cancel = false;
-    let body = |ui: &mut Ui, close: &mut bool, cancel: &mut bool| {
+    egui::Modal::new(egui::Id::new("prototype-operation-dialog")).show(ctx, |ui| {
         ui.set_width(620.0);
         ui.label(
             RichText::new("PROTOTYPE: nothing runs")
@@ -761,83 +773,17 @@ fn dialog(ctx: &egui::Context, now: f64) {
         ui.heading(title);
         ui.label(RichText::new(command).monospace().weak());
         ui.add_space(6.0);
-        egui::Frame::new()
-            .fill(ui.visuals().extreme_bg_color)
-            .inner_margin(6)
-            .corner_radius(4)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(200.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        ui.set_min_width(600.0);
-                        for line in &output {
-                            let colour = if line.starts_with("CONFLICT")
-                                || line.starts_with("error")
-                                || line.starts_with("fatal")
-                                || line.contains("[rejected]")
-                            {
-                                Color32::from_rgb(210, 80, 60)
-                            } else {
-                                ui.visuals().text_color()
-                            };
-                            ui.label(RichText::new(line).monospace().color(colour));
-                        }
-                    });
-            });
+        output_box(ui, &output);
         ui.add_space(6.0);
-        match &outcome {
-            None => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Running…");
-                });
-            }
-            Some(Outcome::Done(t)) => {
-                ui.label(RichText::new(format!("✔ {t}")).color(Color32::from_rgb(60, 150, 60)));
-            }
-            Some(Outcome::Failed(t, why)) => {
-                ui.label(
-                    RichText::new(format!("✖ {t}"))
-                        .strong()
-                        .color(Color32::from_rgb(210, 80, 60)),
-                );
-                ui.label(*why);
-            }
-            Some(Outcome::Stopped(t, _)) => {
-                ui.label(
-                    RichText::new("⚠ Stopped on conflicts")
-                        .strong()
-                        .color(Color32::from_rgb(220, 130, 20)),
-                );
-                ui.label(*t);
-            }
-        }
-        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if outcome.is_none() {
-                if network && ui.button("Cancel").clicked() {
-                    *cancel = true;
-                }
-            } else if ui.button("Close").clicked() {
-                *close = true;
-            }
+            ui.spinner();
+            ui.label("Running… this closes by itself when git is done.");
         });
-    };
-    match runner {
-        0 => {
-            egui::Modal::new(egui::Id::new("prototype-operation-dialog"))
-                .show(ctx, |ui| body(ui, &mut close, &mut cancel));
+        ui.add_space(8.0);
+        if ui.button("Cancel").clicked() {
+            cancel = true;
         }
-        _ => {
-            egui::Window::new("Operation")
-                .id(egui::Id::new("prototype-operation-window"))
-                .collapsible(true)
-                .resizable(false)
-                .default_pos(ctx.content_rect().right_top() + egui::vec2(-680.0, 60.0))
-                .show(ctx, |ui| body(ui, &mut close, &mut cancel));
-        }
-    }
+    });
     if cancel {
         with(|s| {
             if let Some(run) = &mut s.run {
@@ -851,44 +797,169 @@ fn dialog(ctx: &egui::Context, now: f64) {
             }
         });
     }
-    if close {
-        with(|s| {
-            if runner == 2 {
-                if let Some(run) = &mut s.run {
-                    run.open = false;
-                }
-            } else {
-                s.run = None;
-            }
+}
+
+fn output_box(ui: &mut Ui, output: &[String]) {
+    egui::Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .inner_margin(6)
+        .corner_radius(4)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(240.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.set_min_width(600.0);
+                    for line in output {
+                        let bad = line.starts_with("CONFLICT")
+                            || line.starts_with("error")
+                            || line.starts_with("fatal")
+                            || line.contains("[rejected]");
+                        let colour = if bad {
+                            Color32::from_rgb(210, 80, 60)
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        ui.label(RichText::new(line).monospace().color(colour));
+                    }
+                });
         });
+}
+
+fn tone_fill(tone: Tone) -> Color32 {
+    match tone {
+        Tone::Running => Color32::from_rgb(90, 90, 100),
+        Tone::Success => Color32::from_rgb(46, 140, 70),
+        Tone::Failure => Color32::from_rgb(190, 55, 50),
+        Tone::Stopped => Color32::from_rgb(215, 125, 20),
     }
 }
 
-fn output_window(ctx: &egui::Context) {
-    let mut open = with(|s| s.output_window);
-    if !open {
-        return;
-    }
-    let output = with(|s| {
+/// The stack of notifications, bottom right, newest at the bottom; a quick local operation
+/// shows as a running one while it runs.
+fn notifications(ctx: &egui::Context, now: f64) {
+    let mut notes = with(|s| s.notes.clone());
+    if let Some((title, command)) = with(|s| {
         s.run
             .as_ref()
-            .map(|r| (r.scenario.command, r.output.clone()))
-    });
-    egui::Window::new("Output of the last operation")
-        .open(&mut open)
-        .default_width(620.0)
-        .show(ctx, |ui| match &output {
-            Some((command, lines)) => {
-                ui.label(RichText::new(*command).monospace().weak());
-                for l in lines {
-                    ui.label(RichText::new(l).monospace());
+            .filter(|r| {
+                !r.scenario.network && r.outcome.is_none() && !r.scenario.command.is_empty()
+            })
+            .map(|r| (r.scenario.title, r.scenario.command))
+    }) {
+        notes.push(Note {
+            id: 0,
+            tone: Tone::Running,
+            title: title.to_owned(),
+            summary: "Running…".to_owned(),
+            command,
+            output: Vec::new(),
+            created: now,
+            pinned: false,
+        });
+    }
+    if notes.is_empty() {
+        return;
+    }
+    let mut clicked = None;
+    let mut closed = None;
+    egui::Area::new(egui::Id::new("prototype-notifications"))
+        .anchor(Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            for n in &notes {
+                let frame = egui::Frame::new()
+                    .fill(tone_fill(n.tone))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .shadow(egui::Shadow {
+                        offset: [0, 3],
+                        blur: 12,
+                        spread: 0,
+                        color: Color32::from_black_alpha(60),
+                    })
+                    .show(ui, |ui| {
+                        ui.set_width(396.0);
+                        ui.horizontal(|ui| {
+                            if n.tone == Tone::Running {
+                                ui.spinner();
+                            }
+                            ui.label(RichText::new(&n.title).strong().color(Color32::WHITE));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let x =
+                                        egui::Button::new(RichText::new("×").size(16.0).color(Color32::WHITE))
+                                            .frame(false);
+                                    if n.tone != Tone::Running && ui.add(x).clicked() {
+                                        closed = Some(n.id);
+                                    }
+                                    if n.tone == Tone::Success && !n.pinned {
+                                        let left = (5.0 - (now - n.created)).max(0.0).ceil();
+                                        ui.label(
+                                            RichText::new(format!("{left:.0}s"))
+                                                .small()
+                                                .color(Color32::from_white_alpha(160)),
+                                        );
+                                    }
+                                },
+                            );
+                        });
+                        ui.label(RichText::new(&n.summary).color(Color32::WHITE));
+                    });
+                let click = ui.interact(
+                    frame.response.rect,
+                    egui::Id::new(("prototype-note", n.id)),
+                    egui::Sense::click(),
+                );
+                if n.tone != Tone::Running && click.clicked() && closed.is_none() {
+                    clicked = Some(n.id);
                 }
-            }
-            None => {
-                ui.label("No operation has run.");
+                ui.add_space(6.0);
             }
         });
-    with(|s| s.output_window = open);
+    with(|s| {
+        if let Some(id) = closed {
+            s.notes.retain(|n| n.id != id);
+        }
+        if let Some(id) = clicked {
+            if let Some(n) = s.notes.iter_mut().find(|n| n.id == id) {
+                n.pinned = true;
+            }
+            s.details = Some(id);
+        }
+    });
+}
+
+/// A notification's details: the command, git's whole output and the result.
+fn details(ctx: &egui::Context) {
+    let Some(n) = with(|s| {
+        s.details
+            .and_then(|id| s.notes.iter().find(|n| n.id == id).cloned())
+    }) else {
+        return;
+    };
+    let mut close = false;
+    let modal = egui::Modal::new(egui::Id::new("prototype-note-details")).show(ctx, |ui| {
+        ui.set_width(620.0);
+        ui.heading(&n.title);
+        ui.label(RichText::new(n.command).monospace().weak());
+        ui.add_space(6.0);
+        output_box(ui, &n.output);
+        ui.add_space(6.0);
+        ui.label(RichText::new(&n.summary).color(tone_fill(n.tone)));
+        ui.add_space(8.0);
+        if ui.button("Close").clicked() {
+            close = true;
+        }
+    });
+    if close || modal.should_close() {
+        with(|s| {
+            s.details = None;
+            s.notes.retain(|x| x.id != n.id);
+        });
+    }
 }
 
 /// 2: a banner across the top of the graph.
@@ -957,15 +1028,7 @@ fn variant_bar(ctx: &egui::Context) {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let text = |s: &str| RichText::new(s).color(Color32::WHITE);
-                        let (runner, show) = with(|s| (s.runner, s.show));
-                        if ui.add(egui::Button::new(text("◀")).frame(false)).clicked() {
-                            with(|s| s.runner = (runner + 2) % 3);
-                        }
-                        ui.label(text(&format!("Running: {}", RUNNERS[runner])));
-                        if ui.add(egui::Button::new(text("▶")).frame(false)).clicked() {
-                            with(|s| s.runner = (runner + 1) % 3);
-                        }
-                        ui.label(text("   |   "));
+                        let show = with(|s| s.show);
                         if ui.add(egui::Button::new(text("◀")).frame(false)).clicked() {
                             with(|s| s.show = (show + 2) % 3);
                         }
@@ -978,7 +1041,8 @@ fn variant_bar(ctx: &egui::Context) {
         });
 }
 
-/// For scripted screenshots: `PARTERRE_PROTO=<runner><show>:<scenario>`, e.g. `A1:3`.
+/// For scripted screenshots: `PARTERRE_PROTO=<show>:<scenario>[,<scenario>…]`, e.g. `1:3,0`.
+/// All but the last scenario finish at once, so their notifications stack.
 pub fn from_env(now: f64) {
     thread_local! { static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
     if DONE.with(|d| d.replace(true)) {
@@ -987,25 +1051,32 @@ pub fn from_env(now: f64) {
     let Ok(v) = std::env::var("PARTERRE_PROTO") else {
         return;
     };
-    let mut chars = v.chars();
-    let runner = match chars.next() {
-        Some('B') => 1,
-        Some('C') => 2,
-        _ => 0,
-    };
-    let show = match chars.next() {
-        Some('2') => 1,
-        Some('3') => 2,
-        _ => 0,
-    };
-    with(|s| {
-        s.runner = runner;
-        s.show = show;
-    });
-    if let Some((_, n)) = v.split_once(':')
-        && let Ok(n) = n.parse::<usize>()
-        && n < scenarios().len()
-    {
+    let (show, list) = v.split_once(':').unwrap_or((&v, ""));
+    with(|s| s.show = show.parse::<usize>().unwrap_or(1).clamp(1, 3) - 1);
+    let picks: Vec<usize> = list.split(',').filter_map(|n| n.parse().ok()).collect();
+    for (k, &n) in picks.iter().enumerate() {
+        if n >= scenarios().len() {
+            continue;
+        }
         start(scenarios().swap_remove(n), now);
+        if k + 1 < picks.len() {
+            with(|s| {
+                if let Some(run) = &mut s.run {
+                    for st in run.scenario.steps.clone() {
+                        match st {
+                            Step::Line(_, t) => run.output.push(t.to_owned()),
+                            Step::End(o) => {
+                                if let Outcome::Stopped(_, ip) = &o {
+                                    s.in_progress = Some(ip.clone());
+                                }
+                                run.outcome = Some(o);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                finish(s, now);
+            });
+        }
     }
 }
