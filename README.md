@@ -108,10 +108,11 @@ parterre adds:
   shown, turning them on there says why. A pull request shows once
   its branch has been fetched and its base branch is shown. parterre asks GitHub about the
   fetched branches only, at most once a minute per repository, and never without signing in.
-- the other worktrees (off by default; the toolbar's folder button): the branches they have
-  checked out in cyan, even where hidden, and detached ones as folder labels, first on their
-  commits, in the graph and in the log. A worktree whose folder is gone is struck through.
-  Right-click one to open it in the file system or a terminal.
+- the other worktrees (off by default; the toolbar's folder button), marked with a folder
+  and first on their commits, in the graph and in the log: the branches they have checked
+  out, even where hidden, and detached ones in cyan, with the folder's name in italics. A
+  worktree whose folder is gone gets a crossed-out folder. Right-click one to open it in the
+  file system or a terminal.
 - light and dark themes
 - rearranging by hand: drag modes, multi-selection, undo
 

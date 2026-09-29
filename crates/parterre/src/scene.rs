@@ -17,7 +17,7 @@ pub const FONT_SIZE: f32 = 12.0;
 pub const MARGIN_X: f32 = 20.0;
 pub const MARGIN_Y: f32 = 5.0;
 pub const CORNER_RADIUS: f32 = 6.0;
-/// The room a worktree's folder glyph takes before its name, at 100%: the glyph and a gap.
+/// The room a worktree's folder glyph takes before its label, at 100%: the glyph and a gap.
 pub const WORKTREE_GLYPH: f32 = FONT_SIZE + 4.0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,11 +28,11 @@ pub enum RowKind {
         kind: RefKind,
         head: bool,
         /// The worktree that has this branch checked out, while worktrees are shown (not the
-        /// open one, whose branch is HEAD's).
+        /// open one, whose branch is HEAD's). Its name then follows the folder glyph.
         worktree: Option<Checkout>,
     },
     /// A worktree whose detached HEAD this commit is. Its label is the folder's name, drawn
-    /// after the folder glyph.
+    /// after the folder glyph, in italics.
     Worktree(Checkout),
     /// An open pull request whose head this commit is: [`Scene::pull_requests`]`[index]`. Its
     /// label is the number, drawn after the pull-request glyph.
@@ -178,7 +178,11 @@ impl Scene {
                 }));
                 for row in &mut rows {
                     row.width = text_width(&row.label);
-                    if let RowKind::Worktree(_) = row.kind {
+                    if let RowKind::Worktree(_)
+                    | RowKind::Ref {
+                        worktree: Some(_), ..
+                    } = row.kind
+                    {
                         row.width += WORKTREE_GLYPH;
                     }
                 }

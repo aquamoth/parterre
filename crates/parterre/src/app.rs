@@ -2115,43 +2115,49 @@ impl ParterreApp {
                         ui.label(what);
                     });
                 }
-                swatch(
-                    ui,
-                    palette.worktree,
-                    "feature/y",
-                    "Branch checked out in another worktree",
-                );
-                for (fill, what) in [
-                    (palette.worktree, "Another worktree's detached HEAD"),
-                    (palette.missing_worktree, "Worktree whose folder is gone"),
+                for (fill, name, italics, glyph, what) in [
+                    (
+                        palette.local_branch,
+                        "feature/y",
+                        false,
+                        parterre_core::glyphs::FOLDER,
+                        "Branch checked out in another worktree",
+                    ),
+                    (
+                        palette.worktree,
+                        "wt-fix",
+                        true,
+                        parterre_core::glyphs::FOLDER,
+                        "Another worktree's detached HEAD",
+                    ),
+                    (
+                        palette.missing_worktree,
+                        "wt-old",
+                        true,
+                        parterre_core::glyphs::FOLDER_GONE,
+                        "Worktree whose folder is gone",
+                    ),
                 ] {
                     ui.horizontal(|ui| {
                         let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
                         let text = crate::theme::text_on(fill);
                         ui.painter().rect_filled(rect, 4.0, fill);
-                        // As in the graph: the folder's name after the glyph.
+                        // As in the graph: the name after the glyph.
                         let icon = Rect::from_center_size(
                             rect.left_center() + vec2(14.0, 0.0),
                             Vec2::splat(12.0),
                         );
-                        crate::widgets::paint_glyph(
-                            ui.painter(),
-                            icon,
-                            parterre_core::glyphs::FOLDER,
-                            text,
-                        );
-                        let name = ui.painter().text(
-                            rect.left_center() + vec2(24.0, 0.0),
-                            egui::Align2::LEFT_CENTER,
-                            "wt-fix",
-                            FontId::monospace(12.0),
-                            text,
-                        );
-                        if fill == palette.missing_worktree {
-                            let y = name.center().y;
-                            ui.painter()
-                                .hline(name.x_range(), y, egui::Stroke::new(1.0, text));
-                        }
+                        crate::widgets::paint_glyph(ui.painter(), icon, glyph, text);
+                        let format = egui::TextFormat {
+                            font_id: FontId::monospace(12.0),
+                            color: text,
+                            italics,
+                            ..egui::TextFormat::default()
+                        };
+                        let job = egui::text::LayoutJob::single_section(name.to_owned(), format);
+                        let galley = ui.painter().layout_job(job);
+                        let at = rect.left_center() + vec2(24.0, -galley.size().y / 2.0);
+                        ui.painter().galley(at, galley, text);
                         ui.label(what);
                     });
                 }

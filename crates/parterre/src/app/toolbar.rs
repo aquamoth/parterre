@@ -606,9 +606,9 @@ pub(super) const PULL_REQUESTS_TIP: &str = "Open pull requests of origin on GitH
     fetched. Click one to open it. Asks GitHub only when gh is signed in (gh auth login).";
 pub(super) const NO_PULL_REQUESTS_TIP: &str =
     "Pull requests: only for repositories whose origin is on GitHub, for now.";
-pub(super) const WORKTREES_TIP: &str = "The repository's other worktrees: the branches they \
-    have checked out, in their own colour and even where hidden, and their detached HEADs as \
-    folder labels. Right-click one to open its folder.";
+pub(super) const WORKTREES_TIP: &str = "The repository's other worktrees, marked with a \
+    folder: the branches they have checked out, even where hidden, and their detached HEADs \
+    in a colour of their own. Right-click one to open it.";
 pub(super) const NO_WORKTREES_TIP: &str =
     "Worktrees: this repository has no other worktrees (git worktree add).";
 pub(super) const REMEMBER_TIP: &str =

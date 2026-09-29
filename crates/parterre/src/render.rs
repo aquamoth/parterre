@@ -1,5 +1,6 @@
 //! Painting a [`Scene`]: TortoiseGit-style nodes (one coloured row per ref) and edges.
 
+use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
     Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2,
     vec2,
@@ -127,7 +128,7 @@ pub fn paint_scene(
             if !draw_text {
                 continue;
             }
-            let label = if let RowKind::PullRequest { index, .. } = row.kind {
+            if let RowKind::PullRequest { index, .. } = row.kind {
                 // The label's lengths all grow with the zoom, so this keeps them their size
                 // on screen, whatever the text size.
                 let (end, icon) = pull_request_label(row_rect, row.width, fixed(zoom));
@@ -139,11 +140,20 @@ pub fn paint_scene(
                     let stroke = Stroke::new(fixed(zoom.max(1.0)), text);
                     painter.hline(number.x_range(), y, stroke);
                 }
-                number
-            } else if let RowKind::Worktree(_) = row.kind {
+            } else if let Some(c) = row_worktree(row) {
+                // A detached worktree's name is in italics: it is no branch.
                 let (start, icon) = worktree_label(row_rect, fixed(zoom));
-                widgets::paint_glyph(painter, icon, glyphs::FOLDER, text);
-                painter.text(start, Align2::LEFT_CENTER, &row.label, font.clone(), text)
+                widgets::paint_glyph(painter, icon, worktree_glyph(c), text);
+                let format = TextFormat {
+                    font_id: font.clone(),
+                    color: text,
+                    italics: matches!(row.kind, RowKind::Worktree(_)),
+                    ..TextFormat::default()
+                };
+                let galley =
+                    painter.layout_job(LayoutJob::single_section(row.label.clone(), format));
+                let at = Pos2::new(start.x, start.y - galley.size().y / 2.0);
+                painter.galley(at, galley, text);
             } else {
                 painter.text(
                     Pos2::new(row_rect.min.x + fixed(MARGIN_X * zoom), row_rect.center().y),
@@ -151,12 +161,7 @@ pub fn paint_scene(
                     &row.label,
                     font.clone(),
                     text,
-                )
-            };
-            // A worktree whose folder is gone is struck through.
-            if row_worktree(row).is_some_and(|c| c.missing) {
-                let stroke = Stroke::new(fixed(zoom.max(1.0)), text);
-                painter.hline(label.x_range(), label.center().y, stroke);
+                );
             }
         }
 
@@ -560,6 +565,15 @@ pub fn worktree_label(row: Rect, zoom: f32) -> (Pos2, Rect) {
     )
 }
 
+/// The glyph before a worktree's label: a folder, crossed out if it is gone.
+pub fn worktree_glyph(c: Checkout) -> glyphs::Glyph {
+    if c.missing {
+        glyphs::FOLDER_GONE
+    } else {
+        glyphs::FOLDER
+    }
+}
+
 /// The worktree a row stands for, if any.
 pub fn row_worktree(row: &Row) -> Option<Checkout> {
     match row.kind {
@@ -585,13 +599,8 @@ pub fn row_colors(row: &Row, palette: &Palette) -> (Color32, Color32, Color32) {
 fn row_fill(row: &Row, palette: &Palette) -> Color32 {
     match &row.kind {
         RowKind::Hash => palette.plain_fill,
-        // The current branch stays red; a worktree's colour goes before the branch colours.
-        RowKind::Ref {
-            head: false,
-            worktree: Some(c),
-            ..
-        }
-        | RowKind::Worktree(c) => {
+        // Only a detached worktree has a colour of its own: it stands in for HEAD.
+        RowKind::Worktree(c) => {
             if c.missing {
                 palette.missing_worktree
             } else {

@@ -1139,26 +1139,31 @@ pub(super) fn badge(
             palette.worktree
         }
     };
-    // As in the graph: the current branch stays red, and a gone folder is struck through.
+    // As in the graph: a worktree's folder glyph (crossed out if it is gone) before the
+    // branch it has checked out, and a detached one in a colour of its own and in italics.
     let (fill, worktree) = match *badge {
-        Badge::Ref(r, Some(w)) if !r.is_head => (worktree_fill(w), Some(w)),
-        Badge::Ref(r, _) => (palette.ref_fill(r.kind, r.is_head, &r.name), None),
+        Badge::Ref(r, w) => (palette.ref_fill(r.kind, r.is_head, &r.name), w),
         Badge::Worktree(w) => (worktree_fill(w), Some(w)),
     };
-    let glyph = if let Badge::Worktree(_) = badge {
-        BADGE_GLYPH
-    } else {
-        0.0
-    };
+    let glyph = if worktree.is_some() { BADGE_GLYPH } else { 0.0 };
     let color = text_on(fill);
     let pad = 5.0;
-    let g = cell(
-        ui,
-        &badge.text(),
-        FontId::proportional(11.5),
-        color,
-        max_width - 2.0 * pad - glyph,
+    let mut job = LayoutJob::single_section(
+        badge.text(),
+        TextFormat {
+            font_id: FontId::proportional(11.5),
+            color,
+            italics: matches!(badge, Badge::Worktree(_)),
+            ..TextFormat::default()
+        },
     );
+    job.wrap = TextWrapping {
+        max_width: (max_width - 2.0 * pad - glyph).max(1.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let g = ui.painter().layout_job(job);
     let size = vec2(g.size().x + 2.0 * pad + glyph, 17.0);
     let rect = Rect::from_min_size(pos2(at.x, at.y - size.y / 2.0), size);
     let painter = ui.painter();
@@ -1169,24 +1174,26 @@ pub(super) fn badge(
         Stroke::new(1.0, Color32::from_black_alpha(64)),
         egui::StrokeKind::Inside,
     );
-    if glyph > 0.0 {
+    if let Some(w) = worktree {
         let icon = Rect::from_center_size(
             pos2(rect.left() + pad + 5.5, rect.center().y),
             Vec2::splat(11.0),
         );
-        widgets::paint_glyph(painter, icon, glyphs::FOLDER, color);
+        let folder = if w.missing {
+            glyphs::FOLDER_GONE
+        } else {
+            glyphs::FOLDER
+        };
+        widgets::paint_glyph(painter, icon, folder, color);
     }
-    let text = Rect::from_min_size(
+    painter.galley(
         pos2(
             rect.left() + pad + glyph,
             rect.center().y - g.size().y / 2.0,
         ),
-        g.size(),
+        g,
+        color,
     );
-    painter.galley(text.min, g, color);
-    if worktree.is_some_and(|w| w.missing) {
-        painter.hline(text.x_range(), text.center().y, Stroke::new(1.0, color));
-    }
     size.x
 }
 
@@ -1407,7 +1414,7 @@ fn badge_widget(ui: &mut Ui, b: &Badge, palette: &Palette) {
     let text =
         ui.painter()
             .layout_no_wrap(b.text(), FontId::proportional(11.5), Color32::PLACEHOLDER);
-    let glyph = if let Badge::Worktree(_) = b {
+    let glyph = if let Badge::Ref(_, Some(_)) | Badge::Worktree(_) = b {
         BADGE_GLYPH
     } else {
         0.0
