@@ -1792,6 +1792,7 @@ impl ParterreApp {
                             action = Some(MenuAction::Compare(CompareRequest::WorkingTree(oid)));
                             ui.close();
                         }
+                        menu::separator(ui);
                         let is_marked = marked.as_ref().is_some_and(|(m, _)| *m == oid);
                         let (text, mark) = if is_marked {
                             ("Clear the mark", None)
@@ -1828,21 +1829,6 @@ impl ParterreApp {
                             ui.close();
                         }
                     });
-                    if pull_requests_shown {
-                        // Greyed out rather than left out, so the menu keeps its shape.
-                        if n.pull_requests.is_empty() {
-                            ui.add_enabled(false, egui::Button::new("Open pull request"))
-                                .on_disabled_hover_text("No open pull request's head is here");
-                        }
-                        for &i in &n.pull_requests {
-                            let pr = &scene.pull_requests[i];
-                            let label = format!("Open pull request #{}", pr.number);
-                            if ui.button(label).on_hover_text(&pr.title).clicked() {
-                                action = Some(MenuAction::OpenPullRequest(pr.url.clone()));
-                                ui.close();
-                            }
-                        }
-                    }
                     // The worktrees here: the open one at HEAD, and those shown on the node.
                     let worktrees: Vec<&parterre_core::Worktree> = if worktrees_shown {
                         let open = n
@@ -1854,42 +1840,78 @@ impl ParterreApp {
                     } else {
                         Vec::new()
                     };
-                    if worktrees_shown {
-                        for (what, opener) in [
-                            ("Open in file system", Opener::FileManager),
-                            ("Open in terminal", Opener::Terminal),
-                        ] {
-                            // One worktree: the item opens it. Several: a submenu names them.
-                            let mut open_item =
-                                |ui: &mut Ui, label: &str, w: &parterre_core::Worktree| {
-                                    let path = w.path.display().to_string();
-                                    let open = ui
-                                        .add_enabled(!w.missing, egui::Button::new(label))
-                                        .on_hover_text(&path)
-                                        .on_disabled_hover_text(format!(
-                                            "The folder is gone: {path}"
-                                        ));
-                                    if open.clicked() {
-                                        action = Some(MenuAction::Open(opener, w.path.clone()));
+                    menu::separator(ui);
+                    // Greyed out rather than left out, so the menu keeps its shape.
+                    if !(pull_requests_shown || worktrees_shown) {
+                        ui.add_enabled(false, egui::Button::new("Open"))
+                            .on_disabled_hover_text("Show pull requests or worktrees to open them");
+                    } else {
+                        menu::plain_submenu(ui, "Open", |ui| {
+                            if pull_requests_shown {
+                                let mut open_item = |ui: &mut Ui, label: &str, i: usize| {
+                                    let pr = &scene.pull_requests[i];
+                                    if ui.button(label).on_hover_text(&pr.title).clicked() {
+                                        action = Some(MenuAction::OpenPullRequest(pr.url.clone()));
                                         ui.close();
                                     }
                                 };
-                            match worktrees.as_slice() {
-                                // Greyed out rather than left out, so the menu keeps its shape.
-                                [] => {
-                                    ui.add_enabled(false, egui::Button::new(what))
-                                        .on_disabled_hover_text("No worktree is checked out here");
-                                }
-                                [w] => open_item(ui, what, w),
-                                several => menu::plain_submenu(ui, what, |ui| {
-                                    for w in several {
-                                        open_item(ui, &w.name(), w);
+                                let number = |i: usize| scene.pull_requests[i].number;
+                                match n.pull_requests.as_slice() {
+                                    [] => {
+                                        ui.add_enabled(false, egui::Button::new("Pull request"))
+                                            .on_disabled_hover_text(
+                                                "No open pull request's head is here",
+                                            );
                                     }
-                                }),
+                                    &[i] => {
+                                        open_item(ui, &format!("Pull request #{}", number(i)), i)
+                                    }
+                                    several => menu::plain_submenu(ui, "Pull request", |ui| {
+                                        for &i in several {
+                                            open_item(ui, &format!("#{}", number(i)), i);
+                                        }
+                                    }),
+                                }
                             }
-                        }
+                            if !worktrees_shown {
+                                return;
+                            }
+                            for (what, opener) in [
+                                ("In file system", Opener::FileManager),
+                                ("In terminal", Opener::Terminal),
+                            ] {
+                                // One worktree: the item opens it. Several: a submenu names them.
+                                let mut open_item =
+                                    |ui: &mut Ui, label: &str, w: &parterre_core::Worktree| {
+                                        let path = w.path.display().to_string();
+                                        let open = ui
+                                            .add_enabled(!w.missing, egui::Button::new(label))
+                                            .on_hover_text(&path)
+                                            .on_disabled_hover_text(format!(
+                                                "The folder is gone: {path}"
+                                            ));
+                                        if open.clicked() {
+                                            action = Some(MenuAction::Open(opener, w.path.clone()));
+                                            ui.close();
+                                        }
+                                    };
+                                match worktrees.as_slice() {
+                                    [] => {
+                                        ui.add_enabled(false, egui::Button::new(what))
+                                            .on_disabled_hover_text(
+                                                "No worktree is checked out here",
+                                            );
+                                    }
+                                    [w] => open_item(ui, what, w),
+                                    several => menu::plain_submenu(ui, what, |ui| {
+                                        for w in several {
+                                            open_item(ui, &w.name(), w);
+                                        }
+                                    }),
+                                }
+                            }
+                        });
                     }
-                    menu::separator(ui);
                     let commit = scene.repo.commit(n.commit);
                     menu::plain_submenu(ui, "Copy", |ui| {
                         // Right-clicking selects the node, so Ctrl+C would copy the same hash.
@@ -1916,16 +1938,21 @@ impl ParterreApp {
                             ui.ctx().copy_text(commit.subject.clone());
                             ui.close();
                         }
-                        for w in &worktrees {
-                            let label = if worktrees.len() > 1 {
-                                format!("Folder path ({})", w.name())
-                            } else {
-                                "Folder path".to_owned()
-                            };
-                            if ui.button(label).clicked() {
-                                ui.ctx().copy_text(w.path.display().to_string());
+                        let copy_path = |ui: &mut Ui, label: &str, w: &parterre_core::Worktree| {
+                            let path = w.path.display().to_string();
+                            if ui.button(label).on_hover_text(&path).clicked() {
+                                ui.ctx().copy_text(path);
                                 ui.close();
                             }
+                        };
+                        match worktrees.as_slice() {
+                            [] => {}
+                            [w] => copy_path(ui, "Folder path", w),
+                            several => menu::plain_submenu(ui, "Folder path", |ui| {
+                                for w in several {
+                                    copy_path(ui, &w.name(), w);
+                                }
+                            }),
                         }
                     });
                     menu::separator(ui);
