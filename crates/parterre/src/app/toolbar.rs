@@ -300,6 +300,9 @@ impl ParterreApp {
     }
 
     fn main_menu(&mut self, ui: &mut Ui) {
+        if menu::item(ui, "Fetch all remotes", "Ctrl+F5", Mark::None).clicked() {
+            crate::prototype_operation_menus::fetch_op();
+        }
         if menu::item(ui, "Open folder…", "Ctrl+O", Mark::None).clicked() {
             self.pick_folder = true;
         }

@@ -1140,7 +1140,11 @@ impl ParterreApp {
             self.view
                 .zoom_around(self.canvas, self.canvas.center(), 1.0 / self.view.zoom);
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F5)) {
+            crate::prototype_operation_menus::fetch_op();
+        }
         if pressed(Key::F5) {
+            crate::prototype_operation_menus::forget();
             self.reload();
         }
         // One node gives its log, two the range between them; three or more nothing.
@@ -1463,6 +1467,21 @@ impl ParterreApp {
         }
         if response.secondary_clicked() {
             self.context_node = self.hovered;
+            {
+                use crate::prototype_operation_menus::Clicked;
+                let world = pointer.map(|p| self.view.to_world(canvas, p));
+                let row = self
+                    .hovered
+                    .zip(world)
+                    .and_then(|(n, w)| scene.row_at(n, w));
+                crate::prototype_operation_menus::set_clicked(match row.map(|r| &r.kind) {
+                    Some(crate::scene::RowKind::Ref { .. }) => {
+                        Clicked::Ref(row.unwrap().label.clone())
+                    }
+                    Some(crate::scene::RowKind::Worktree(c)) => Clicked::Worktree(c.index),
+                    _ => Clicked::Commit,
+                });
+            }
             if let Some(n) = self.hovered
                 && !self.selection.contains(n)
             {
@@ -1725,6 +1744,11 @@ impl ParterreApp {
                 menu::fit_window(ui, |ui| {
                     ui.set_min_width(menu::MIN_WIDTH);
                     let Some(node) = context_node else {
+                        if ui.add(item("Fetch all remotes", "Ctrl+F5")).clicked() {
+                            crate::prototype_operation_menus::fetch_op();
+                            ui.close();
+                        }
+                        crate::menu::separator(ui);
                         if ui.add(item("Fit graph", "F")).clicked() {
                             action = Some(MenuAction::Fit);
                             ui.close();
@@ -1735,6 +1759,12 @@ impl ParterreApp {
                         }
                         return;
                     };
+                    crate::prototype_operation_menus::menu(
+                        ui,
+                        &scene.repo,
+                        scene.graph.nodes[node].commit,
+                        true,
+                    );
                     // Greyed out rather than left out, so the menu keeps its shape.
                     let show_log = ui
                         .add_enabled(group.len() <= 2, item("Show log", "L"))
@@ -2428,6 +2458,8 @@ impl eframe::App for ParterreApp {
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         self.about_window(&ctx);
+        crate::prototype_operation_menus::dialog(&ctx, self.repo.as_deref());
+        crate::prototype_operation_menus::variant_bar(&ctx);
 
         // Scripted runs wait for the graph, unless there is none to wait for, and for the diffs
         // and the pull requests (and the layout with them) being loaded.
