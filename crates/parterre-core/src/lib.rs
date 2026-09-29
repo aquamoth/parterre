@@ -3,6 +3,7 @@
 
 pub mod blame;
 pub mod changed_files;
+pub mod columns;
 pub mod compare;
 pub mod file_diff;
 pub mod file_history;

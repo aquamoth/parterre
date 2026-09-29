@@ -1,5 +1,5 @@
-//! The changed-files table of the log and compare windows: a filter, sortable columns, a
-//! selection, and double-click or Enter to open diff windows. Also the worker that asks git
+//! The changed-files table of the log and compare windows: a filter, sortable and resizable
+//! columns, a selection, and double-click or Enter to open diff windows. Also the worker that asks git
 //! for such lists off the UI thread.
 
 use std::collections::{HashMap, HashSet};
@@ -14,10 +14,12 @@ use eframe::egui::{
 use parterre_core::changed_files::{
     ChangedFile, FileColumn, FileOrder, FileStatus, filter_and_sort,
 };
+use parterre_core::columns::{ColumnWidths, Layout};
 use parterre_core::file_diff::GITLINK_MODE;
 use parterre_core::git::Git;
 use parterre_core::text::{elide_start, thousands};
 
+use super::column_borders::{self, Columns};
 use super::log_window::{CELL_PAD, Colors, HEADING, cell, heading_background};
 use crate::widgets;
 
@@ -29,12 +31,14 @@ const FILE_ROW: f32 = 23.0;
 /// Changed files, or why they could not be listed.
 pub type Listing = Result<Vec<ChangedFile>, String>;
 
-/// The table's state: sort, filter and selection.
+/// The table's state: sort, filter, selection and the column widths the user picked.
 #[derive(Debug, Default)]
 pub struct FileTable {
     pub order: FileOrder,
     pub filter: String,
     selection: FileSelection,
+    /// Until the window closes.
+    pub widths: ColumnWidths,
 }
 
 /// Changed files chosen in the list, by path, for the list they belong to. Showing another
@@ -159,16 +163,32 @@ impl FileTable {
         // Headings; a click sorts, another reverses.
         let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADING), Sense::hover());
         heading_background(ui, head, c);
-        let (x, w) = file_columns(head.width(), head.left());
         let compact = compact_files(head.width());
+        let layout = file_columns(&self.widths, head.width(), head.left());
+        let sorts: Vec<Response> = FileColumn::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(i, column)| {
+                let rect =
+                    Rect::from_x_y_ranges(layout.x[i]..=layout.x[i] + layout.w[i], head.y_range());
+                let response = ui.interact(rect, Id::new((name, "sort", i)), Sense::click());
+                if file_heading(column, compact) != column.title() {
+                    response.on_hover_text(column.title())
+                } else {
+                    response
+                }
+            })
+            .collect();
+        // The borders over the headings; then the columns as dragged, in this frame.
+        let columns = file_table_columns(&layout);
+        let border_id = Id::new((name, "columns"));
+        let active = column_borders::drag(ui, border_id, head, &columns, &mut self.widths);
+        let layout = file_columns(&self.widths, head.width(), head.left());
+        let (x, w) = (&layout.x, &layout.w);
         let heading_font = FontId::proportional(12.0);
-        for (i, column) in FileColumn::ALL.into_iter().enumerate() {
+        for ((i, column), response) in FileColumn::ALL.into_iter().enumerate().zip(sorts) {
             let rect = Rect::from_x_y_ranges(x[i]..=x[i] + w[i], head.y_range());
-            let mut response = ui.interact(rect, Id::new((name, "sort", i)), Sense::click());
             let heading = file_heading(column, compact);
-            if heading != column.title() {
-                response = response.on_hover_text(column.title());
-            }
             if response.clicked() {
                 self.order.click(column);
             }
@@ -203,6 +223,7 @@ impl FileTable {
                 sort_arrow(ui, at, self.order.descending, color);
             }
         }
+        column_borders::paint(ui, head, &file_table_columns(&layout), active, c);
 
         if shown.is_empty() {
             ui.add_space(16.0);
@@ -223,6 +244,7 @@ impl FileTable {
         let mut click = None;
         let mut pick = None;
         let selection = &self.selection;
+        let widths = &self.widths;
         ScrollArea::vertical()
             .id_salt(("files", owner))
             .auto_shrink(false)
@@ -246,7 +268,7 @@ impl FileTable {
                     } else if row % 2 == 1 {
                         ui.painter().rect_filled(rect, 0.0, c.stripe);
                     }
-                    let (x, w) = file_columns(rect.width(), rect.left());
+                    let Layout { x, w } = file_columns(widths, rect.width(), rect.left());
                     let y = rect.center().y;
                     let put = |g: Arc<Galley>, x: f32| {
                         ui.painter().galley(pos2(x, y - g.size().y / 2.0), g, text);
@@ -678,20 +700,28 @@ fn file_heading(column: FileColumn, compact: bool) -> &'static str {
     }
 }
 
-/// x and widths of the changed-files columns: the path takes what the others leave.
-fn file_columns(width: f32, left: f32) -> ([f32; 5], [f32; 5]) {
+/// The path column, which takes what the others leave, and the least it gets.
+const PATH: usize = 0;
+const PATH_MIN: f32 = 120.0;
+
+/// x and widths of the changed-files columns: the path takes what the others leave; they are
+/// as the user dragged them, or as the table's width has them.
+fn file_columns(widths: &ColumnWidths, width: f32, left: f32) -> Layout {
     let fixed = if compact_files(width) {
         COMPACT_FILE_COLUMNS
     } else {
         FILE_COLUMNS
     };
-    let path = (width - fixed.iter().sum::<f32>()).max(120.0);
-    let w = [path, fixed[0], fixed[1], fixed[2], fixed[3]];
-    let mut x = [left; 5];
-    for i in 1..5 {
-        x[i] = x[i - 1] + w[i - 1];
+    let defaults = [0.0, fixed[0], fixed[1], fixed[2], fixed[3]];
+    widths.layout(&defaults, PATH, PATH_MIN, left, width)
+}
+
+fn file_table_columns(layout: &Layout) -> Columns<'_> {
+    Columns {
+        layout,
+        flex: PATH,
+        flex_min: PATH_MIN,
     }
-    (x, w)
 }
 
 /// A small triangle: up for ascending, down for descending.

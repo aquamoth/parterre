@@ -265,14 +265,21 @@ pub const HISTORY: Glyph = &[Part::Path(
     "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M12 7v5l4 2",
 )];
 
+/// Copy: Lucide's copy, a rounded square with a second one offset behind it.
+pub const COPY: Glyph = &[
+    rect(8.0, 8.0, 14.0, 14.0, 2.0, false),
+    Part::Path("M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"),
+];
+
 /// Every glyph, for tests.
-pub const ALL: [Glyph; 44] = [
+pub const ALL: [Glyph; 45] = [
     MENU,
     SEARCH,
     PLUS,
     MINUS,
     CLOSE,
     CHECK,
+    COPY,
     CHEVRON_DOWN,
     CHEVRON_UP,
     CHEVRON_RIGHT,
