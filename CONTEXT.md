@@ -22,6 +22,42 @@ One of the repository's checkouts that git knows about: the main one and each li
 with its own folder and its own HEAD. The one parterre opened is one of them.
 _Avoid_: checkout, clone, working copy
 
+**Open worktree**:
+The worktree parterre has open, in its one main window. Going to another worktree of the same
+repository replaces it rather than opening a second window.
+_Avoid_: current worktree, active worktree; "open in parterre" or "switch" for going to one
+
+**Deleting a worktree**:
+Deleting a worktree's folder, with everything in it, and git's record of it. There is no
+deleting only one of the two.
+_Avoid_: remove worktree, prune
+
+### Changing the repository
+
+**Operation**:
+A git command parterre runs that changes the repository: switching, creating, pushing, pulling
+or deleting a branch, fetching, adding or deleting a worktree, merging, rebasing, cherry-picking
+or reverting. Only the open worktree's branch is ever merged into, rebased or pulled; other
+branches can only be switched to, pushed, fast-forwarded or deleted.
+_Avoid_: action (actions also include opening a folder or copying a hash), command, task
+
+**Upstream**:
+The remote branch a local branch is set to track, which pull and push use by default. It may
+have a different name from the local branch, or there may be none.
+_Avoid_: tracking branch, remote branch (any branch on a remote), origin
+
+**Operation in progress**:
+A merge, rebase, cherry-pick or revert that stopped partway, usually on conflicts, in one
+worktree, until it is continued or aborted there.
+_Avoid_: conflict state, pending merge
+
+**Lost work**:
+What an operation would destroy with no copy left: commits that no other branch, remote branch,
+tag or worktree reaches, and uncommitted changes to files that aren't ignored, whether staged,
+modified or untracked. Ignored files are never lost work. A pushed branch deleted locally loses
+nothing.
+_Avoid_: unmerged, unpushed, data loss
+
 ### The log
 
 **Log window**:
