@@ -1759,11 +1759,6 @@ impl ParterreApp {
                         }
                         return;
                     };
-                    crate::prototype_operation_menus::node_menu(
-                        ui,
-                        &scene.repo,
-                        scene.graph.nodes[node].commit,
-                    );
                     // Greyed out rather than left out, so the menu keeps its shape.
                     let show_log = ui
                         .add_enabled(group.len() <= 2, item("Show log", "L"))
@@ -1857,12 +1852,17 @@ impl ParterreApp {
                         .map(|k| &scene.repo.worktrees[k])
                         .collect();
                     menu::separator(ui);
+                    crate::prototype_operation_menus::node_menu(
+                        ui,
+                        &scene.repo,
+                        scene.graph.nodes[node].commit,
+                    );
                     // Greyed out rather than left out, so the menu keeps its shape.
                     if !(pull_requests_shown || worktrees_shown) {
-                        ui.add_enabled(false, egui::Button::new("Open"))
+                        ui.add_enabled(false, egui::Button::new("Open in"))
                             .on_disabled_hover_text("Show pull requests or worktrees to open them");
                     } else {
-                        menu::plain_submenu(ui, "Open", |ui| {
+                        menu::plain_submenu(ui, "Open in", |ui| {
                             if pull_requests_shown {
                                 let mut open_item = |ui: &mut Ui, label: &str, i: usize| {
                                     let pr = &scene.pull_requests[i];
@@ -2458,7 +2458,6 @@ impl eframe::App for ParterreApp {
         self.blame_windows(&ctx);
         self.about_window(&ctx);
         crate::prototype_operation_menus::dialog(&ctx, self.repo.as_deref());
-        crate::prototype_operation_menus::variant_bar(&ctx);
 
         // Scripted runs wait for the graph, unless there is none to wait for, and for the diffs
         // and the pull requests (and the layout with them) being loaded.

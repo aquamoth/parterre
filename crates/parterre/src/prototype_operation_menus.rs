@@ -21,6 +21,7 @@ use eframe::egui::{self, Color32, RichText, Ui};
 use parterre_core::git::Git;
 use parterre_core::{CommitIx, GitRef, Head, RefKind, Repo};
 
+#[allow(dead_code)]
 pub const VARIANTS: [(&str, &str); 3] = [
     ("A", "Flat, every item names its branch"),
     ("B", "One item per verb, branches in a submenu"),
@@ -85,9 +86,9 @@ struct State {
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State {
         variant: match std::env::var("PARTERRE_MENU_VARIANT").as_deref() {
+            Ok("A" | "a") => 0,
             Ok("B" | "b") => 1,
-            Ok("C" | "c") => 2,
-            _ => 0,
+            _ => 2,
         },
         clicked: Clicked::Commit,
         pending: None,
@@ -802,13 +803,32 @@ fn label_clicked(
                 ui.label(RichText::new("The current branch").weak());
             }
             let mut last = None;
+            let (advanced, list): (Vec<Entry>, Vec<Entry>) =
+                list.into_iter().partition(|e| e.verb == Verb::Upstream);
+            let mut advanced = Some(advanced).filter(|a| !a.is_empty());
             for e in list {
+                if e.verb == Verb::Delete
+                    && let Some(advanced) = advanced.take()
+                {
+                    crate::menu::plain_submenu(ui, "Advanced", |ui| {
+                        for e in advanced {
+                            item(ui, &e.full, e.offer);
+                        }
+                    });
+                }
                 let group = matches!(e.verb, Verb::Push | Verb::Pull | Verb::Upstream);
                 if last.is_some_and(|g| g != group) || last.is_some() && e.verb == Verb::Delete {
                     crate::menu::separator(ui);
                 }
                 last = Some(group);
                 item(ui, &e.full, e.offer);
+            }
+            if let Some(advanced) = advanced {
+                crate::menu::plain_submenu(ui, "Advanced", |ui| {
+                    for e in advanced {
+                        item(ui, &e.full, e.offer);
+                    }
+                });
             }
         }
         _ => {
@@ -828,23 +848,35 @@ fn label_clicked(
 pub fn row_menu(ui: &mut Ui, repo: &Repo, commit: CommitIx) {
     let cur = Current::of(repo);
     let h = hash(repo, commit);
-    item(
-        ui,
-        &format!("Cherry-pick into {}", cur.name()),
-        cherry_pick(repo, commit, &cur),
-    );
-    item(
-        ui,
-        &format!("Revert in {}", cur.name()),
-        revert(repo, commit, &cur),
-    );
-    crate::menu::separator(ui);
-    item(
-        ui,
-        &format!("Switch to {h} (detached)"),
-        switch_detached(repo, commit, &cur),
-    );
+    // Hidden, not greyed out, where they don't apply: a commit is either in the current
+    // branch (revert) or not (cherry-pick).
+    let mut any = false;
+    for (label, offer) in [
+        (
+            format!("Cherry-pick into {}", cur.name()),
+            cherry_pick(repo, commit, &cur),
+        ),
+        (
+            format!("Revert in {}", cur.name()),
+            revert(repo, commit, &cur),
+        ),
+    ] {
+        if offer.is_ok() {
+            item(ui, &label, offer);
+            any = true;
+        }
+    }
+    if any {
+        crate::menu::separator(ui);
+    }
     commit_items(ui, repo, commit);
+    crate::menu::plain_submenu(ui, "Advanced", |ui| {
+        item(
+            ui,
+            &format!("Switch to {h} (detached)"),
+            switch_detached(repo, commit, &cur),
+        );
+    });
     crate::menu::separator(ui);
 }
 
@@ -916,6 +948,7 @@ pub fn dialog(ctx: &egui::Context, repo: Option<&Repo>) {
 }
 
 /// The bar that switches between variants, bottom centre.
+#[allow(dead_code)]
 pub fn variant_bar(ctx: &egui::Context) {
     egui::Area::new(egui::Id::new("prototype-variant-bar"))
         .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -40.0))
