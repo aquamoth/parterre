@@ -14,6 +14,7 @@ mod frame_pacing;
 mod icon;
 mod menu;
 mod prototype_operation_menus;
+mod prototype_warnings;
 mod raster;
 mod render;
 mod scene;

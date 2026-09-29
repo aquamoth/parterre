@@ -2458,6 +2458,13 @@ impl eframe::App for ParterreApp {
         self.blame_windows(&ctx);
         self.about_window(&ctx);
         crate::prototype_operation_menus::dialog(&ctx, self.repo.as_deref());
+        if let Some(repo) = self.repo.clone() {
+            crate::prototype_warnings::from_env(&repo);
+            crate::prototype_warnings::show(&ctx, Some(&repo));
+            if let Some(query) = crate::prototype_warnings::take_log_request(&repo) {
+                self.prototype_open_log_query(repo, query);
+            }
+        }
 
         // Scripted runs wait for the graph, unless there is none to wait for, and for the diffs
         // and the pull requests (and the layout with them) being loaded.

@@ -1540,6 +1540,14 @@ impl ParterreApp {
         self.open_log(repo, &commits);
     }
 
+    /// PROTOTYPE (#147): opens the log on any query.
+    pub(super) fn prototype_open_log_query(&mut self, repo: Arc<Repo>, query: LogQuery) {
+        let [w, h] = self.settings.log_window.size;
+        let options = self.settings.log_window.options;
+        self.log.open(repo, query, options, vec2(w, h));
+        self.focus_log = true;
+    }
+
     /// Opens the log of `commits` (one or two, see [`LogQuery::for_selection`]).
     pub(super) fn open_log(&mut self, repo: Arc<Repo>, commits: &[CommitIx]) {
         let Some(query) = LogQuery::for_selection(&repo, commits) else {
