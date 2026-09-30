@@ -140,6 +140,7 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State {
         variant: match std::env::var("PARTERRE_ADD_WORKTREE_VARIANT").as_deref() {
             Ok("B" | "b") => 1,
+            // A to C were turned down; only the environment brings them back.
             Ok("A" | "a") => 0,
             Ok("C" | "c") => 2,
             _ => 3,
@@ -771,7 +772,6 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
                 run = Some(command(p, &folder, &d.hash));
             }
         });
-    variant_bar(ctx);
     if ctx.input(|i| i.key_pressed(Key::Escape)) {
         close = true;
     }
@@ -850,25 +850,53 @@ fn header(ui: &mut Ui, d: &mut Dialog) {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.label(RichText::new("Add a worktree").size(16.0).strong());
-            // The commit: its hash opens it in the log window.
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.spacing_mut().interact_size.y = 0.0;
-                ui.label(RichText::new("at").weak().size(12.0));
-                let link = ui
-                    .link(RichText::new(&d.hash).monospace().size(12.0))
-                    .on_hover_text("Show in the log");
-                if link.clicked() {
-                    d.to_log = true;
-                }
-                ui.label(RichText::new(&d.subject).size(12.0));
-            });
-            ui.label(
-                RichText::new(format!("{}, {}", d.author, d.date))
-                    .weak()
-                    .size(12.0),
-            );
+            commit_line(ui, d);
         });
+    });
+}
+
+/// The commit, as the log window's row has it: hash (opening it in the log window), subject
+/// (cut short to fit), author and date, one line.
+fn commit_line(ui: &mut Ui, d: &mut Dialog) {
+    const SIZE: f32 = 12.0;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.spacing_mut().interact_size.y = 0.0;
+        let weak = ui.visuals().weak_text_color();
+        let bar = || {
+            RichText::new("|")
+                .size(SIZE)
+                .color(weak.gamma_multiply(0.6))
+        };
+        ui.label(RichText::new("at").weak().size(SIZE));
+        let link = ui
+            .link(RichText::new(&d.hash).monospace().size(SIZE))
+            .on_hover_text("Show in the log");
+        if link.clicked() {
+            d.to_log = true;
+        }
+        ui.label(bar());
+        // The author and date keep their room; the subject has what's left.
+        let font = egui::FontId::proportional(SIZE);
+        let width = |t: &str| {
+            ui.painter()
+                .layout_no_wrap(t.to_owned(), font.clone(), weak)
+                .size()
+                .x
+        };
+        let spacing = ui.spacing().item_spacing.x;
+        let right = width("|") * 2.0 + width(&d.author) + width(&d.date) + spacing * 5.0;
+        let room = (ui.available_width() - right).max(40.0);
+        let height = ui.fonts_mut(|f| f.row_height(&font));
+        let centred = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(egui::vec2(room, height), centred, |ui| {
+            ui.add(egui::Label::new(RichText::new(&d.subject).size(SIZE)).truncate())
+                .on_hover_text(&d.subject);
+        });
+        ui.label(bar());
+        ui.label(RichText::new(&d.author).weak().size(SIZE));
+        ui.label(bar());
+        ui.label(RichText::new(&d.date).weak().size(SIZE));
     });
 }
 
@@ -1075,8 +1103,7 @@ fn variant_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog) -> Result<Plan, String> {
         Some(_) if taken(repo, &folder) => Some(format!("The folder '{name}' already exists.")),
         _ => None,
     };
-    folder_d(ui, repo, d, &folder, problem.as_deref());
-    folder_notes(ui, repo, d, &wanted, &folder);
+    folder_d(ui, repo, d, &wanted, &folder, problem.as_deref());
     match problem {
         Some(p) => Err(p),
         None => plan,
@@ -1085,7 +1112,14 @@ fn variant_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog) -> Result<Plan, String> {
 
 /// Where the worktree goes, ending in a separator, and the folder's name in it: the branch's,
 /// until it's typed.
-fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, problem: Option<&str>) {
+fn folder_d(
+    ui: &mut Ui,
+    repo: &Repo,
+    d: &mut Dialog,
+    wanted: &Path,
+    folder: &Path,
+    problem: Option<&str>,
+) {
     caption(ui, "WORKTREE ROOT");
     ui.horizontal(|ui| {
         let parent = d.parent.clone().unwrap_or_else(|| default_parent(repo));
@@ -1109,6 +1143,8 @@ fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, problem: Op
         d.root_text = Some(text);
         browse(ui, repo, d, folder);
     });
+    // Inside a repository: the root's business, so under it.
+    folder_notes(ui, repo, d, wanted, folder);
     caption(ui, "WORKTREE NAME");
     ui.horizontal(|ui| {
         let auto = folder
@@ -1392,7 +1428,8 @@ fn warning(ui: &mut Ui, text: &str, exclude: Option<(&Path, &str)>) {
         });
 }
 
-/// The bar that switches between variants, bottom centre, above the dialog.
+/// The bar that switched between variants, bottom centre, above the dialog. D won.
+#[allow(dead_code)]
 fn variant_bar(ctx: &egui::Context) {
     let n = VARIANTS.len();
     let v = variant();
