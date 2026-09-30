@@ -8,6 +8,7 @@
 # - feature/shared: pushed and level with origin/feature/shared (the remote is that branch).
 # - demo.worktrees/fix-typo: a folder with a file in it, so fix/typo's suggestion is taken.
 # - release: checked out in demo.worktrees/release, and level with origin/release.
+# - other: an unrelated repository beside demo, to pick as the worktree root.
 set -e
 root=${1:?usage: prototype_add_worktree_demo.sh <folder>}
 here=$(cd "$(dirname "$0")" && pwd)
@@ -22,4 +23,5 @@ git branch -q docs/readme-2
 git switch -q -c feature/shared main && f shared.txt a "Shared work" && git push -q -u origin feature/shared
 git switch -q main
 mkdir -p ../demo.worktrees/fix-typo && echo "left over" > ../demo.worktrees/fix-typo/notes.txt
+git init -q "$root/other" && (cd "$root/other" && echo x > x.txt && git add x.txt && git commit -q -m "Other")
 echo "made $root/demo"

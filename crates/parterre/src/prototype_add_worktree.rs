@@ -132,6 +132,8 @@ struct State {
     ignored: HashMap<(PathBuf, String), bool>,
     /// Patterns *Exclude it* would have added (nothing is written).
     excluded: HashSet<(PathBuf, String)>,
+    /// `git rev-parse --show-toplevel`, by folder.
+    toplevels: HashMap<PathBuf, Option<PathBuf>>,
 }
 
 thread_local! {
@@ -147,6 +149,7 @@ thread_local! {
         valid: HashMap::new(),
         ignored: HashMap::new(),
         excluded: HashSet::new(),
+        toplevels: HashMap::new(),
     });
 }
 
@@ -290,6 +293,22 @@ fn free(repo: &Repo, p: &Path) -> PathBuf {
         .map(|k| p.with_file_name(format!("{name}-{k}")))
         .find(|q| !taken(repo, q))
         .unwrap()
+}
+
+/// Another repository the folder would be inside: the top of its working tree. Asked of the
+/// nearest folder that exists.
+fn other_repository(repo: &Repo, p: &Path) -> Option<PathBuf> {
+    let existing = p.ancestors().find(|a| a.is_dir())?.to_owned();
+    let cached = STATE.with(|s| s.borrow().toplevels.get(&existing).cloned());
+    let top = cached.unwrap_or_else(|| {
+        let (ok, out) = git_in(&existing, &["rev-parse", "--show-toplevel"]);
+        let top = ok.then(|| PathBuf::from(out.trim()));
+        STATE.with(|s| s.borrow_mut().toplevels.insert(existing, top.clone()));
+        top
+    })?;
+    // Its own worktrees are the note's business.
+    let t = norm(&top);
+    (!repo.worktrees.iter().any(|w| norm(&w.path) == t)).then_some(top)
 }
 
 /// The worktree the folder is inside, and the pattern *Exclude it* would add for it, when git
@@ -480,6 +499,14 @@ pub fn from_env(repo: &Repo) {
     if let Some(c) = resolve(repo, &rev) {
         start(repo, c, None);
     }
+    // And `PARTERRE_ADD_WORKTREE_ROOT=<path>` as if typed in D's worktree root field.
+    if let Ok(root) = std::env::var("PARTERRE_ADD_WORKTREE_ROOT") {
+        STATE.with(|s| {
+            if let Some(d) = s.borrow_mut().open.as_mut() {
+                d.parent = Some(PathBuf::from(root));
+            }
+        });
+    }
     // And `PARTERRE_ADD_WORKTREE_NAME=<name>` as if typed in D's folder name field.
     if let Ok(name) = std::env::var("PARTERRE_ADD_WORKTREE_NAME") {
         STATE.with(|s| {
@@ -591,7 +618,11 @@ impl Dialog {
         if let Some(t) = &self.edited {
             return PathBuf::from(t.trim());
         }
-        let leaf = self.leaf.clone().unwrap_or_else(|| slug(branch));
+        // Spaces around a typed name are left out.
+        let leaf = self
+            .leaf
+            .as_deref()
+            .map_or_else(|| slug(branch), |l| l.trim().to_owned());
         self.parent
             .clone()
             .unwrap_or_else(|| default_parent(repo))
@@ -792,8 +823,14 @@ fn folder_notes(ui: &mut Ui, repo: &Repo, d: &Dialog, wanted: &Path, folder: &Pa
             .weak(),
         );
     }
+    if let Some(other) = other_repository(repo, folder) {
+        let what = format!("another repository, {}", shown(&other));
+        warning(ui, &inside_risks(&what), None);
+    }
+    // This repository's: not when the folder is ignored there.
     if let Some((wt, name, pattern)) = inside(repo, folder) {
-        note_inside(ui, &wt, &name, &pattern);
+        let what = format!("this repository's worktree {name}");
+        warning(ui, &inside_risks(&what), Some((&wt, &pattern)));
     }
 }
 
@@ -1030,7 +1067,7 @@ fn variant_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog) -> Result<Plan, String> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let problem = match d.leaf.as_deref() {
+    let problem = match d.leaf.as_deref().map(str::trim) {
         Some("") => {
             Some("The worktree needs a name: its folder's, in the worktree root.".to_owned())
         }
@@ -1301,35 +1338,54 @@ fn folder_c(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, branch: &st
 
 // The rest. ----------------------------------------------------------------------------------
 
-/// A note, not a warning: the folder would show in git status there.
-fn note_inside(ui: &mut Ui, wt: &Path, name: &str, pattern: &str) {
-    let t = crate::widgets::tones(ui);
+/// What a worktree inside a repository's working tree risks there.
+fn inside_risks(what: &str) -> String {
+    format!(
+        "This folder is inside {what}. It will show there as untracked, git add . there would record it as an embedded repository, and git clean -ffdx there would delete it."
+    )
+}
+
+/// A warning: the folder would be inside a repository's working tree, this one's or another's.
+/// Create stays enabled: git allows it. For this repository, *Exclude it* ignores the folder,
+/// which ends the warning.
+fn warning(ui: &mut Ui, text: &str, exclude: Option<(&Path, &str)>) {
+    let danger = Color32::from_rgb(0xc0, 0x1c, 0x28);
     egui::Frame::new()
-        .fill(t.on_bg)
+        .fill(danger.gamma_multiply(0.12))
         .corner_radius(8)
         .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::Label::new(format!(
-                        "This folder is inside {name}, where git status would list it."
-                    ))
-                    .wrap(),
+            ui.horizontal_top(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::hover());
+                crate::widgets::paint_glyph(
+                    ui.painter(),
+                    rect,
+                    &[
+                        parterre_core::glyphs::Part::Path("M12 3.5 2.5 20h19Z"),
+                        parterre_core::glyphs::Part::Path("M12 9.5v5"),
+                        parterre_core::glyphs::Part::Path("M12 17.2v.6"),
+                    ],
+                    danger,
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let b = crate::widgets::text_button(ui, "Exclude it").on_hover_text(format!(
-                        "Adds {pattern} to .git/info/exclude (only in this repository)"
-                    ));
-                    if b.clicked() {
-                        STATE.with(|s| {
-                            s.borrow_mut()
-                                .excluded
-                                .insert((wt.to_owned(), pattern.to_owned()))
-                        });
-                        crate::prototype_warnings::toast(format!(
-                            "Would add {pattern} to .git/info/exclude"
-                        ));
+                ui.vertical(|ui| {
+                    ui.add(egui::Label::new(text).wrap());
+                    if let Some((wt, pattern)) = exclude {
+                        let b =
+                            crate::widgets::text_button(ui, "Exclude it").on_hover_text(format!(
+                                "Adds {pattern} to .git/info/exclude (only in this repository)"
+                            ));
+                        if b.clicked() {
+                            STATE.with(|s| {
+                                s.borrow_mut()
+                                    .excluded
+                                    .insert((wt.to_owned(), pattern.to_owned()))
+                            });
+                            crate::prototype_warnings::toast(format!(
+                                "Would add {pattern} to .git/info/exclude"
+                            ));
+                        }
                     }
                 });
             });

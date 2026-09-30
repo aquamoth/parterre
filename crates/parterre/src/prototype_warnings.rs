@@ -818,8 +818,7 @@ pub(crate) fn command_box(ui: &mut Ui, commands: &[String]) {
         shown = !shown;
         ui.data_mut(|d| d.insert_persisted(id, shown));
     }
-    // No command yet: the heading stays, so the dialog keeps its shape.
-    if !shown || commands.is_empty() {
+    if !shown {
         return;
     }
     ui.add_space(-4.0);
@@ -836,6 +835,11 @@ pub(crate) fn command_box(ui: &mut Ui, commands: &[String]) {
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // No command yet: an empty box, so the dialog keeps its shape.
+            ui.set_min_height(30.0);
+            if commands.is_empty() {
+                return;
+            }
             ui.horizontal_top(|ui| {
                 let w = ui.available_width() - 28.0;
                 ui.vertical(|ui| {
