@@ -367,7 +367,7 @@ fn dialog_for(repo: &Repo, commit: CommitIx, prefer: Option<&str>) -> Dialog {
     let typed = match sel {
         Sel::Local(i) => locals[i].name.clone(),
         Sel::Remote(i) => remotes[i].name.clone(),
-        Sel::New => String::new(),
+        Sel::New => suggest_name(repo, commit, &locals),
     };
     let c = repo.commit(commit);
     Dialog {
@@ -386,6 +386,36 @@ fn dialog_for(repo: &Repo, commit: CommitIx, prefer: Option<&str>) -> Dialog {
         first_frame: true,
         browse: None,
     }
+}
+
+/// A new branch's name when the commit has no branch to check out: its busy branch's with
+/// `-2`, `-3`…, or else its subject's, as `parse-numbers`.
+fn suggest_name(repo: &Repo, commit: CommitIx, locals: &[LocalBranch]) -> String {
+    let base = match locals.first() {
+        Some(l) => l.name.clone(),
+        None => {
+            let words: Vec<String> = repo
+                .commit(commit)
+                .subject
+                .to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .take(4)
+                .map(str::to_owned)
+                .collect();
+            words.join("-")
+        }
+    };
+    if base.is_empty() {
+        return String::new();
+    }
+    if locals.is_empty() && local_exists(repo, &base).is_none() {
+        return base;
+    }
+    (2..)
+        .map(|k| format!("{base}-{k}"))
+        .find(|n| local_exists(repo, n).is_none())
+        .unwrap()
 }
 
 pub fn start(repo: &Repo, commit: CommitIx, prefer: Option<&str>) {
