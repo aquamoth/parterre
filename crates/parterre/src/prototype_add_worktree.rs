@@ -322,25 +322,31 @@ fn inside(repo: &Repo, p: &Path) -> Option<(PathBuf, String, String)> {
         .filter(|w| !w.missing)
         .filter(|w| n.starts_with(&format!("{}/", norm(&w.path))))
         .max_by_key(|w| norm(&w.path).len())?;
-    let rel = n[norm(&wt.path).len() + 1..].to_owned();
-    let top = rel.split('/').next().unwrap_or(&rel).to_owned();
-    let pattern = format!("/{top}/");
-    let key = (wt.path.clone(), rel.clone());
+    unignored(&wt.path, p).map(|pattern| (wt.path.clone(), wt.name(), pattern))
+}
+
+/// The pattern *Exclude it* would add for the folder, inside the working tree `top` (this
+/// repository's or another's), while git status there would list it.
+fn unignored(top: &Path, p: &Path) -> Option<String> {
+    let rel = norm(p).get(norm(top).len() + 1..)?.to_owned();
+    let first = rel.split('/').next().unwrap_or(&rel).to_owned();
+    let pattern = format!("/{first}/");
+    let key = (top.to_owned(), rel.clone());
     let excluded = STATE.with(|s| {
         s.borrow()
             .excluded
-            .contains(&(wt.path.clone(), pattern.clone()))
+            .contains(&(top.to_owned(), pattern.clone()))
     });
     if excluded {
         return None;
     }
     let ignored = STATE.with(|s| s.borrow().ignored.get(&key).copied());
     let ignored = ignored.unwrap_or_else(|| {
-        let (ok, _) = git_in(&wt.path, &["check-ignore", "-q", &format!("{rel}/")]);
+        let (ok, _) = git_in(top, &["check-ignore", "-q", &format!("{rel}/")]);
         STATE.with(|s| s.borrow_mut().ignored.insert(key, ok));
         ok
     });
-    (!ignored).then(|| (wt.path.clone(), wt.name(), pattern))
+    (!ignored).then_some(pattern)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -823,11 +829,14 @@ fn folder_notes(ui: &mut Ui, repo: &Repo, d: &Dialog, wanted: &Path, folder: &Pa
             .weak(),
         );
     }
-    if let Some(other) = other_repository(repo, folder) {
+    // Another repository's, or this one's: not when the folder is ignored there. *Exclude it*
+    // ignores it in either.
+    if let Some(other) = other_repository(repo, folder)
+        && let Some(pattern) = unignored(&other, folder)
+    {
         let what = format!("another repository, {}", shown(&other));
-        warning(ui, &inside_risks(&what), None);
+        warning(ui, &inside_risks(&what), Some((&other, &pattern)));
     }
-    // This repository's: not when the folder is ignored there.
     if let Some((wt, name, pattern)) = inside(repo, folder) {
         let what = format!("this repository's worktree {name}");
         warning(ui, &inside_risks(&what), Some((&wt, &pattern)));
@@ -1408,10 +1417,11 @@ fn warning(ui: &mut Ui, text: &str, exclude: Option<(&Path, &str)>) {
                 ui.vertical(|ui| {
                     ui.add(egui::Label::new(text).wrap());
                     if let Some((wt, pattern)) = exclude {
-                        let b =
-                            crate::widgets::text_button(ui, "Exclude it").on_hover_text(format!(
-                                "Adds {pattern} to .git/info/exclude (only in this repository)"
-                            ));
+                        // That repository's own exclude file (git rev-parse --git-path
+                        // info/exclude there), which only this computer has.
+                        let file = format!("{}'s .git/info/exclude", shown(wt));
+                        let b = crate::widgets::text_button(ui, "Exclude it")
+                            .on_hover_text(format!("Adds {pattern} to {file}"));
                         if b.clicked() {
                             STATE.with(|s| {
                                 s.borrow_mut()
@@ -1419,7 +1429,7 @@ fn warning(ui: &mut Ui, text: &str, exclude: Option<(&Path, &str)>) {
                                     .insert((wt.to_owned(), pattern.to_owned()))
                             });
                             crate::prototype_warnings::toast(format!(
-                                "Would add {pattern} to .git/info/exclude"
+                                "Would add {pattern} to {file}"
                             ));
                         }
                     }
