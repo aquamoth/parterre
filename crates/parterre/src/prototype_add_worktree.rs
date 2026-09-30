@@ -114,6 +114,8 @@ struct Dialog {
     parent: Option<PathBuf>,
     /// Its name, typed in C.
     leaf: Option<String>,
+    /// D's worktree root as typed.
+    root_text: Option<String>,
     /// B's folder line unfolded.
     folder_open: bool,
     first_frame: bool,
@@ -401,6 +403,7 @@ fn dialog_for(repo: &Repo, commit: CommitIx, prefer: Option<&str>) -> Dialog {
         edited: None,
         parent: None,
         leaf: None,
+        root_text: None,
         folder_open: false,
         first_frame: true,
         browse: None,
@@ -659,6 +662,7 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
                     .map(|n| n.to_string_lossy().into_owned());
             }
             d.parent = Some(dir);
+            d.root_text = None;
         }
     }
     let v = variant();
@@ -700,12 +704,10 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
                 Ok(p) => {
                     crate::prototype_warnings::command_box(ui, &[command(p, &folder, &d.hash)])
                 }
+                // D shows its errors by their fields, and the command's section without one.
+                Err(_) if v == 3 => crate::prototype_warnings::command_box(ui, &[]),
                 // Not before anything's typed.
-                Err(why)
-                    if !why.starts_with("Type a name")
-                        && !(v == 3
-                            && (why.starts_with("The folder") || why.ends_with("name."))) =>
-                {
+                Err(why) if !why.starts_with("Type a name") => {
                     ui.label(RichText::new(why).color(Color32::from_rgb(0xc0, 0x1c, 0x28)));
                 }
                 Err(_) => {}
@@ -1014,9 +1016,13 @@ fn select_all(ui: &Ui, id: egui::Id, text: &str) {
 // D: C's folder on top, a branch dropdown to type in, the command. ---------------------------
 
 fn variant_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog) -> Result<Plan, String> {
-    caption(ui, "BRANCH");
+    ui.add_space(6.0);
+    caption(ui, "BRANCH NAME");
     branch_combo(ui, d);
     let plan = d.plan(repo, 3);
+    if let Err(why) = &plan {
+        error(ui, why);
+    }
     // The branch is all it needs; the rest is there to change.
     ui.separator();
     let (wanted, folder, _) = place(d, repo, &plan, 3);
@@ -1025,7 +1031,9 @@ fn variant_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog) -> Result<Plan, String> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let problem = match d.leaf.as_deref() {
-        Some("") => Some("Type a name for the worktree".to_owned()),
+        Some("") => {
+            Some("The worktree needs a name: its folder's, in the worktree root.".to_owned())
+        }
         Some("." | "..") => Some(format!("'{name}' can't be a folder's name.")),
         Some(_) if taken(repo, &folder) => Some(format!("The folder '{name}' already exists.")),
         _ => None,
@@ -1044,7 +1052,9 @@ fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, problem: Op
     caption(ui, "WORKTREE ROOT");
     ui.horizontal(|ui| {
         let parent = d.parent.clone().unwrap_or_else(|| default_parent(repo));
-        let mut text = shown(&parent);
+        // The text as typed, kept between frames, so the separator added below stays when
+        // editing starts.
+        let mut text = d.root_text.clone().unwrap_or_else(|| shown(&parent));
         let w = ui.available_width() - 90.0;
         let id = ui.id().with("prototype-add-worktree-parent");
         // Free text while it's edited; ends in the separator otherwise.
@@ -1057,8 +1067,9 @@ fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, problem: Op
         let r = crate::widgets::text_field(ui, &mut text, "", w);
         ui.memory_mut(|m| m.data.insert_temp(id, r.id));
         if r.changed() {
-            d.parent = Some(PathBuf::from(text));
+            d.parent = Some(PathBuf::from(&text));
         }
+        d.root_text = Some(text);
         browse(ui, repo, d, folder);
     });
     caption(ui, "WORKTREE NAME");
@@ -1068,7 +1079,8 @@ fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, problem: Op
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let mut text = d.leaf.clone().unwrap_or(auto);
-        if crate::widgets::text_field(ui, &mut text, "", 240.0).changed() {
+        let hint = "The folder name of the worktree";
+        if crate::widgets::text_field(ui, &mut text, hint, 300.0).changed() {
             // A name, not a path: separators and what Windows forbids can't be typed.
             text.retain(|c| !not_in_names(c));
             d.leaf = Some(text);
@@ -1085,9 +1097,13 @@ fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, problem: Op
             d.leaf = None;
         }
     });
-    if let Some(p) = problem.filter(|p| !p.starts_with("Type a name")) {
-        ui.label(RichText::new(p).color(Color32::from_rgb(0xc0, 0x1c, 0x28)));
+    if let Some(p) = problem {
+        error(ui, p);
     }
+}
+
+fn error(ui: &mut Ui, text: &str) {
+    ui.label(RichText::new(text).color(Color32::from_rgb(0xc0, 0x1c, 0x28)));
 }
 
 /// A field to type a branch in, and a list of the commit's branches a worktree can check out:
@@ -1108,13 +1124,7 @@ fn branch_combo(ui: &mut Ui, d: &mut Dialog) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let w = ui.available_width() - 24.0;
-        let r = field(
-            ui,
-            &mut d.typed,
-            "a new branch, or empty for a detached HEAD",
-            w,
-            d.first_frame,
-        );
+        let r = field(ui, &mut d.typed, "(detached)", w, d.first_frame);
         if d.first_frame {
             select_all(ui, r.id, &d.typed);
         }

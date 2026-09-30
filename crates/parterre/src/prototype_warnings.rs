@@ -818,7 +818,8 @@ pub(crate) fn command_box(ui: &mut Ui, commands: &[String]) {
         shown = !shown;
         ui.data_mut(|d| d.insert_persisted(id, shown));
     }
-    if !shown {
+    // No command yet: the heading stays, so the dialog keeps its shape.
+    if !shown || commands.is_empty() {
         return;
     }
     ui.add_space(-4.0);
