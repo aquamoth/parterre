@@ -851,6 +851,13 @@ pub fn dialog(ctx: &egui::Context, repo: Option<&Repo>) {
     let Some(mut o) = STATE.with(|s| s.borrow_mut().pending.take()) else {
         return;
     };
+    // The Add worktree dialog (#158) takes over *Add worktree here…*.
+    if o.commands
+        .first()
+        .is_some_and(|c| crate::prototype_add_worktree::intercept(repo, c))
+    {
+        return;
+    }
     // Warnings before losing work (#147) take over the operations they're about.
     if o.commands
         .first()

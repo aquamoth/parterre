@@ -2461,6 +2461,8 @@ impl eframe::App for ParterreApp {
         if let Some(repo) = self.repo.clone() {
             crate::prototype_warnings::from_env(&repo);
             crate::prototype_warnings::show(&ctx, Some(&repo));
+            crate::prototype_add_worktree::from_env(&repo);
+            crate::prototype_add_worktree::show(&ctx, &repo);
             if let Some(query) = crate::prototype_warnings::take_log_request(&repo) {
                 self.prototype_open_log_query(repo, query);
             }

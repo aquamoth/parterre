@@ -13,6 +13,7 @@ mod file_manager;
 mod frame_pacing;
 mod icon;
 mod menu;
+mod prototype_add_worktree;
 mod prototype_operation_menus;
 mod prototype_warnings;
 mod raster;

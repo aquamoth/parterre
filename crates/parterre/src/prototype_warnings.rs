@@ -133,7 +133,7 @@ pub fn start(case: Case) {
     });
 }
 
-fn toast(text: impl Into<String>) {
+pub(crate) fn toast(text: impl Into<String>) {
     STATE.with(|s| s.borrow_mut().toast = Some((text.into(), Instant::now())));
 }
 
@@ -729,7 +729,7 @@ const QUESTION: Glyph = &[
 ];
 
 /// The app's dialog look (as the pull-request error dialog): the popover style, a popup frame.
-fn dialog_style(ctx: &egui::Context) -> (egui::Style, egui::Frame) {
+pub(crate) fn dialog_style(ctx: &egui::Context) -> (egui::Style, egui::Frame) {
     let mut style = (*ctx.global_style()).clone();
     crate::menu::popover_style(&mut style);
     let frame = egui::Frame::popup(&style)
@@ -762,7 +762,7 @@ fn danger_button(ui: &mut Ui, text: &str) -> egui::Response {
 }
 
 /// The keyboard focus, drawn as the app would: a ring round the button.
-fn focus_ring(ui: &Ui, response: &egui::Response) {
+pub(crate) fn focus_ring(ui: &Ui, response: &egui::Response) {
     if response.has_focus() {
         let accent = crate::widgets::tones(ui).accent;
         ui.painter().rect_stroke(
@@ -775,7 +775,7 @@ fn focus_ring(ui: &Ui, response: &egui::Response) {
 }
 
 /// The git command, as the pull-request dialog shows one.
-fn command_box(ui: &mut Ui, commands: &[String]) {
+pub(crate) fn command_box(ui: &mut Ui, commands: &[String]) {
     let t = crate::widgets::tones(ui);
     egui::Frame::new()
         .fill(t.seg_bg)
@@ -931,7 +931,13 @@ pub fn show(ctx: &egui::Context, repo: Option<&Repo>) {
                 if let Some(alt) = &d.alt
                     && crate::widgets::text_button(ui, alt).clicked()
                 {
-                    toast(format!("Would open: {alt}"));
+                    match alt
+                        .strip_prefix("Create a worktree for ")
+                        .and_then(|b| b.strip_suffix('…'))
+                    {
+                        Some(b) => crate::prototype_add_worktree::start_for_branch(repo, b),
+                        None => toast(format!("Would open: {alt}")),
+                    }
                     close = true;
                 }
             });
