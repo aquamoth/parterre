@@ -1013,15 +1013,15 @@ fn variant_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog) -> Result<Plan, String> {
     let plan = d.plan(repo, 3);
     // The branch is all it needs; the rest is there to change.
     ui.separator();
-    let (wanted, folder, branch) = place(d, repo, &plan, 3);
-    folder_d(ui, repo, d, &folder, &branch);
+    let (wanted, folder, _) = place(d, repo, &plan, 3);
+    folder_d(ui, repo, d, &folder);
     folder_notes(ui, repo, d, &wanted, &folder);
     plan
 }
 
-/// Where the worktree goes, ending in a separator: the folder named after the branch goes in
-/// it. Naming the folder otherwise is a link away.
-fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, branch: &str) {
+/// Where the worktree goes, ending in a separator, and the folder's name in it: the branch's,
+/// until it's typed.
+fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path) {
     caption(ui, "FOLDER");
     ui.horizontal(|ui| {
         let parent = d.parent.clone().unwrap_or_else(|| default_parent(repo));
@@ -1042,30 +1042,28 @@ fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, branch: &st
         }
         browse(ui, repo, d, folder);
     });
-    if d.folder_open || d.leaf.is_some() {
-        caption(ui, "FOLDER NAME");
-        ui.horizontal(|ui| {
-            let auto = folder
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let mut text = d.leaf.clone().unwrap_or(auto);
-            if crate::widgets::text_field(ui, &mut text, "", 240.0).changed() {
-                d.leaf = Some(text);
-            }
-            let follow = crate::widgets::icon_button(ui, parterre_core::glyphs::RESET, false)
-                .on_hover_text("Follow the branch: name the folder after it");
-            if follow.clicked() {
-                d.leaf = None;
-                d.folder_open = false;
-            }
-        });
-    } else if ui
-        .link(RichText::new(format!("Name the folder other than {}…", slug(branch))).small())
-        .clicked()
-    {
-        d.folder_open = true;
-    }
+    caption(ui, "FOLDER NAME");
+    ui.horizontal(|ui| {
+        let auto = folder
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut text = d.leaf.clone().unwrap_or(auto);
+        if crate::widgets::text_field(ui, &mut text, "", 240.0).changed() {
+            d.leaf = Some(text);
+        }
+        // Greyed out while the name follows the branch.
+        let follow = ui
+            .add_enabled_ui(d.leaf.is_some(), |ui| {
+                crate::widgets::icon_button(ui, parterre_core::glyphs::RESET, false)
+            })
+            .inner
+            .on_hover_text("Follow the branch: name the folder after it")
+            .on_disabled_hover_text("Follows the branch");
+        if follow.clicked() {
+            d.leaf = None;
+        }
+    });
 }
 
 /// A field to type a branch in, and a list of the commit's branches a worktree can check out:
