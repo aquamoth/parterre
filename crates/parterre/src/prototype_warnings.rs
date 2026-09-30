@@ -840,9 +840,7 @@ pub(crate) fn command_box(ui: &mut Ui, commands: &[String]) {
                 ui.vertical(|ui| {
                     ui.set_width(w);
                     ui.add_space(4.0);
-                    for c in commands {
-                        ui.add(egui::Label::new(RichText::new(c).monospace().size(11.5)).wrap());
-                    }
+                    wrapped_commands(ui, commands, w);
                 });
                 // A check mark for a moment after a click.
                 let copied_id = egui::Id::new("prototype-copied").with(&text);
@@ -863,6 +861,39 @@ pub(crate) fn command_box(ui: &mut Ui, commands: &[String]) {
                 }
             });
         });
+}
+
+/// A return arrow, where a command is broken.
+const RETURN: Glyph = &[Part::Path("M19 5v9H6"), Part::Path("M10 10l-4 4 4 4")];
+
+/// Each command broken where the room ends, not at its spaces, with a return arrow at each
+/// break; space between the commands, so each can be told apart.
+fn wrapped_commands(ui: &mut Ui, commands: &[String], width: f32) {
+    const MARK: f32 = 13.0;
+    let font = egui::FontId::monospace(11.5);
+    let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+    let per_line = (((width - MARK) / char_w).floor() as usize).max(10);
+    let weak = ui.visuals().weak_text_color();
+    ui.spacing_mut().interact_size.y = 0.0;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    for (k, command) in commands.iter().enumerate() {
+        if k > 0 {
+            ui.add_space(10.0);
+        }
+        let chars: Vec<char> = command.chars().collect();
+        let lines: Vec<String> = chars.chunks(per_line).map(|l| l.iter().collect()).collect();
+        for (i, line) in lines.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.add(egui::Label::new(RichText::new(line).font(font.clone())).extend());
+                if i + 1 < lines.len() {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::Vec2::splat(11.0), egui::Sense::hover());
+                    crate::widgets::paint_glyph(ui.painter(), rect, RETURN, weak);
+                }
+            });
+        }
+    }
 }
 
 /// Opens the log window on `tip` (a full hash).

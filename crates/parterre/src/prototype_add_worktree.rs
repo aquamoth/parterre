@@ -237,7 +237,15 @@ fn norm(p: &Path) -> String {
 }
 
 fn slug(branch: &str) -> String {
-    branch.replace('/', "-")
+    branch
+        .chars()
+        .map(|c| if not_in_names(c) { '-' } else { c })
+        .collect()
+}
+
+/// Path separators, and what Windows allows in no file name.
+fn not_in_names(c: char) -> bool {
+    matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*') || c.is_control()
 }
 
 /// VS Code's suggestion: `<parent>/<repo>.worktrees/` from the main worktree, beside it from a
@@ -693,7 +701,11 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
                     crate::prototype_warnings::command_box(ui, &[command(p, &folder, &d.hash)])
                 }
                 // Not before anything's typed.
-                Err(why) if !why.starts_with("Type a name") => {
+                Err(why)
+                    if !why.starts_with("Type a name")
+                        && !(v == 3
+                            && (why.starts_with("The folder") || why.ends_with("name."))) =>
+                {
                     ui.label(RichText::new(why).color(Color32::from_rgb(0xc0, 0x1c, 0x28)));
                 }
                 Err(_) => {}
@@ -754,7 +766,7 @@ fn place(
     let wanted = d.folder(repo, &branch);
     // Nothing to make free before there's a name.
     let named = d.edited.is_some() || !d.leaf.clone().unwrap_or_else(|| slug(&branch)).is_empty();
-    let folder = if named {
+    let folder = if named && !(v == 3 && d.leaf.is_some()) {
         free(repo, &wanted)
     } else {
         wanted.clone()
@@ -764,17 +776,11 @@ fn place(
 
 /// The folder isn't the one asked for, or is inside the repository.
 fn folder_notes(ui: &mut Ui, repo: &Repo, d: &Dialog, wanted: &Path, folder: &Path) {
-    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
-    if folder != wanted && variant() == 3 {
-        ui.label(
-            RichText::new(format!(
-                "{} is taken, so the folder is {}.",
-                name(wanted).unwrap_or_default(),
-                name(folder).unwrap_or_default()
-            ))
-            .weak(),
-        );
-    } else if folder != wanted && (d.edited.is_some() || d.parent.is_some() || d.leaf.is_some()) {
+    // D's suggestion is made free silently; a typed name that's taken is an error.
+    if variant() != 3
+        && folder != wanted
+        && (d.edited.is_some() || d.parent.is_some() || d.leaf.is_some())
+    {
         ui.label(
             RichText::new(format!(
                 "{} isn't empty, so the worktree goes in {}.",
@@ -1014,15 +1020,28 @@ fn variant_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog) -> Result<Plan, String> {
     // The branch is all it needs; the rest is there to change.
     ui.separator();
     let (wanted, folder, _) = place(d, repo, &plan, 3);
-    folder_d(ui, repo, d, &folder);
+    let name = folder
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let problem = match d.leaf.as_deref() {
+        Some("") => Some("Type a name for the worktree".to_owned()),
+        Some("." | "..") => Some(format!("'{name}' can't be a folder's name.")),
+        Some(_) if taken(repo, &folder) => Some(format!("The folder '{name}' already exists.")),
+        _ => None,
+    };
+    folder_d(ui, repo, d, &folder, problem.as_deref());
     folder_notes(ui, repo, d, &wanted, &folder);
-    plan
+    match problem {
+        Some(p) => Err(p),
+        None => plan,
+    }
 }
 
 /// Where the worktree goes, ending in a separator, and the folder's name in it: the branch's,
 /// until it's typed.
-fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path) {
-    caption(ui, "FOLDER");
+fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, problem: Option<&str>) {
+    caption(ui, "WORKTREE ROOT");
     ui.horizontal(|ui| {
         let parent = d.parent.clone().unwrap_or_else(|| default_parent(repo));
         let mut text = shown(&parent);
@@ -1042,7 +1061,7 @@ fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path) {
         }
         browse(ui, repo, d, folder);
     });
-    caption(ui, "FOLDER NAME");
+    caption(ui, "WORKTREE NAME");
     ui.horizontal(|ui| {
         let auto = folder
             .file_name()
@@ -1050,6 +1069,8 @@ fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path) {
             .unwrap_or_default();
         let mut text = d.leaf.clone().unwrap_or(auto);
         if crate::widgets::text_field(ui, &mut text, "", 240.0).changed() {
+            // A name, not a path: separators and what Windows forbids can't be typed.
+            text.retain(|c| !not_in_names(c));
             d.leaf = Some(text);
         }
         // Greyed out while the name follows the branch.
@@ -1064,6 +1085,9 @@ fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path) {
             d.leaf = None;
         }
     });
+    if let Some(p) = problem.filter(|p| !p.starts_with("Type a name")) {
+        ui.label(RichText::new(p).color(Color32::from_rgb(0xc0, 0x1c, 0x28)));
+    }
 }
 
 /// A field to type a branch in, and a list of the commit's branches a worktree can check out:
