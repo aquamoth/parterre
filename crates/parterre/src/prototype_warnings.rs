@@ -788,19 +788,86 @@ pub(crate) fn focus_ring(ui: &Ui, response: &egui::Response) {
     }
 }
 
-/// The git command, as the pull-request dialog shows one.
+/// The git commands, under a line and a heading that folds them away (for every dialog, and
+/// remembered), smaller than the text, with a button copying them for a terminal.
 pub(crate) fn command_box(ui: &mut Ui, commands: &[String]) {
+    ui.separator();
+    let id = egui::Id::new("prototype-git-commands-shown");
+    let mut shown = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
+    // The heading as tall as its text, close to the box.
+    let row = ui.spacing().interact_size.y;
+    ui.spacing_mut().interact_size.y = 16.0;
+    let head = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(12.0), egui::Sense::hover());
+            let glyph = if shown {
+                parterre_core::glyphs::CHEVRON_DOWN
+            } else {
+                parterre_core::glyphs::CHEVRON_RIGHT
+            };
+            let weak = ui.visuals().weak_text_color();
+            crate::widgets::paint_glyph(ui.painter(), rect, glyph, weak);
+            ui.label(RichText::new("Git command").small().weak());
+        })
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    ui.spacing_mut().interact_size.y = row;
+    if head.clicked() {
+        shown = !shown;
+        ui.data_mut(|d| d.insert_persisted(id, shown));
+    }
+    if !shown {
+        return;
+    }
+    ui.add_space(-4.0);
     let t = crate::widgets::tones(ui);
+    let text = commands.join("\n");
     egui::Frame::new()
         .fill(t.seg_bg)
         .corner_radius(8)
-        .inner_margin(egui::Margin::symmetric(12, 8))
+        .inner_margin(egui::Margin {
+            left: 12,
+            right: 4,
+            top: 4,
+            bottom: 6,
+        })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            for c in commands {
-                ui.label(RichText::new(c).monospace().size(13.0));
-            }
+            ui.horizontal_top(|ui| {
+                let w = ui.available_width() - 28.0;
+                ui.vertical(|ui| {
+                    ui.set_width(w);
+                    ui.add_space(4.0);
+                    for c in commands {
+                        ui.add(egui::Label::new(RichText::new(c).monospace().size(11.5)).wrap());
+                    }
+                });
+                // A check mark for a moment after a click.
+                let copied_id = egui::Id::new("prototype-copied").with(&text);
+                let now = ui.input(|i| i.time);
+                let at: Option<f64> = ui.data(|d| d.get_temp(copied_id));
+                let copied = at.is_some_and(|at| now - at < 1.5);
+                if copied {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(300));
+                }
+                let done = Color32::from_rgb(0x2e, 0xa0, 0x43);
+                if crate::widgets::copy_button(ui, copied, done)
+                    .on_hover_text("Copy, to run in a terminal")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(text.clone());
+                    ui.data_mut(|d| d.insert_temp(copied_id, now));
+                }
+            });
         });
+}
+
+/// Opens the log window on `tip` (a full hash).
+pub(crate) fn show_in_log(tip: String) {
+    STATE.with(|s| s.borrow_mut().log = Some((tip, Vec::new())));
 }
 
 /// A section: its count, and *Show in log* for commits or *Show* for files.

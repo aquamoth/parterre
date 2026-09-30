@@ -96,6 +96,11 @@ struct RemoteBranch {
 struct Dialog {
     hash: String,
     subject: String,
+    oid: String,
+    author: String,
+    date: String,
+    /// The log window was asked for: the dialog closes for it.
+    to_log: bool,
     locals: Vec<LocalBranch>,
     remotes: Vec<RemoteBranch>,
     sel: Sel,
@@ -375,6 +380,10 @@ fn dialog_for(repo: &Repo, commit: CommitIx, prefer: Option<&str>) -> Dialog {
     Dialog {
         hash: hash(repo, commit),
         subject: c.subject.clone(),
+        oid: c.oid.to_hex(),
+        author: c.author_name.clone(),
+        date: c.author_date.clone(),
+        to_log: false,
         locals,
         remotes,
         sel,
@@ -459,6 +468,14 @@ pub fn from_env(repo: &Repo) {
     };
     if let Some(c) = resolve(repo, &rev) {
         start(repo, c, None);
+    }
+    // And `PARTERRE_ADD_WORKTREE_NAME=<name>` as if typed in D's folder name field.
+    if let Ok(name) = std::env::var("PARTERRE_ADD_WORKTREE_NAME") {
+        STATE.with(|s| {
+            if let Some(d) = s.borrow_mut().open.as_mut() {
+                d.leaf = Some(name);
+            }
+        });
     }
     // And `PARTERRE_ADD_WORKTREE_FOLDER=<path>` as if typed in the folder field.
     if let Ok(folder) = std::env::var("PARTERRE_ADD_WORKTREE_FOLDER") {
@@ -653,7 +670,7 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
             ui.spacing_mut().item_spacing.y = 10.0;
             // Rows as tall as the text fields, so labels line up with them.
             ui.spacing_mut().interact_size.y = 28.0;
-            header(ui, &d, v);
+            header(ui, &mut d);
             let mut create = false;
             let plan = match v {
                 0 => variant_a(ui, repo, &mut d),
@@ -716,6 +733,10 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
     if let Some(cmd) = &run {
         crate::prototype_warnings::toast(format!("Would run: {cmd}, then reload the graph"));
     }
+    if d.to_log {
+        crate::prototype_warnings::show_in_log(d.oid.clone());
+        close = true;
+    }
     d.first_frame = false;
     if !(close || run.is_some() || (modal.should_close() && d.browse.is_none())) {
         STATE.with(|s| s.borrow_mut().open = Some(d));
@@ -773,7 +794,7 @@ fn wants_name(d: &Dialog, v: usize) -> bool {
     v == 1 || v == 3 || d.sel == Sel::New
 }
 
-fn header(ui: &mut Ui, d: &Dialog, v: usize) {
+fn header(ui: &mut Ui, d: &mut Dialog) {
     let t = crate::widgets::tones(ui);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
@@ -784,18 +805,26 @@ fn header(ui: &mut Ui, d: &Dialog, v: usize) {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.label(RichText::new("Add a worktree").size(16.0).strong());
+            // The commit: its hash opens it in the log window.
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().interact_size.y = 0.0;
+                ui.label(RichText::new("at").weak().size(12.0));
+                let link = ui
+                    .link(RichText::new(&d.hash).monospace().size(12.0))
+                    .on_hover_text("Show in the log");
+                if link.clicked() {
+                    d.to_log = true;
+                }
+                ui.label(RichText::new(&d.subject).size(12.0));
+            });
             ui.label(
-                RichText::new(format!("at {} {}", d.hash, d.subject))
+                RichText::new(format!("{}, {}", d.author, d.date))
                     .weak()
                     .size(12.0),
             );
         });
     });
-    ui.label(
-        RichText::new(format!("PROTOTYPE {}: nothing runs", VARIANTS[v].0))
-            .small()
-            .color(Color32::from_rgb(200, 120, 0)),
-    );
 }
 
 fn caption(ui: &mut Ui, text: &str) {
@@ -982,9 +1011,8 @@ fn variant_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog) -> Result<Plan, String> {
     caption(ui, "BRANCH");
     branch_combo(ui, d);
     let plan = d.plan(repo, 3);
-    if let Ok(p) = &plan {
-        ui.label(RichText::new(describe(p, &d.hash)).strong());
-    }
+    // The branch is all it needs; the rest is there to change.
+    ui.separator();
     let (wanted, folder, branch) = place(d, repo, &plan, 3);
     folder_d(ui, repo, d, &folder, &branch);
     folder_notes(ui, repo, d, &wanted, &folder);
@@ -996,7 +1024,6 @@ fn variant_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog) -> Result<Plan, String> {
 fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, branch: &str) {
     caption(ui, "FOLDER");
     ui.horizontal(|ui| {
-        ui.label("In");
         let parent = d.parent.clone().unwrap_or_else(|| default_parent(repo));
         let mut text = shown(&parent);
         let w = ui.available_width() - 90.0;
@@ -1016,8 +1043,8 @@ fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, branch: &st
         browse(ui, repo, d, folder);
     });
     if d.folder_open || d.leaf.is_some() {
+        caption(ui, "FOLDER NAME");
         ui.horizontal(|ui| {
-            ui.label("Named");
             let auto = folder
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -1026,7 +1053,9 @@ fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, branch: &st
             if crate::widgets::text_field(ui, &mut text, "", 240.0).changed() {
                 d.leaf = Some(text);
             }
-            if ui.link("Follow the branch").clicked() {
+            let follow = crate::widgets::icon_button(ui, parterre_core::glyphs::RESET, false)
+                .on_hover_text("Follow the branch: name the folder after it");
+            if follow.clicked() {
                 d.leaf = None;
                 d.folder_open = false;
             }
