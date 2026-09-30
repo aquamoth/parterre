@@ -13,6 +13,7 @@ mod file_manager;
 mod frame_pacing;
 mod icon;
 mod menu;
+mod prototype_branch_create;
 mod raster;
 mod render;
 mod scene;
@@ -370,6 +371,12 @@ fn main() -> ExitCode {
         ..Default::default()
     };
     options.glow_options.vsync = vsync;
+    if std::env::var_os("PARTERRE_BRANCH_PROTO").is_some() {
+        options.persist_window = false;
+        options.persistence_path = Some(
+            std::env::temp_dir().join(format!("parterre-branch-dialog-{}.ron", std::process::id())),
+        );
+    }
     let mut automation = Automation::new(
         cli.screenshot.clone(),
         cli.fit,

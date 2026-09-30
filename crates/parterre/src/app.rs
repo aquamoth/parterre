@@ -330,7 +330,8 @@ impl ParterreApp {
         automation: Automation,
         vsync: bool,
     ) -> ParterreApp {
-        let persist = !automation.is_active();
+        let persist =
+            !automation.is_active() && std::env::var_os("PARTERRE_BRANCH_PROTO").is_none();
         let mut settings: Settings = cc
             .storage
             .filter(|_| persist)
@@ -1821,6 +1822,7 @@ impl ParterreApp {
                             ui.close();
                         }
                     });
+                    crate::prototype_branch_create::node_menu(ui, &scene.repo, n.commit);
                     // The worktrees shown on the node, the open one at HEAD among them.
                     let worktrees: Vec<&parterre_core::Worktree> = scene
                         .worktrees_on(node)
@@ -2428,6 +2430,9 @@ impl eframe::App for ParterreApp {
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         self.about_window(&ctx);
+        if let Some(repo) = self.repo.as_deref() {
+            crate::prototype_branch_create::show(&ctx, repo);
+        }
 
         // Scripted runs wait for the graph, unless there is none to wait for, and for the diffs
         // and the pull requests (and the layout with them) being loaded.
@@ -2456,6 +2461,10 @@ impl eframe::App for ParterreApp {
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.automation.inject_input(raw_input);
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        self.persist
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
