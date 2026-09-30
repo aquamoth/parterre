@@ -10,9 +10,11 @@
 //!   saying what it will do, and the folder folded into one line with *Change…*.
 //! - C: tabs for *Branch here*, *New branch* and *Remote branch*; the folder in two parts, where
 //!   it goes (*Browse…*) and its name.
-//! - D (round 2, the default): C's folder on top; under it B's branch field as a dropdown of the
-//!   commit's branches that no worktree has, to type a new name in, or to empty for a detached
-//!   HEAD (named after the commit); the command at the bottom.
+//! - D (the default): the branch on top, a field with a dropdown of the commit's branches that
+//!   no worktree has, to type a new name in, or to empty for a detached HEAD (named after the
+//!   commit). A commit with none of its own suggests a new name, selected. Then where the
+//!   worktree goes, ending in a separator; the folder is named after the branch unless named
+//!   otherwise (a link away). The command at the bottom.
 //!
 //! Opened from *Add worktree here…* (the menus prototype, #144), from *Create a worktree for X…*
 //! when a switch is blocked (#147), from the panel at the bottom left, or with
@@ -35,7 +37,7 @@ pub const VARIANTS: [(&str, &str); 4] = [
     ("A", "Every choice in view"),
     ("B", "One branch field"),
     ("C", "Tabs, the folder in two parts"),
-    ("D", "Round 2: C's folder, a branch dropdown, the command"),
+    ("D", "Branch dropdown, then where it goes, then the command"),
 ];
 
 /// What the new worktree checks out, in variants A and C.
@@ -741,7 +743,17 @@ fn place(
 
 /// The folder isn't the one asked for, or is inside the repository.
 fn folder_notes(ui: &mut Ui, repo: &Repo, d: &Dialog, wanted: &Path, folder: &Path) {
-    if folder != wanted && (d.edited.is_some() || d.parent.is_some() || d.leaf.is_some()) {
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
+    if folder != wanted && variant() == 3 {
+        ui.label(
+            RichText::new(format!(
+                "{} is taken, so the folder is {}.",
+                name(wanted).unwrap_or_default(),
+                name(folder).unwrap_or_default()
+            ))
+            .weak(),
+        );
+    } else if folder != wanted && (d.edited.is_some() || d.parent.is_some() || d.leaf.is_some()) {
         ui.label(
             RichText::new(format!(
                 "{} isn't empty, so the worktree goes in {}.",
@@ -967,18 +979,64 @@ fn select_all(ui: &Ui, id: egui::Id, text: &str) {
 // D: C's folder on top, a branch dropdown to type in, the command. ---------------------------
 
 fn variant_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog) -> Result<Plan, String> {
-    // The folder follows the branch as typed up to this frame; typing repaints.
-    let before = d.plan(repo, 3);
-    let (wanted, folder, branch) = place(d, repo, &before, 3);
-    folder_c(ui, repo, d, &folder, &branch);
-    folder_notes(ui, repo, d, &wanted, &folder);
     caption(ui, "BRANCH");
     branch_combo(ui, d);
     let plan = d.plan(repo, 3);
     if let Ok(p) = &plan {
         ui.label(RichText::new(describe(p, &d.hash)).strong());
     }
+    let (wanted, folder, branch) = place(d, repo, &plan, 3);
+    folder_d(ui, repo, d, &folder, &branch);
+    folder_notes(ui, repo, d, &wanted, &folder);
     plan
+}
+
+/// Where the worktree goes, ending in a separator: the folder named after the branch goes in
+/// it. Naming the folder otherwise is a link away.
+fn folder_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path, branch: &str) {
+    caption(ui, "FOLDER");
+    ui.horizontal(|ui| {
+        ui.label("In");
+        let parent = d.parent.clone().unwrap_or_else(|| default_parent(repo));
+        let mut text = shown(&parent);
+        let w = ui.available_width() - 90.0;
+        let id = ui.id().with("prototype-add-worktree-parent");
+        // Free text while it's edited; ends in the separator otherwise.
+        let editing = ui
+            .memory(|m| m.data.get_temp::<egui::Id>(id))
+            .is_some_and(|f| ui.memory(|m| m.has_focus(f)));
+        if !editing && !text.ends_with(['\\', '/']) {
+            text.push(std::path::MAIN_SEPARATOR);
+        }
+        let r = crate::widgets::text_field(ui, &mut text, "", w);
+        ui.memory_mut(|m| m.data.insert_temp(id, r.id));
+        if r.changed() {
+            d.parent = Some(PathBuf::from(text));
+        }
+        browse(ui, repo, d, folder);
+    });
+    if d.folder_open || d.leaf.is_some() {
+        ui.horizontal(|ui| {
+            ui.label("Named");
+            let auto = folder
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let mut text = d.leaf.clone().unwrap_or(auto);
+            if crate::widgets::text_field(ui, &mut text, "", 240.0).changed() {
+                d.leaf = Some(text);
+            }
+            if ui.link("Follow the branch").clicked() {
+                d.leaf = None;
+                d.folder_open = false;
+            }
+        });
+    } else if ui
+        .link(RichText::new(format!("Name the folder other than {}…", slug(branch))).small())
+        .clicked()
+    {
+        d.folder_open = true;
+    }
 }
 
 /// A field to type a branch in, and a list of the commit's branches a worktree can check out:
