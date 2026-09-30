@@ -40,15 +40,18 @@ pub const VARIANTS: [(&str, &str); 4] = [
     ("D", "Branch dropdown, then where it goes, then the command"),
 ];
 
-/// The dialog's height inside its frame: the fields with a warning and an error, and a
-/// two-line command, fit without scrolling.
-const DIALOG_HEIGHT: f32 = 630.0;
-/// Room for a field or two, however small the screen.
-const MIN_FIELDS_HEIGHT: f32 = 120.0;
+/// The dialog's size inside its frame. It is as high as its content, up to this; the fields
+/// with a warning and an error, and a two-line command, fit without scrolling.
+const MAX_DIALOG_HEIGHT: f32 = 630.0;
+const DIALOG_WIDTH: f32 = 600.0;
+const MIN_DIALOG_WIDTH: f32 = 340.0;
+/// Room for a field, however small the window: the buttons stay in it down to its least
+/// height.
+const MIN_FIELDS_HEIGHT: f32 = 60.0;
 /// Space kept above and below the dialog.
 const SCREEN_MARGIN: f32 = 24.0;
-/// The dialog frame's margin (`prototype_warnings::dialog_style`).
-const FRAME_MARGIN: f32 = 20.0;
+/// The dialog frame's margin and stroke (`prototype_warnings::dialog_style`).
+const FRAME_MARGIN: f32 = 21.0;
 
 /// What the new worktree checks out, in variants A and C.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -126,6 +129,12 @@ struct Dialog {
     leaf: Option<String>,
     /// The command's section and the buttons, as high as they were last frame.
     bottom_height: f32,
+    /// The whole dialog, as high as it was last frame.
+    outer_height: f32,
+    /// Where its top is, once it has settled: it then grows and shrinks downwards, so the
+    /// fields don't move under the user. For the window size in `screen`.
+    top: Option<f32>,
+    screen: egui::Vec2,
     /// D's worktree root as typed.
     root_text: Option<String>,
     /// B's folder line unfolded.
@@ -147,6 +156,8 @@ struct State {
     /// Warnings and errors shown in the last frame, and in this one: a new one is scrolled
     /// into view.
     notices_before: HashSet<String>,
+    /// The dialog is still finding its size: what it opens with isn't new.
+    opening: bool,
     notices_now: HashSet<String>,
     /// `git rev-parse --show-toplevel`, by folder.
     toplevels: HashMap<PathBuf, Option<PathBuf>>,
@@ -168,6 +179,7 @@ thread_local! {
         excluded: HashSet::new(),
         toplevels: HashMap::new(),
         notices_before: HashSet::new(),
+        opening: false,
         notices_now: HashSet::new(),
     });
 }
@@ -449,6 +461,9 @@ fn dialog_for(repo: &Repo, commit: CommitIx, prefer: Option<&str>) -> Dialog {
         leaf: None,
         root_text: None,
         bottom_height: 150.0,
+        outer_height: 480.0,
+        top: None,
+        screen: egui::Vec2::ZERO,
         folder_open: false,
         first_frame: true,
         browse: None,
@@ -727,7 +742,25 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
     let (style, frame) = crate::prototype_warnings::dialog_style(ctx);
     let mut close = false;
     let mut run = None;
-    let modal = egui::Modal::new(egui::Id::new("prototype-add-worktree"))
+    // Centred when it opens, then its top stays put while it grows and shrinks; a new window
+    // size centres it again.
+    let screen = ctx.content_rect();
+    if d.screen != screen.size() {
+        d.screen = screen.size();
+        d.top = None;
+    }
+    let top = d.top.unwrap_or_else(|| {
+        ((screen.height() - d.outer_height) / 2.0)
+            .min(screen.height() - SCREEN_MARGIN - d.outer_height)
+            .max(SCREEN_MARGIN)
+    });
+    STATE.with(|s| s.borrow_mut().opening = d.top.is_none());
+    let id = egui::Id::new("prototype-add-worktree");
+    let modal = egui::Modal::new(id)
+        .area(egui::Modal::default_area(id).anchor(
+            egui::Align2::CENTER_TOP,
+            egui::vec2(0.0, screen.top() + top),
+        ))
         .frame(frame)
         .backdrop_color(Color32::from_black_alpha(if style.visuals.dark_mode {
             90
@@ -736,24 +769,23 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
         }))
         .show(ctx, |ui| {
             ui.set_style(style.clone());
-            ui.set_width(600.0);
+            let room = screen.width() - 2.0 * (SCREEN_MARGIN + FRAME_MARGIN);
+            ui.set_width(DIALOG_WIDTH.min(room).max(MIN_DIALOG_WIDTH));
             ui.spacing_mut().item_spacing.y = 10.0;
             // Rows as tall as the text fields, so labels line up with them.
             ui.spacing_mut().interact_size.y = 28.0;
-            // The fields scroll in a region of a fixed height, as much as the screen has room
-            // for; the command and the buttons stay under it, so warnings coming and going move
-            // neither them nor the dialog.
-            let screen = ui.ctx().content_rect().height();
-            // The whole dialog keeps one height: a longer command takes its room from the
-            // fields' area.
-            let height = DIALOG_HEIGHT.min(screen - 2.0 * SCREEN_MARGIN - 2.0 * FRAME_MARGIN);
-            let top = (height - d.bottom_height).max(MIN_FIELDS_HEIGHT);
+            // The fields are as high as they are, up to what's left of the dialog's most, or of
+            // the window under its top, after the command and the buttons; beyond that they
+            // scroll.
+            let below = screen.height() - top - SCREEN_MARGIN - 2.0 * FRAME_MARGIN;
+            let fields_max =
+                (MAX_DIALOG_HEIGHT.min(below) - d.bottom_height).max(MIN_FIELDS_HEIGHT);
             // A solid bar, there whenever the fields don't fit: a floating one shows only on
             // hover, and nothing would say there's more.
             let inside = crate::prototype_warnings::visible_scroll_bars(ui);
             let area = egui::ScrollArea::vertical()
                 .id_salt("prototype-add-worktree-fields")
-                .max_height(top)
+                .max_height(fields_max)
                 .auto_shrink([false, true]);
             let fields = area.show(ui, |ui| {
                 *ui.visuals_mut() = inside;
@@ -776,13 +808,8 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
                 }
                 (plan, folder)
             });
-            // The area shrinks to its content (inner_rect says the most it may take).
-            let used = fields.content_size.y.min(top);
-            if used < top {
-                ui.add_space(top - used);
-            }
             let (plan, folder) = fields.inner;
-            let bottom_start = ui.cursor().top();
+            let fields_end = fields.inner_rect.bottom();
             let mut create = false;
             match &plan {
                 Ok(p) => {
@@ -820,8 +847,9 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
                     ok.request_focus();
                 }
             });
-            // For the next frame's room for the fields.
-            let bottom = buttons.response.rect.bottom() - bottom_start;
+            // For the next frame's room for the fields (the space above the command's section
+            // too).
+            let bottom = buttons.response.rect.bottom() - fields_end;
             if (bottom - d.bottom_height).abs() > 0.5 {
                 d.bottom_height = bottom;
                 ui.ctx().request_repaint();
@@ -833,6 +861,16 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
                 run = Some(command(p, &folder, &d.hash));
             }
         });
+    // Its top settles once its height does.
+    let height = modal.response.rect.height();
+    if d.top.is_none() {
+        if !d.first_frame && (height - d.outer_height).abs() < 0.5 {
+            d.top = Some(top);
+        } else {
+            ctx.request_repaint();
+        }
+    }
+    d.outer_height = height;
     if ctx.input(|i| i.key_pressed(Key::Escape)) {
         close = true;
     }
@@ -1222,10 +1260,11 @@ fn folder_d(
             .unwrap_or_default();
         let mut text = d.leaf.clone().unwrap_or(auto);
         let hint = "The folder name of the worktree";
-        let r = crate::widgets::text_field(ui, &mut text, hint, 300.0);
+        let w = 300.0_f32.min(ui.available_width() - 40.0);
+        let r = crate::widgets::text_field(ui, &mut text, hint, w);
         // `PARTERRE_ADD_WORKTREE_FOCUS=name` gives it the focus once the dialog is open, as Tab
         // would, for --screenshot.
-        if !d.first_frame
+        if d.top.is_some()
             && std::env::var("PARTERRE_ADD_WORKTREE_FOCUS").as_deref() == Ok("name")
             && !FOCUSED.with(|f| f.replace(true))
         {
@@ -1265,7 +1304,7 @@ fn in_view_when_new(r: &egui::Response, key: &str) {
     let new = STATE.with(|s| {
         let mut s = s.borrow_mut();
         s.notices_now.insert(key.to_owned());
-        !s.notices_before.contains(key)
+        !s.notices_before.contains(key) && !s.opening
     });
     if new {
         r.scroll_to_me(None);
@@ -1276,8 +1315,9 @@ thread_local!(static FOCUSED: std::cell::Cell<bool> = const { std::cell::Cell::n
 
 /// A field that gets the focus, with Tab too, is scrolled into view: its frame and a little
 /// room around it, not only the text inside.
+/// Not the field focused as the dialog opens: the dialog opens at its top.
 fn in_view_on_focus(ui: &Ui, r: &egui::Response) {
-    if r.gained_focus() {
+    if r.gained_focus() && !STATE.with(|s| s.borrow().opening) {
         ui.scroll_to_rect(r.rect.expand(12.0), None);
     }
 }
