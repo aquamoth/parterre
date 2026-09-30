@@ -3,13 +3,16 @@
 //! run. The dialog reads the repository for the commit's branches, the suggested folder,
 //! existing folders and whether a folder inside the repository is ignored.
 //!
-//! Three variants of the same dialog, switched with the bar at the bottom (or ← and → while no
-//! text field has the focus), or `PARTERRE_ADD_WORKTREE_VARIANT=A|B|C`:
+//! Four variants of the same dialog, switched with the bar at the bottom (or ← and → while no
+//! text field has the focus), or `PARTERRE_ADD_WORKTREE_VARIANT=A|B|C|D`:
 //! - A: every choice in view, as radio buttons; the folder as one path with *Browse…*.
 //! - B: one branch field: a branch of the commit, or a new name. Suggestions under it, a line
 //!   saying what it will do, and the folder folded into one line with *Change…*.
 //! - C: tabs for *Branch here*, *New branch* and *Remote branch*; the folder in two parts, where
 //!   it goes (*Browse…*) and its name.
+//! - D (round 2, the default): C's folder on top; under it B's branch field as a dropdown of the
+//!   commit's branches that no worktree has, to type a new name in, or to empty for a detached
+//!   HEAD (named after the commit); the command at the bottom.
 //!
 //! Opened from *Add worktree here…* (the menus prototype, #144), from *Create a worktree for X…*
 //! when a switch is blocked (#147), from the panel at the bottom left, or with
@@ -28,10 +31,11 @@ use parterre_core::{CommitIx, Oid, RefKind, Repo};
 
 use crate::file_dialog::Pending;
 
-pub const VARIANTS: [(&str, &str); 3] = [
+pub const VARIANTS: [(&str, &str); 4] = [
     ("A", "Every choice in view"),
     ("B", "One branch field"),
     ("C", "Tabs, the folder in two parts"),
+    ("D", "Round 2: C's folder, a branch dropdown, the command"),
 ];
 
 /// What the new worktree checks out, in variants A and C.
@@ -55,7 +59,12 @@ enum Tab {
 enum Plan {
     Local(String),
     New(String),
-    Track { remote: String, local: String },
+    Track {
+        remote: String,
+        local: String,
+    },
+    /// D: the branch field left empty.
+    Detached,
 }
 
 impl Plan {
@@ -63,6 +72,7 @@ impl Plan {
         match self {
             Plan::Local(n) | Plan::New(n) => n,
             Plan::Track { local, .. } => local,
+            Plan::Detached => "",
         }
     }
 }
@@ -119,8 +129,9 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State {
         variant: match std::env::var("PARTERRE_ADD_WORKTREE_VARIANT").as_deref() {
             Ok("B" | "b") => 1,
+            Ok("A" | "a") => 0,
             Ok("C" | "c") => 2,
-            _ => 0,
+            _ => 3,
         },
         open: None,
         panel: true,
@@ -138,7 +149,7 @@ fn variant() -> usize {
 // Reading the repository.
 
 fn git_in(dir: &Path, args: &[&str]) -> (bool, String) {
-    match std::process::Command::new("git")
+    match crate::prototype_warnings::git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -167,7 +178,7 @@ fn valid_name(name: &str) -> bool {
     if let Some(v) = STATE.with(|s| s.borrow().valid.get(name).copied()) {
         return v;
     }
-    let v = std::process::Command::new("git")
+    let v = crate::prototype_warnings::git_command()
         .args(["check-ref-format", "--branch", name])
         .output()
         .is_ok_and(|o| o.status.success());
@@ -434,7 +445,10 @@ pub fn from_env(repo: &Repo) {
 impl Dialog {
     /// What would run, or why *Create* is greyed out.
     fn plan(&self, repo: &Repo, v: usize) -> Result<Plan, String> {
-        if v == 1 {
+        if v == 3 && self.typed.trim().is_empty() {
+            return Ok(Plan::Detached);
+        }
+        if v == 1 || v == 3 {
             return self.plan_typed(repo);
         }
         let sel = if v == 2 {
@@ -527,8 +541,10 @@ impl Dialog {
     /// The branch whose name the folder follows: the plan's, or what's typed so far.
     fn branch_for_folder(&self, plan: &Result<Plan, String>, v: usize) -> String {
         match plan {
+            // A detached worktree's folder is named after the commit.
+            Ok(Plan::Detached) => self.hash.clone(),
             Ok(p) => p.branch().to_owned(),
-            Err(_) if v == 1 => self.typed.trim().to_owned(),
+            Err(_) if v == 1 || v == 3 => self.typed.trim().to_owned(),
             Err(_) => self.name.trim().to_owned(),
         }
     }
@@ -551,6 +567,7 @@ fn command(plan: &Plan, folder: &Path, hash: &str) -> String {
         Plan::Track { remote, local } => {
             format!("git worktree add --track -b {local} {f} {remote}")
         }
+        Plan::Detached => format!("git worktree add --detach {f} {hash}"),
     }
 }
 
@@ -561,6 +578,7 @@ fn describe(plan: &Plan, hash: &str) -> String {
         Plan::Track { remote, local } => {
             format!("Creates the branch {local}, tracking {remote}")
         }
+        Plan::Detached => format!("Detached HEAD at {hash}, on no branch"),
     }
 }
 
@@ -608,35 +626,18 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
             let plan = match v {
                 0 => variant_a(ui, repo, &mut d),
                 1 => variant_b(ui, repo, &mut d),
-                _ => variant_c(ui, repo, &mut d),
+                2 => variant_c(ui, repo, &mut d),
+                _ => variant_d(ui, repo, &mut d),
             };
-            let branch = d.branch_for_folder(&plan, v);
-            let wanted = d.folder(repo, &branch);
-            // Nothing to make free before there's a name.
-            let named =
-                d.edited.is_some() || !d.leaf.clone().unwrap_or_else(|| slug(&branch)).is_empty();
-            let folder = if named {
-                free(repo, &wanted)
-            } else {
-                wanted.clone()
-            };
-            match v {
-                0 => folder_a(ui, repo, &mut d, &folder),
-                1 => folder_b(ui, repo, &mut d, &folder),
-                _ => folder_c(ui, repo, &mut d, &folder, &branch),
-            }
-            if folder != wanted && (d.edited.is_some() || d.parent.is_some() || d.leaf.is_some()) {
-                ui.label(
-                    RichText::new(format!(
-                        "{} isn't empty, so the worktree goes in {}.",
-                        shown(&wanted),
-                        shown(&folder)
-                    ))
-                    .weak(),
-                );
-            }
-            if let Some((wt, name, pattern)) = inside(repo, &folder) {
-                note_inside(ui, &wt, &name, &pattern);
+            let (wanted, folder, branch) = place(&d, repo, &plan, v);
+            // D shows the folder above the branch.
+            if v != 3 {
+                match v {
+                    0 => folder_a(ui, repo, &mut d, &folder),
+                    1 => folder_b(ui, repo, &mut d, &folder),
+                    _ => folder_c(ui, repo, &mut d, &folder, &branch),
+                }
+                folder_notes(ui, repo, &d, &wanted, &folder);
             }
             match &plan {
                 Ok(p) => {
@@ -689,9 +690,45 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
     }
 }
 
+/// Where the worktree goes: as the user has it, after `-1`, `-2`…, and the branch it follows.
+fn place(
+    d: &Dialog,
+    repo: &Repo,
+    plan: &Result<Plan, String>,
+    v: usize,
+) -> (PathBuf, PathBuf, String) {
+    let branch = d.branch_for_folder(plan, v);
+    let wanted = d.folder(repo, &branch);
+    // Nothing to make free before there's a name.
+    let named = d.edited.is_some() || !d.leaf.clone().unwrap_or_else(|| slug(&branch)).is_empty();
+    let folder = if named {
+        free(repo, &wanted)
+    } else {
+        wanted.clone()
+    };
+    (wanted, folder, branch)
+}
+
+/// The folder isn't the one asked for, or is inside the repository.
+fn folder_notes(ui: &mut Ui, repo: &Repo, d: &Dialog, wanted: &Path, folder: &Path) {
+    if folder != wanted && (d.edited.is_some() || d.parent.is_some() || d.leaf.is_some()) {
+        ui.label(
+            RichText::new(format!(
+                "{} isn't empty, so the worktree goes in {}.",
+                shown(wanted),
+                shown(folder)
+            ))
+            .weak(),
+        );
+    }
+    if let Some((wt, name, pattern)) = inside(repo, folder) {
+        note_inside(ui, &wt, &name, &pattern);
+    }
+}
+
 /// Whether the name field takes the focus when the dialog opens.
 fn wants_name(d: &Dialog, v: usize) -> bool {
-    v == 1 || d.sel == Sel::New
+    v == 1 || v == 3 || d.sel == Sel::New
 }
 
 fn header(ui: &mut Ui, d: &Dialog, v: usize) {
@@ -834,17 +871,7 @@ fn variant_b(ui: &mut Ui, repo: &Repo, d: &mut Dialog) -> Result<Plan, String> {
     let w = ui.available_width();
     let r = field(ui, &mut d.typed, "a new branch's name", w, d.first_frame);
     if d.first_frame {
-        // Typing replaces the suggestion.
-        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), r.id) {
-            let end = egui::text::CCursor::new(d.typed.chars().count());
-            state
-                .cursor
-                .set_char_range(Some(egui::text::CCursorRange::two(
-                    egui::text::CCursor::new(0),
-                    end,
-                )));
-            state.store(ui.ctx(), r.id);
-        }
+        select_all(ui, r.id, &d.typed);
     }
     let names: Vec<(String, Option<String>)> = d
         .locals
@@ -891,6 +918,92 @@ fn folder_b(ui: &mut Ui, repo: &Repo, d: &mut Dialog, folder: &Path) {
             }
         });
     }
+}
+
+/// Typing replaces the suggestion.
+fn select_all(ui: &Ui, id: egui::Id, text: &str) {
+    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
+        let end = egui::text::CCursor::new(text.chars().count());
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                end,
+            )));
+        state.store(ui.ctx(), id);
+    }
+}
+
+// D: C's folder on top, a branch dropdown to type in, the command. ---------------------------
+
+fn variant_d(ui: &mut Ui, repo: &Repo, d: &mut Dialog) -> Result<Plan, String> {
+    // The folder follows the branch as typed up to this frame; typing repaints.
+    let before = d.plan(repo, 3);
+    let (wanted, folder, branch) = place(d, repo, &before, 3);
+    folder_c(ui, repo, d, &folder, &branch);
+    folder_notes(ui, repo, d, &wanted, &folder);
+    caption(ui, "BRANCH");
+    branch_combo(ui, d);
+    let plan = d.plan(repo, 3);
+    if let Ok(p) = &plan {
+        ui.label(RichText::new(describe(p, &d.hash)).strong());
+    }
+    plan
+}
+
+/// A field to type a branch in, and a list of the commit's branches a worktree can check out:
+/// none that a worktree has.
+fn branch_combo(ui: &mut Ui, d: &mut Dialog) {
+    let usable: Vec<String> = d
+        .locals
+        .iter()
+        .filter(|l| l.blocked.is_none())
+        .map(|l| l.name.clone())
+        .chain(
+            d.remotes
+                .iter()
+                .filter(|r| r.blocked.is_none())
+                .map(|r| r.name.clone()),
+        )
+        .collect();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let w = ui.available_width() - 24.0;
+        let r = field(
+            ui,
+            &mut d.typed,
+            "a new branch, or empty for a detached HEAD",
+            w,
+            d.first_frame,
+        );
+        if d.first_frame {
+            select_all(ui, r.id, &d.typed);
+        }
+        if r.changed() {
+            ui.ctx().request_repaint();
+        }
+        let id = ui.id().with("prototype-add-worktree-branches");
+        let chevron = crate::widgets::popover_button(ui, id, None, false);
+        egui::Popup::from_toggle_button_response(&chevron)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .align(egui::RectAlign::BOTTOM_END)
+            .gap(4.0)
+            .style(crate::menu::popover_style)
+            .show(|ui| {
+                ui.set_min_width(240.0);
+                if usable.is_empty() {
+                    ui.label(RichText::new("No free branch on this commit").weak());
+                }
+                for n in usable {
+                    let on = d.typed.trim() == n;
+                    if ui.add(egui::Button::selectable(on, n.as_str())).clicked() {
+                        d.typed = n;
+                        ui.ctx().request_repaint();
+                        ui.close();
+                    }
+                }
+            });
+    });
 }
 
 // C: tabs, the folder in two parts. ----------------------------------------------------------

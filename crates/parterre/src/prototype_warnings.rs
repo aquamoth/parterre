@@ -179,8 +179,22 @@ pub fn take_log_request(repo: &Repo) -> Option<LogQuery> {
 // ---------------------------------------------------------------------------------------------
 // Reading the repository.
 
+/// git, without the console window a GUI app on Windows would open for it: several seconds a
+/// call where the default terminal is Windows Terminal (as `Git::command` does).
+pub(crate) fn git_command() -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 fn git_in(dir: &Path, args: &[&str]) -> (bool, String) {
-    match std::process::Command::new("git")
+    match crate::prototype_warnings::git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
