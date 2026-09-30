@@ -144,6 +144,10 @@ struct State {
     ignored: HashMap<(PathBuf, String), bool>,
     /// Patterns *Exclude it* would have added (nothing is written).
     excluded: HashSet<(PathBuf, String)>,
+    /// Warnings and errors shown in the last frame, and in this one: a new one is scrolled
+    /// into view.
+    notices_before: HashSet<String>,
+    notices_now: HashSet<String>,
     /// `git rev-parse --show-toplevel`, by folder.
     toplevels: HashMap<PathBuf, Option<PathBuf>>,
 }
@@ -163,6 +167,8 @@ thread_local! {
         ignored: HashMap::new(),
         excluded: HashSet::new(),
         toplevels: HashMap::new(),
+        notices_before: HashSet::new(),
+        notices_now: HashSet::new(),
     });
 }
 
@@ -481,6 +487,7 @@ fn suggest_name(repo: &Repo, commit: CommitIx, locals: &[LocalBranch]) -> String
 
 pub fn start(repo: &Repo, commit: CommitIx, prefer: Option<&str>) {
     let d = dialog_for(repo, commit, prefer);
+    STATE.with(|s| s.borrow_mut().notices_before.clear());
     STATE.with(|s| s.borrow_mut().open = Some(d));
 }
 
@@ -743,31 +750,32 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
             let top = (height - d.bottom_height).max(MIN_FIELDS_HEIGHT);
             // A solid bar, there whenever the fields don't fit: a floating one shows only on
             // hover, and nothing would say there's more.
-            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-            let fields = egui::ScrollArea::vertical()
+            let inside = crate::prototype_warnings::visible_scroll_bars(ui);
+            let area = egui::ScrollArea::vertical()
                 .id_salt("prototype-add-worktree-fields")
                 .max_height(top)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    header(ui, &mut d);
-                    let plan = match v {
-                        0 => variant_a(ui, repo, &mut d),
-                        1 => variant_b(ui, repo, &mut d),
-                        2 => variant_c(ui, repo, &mut d),
-                        _ => variant_d(ui, repo, &mut d),
-                    };
-                    let (wanted, folder, branch) = place(&d, repo, &plan, v);
-                    // D shows the folder above the branch.
-                    if v != 3 {
-                        match v {
-                            0 => folder_a(ui, repo, &mut d, &folder),
-                            1 => folder_b(ui, repo, &mut d, &folder),
-                            _ => folder_c(ui, repo, &mut d, &folder, &branch),
-                        }
-                        folder_notes(ui, repo, &d, &wanted, &folder);
+                .auto_shrink([false, true]);
+            let fields = area.show(ui, |ui| {
+                *ui.visuals_mut() = inside;
+                header(ui, &mut d);
+                let plan = match v {
+                    0 => variant_a(ui, repo, &mut d),
+                    1 => variant_b(ui, repo, &mut d),
+                    2 => variant_c(ui, repo, &mut d),
+                    _ => variant_d(ui, repo, &mut d),
+                };
+                let (wanted, folder, branch) = place(&d, repo, &plan, v);
+                // D shows the folder above the branch.
+                if v != 3 {
+                    match v {
+                        0 => folder_a(ui, repo, &mut d, &folder),
+                        1 => folder_b(ui, repo, &mut d, &folder),
+                        _ => folder_c(ui, repo, &mut d, &folder, &branch),
                     }
-                    (plan, folder)
-                });
+                    folder_notes(ui, repo, &d, &wanted, &folder);
+                }
+                (plan, folder)
+            });
             // The area shrinks to its content (inner_rect says the most it may take).
             let used = fields.content_size.y.min(top);
             if used < top {
@@ -835,6 +843,10 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
         crate::prototype_warnings::show_in_log(d.oid.clone());
         close = true;
     }
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        s.notices_before = std::mem::take(&mut s.notices_now);
+    });
     d.first_frame = false;
     if !(close || run.is_some() || (modal.should_close() && d.browse.is_none())) {
         STATE.with(|s| s.borrow_mut().open = Some(d));
@@ -1192,6 +1204,7 @@ fn folder_d(
             text.push(std::path::MAIN_SEPARATOR);
         }
         let r = crate::widgets::text_field(ui, &mut text, "", w);
+        in_view_on_focus(ui, &r);
         ui.memory_mut(|m| m.data.insert_temp(id, r.id));
         if r.changed() {
             d.parent = Some(PathBuf::from(&text));
@@ -1209,7 +1222,17 @@ fn folder_d(
             .unwrap_or_default();
         let mut text = d.leaf.clone().unwrap_or(auto);
         let hint = "The folder name of the worktree";
-        if crate::widgets::text_field(ui, &mut text, hint, 300.0).changed() {
+        let r = crate::widgets::text_field(ui, &mut text, hint, 300.0);
+        // `PARTERRE_ADD_WORKTREE_FOCUS=name` gives it the focus once the dialog is open, as Tab
+        // would, for --screenshot.
+        if !d.first_frame
+            && std::env::var("PARTERRE_ADD_WORKTREE_FOCUS").as_deref() == Ok("name")
+            && !FOCUSED.with(|f| f.replace(true))
+        {
+            r.request_focus();
+        }
+        in_view_on_focus(ui, &r);
+        if r.changed() {
             // A name, not a path: separators and what Windows forbids can't be typed.
             text.retain(|c| !not_in_names(c));
             d.leaf = Some(text);
@@ -1232,7 +1255,31 @@ fn folder_d(
 }
 
 fn error(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).color(Color32::from_rgb(0xc0, 0x1c, 0x28)));
+    let r = ui.label(RichText::new(text).color(Color32::from_rgb(0xc0, 0x1c, 0x28)));
+    in_view_when_new(&r, text);
+}
+
+/// A warning or an error that wasn't there last frame is scrolled into view, so one outside
+/// the part of the fields shown isn't missed.
+fn in_view_when_new(r: &egui::Response, key: &str) {
+    let new = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        s.notices_now.insert(key.to_owned());
+        !s.notices_before.contains(key)
+    });
+    if new {
+        r.scroll_to_me(None);
+    }
+}
+
+thread_local!(static FOCUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+
+/// A field that gets the focus, with Tab too, is scrolled into view: its frame and a little
+/// room around it, not only the text inside.
+fn in_view_on_focus(ui: &Ui, r: &egui::Response) {
+    if r.gained_focus() {
+        ui.scroll_to_rect(r.rect.expand(12.0), None);
+    }
 }
 
 /// A field to type a branch in, and a list of the commit's branches a worktree can check out:
@@ -1257,6 +1304,7 @@ fn branch_combo(ui: &mut Ui, d: &mut Dialog) {
         if d.first_frame {
             select_all(ui, r.id, &d.typed);
         }
+        in_view_on_focus(ui, &r);
         if r.changed() {
             ui.ctx().request_repaint();
         }
@@ -1442,7 +1490,7 @@ fn inside_risks(what: &str) -> String {
 /// which ends the warning.
 fn warning(ui: &mut Ui, text: &str, exclude: Option<(&Path, &str)>) {
     let danger = Color32::from_rgb(0xc0, 0x1c, 0x28);
-    egui::Frame::new()
+    let shown = egui::Frame::new()
         .fill(danger.gamma_multiply(0.12))
         .corner_radius(8)
         .inner_margin(egui::Margin::symmetric(12, 8))
@@ -1483,6 +1531,7 @@ fn warning(ui: &mut Ui, text: &str, exclude: Option<(&Path, &str)>) {
                 });
             });
         });
+    in_view_when_new(&shown.response, text);
 }
 
 /// The bar that switched between variants, bottom centre, above the dialog. D won.

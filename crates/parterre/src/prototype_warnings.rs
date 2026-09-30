@@ -837,24 +837,35 @@ pub(crate) fn command_box(ui: &mut Ui, commands: &[String]) {
             ui.set_width(ui.available_width());
             // Two lines high at least, so the dialog keeps its shape; empty while there's no
             // command.
-            let line = ui.fonts_mut(|f| f.row_height(&egui::FontId::monospace(11.5)));
+            // A line as the commands are drawn: one row of their font.
+            let line = ui
+                .painter()
+                .layout_no_wrap("git".into(), egui::FontId::monospace(11.5), Color32::WHITE)
+                .size()
+                .y;
             ui.set_min_height(2.0 * line + 4.0);
             if commands.is_empty() {
                 return;
             }
             ui.horizontal_top(|ui| {
                 let w = ui.available_width() - 28.0;
-                // Six lines at most; more scroll, so the dialog still fits the screen.
                 // Its own column: the row it's in would lay the lines side by side.
+                // Three lines at most; more scroll, with a bar that shows it.
                 ui.vertical(|ui| {
                     ui.set_width(w);
+                    let inside = visible_scroll_bars(ui);
+                    // egui keeps a scrolling area 64 points high at least: three lines are less.
+                    let three = 3.0 * line + 4.0;
                     egui::ScrollArea::vertical()
                         .id_salt("prototype-git-commands")
-                        .max_height(6.0 * line + 4.0)
+                        .max_height(three)
+                        .min_scrolled_height(three)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
+                            *ui.visuals_mut() = inside;
+                            ui.spacing_mut().item_spacing.y = 0.0;
                             ui.add_space(4.0);
-                            wrapped_commands(ui, commands, w - 12.0);
+                            wrapped_commands(ui, commands, w - 16.0);
                         });
                 });
                 // A check mark for a moment after a click.
@@ -878,6 +889,26 @@ pub(crate) fn command_box(ui: &mut Ui, commands: &[String]) {
         });
 }
 
+/// Scroll bars that show there's more: a solid bar with a gray track the whole height of the
+/// area and a darker handle, instead of egui's track in the dialog's own colour (white on
+/// white) and a handle only on hover. Returns the visuals to put back inside the area, so its
+/// content looks as it would outside.
+pub(crate) fn visible_scroll_bars(ui: &mut Ui) -> egui::Visuals {
+    let inside = ui.visuals().clone();
+    let t = crate::widgets::tones(ui);
+    ui.spacing_mut().scroll = egui::style::ScrollStyle {
+        bar_width: 8.0,
+        ..egui::style::ScrollStyle::solid()
+    };
+    let weak = inside.weak_text_color();
+    let v = ui.visuals_mut();
+    v.extreme_bg_color = t.seg_bg;
+    v.widgets.inactive.bg_fill = weak.gamma_multiply(0.6);
+    v.widgets.hovered.bg_fill = weak;
+    v.widgets.active.bg_fill = inside.text_color();
+    inside
+}
+
 /// A return arrow, where a command is broken.
 const RETURN: Glyph = &[Part::Path("M19 5v9H6"), Part::Path("M10 10l-4 4 4 4")];
 
@@ -888,26 +919,36 @@ fn wrapped_commands(ui: &mut Ui, commands: &[String], width: f32) {
     let font = egui::FontId::monospace(11.5);
     let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
     let per_line = (((width - MARK) / char_w).floor() as usize).max(10);
+    let color = ui.visuals().text_color();
     let weak = ui.visuals().weak_text_color();
-    ui.spacing_mut().interact_size.y = 0.0;
-    ui.spacing_mut().item_spacing.y = 0.0;
     for (k, command) in commands.iter().enumerate() {
         if k > 0 {
             ui.add_space(10.0);
         }
+        // One block of text, a row per line, so the lines sit exactly a font's height apart
+        // (three of them fill the box).
         let chars: Vec<char> = command.chars().collect();
         let lines: Vec<String> = chars.chunks(per_line).map(|l| l.iter().collect()).collect();
-        for (i, line) in lines.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                ui.add(egui::Label::new(RichText::new(line).font(font.clone())).extend());
-                if i + 1 < lines.len() {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::Vec2::splat(11.0), egui::Sense::hover());
-                    crate::widgets::paint_glyph(ui.painter(), rect, RETURN, weak);
-                }
-            });
+        let galley = ui.painter().layout_no_wrap(
+            lines.join(
+                "
+",
+            ),
+            font.clone(),
+            color,
+        );
+        let size = egui::vec2(galley.size().x + MARK + 2.0, galley.size().y);
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let rows = galley.rows.len();
+        for (i, row) in galley.rows.iter().enumerate() {
+            if i + 1 < rows {
+                let r = row.rect().translate(rect.min.to_vec2());
+                let at = egui::pos2(r.right() + 2.0 + MARK / 2.0, r.center().y);
+                let mark = egui::Rect::from_center_size(at, egui::Vec2::splat(11.0));
+                crate::widgets::paint_glyph(ui.painter(), mark, RETURN, weak);
+            }
         }
+        ui.painter().galley(rect.min, galley, color);
     }
 }
 
