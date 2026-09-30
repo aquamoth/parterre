@@ -3,18 +3,21 @@
 //! run. The dialog reads the repository for the commit's branches, the suggested folder,
 //! existing folders and whether a folder inside the repository is ignored.
 //!
-//! Four variants of the same dialog, switched with the bar at the bottom (or ← and → while no
-//! text field has the focus), or `PARTERRE_ADD_WORKTREE_VARIANT=A|B|C|D`:
+//! VERDICT: variant D, the default. A to C were turned down and are only reachable with
+//! `PARTERRE_ADD_WORKTREE_VARIANT=A|B|C`:
 //! - A: every choice in view, as radio buttons; the folder as one path with *Browse…*.
 //! - B: one branch field: a branch of the commit, or a new name. Suggestions under it, a line
 //!   saying what it will do, and the folder folded into one line with *Change…*.
 //! - C: tabs for *Branch here*, *New branch* and *Remote branch*; the folder in two parts, where
 //!   it goes (*Browse…*) and its name.
-//! - D (the default): the branch on top, a field with a dropdown of the commit's branches that
-//!   no worktree has, to type a new name in, or to empty for a detached HEAD (named after the
-//!   commit). A commit with none of its own suggests a new name, selected. Then where the
-//!   worktree goes, ending in a separator; the folder is named after the branch unless named
-//!   otherwise (a link away). The command at the bottom.
+//! - D: the commit as one row of the log window (the hash opens it there). *Branch name*: a
+//!   field with a dropdown of the commit's branches no worktree has; a new name makes a new
+//!   branch, an empty field a detached HEAD. A commit with none of its own suggests a new name,
+//!   selected. A line, then the optional part: *Worktree root*, ending in a separator, with
+//!   *Browse…* and a warning with *Exclude it* when it's inside a repository (this one or
+//!   another); *Worktree name*, following the branch until typed (a reset icon follows it
+//!   again). Then the collapsible *Git command* and the buttons. As high as its content, up to
+//!   the window; the fields scroll when they don't fit.
 //!
 //! Opened from *Add worktree here…* (the menus prototype, #144), from *Create a worktree for X…*
 //! when a switch is blocked (#147), from the panel at the bottom left, or with
