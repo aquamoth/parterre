@@ -835,17 +835,27 @@ pub(crate) fn command_box(ui: &mut Ui, commands: &[String]) {
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            // No command yet: an empty box, so the dialog keeps its shape.
-            ui.set_min_height(30.0);
+            // Two lines high at least, so the dialog keeps its shape; empty while there's no
+            // command.
+            let line = ui.fonts_mut(|f| f.row_height(&egui::FontId::monospace(11.5)));
+            ui.set_min_height(2.0 * line + 4.0);
             if commands.is_empty() {
                 return;
             }
             ui.horizontal_top(|ui| {
                 let w = ui.available_width() - 28.0;
+                // Six lines at most; more scroll, so the dialog still fits the screen.
+                // Its own column: the row it's in would lay the lines side by side.
                 ui.vertical(|ui| {
                     ui.set_width(w);
-                    ui.add_space(4.0);
-                    wrapped_commands(ui, commands, w);
+                    egui::ScrollArea::vertical()
+                        .id_salt("prototype-git-commands")
+                        .max_height(6.0 * line + 4.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.add_space(4.0);
+                            wrapped_commands(ui, commands, w - 12.0);
+                        });
                 });
                 // A check mark for a moment after a click.
                 let copied_id = egui::Id::new("prototype-copied").with(&text);

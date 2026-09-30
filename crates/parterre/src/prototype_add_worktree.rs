@@ -40,6 +40,16 @@ pub const VARIANTS: [(&str, &str); 4] = [
     ("D", "Branch dropdown, then where it goes, then the command"),
 ];
 
+/// The dialog's height inside its frame: the fields with a warning and an error, and a
+/// two-line command, fit without scrolling.
+const DIALOG_HEIGHT: f32 = 630.0;
+/// Room for a field or two, however small the screen.
+const MIN_FIELDS_HEIGHT: f32 = 120.0;
+/// Space kept above and below the dialog.
+const SCREEN_MARGIN: f32 = 24.0;
+/// The dialog frame's margin (`prototype_warnings::dialog_style`).
+const FRAME_MARGIN: f32 = 20.0;
+
 /// What the new worktree checks out, in variants A and C.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Sel {
@@ -114,6 +124,8 @@ struct Dialog {
     parent: Option<PathBuf>,
     /// Its name, typed in C.
     leaf: Option<String>,
+    /// The command's section and the buttons, as high as they were last frame.
+    bottom_height: f32,
     /// D's worktree root as typed.
     root_text: Option<String>,
     /// B's folder line unfolded.
@@ -430,6 +442,7 @@ fn dialog_for(repo: &Repo, commit: CommitIx, prefer: Option<&str>) -> Dialog {
         parent: None,
         leaf: None,
         root_text: None,
+        bottom_height: 150.0,
         folder_open: false,
         first_frame: true,
         browse: None,
@@ -720,24 +733,49 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
             ui.spacing_mut().item_spacing.y = 10.0;
             // Rows as tall as the text fields, so labels line up with them.
             ui.spacing_mut().interact_size.y = 28.0;
-            header(ui, &mut d);
-            let mut create = false;
-            let plan = match v {
-                0 => variant_a(ui, repo, &mut d),
-                1 => variant_b(ui, repo, &mut d),
-                2 => variant_c(ui, repo, &mut d),
-                _ => variant_d(ui, repo, &mut d),
-            };
-            let (wanted, folder, branch) = place(&d, repo, &plan, v);
-            // D shows the folder above the branch.
-            if v != 3 {
-                match v {
-                    0 => folder_a(ui, repo, &mut d, &folder),
-                    1 => folder_b(ui, repo, &mut d, &folder),
-                    _ => folder_c(ui, repo, &mut d, &folder, &branch),
-                }
-                folder_notes(ui, repo, &d, &wanted, &folder);
+            // The fields scroll in a region of a fixed height, as much as the screen has room
+            // for; the command and the buttons stay under it, so warnings coming and going move
+            // neither them nor the dialog.
+            let screen = ui.ctx().content_rect().height();
+            // The whole dialog keeps one height: a longer command takes its room from the
+            // fields' area.
+            let height = DIALOG_HEIGHT.min(screen - 2.0 * SCREEN_MARGIN - 2.0 * FRAME_MARGIN);
+            let top = (height - d.bottom_height).max(MIN_FIELDS_HEIGHT);
+            // A solid bar, there whenever the fields don't fit: a floating one shows only on
+            // hover, and nothing would say there's more.
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+            let fields = egui::ScrollArea::vertical()
+                .id_salt("prototype-add-worktree-fields")
+                .max_height(top)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    header(ui, &mut d);
+                    let plan = match v {
+                        0 => variant_a(ui, repo, &mut d),
+                        1 => variant_b(ui, repo, &mut d),
+                        2 => variant_c(ui, repo, &mut d),
+                        _ => variant_d(ui, repo, &mut d),
+                    };
+                    let (wanted, folder, branch) = place(&d, repo, &plan, v);
+                    // D shows the folder above the branch.
+                    if v != 3 {
+                        match v {
+                            0 => folder_a(ui, repo, &mut d, &folder),
+                            1 => folder_b(ui, repo, &mut d, &folder),
+                            _ => folder_c(ui, repo, &mut d, &folder, &branch),
+                        }
+                        folder_notes(ui, repo, &d, &wanted, &folder);
+                    }
+                    (plan, folder)
+                });
+            // The area shrinks to its content (inner_rect says the most it may take).
+            let used = fields.content_size.y.min(top);
+            if used < top {
+                ui.add_space(top - used);
             }
+            let (plan, folder) = fields.inner;
+            let bottom_start = ui.cursor().top();
+            let mut create = false;
             match &plan {
                 Ok(p) => {
                     crate::prototype_warnings::command_box(ui, &[command(p, &folder, &d.hash)])
@@ -751,7 +789,10 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
                 Err(_) => {}
             }
             ui.add_space(4.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // A row of its own height: a layout alone would take the rest of the dialog.
+            let row = egui::vec2(ui.available_width(), 34.0);
+            let right = egui::Layout::right_to_left(egui::Align::Center);
+            let buttons = ui.allocate_ui_with_layout(row, right, |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let ok = ui
                     .add_enabled_ui(plan.is_ok(), |ui| {
@@ -771,6 +812,12 @@ pub fn show(ctx: &egui::Context, repo: &Repo) {
                     ok.request_focus();
                 }
             });
+            // For the next frame's room for the fields.
+            let bottom = buttons.response.rect.bottom() - bottom_start;
+            if (bottom - d.bottom_height).abs() > 0.5 {
+                d.bottom_height = bottom;
+                ui.ctx().request_repaint();
+            }
             let enter = ui.input(|i| i.key_pressed(Key::Enter)) && !d.first_frame;
             if (create || enter)
                 && let Ok(p) = &plan
