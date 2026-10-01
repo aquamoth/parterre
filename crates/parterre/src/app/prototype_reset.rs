@@ -1,17 +1,16 @@
 //! PROTOTYPE — throwaway. Resetting the open worktree's branch from the log window, for
-//! "Resetting a branch" (aquamoth/parterre#172). Three variants, switched with the pill at the
-//! bottom of the log window (or `PARTERRE_RESET_VARIANT=A|B|C`):
+//! "Resetting a branch" (aquamoth/parterre#172).
 //!
-//! - **A, only when needed:** one click when nothing can be lost (no staged, modified or
-//!   in-the-way files, no commits left behind), otherwise the dialog.
-//! - **B, always a dialog:** calm when the chosen mode loses nothing, a warning when it does.
-//! - **C, modes in the menu:** *Reset `<b>` to here ▸ Soft … Hard*, one click per mode when it
-//!   loses nothing, the dialog for that mode otherwise, git's refusal greyed out.
+//! Round 2: variant B of round 1, always a dialog. Above the modes, what the reset does to the
+//! branch and what uncommitted changes there are. Only the modes that make a difference here
+//! can be picked; one that would do the same as another, or that git refuses, is greyed out.
+//! Below them, what the picked mode does, as information, or as a warning when it loses work.
+//! Lost commits are always lost work. Not offered while a merge, rebase, cherry-pick or revert
+//! is in progress. Asking again while the dialog is open brings it to the front.
 //!
-//! All five of git's modes. Lost means gone: not on disk, on a branch or in history. Nothing
-//! runs git to change anything; a notification says what would have run. The demo repository
-//! is `prototype_reset_demo.sh`. `PARTERRE_RESET_DEMO=<rev>[:<mode>]` opens the dialog at
-//! startup, for `--screenshot`.
+//! Nothing runs git to change anything; a notification says what would have run. The demo
+//! repository is `prototype_reset_demo.sh`. `PARTERRE_RESET_DEMO=<rev>[:<mode>]` opens the
+//! dialog at startup, for `--screenshot`.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -26,25 +25,6 @@ use parterre_core::{Oid, Repo};
 use crate::{dialogs, menu, widgets};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Variant {
-    A,
-    B,
-    C,
-}
-
-impl Variant {
-    const ALL: [Variant; 3] = [Variant::A, Variant::B, Variant::C];
-
-    fn name(self) -> &'static str {
-        match self {
-            Variant::A => "A — only when needed",
-            Variant::B => "B — always a dialog",
-            Variant::C => "C — modes in the menu",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
     Soft,
     Mixed,
@@ -54,7 +34,10 @@ enum Mode {
 }
 
 impl Mode {
+    /// In order of how much they touch.
     const ALL: [Mode; 5] = [Mode::Soft, Mode::Mixed, Mode::Keep, Mode::Merge, Mode::Hard];
+    /// Which of several modes that do the same here stays: the gentlest name.
+    const PREFERRED: [Mode; 5] = [Mode::Soft, Mode::Mixed, Mode::Keep, Mode::Hard, Mode::Merge];
 
     fn name(self) -> &'static str {
         match self {
@@ -76,17 +59,6 @@ impl Mode {
         }
     }
 
-    /// What happens to the changes of the commits moved away from, and to yours.
-    fn gist(self) -> &'static str {
-        match self {
-            Mode::Soft => "their changes staged, yours kept",
-            Mode::Mixed => "their changes unstaged, yours kept unstaged",
-            Mode::Keep => "their changes dropped, yours kept unstaged",
-            Mode::Merge => "their changes dropped, your staged changes dropped",
-            Mode::Hard => "their changes and yours dropped",
-        }
-    }
-
     fn parse(s: &str) -> Option<Mode> {
         Mode::ALL
             .into_iter()
@@ -94,25 +66,33 @@ impl Mode {
     }
 }
 
+/// What happens to one kind of change; `None` where there is none of that kind.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Fate {
+    Staged,
+    Unstaged,
+    Kept,
+    Dropped,
+    Refused,
+}
+
 /// What a reset of the open worktree's branch to `target` would meet.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 struct Facts {
     repo: Arc<Repo>,
-    root: PathBuf,
     branch: String,
     head: Oid,
     target: Oid,
-    in_progress: Option<&'static str>,
+    /// Commits the branch leaves behind, and gains (`rev-list --left-right --count`).
+    behind: usize,
+    gained: usize,
     staged: BTreeSet<String>,
     unstaged: BTreeSet<String>,
-    /// Conflicted paths of an unfinished merge; also in `staged` and `unstaged`.
-    unmerged: BTreeSet<String>,
     /// Untracked files at paths the target has.
     in_the_way: BTreeSet<String>,
     /// Paths that differ between HEAD and the target.
     changed: BTreeSet<String>,
-    /// Commits only the branch reaches, which the reset leaves behind.
+    /// Commits only the branch reaches, which nothing reaches afterwards.
     commits: Vec<Oid>,
 }
 
@@ -135,11 +115,18 @@ fn names(root: &Path, args: &[&str]) -> BTreeSet<String> {
         .collect()
 }
 
+fn plural(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+}
+
 impl Facts {
+    /// `None` when there's nothing to offer: a detached HEAD (which includes a branch being
+    /// rebased), an operation in progress, or the commit HEAD is at.
     fn load(repo: &Arc<Repo>, catalog: &Catalog, target: Oid) -> Option<Facts> {
         let branch = catalog.current.clone()?;
         let head = catalog.head?;
-        if head == target || !catalog.has_working_tree {
+        let open = catalog.worktrees.iter().find(|w| w.open)?;
+        if head == target || !catalog.has_working_tree || open.in_progress.is_some() {
             return None;
         }
         let root = catalog.root.clone();
@@ -168,23 +155,21 @@ impl Facts {
             .lines()
             .filter_map(Oid::from_hex)
             .collect();
+        let range = format!("{h}...{t}");
+        let counts = git(&root, &["rev-list", "--left-right", "--count", &range]);
+        let mut counts = counts.split_whitespace().map(|n| n.parse().unwrap_or(0));
         Some(Facts {
             repo: repo.clone(),
             branch,
             head,
             target,
-            in_progress: catalog
-                .worktrees
-                .iter()
-                .find(|w| w.open)
-                .and_then(|w| w.in_progress),
+            behind: counts.next().unwrap_or(0),
+            gained: counts.next().unwrap_or(0),
             staged: names(&root, &["diff", "--cached", "--name-only", "-z"]),
             unstaged: names(&root, &["diff", "--name-only", "-z"]),
-            unmerged: names(&root, &["diff", "--name-only", "--diff-filter=U", "-z"]),
             in_the_way: untracked.intersection(&target_files).cloned().collect(),
             changed: names(&root, &["diff", "--name-only", "-z", &h, &t]),
             commits,
-            root,
         })
     }
 
@@ -192,95 +177,103 @@ impl Facts {
         self.target.short(self.repo.abbrev_len.max(7))
     }
 
-    /// Nothing at all could be lost, whichever mode: variant A's one click.
-    fn clean(&self) -> bool {
-        self.staged.is_empty()
-            && self.unstaged.is_empty()
-            && self.in_the_way.is_empty()
-            && self.commits.is_empty()
-            && self.in_progress.is_none()
+    fn head_short(&self) -> String {
+        self.head.short(self.repo.abbrev_len.max(7))
     }
 
     fn command(&self, mode: Mode) -> String {
         format!("git reset {} {}", mode.flag(), self.short())
     }
 
-    /// What `git reset <mode>` would do here, from git-reset(1) and tests on git 2.34 and 2.43.
-    fn outcome(&self, mode: Mode) -> Outcome {
+    /// Files both staged and modified since: their staged version exists only in the index.
+    fn partly_staged(&self) -> Vec<String> {
+        self.staged.intersection(&self.unstaged).cloned().collect()
+    }
+
+    /// What happens to the commits' changes, your staged changes, your unstaged changes and
+    /// untracked files in the way. Two modes with the same fates do the same here.
+    fn fates(&self, mode: Mode) -> [Option<Fate>; 4] {
+        use Fate::*;
+        let commits = match mode {
+            Mode::Soft => Staged,
+            Mode::Mixed => Unstaged,
+            _ => Dropped,
+        };
+        let staged = match mode {
+            Mode::Soft => Staged,
+            Mode::Mixed | Mode::Keep => Unstaged,
+            Mode::Merge | Mode::Hard => Dropped,
+        };
+        let unstaged = match mode {
+            Mode::Hard => Dropped,
+            _ => Kept,
+        };
+        let in_the_way = match mode {
+            Mode::Soft | Mode::Mixed => Kept,
+            Mode::Keep | Mode::Merge => Refused,
+            Mode::Hard => Dropped,
+        };
+        [
+            (!self.changed.is_empty()).then_some(commits),
+            (!self.staged.is_empty()).then_some(staged),
+            (!self.unstaged.is_empty()).then_some(unstaged),
+            (!self.in_the_way.is_empty()).then_some(in_the_way),
+        ]
+    }
+
+    /// Git's refusal, as git words it (git 2.34 and 2.43).
+    fn refusal(&self, mode: Mode) -> Option<String> {
         let short = self.short();
-        let merging = self.in_progress == Some("a merge");
-        // A conflicted file has no staged version of its own to lose.
-        let partly: Vec<String> = self
-            .staged
-            .intersection(&self.unstaged)
-            .filter(|f| !self.unmerged.contains(*f))
-            .cloned()
-            .collect();
-        let local: BTreeSet<String> = self.staged.union(&self.unstaged).cloned().collect();
-        let not_uptodate = |p: &String| {
-            format!(
-                "error: Entry '{p}' not uptodate. Cannot merge.\nfatal: Could not reset index file to revision '{short}'."
-            )
+        let fail = |what: String| {
+            Some(format!(
+                "{what}\nfatal: Could not reset index file to revision '{short}'."
+            ))
         };
+        let not_uptodate = |p: &String| fail(format!("error: Entry '{p}' not uptodate. Cannot merge."));
         let untracked = |p: &String| {
-            format!(
-                "error: Untracked working tree file '{p}' would be overwritten by merge.\nfatal: Could not reset index file to revision '{short}'."
-            )
+            fail(format!(
+                "error: Untracked working tree file '{p}' would be overwritten by merge."
+            ))
         };
-        let staged_version = |files: Vec<String>| {
-            files
-                .into_iter()
-                .map(|f| (f, "its staged version"))
-                .collect::<Vec<_>>()
-        };
-        let (refusal, files) = match mode {
-            Mode::Soft => (
-                merging.then(|| "fatal: Cannot do a soft reset in the middle of a merge.".into()),
-                Vec::new(),
-            ),
-            Mode::Mixed => (None, staged_version(partly)),
+        match mode {
+            Mode::Soft | Mode::Mixed | Mode::Hard => None,
             Mode::Keep => {
-                let refusal = if merging {
-                    Some("fatal: Cannot do a keep reset in the middle of a merge.".into())
-                } else if let Some(p) = local.intersection(&self.changed).next() {
-                    Some(not_uptodate(p))
-                } else {
-                    self.in_the_way.iter().next().map(untracked)
-                };
-                (refusal, staged_version(partly))
+                let local: BTreeSet<String> = self.staged.union(&self.unstaged).cloned().collect();
+                match local.intersection(&self.changed).next() {
+                    Some(p) => not_uptodate(p),
+                    None => self.in_the_way.iter().next().and_then(untracked),
+                }
             }
             Mode::Merge => {
-                let touched: BTreeSet<String> =
-                    self.changed.union(&self.staged).cloned().collect();
-                // Conflicts don't stop it: `reset --merge` is how a merge is aborted.
-                let refusal = match self
-                    .unstaged
-                    .intersection(&touched)
-                    .find(|f| !self.unmerged.contains(*f))
-                {
-                    Some(p) => Some(not_uptodate(p)),
-                    None => self.in_the_way.iter().next().map(untracked),
-                };
-                let files = self
-                    .staged
-                    .iter()
-                    .map(|f| {
-                        let why = if self.unmerged.contains(f) {
-                            "conflicted"
-                        } else {
-                            "staged changes"
-                        };
-                        (f.clone(), why)
-                    })
-                    .collect();
-                (refusal, files)
+                let touched: BTreeSet<String> = self.changed.union(&self.staged).cloned().collect();
+                match self.unstaged.intersection(&touched).next() {
+                    Some(p) => not_uptodate(p),
+                    None => self.in_the_way.iter().next().and_then(untracked),
+                }
             }
+        }
+    }
+
+    /// Files whose content is gone afterwards, and why.
+    fn lost_files(&self, mode: Mode) -> Vec<(String, &'static str)> {
+        match mode {
+            Mode::Soft => Vec::new(),
+            Mode::Mixed | Mode::Keep => self
+                .partly_staged()
+                .into_iter()
+                .map(|f| (f, "staged version"))
+                .collect(),
+            Mode::Merge => self
+                .staged
+                .iter()
+                .map(|f| (f.clone(), "staged changes"))
+                .collect(),
             Mode::Hard => {
-                let mut files: Vec<(String, &'static str)> = local
-                    .iter()
+                let local: BTreeSet<&String> = self.staged.union(&self.unstaged).collect();
+                let mut files: Vec<_> = local
+                    .into_iter()
                     .map(|f| {
                         let why = match (self.staged.contains(f), self.unstaged.contains(f)) {
-                            _ if self.unmerged.contains(f) => "conflicted",
                             (true, true) => "staged and modified",
                             (true, false) => "staged",
                             _ => "modified",
@@ -293,61 +286,129 @@ impl Facts {
                         .iter()
                         .map(|f| (f.clone(), "untracked, overwritten")),
                 );
-                (None, files)
+                files
             }
-        };
-        Outcome {
-            refusal,
-            files,
-            commits_kept: matches!(mode, Mode::Soft | Mode::Mixed),
         }
     }
 
-    /// The dialog's first mode: Keep when it's calm, else the first one git allows that loses
-    /// nothing, else the first one git allows.
-    fn default_mode(&self) -> Mode {
-        let calm = |m: Mode| self.outcome(m).level(self) == Level::Calm;
-        let allowed = |m: &Mode| self.outcome(*m).refusal.is_none();
-        if calm(Mode::Keep) {
-            return Mode::Keep;
-        }
-        Mode::ALL
+    fn loses(&self, mode: Mode) -> bool {
+        !self.commits.is_empty() || !self.lost_files(mode).is_empty()
+    }
+
+    /// The mode a greyed-out one would do the same as, when it isn't refused.
+    fn same_as(&self, mode: Mode) -> Option<Mode> {
+        let fates = self.fates(mode);
+        Mode::PREFERRED
             .into_iter()
-            .filter(allowed)
-            .find(|&m| self.outcome(m).level(self) != Level::Loses)
-            .or_else(|| Mode::ALL.into_iter().find(allowed))
-            .unwrap_or(Mode::Keep)
+            .take_while(|&m| m != mode)
+            .find(|&m| self.refusal(m).is_none() && self.fates(m) == fates)
     }
-}
 
-#[derive(Clone, Debug)]
-struct Outcome {
-    refusal: Option<String>,
-    files: Vec<(String, &'static str)>,
-    /// The commits left behind keep their changes in the files (Soft, Mixed).
-    commits_kept: bool,
-}
+    fn enabled(&self, mode: Mode) -> bool {
+        self.refusal(mode).is_none() && self.same_as(mode).is_none()
+    }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Level {
-    Calm,
-    /// Commits leave every branch, but their changes stay in the files.
-    Caution,
-    Loses,
-    Refused,
-}
+    /// The first of Keep, Mixed and Soft that loses nothing, else the first that can be picked.
+    fn default_mode(&self) -> Mode {
+        let modes = [Mode::Keep, Mode::Mixed, Mode::Soft];
+        modes
+            .into_iter()
+            .find(|&m| self.enabled(m) && !self.loses(m))
+            .or_else(|| modes.into_iter().find(|&m| self.enabled(m)))
+            .unwrap_or(Mode::Mixed)
+    }
 
-impl Outcome {
-    fn level(&self, facts: &Facts) -> Level {
-        if self.refusal.is_some() {
-            Level::Refused
-        } else if !self.files.is_empty() || !facts.commits.is_empty() && !self.commits_kept {
-            Level::Loses
-        } else if !facts.commits.is_empty() {
-            Level::Caution
-        } else {
-            Level::Calm
+    /// What the reset does to the branch.
+    fn movement(&self) -> String {
+        let (b, from, to) = (&self.branch, self.head_short(), self.short());
+        match (self.behind, self.gained) {
+            (n, 0) => format!("Moves {b} back {} from {from} to {to}.", plural(n, "commit")),
+            (0, n) => format!("Moves {b} forward {} from {from} to {to}.", plural(n, "commit")),
+            (l, g) => format!(
+                "Moves {b} from {from} to {to}, on another line: it leaves {} behind and gains {g}.",
+                plural(l, "commit")
+            ),
         }
+    }
+
+    /// The uncommitted changes, in git status's words.
+    fn changes(&self) -> String {
+        let mut parts = Vec::new();
+        let only_staged = self.staged.len() - self.partly_staged().len();
+        if only_staged > 0 {
+            parts.push(format!("{only_staged} staged"));
+        }
+        let partly = self.partly_staged().len();
+        if partly > 0 {
+            parts.push(format!("{partly} staged and modified since"));
+        }
+        let only_unstaged = self.unstaged.len() - partly;
+        if only_unstaged > 0 {
+            parts.push(format!("{only_unstaged} modified"));
+        }
+        if !self.in_the_way.is_empty() {
+            parts.push(format!(
+                "{} untracked where {} has a file",
+                self.in_the_way.len(),
+                self.short()
+            ));
+        }
+        if parts.is_empty() {
+            "No uncommitted changes.".into()
+        } else {
+            format!("Uncommitted: {}.", parts.join(", "))
+        }
+    }
+
+    /// What `mode` does here, sentence by sentence.
+    fn explanation(&self, mode: Mode) -> Vec<String> {
+        let to = self.short();
+        let mut lines = Vec::new();
+        let left = !self.changed.is_empty() && self.behind > 0;
+        let theirs = if self.gained > 0 && self.behind == 0 {
+            "The difference to the new commit"
+        } else {
+            "The changes of the commits left behind"
+        };
+        match mode {
+            Mode::Soft => {
+                lines.push("Your files and staged changes stay as they are.".into());
+                if left || self.gained > 0 {
+                    lines.push(format!("{theirs} show up as staged."));
+                }
+            }
+            Mode::Mixed => {
+                lines.push("Your files stay as they are; nothing stays staged.".into());
+                if left || self.gained > 0 {
+                    lines.push(format!("{theirs} show up as modified files."));
+                }
+            }
+            Mode::Keep => {
+                lines.push(format!("Your files are updated to {to}."));
+                if !self.staged.is_empty() || !self.unstaged.is_empty() {
+                    lines.push("Your changes are kept, as modified files; nothing stays staged.".into());
+                }
+            }
+            Mode::Merge => {
+                lines.push(format!("Your files are updated to {to}."));
+                if !self.staged.is_empty() {
+                    lines.push("Your staged changes are dropped.".into());
+                }
+                if !self.unstaged.is_empty() {
+                    lines.push("Your changes that aren't staged are kept.".into());
+                }
+            }
+            Mode::Hard => {
+                lines.push(format!("Your files are updated to {to}."));
+                if !self.staged.is_empty() || !self.unstaged.is_empty() {
+                    lines.push("All your uncommitted changes are dropped.".into());
+                }
+                if !self.in_the_way.is_empty() {
+                    lines.push("Untracked files where it has a file are overwritten.".into());
+                }
+            }
+        }
+        lines
     }
 }
 
@@ -355,10 +416,10 @@ impl Outcome {
 struct Open {
     facts: Facts,
     mode: Mode,
-    /// Variant C: the mode was picked in the menu.
-    fixed: bool,
     opener: ViewportId,
     fresh: bool,
+    /// Asked for again while open: left out for a frame, so its window opens anew in front.
+    reopen: bool,
     show_files: bool,
 }
 
@@ -371,7 +432,6 @@ struct Notice {
 
 #[derive(Debug, Default)]
 struct State {
-    variant: Option<Variant>,
     /// The facts for the row whose menu is open, and when they were read.
     cache: Option<(PathBuf, Oid, f64, Option<Facts>)>,
     open: Option<Open>,
@@ -384,16 +444,6 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::default();
 }
 
-fn variant(state: &mut State) -> Variant {
-    *state.variant.get_or_insert_with(|| {
-        match std::env::var("PARTERRE_RESET_VARIANT").as_deref() {
-            Ok("B" | "b") => Variant::B,
-            Ok("C" | "c") => Variant::C,
-            _ => Variant::A,
-        }
-    })
-}
-
 fn notify(state: &mut State, ctx: &egui::Context, facts: &Facts, mode: Mode) {
     state.notices.push(Notice {
         title: format!("Reset {} to {}", facts.branch, facts.short()),
@@ -402,14 +452,10 @@ fn notify(state: &mut State, ctx: &egui::Context, facts: &Facts, mode: Mode) {
     });
 }
 
-/// The reset item of a log row's menu: only for the open worktree's branch, never for a
-/// detached HEAD (which includes a branch being rebased).
+/// The reset item of a log row's menu: only for the open worktree's branch.
 pub fn menu(ui: &mut Ui, repo: &Arc<Repo>, commit: Oid, catalog: Option<&Catalog>) {
     let Some(catalog) = catalog else { return };
-    let Some(branch) = catalog.current.clone() else {
-        return;
-    };
-    if catalog.head == Some(commit) || !catalog.has_working_tree {
+    if catalog.current.is_none() || catalog.head == Some(commit) {
         return;
     }
     STATE.with_borrow_mut(|state| {
@@ -423,98 +469,28 @@ pub fn menu(ui: &mut Ui, repo: &Arc<Repo>, commit: Oid, catalog: Option<&Catalog
         let Some((_, _, _, Some(facts))) = state.cache.clone() else {
             return;
         };
-        let opener = ui.ctx().viewport_id();
         menu::separator(ui);
-        let open = |state: &mut State, mode: Mode, fixed: bool| {
+        if ui
+            .button(format!("Reset {} to here…", facts.branch))
+            .clicked()
+        {
+            let reopen = state.open.is_some();
             state.open = Some(Open {
-                facts: facts.clone(),
-                mode,
-                fixed,
-                opener,
+                mode: facts.default_mode(),
+                facts,
+                opener: ui.ctx().viewport_id(),
                 fresh: true,
+                reopen,
                 show_files: false,
             });
-        };
-        match variant(state) {
-            Variant::A => {
-                let quick = facts.clean();
-                let dots = if quick { "" } else { "…" };
-                if ui.button(format!("Reset {branch} to here{dots}")).clicked() {
-                    if quick {
-                        notify(state, ui.ctx(), &facts, Mode::Keep);
-                    } else {
-                        open(state, facts.default_mode(), false);
-                    }
-                    ui.close();
-                }
-            }
-            Variant::B => {
-                if ui.button(format!("Reset {branch} to here…")).clicked() {
-                    open(state, facts.default_mode(), false);
-                    ui.close();
-                }
-            }
-            Variant::C => {
-                menu::plain_submenu(ui, &format!("Reset {branch} to here"), |ui| {
-                    for mode in Mode::ALL {
-                        let outcome = facts.outcome(mode);
-                        let level = outcome.level(&facts);
-                        let (label, hint) = match level {
-                            Level::Calm => (mode.name().to_owned(), ""),
-                            Level::Caution => (format!("{}…", mode.name()), ""),
-                            Level::Loses => (format!("{}…", mode.name()), "loses work"),
-                            Level::Refused => (mode.name().to_owned(), "refused"),
-                        };
-                        let button = egui::Button::new(label).shortcut_text(hint);
-                        let mut response = ui
-                            .add_enabled(level != Level::Refused, button)
-                            .on_hover_text(mode.gist());
-                        if let Some(refusal) = &outcome.refusal {
-                            response = response
-                                .on_disabled_hover_text(RichText::new(refusal).monospace());
-                        }
-                        if response.clicked() {
-                            if level == Level::Calm {
-                                notify(state, ui.ctx(), &facts, mode);
-                            } else {
-                                open(state, mode, true);
-                            }
-                            ui.close();
-                        }
-                    }
-                });
-            }
+            ui.close();
         }
     });
 }
 
-/// The variant switcher and the notifications, over the log window.
+/// The notifications, over the log window.
 pub fn overlay(ctx: &egui::Context) {
     STATE.with_borrow_mut(|state| {
-        let current = variant(state);
-        egui::Area::new(Id::new("prototype-reset-switcher"))
-            .anchor(egui::Align2::CENTER_BOTTOM, vec2(0.0, -10.0))
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(30, 30, 36))
-                    .corner_radius(16)
-                    .inner_margin(egui::Margin::symmetric(10, 4))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.visuals_mut().override_text_color = Some(Color32::WHITE);
-                            let at = Variant::ALL.iter().position(|v| *v == current).unwrap_or(0);
-                            let n = Variant::ALL.len();
-                            if ui.small_button("◀").clicked() {
-                                state.variant = Some(Variant::ALL[(at + n - 1) % n]);
-                            }
-                            ui.label(format!("Reset prototype: {}", current.name()));
-                            if ui.small_button("▶").clicked() {
-                                state.variant = Some(Variant::ALL[(at + 1) % n]);
-                            }
-                        });
-                    });
-            });
         let now = ctx.input(|i| i.time);
         state.notices.retain(|n| now - n.at < 5.0);
         if state.notices.is_empty() {
@@ -522,7 +498,7 @@ pub fn overlay(ctx: &egui::Context) {
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
         egui::Area::new(Id::new("prototype-reset-notices"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-16.0, -48.0))
+            .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-16.0, -16.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_max_width(360.0);
@@ -571,13 +547,12 @@ pub fn show(
                 if let Some(facts) =
                     Oid::from_hex(hex.trim()).and_then(|t| Facts::load(repo, catalog, t))
                 {
-                    let fixed = Mode::parse(mode);
                     state.open = Some(Open {
-                        mode: fixed.unwrap_or_else(|| facts.default_mode()),
-                        fixed: fixed.is_some(),
+                        mode: Mode::parse(mode).unwrap_or_else(|| facts.default_mode()),
                         facts,
                         opener: log,
                         fresh: true,
+                        reopen: false,
                         show_files: true,
                     });
                 }
@@ -586,8 +561,12 @@ pub fn show(
         let Some(mut open) = state.open.take() else {
             return;
         };
-        let answer = dialog(ctx, &mut open, &mut state.log);
-        match answer {
+        if std::mem::take(&mut open.reopen) {
+            ctx.request_repaint();
+            state.open = Some(open);
+            return;
+        }
+        match dialog(ctx, &mut open, &mut state.log) {
             dialogs::Answer::Primary => notify(state, ctx, &open.facts, open.mode),
             dialogs::Answer::Cancel => {}
             dialogs::Answer::Open => {
@@ -602,41 +581,34 @@ const TRIANGLE: parterre_core::glyphs::Glyph = &[parterre_core::glyphs::Part::Pa
     "M12 3 2 21h20ZM12 9v5m0 3v1",
 )];
 
-fn plural(n: usize, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
-}
-
 fn dialog(
     ctx: &egui::Context,
     open: &mut Open,
     log: &mut Option<(Arc<Repo>, Vec<Oid>)>,
 ) -> dialogs::Answer {
     let facts = &open.facts;
-    let outcome = facts.outcome(open.mode);
-    let level = outcome.level(facts);
-    let files = plural(outcome.files.len(), "file");
+    let loses = facts.loses(open.mode);
+    let lost_files = facts.lost_files(open.mode);
+    let files = plural(lost_files.len(), "file");
     let commits = plural(facts.commits.len(), "commit");
-    let title = if level == Level::Loses {
-        let cost = match (outcome.files.is_empty(), outcome.commits_kept) {
-            (false, false) if !facts.commits.is_empty() => format!("{files} and {commits}"),
-            (false, _) => files.clone(),
-            (true, _) => commits.clone(),
+    let title = if loses {
+        let cost = match (lost_files.is_empty(), facts.commits.is_empty()) {
+            (false, false) => format!("{files} and {commits}"),
+            (false, true) => files.clone(),
+            _ => commits.clone(),
         };
         format!("Reset {} and lose {cost}?", facts.branch)
-    } else if open.fixed {
-        format!("Reset {} to {} ({})", facts.branch, facts.short(), open.mode.name())
     } else {
         format!("Reset {} to {}", facts.branch, facts.short())
     };
     let mut dialog = dialogs::Dialog::new("prototype-reset", &title)
         .opener(open.opener)
         .raise(open.fresh);
-    if matches!(level, Level::Loses | Level::Refused) {
+    if loses {
         dialog = dialog.icon(TRIANGLE, true);
     }
     let mut mode = open.mode;
     let show_files = &mut open.show_files;
-    let fixed = open.fixed;
     let fresh = open.fresh;
     let mut show_log = false;
     let shown = dialog.show(ctx, |ui| {
@@ -644,98 +616,71 @@ fn dialog(
             if let Some(ix) = facts.repo.lookup(&facts.target) {
                 dialogs::commit_line(ui, facts.repo.commit(ix), facts.repo.abbrev_len);
             }
-            if let Some(what) = facts.in_progress {
-                ui.label(format!("{} is in progress.", capitalized(what)));
-            }
-            if !fixed {
-                ui.add_space(4.0);
-                for m in Mode::ALL {
-                    let o = facts.outcome(m);
-                    ui.horizontal(|ui| {
-                        ui.radio_value(&mut mode, m, m.name());
-                        ui.label(RichText::new(m.gist()).weak().small());
-                        match o.level(facts) {
-                            Level::Refused => {
-                                ui.label(RichText::new("refused").small().color(
-                                    ui.visuals().weak_text_color().gamma_multiply(0.8),
-                                ));
-                            }
-                            Level::Loses => {
-                                ui.label(
-                                    RichText::new("loses work")
-                                        .small()
-                                        .color(ui.visuals().error_fg_color),
-                                );
-                            }
-                            _ => {}
-                        }
-                    });
+            ui.label(facts.movement());
+            ui.label(RichText::new(facts.changes()).weak());
+            ui.add_space(4.0);
+            for m in Mode::ALL {
+                let enabled = facts.enabled(m);
+                let response = ui
+                    .add_enabled(enabled, egui::RadioButton::new(mode == m, m.name()))
+                    .on_hover_text(m.flag());
+                let response = match (facts.refusal(m), facts.same_as(m)) {
+                    (Some(refusal), _) => response.on_disabled_hover_text(
+                        RichText::new(format!("git reset {} refuses:\n{refusal}", m.flag()))
+                            .monospace(),
+                    ),
+                    (None, Some(same)) => response
+                        .on_disabled_hover_text(format!("Same as {} here", same.name())),
+                    _ => response,
+                };
+                if response.clicked() {
+                    mode = m;
                 }
-                ui.add_space(4.0);
-            } else {
-                ui.label(RichText::new(open_gist(mode)).weak());
             }
-            let row = |ui: &mut Ui, content: &mut dyn FnMut(&mut Ui)| {
-                egui::Frame::new()
-                    .fill(widgets::tones(ui).seg_bg)
-                    .corner_radius(8)
-                    .inner_margin(egui::Margin::symmetric(12, 8))
-                    .show(ui, |ui| ui.horizontal(|ui| content(ui)));
-            };
-            if let Some(refusal) = &outcome.refusal {
-                ui.label("Git refuses:");
-                ui.label(
-                    RichText::new(refusal)
-                        .monospace()
-                        .color(ui.visuals().error_fg_color),
-                );
-            } else {
-                if !outcome.files.is_empty() {
-                    row(ui, &mut |ui| {
-                        ui.label(&files);
+            ui.add_space(4.0);
+            let lost_files = facts.lost_files(mode);
+            let loses = facts.loses(mode);
+            explanation_box(ui, loses, |ui| {
+                for line in facts.explanation(mode) {
+                    ui.label(line);
+                }
+                if !lost_files.is_empty() {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Lost: {}", plural(lost_files.len(), "file")));
                         let label = if *show_files { "Hide" } else { "Show" };
                         if ui.link(label).clicked() {
                             *show_files = !*show_files;
                         }
                     });
                     if *show_files {
-                        for (file, why) in &outcome.files {
+                        for (file, why) in &lost_files {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(file).monospace());
-                                ui.label(RichText::new(*why).weak().small());
+                                ui.label(RichText::new(*why).small());
                             });
                         }
                     }
                 }
                 if !facts.commits.is_empty() {
-                    if outcome.commits_kept {
-                        caution(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(format!(
-                                    "{commits} will be on no branch; their changes stay in your files."
-                                ));
-                                show_log |= ui.link("Show in log").clicked();
-                            });
-                        });
-                    } else {
-                        ui.label(
-                            "These commits are not reachable from any surviving branch, tag or worktree.",
-                        );
-                        row(ui, &mut |ui| {
-                            ui.label(&commits);
-                            show_log |= ui.link("Show in log").clicked();
-                        });
-                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "Lost: {}, on no branch, tag or worktree afterwards.",
+                            plural(facts.commits.len(), "commit")
+                        ));
+                        show_log |= ui.link("Show in log").clicked();
+                    });
                 }
-            }
+            });
         });
         dialogs::command_box(ui, &[facts.command(mode)]);
-        let loses = level == Level::Loses;
+        let loses = facts.loses(mode);
         let label = if loses { "Reset anyway" } else { "Reset" };
-        let answer = dialogs::actions(ui, label, level != Level::Refused, loses, fresh && loses);
+        let answer = dialogs::actions(ui, label, facts.enabled(mode), loses, fresh && loses);
         // Enter runs a reset that loses nothing.
         if answer == dialogs::Answer::Open
-            && matches!(level, Level::Calm | Level::Caution)
+            && !loses
             && ui.input(|i| i.key_pressed(egui::Key::Enter))
         {
             return dialogs::Answer::Primary;
@@ -752,31 +697,23 @@ fn dialog(
     shown.inner
 }
 
-fn open_gist(mode: Mode) -> String {
-    format!("{}: {}", mode.flag(), mode.gist())
-}
-
-fn capitalized(s: &str) -> String {
-    let mut chars = s.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
-}
-
-/// An amber box for something to be aware of that isn't lost work.
-fn caution(ui: &mut Ui, content: impl FnOnce(&mut Ui)) {
-    let color = if ui.visuals().dark_mode {
-        Color32::from_rgb(240, 191, 95)
+/// Information in a quiet box, or a warning in a red one.
+fn explanation_box(ui: &mut Ui, warning: bool, content: impl FnOnce(&mut Ui)) {
+    let color = if warning {
+        ui.visuals().error_fg_color
     } else {
-        Color32::from_rgb(139, 86, 0)
+        widgets::tones(ui).accent
     };
     egui::Frame::new()
         .fill(color.gamma_multiply(0.10))
+        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.5)))
         .corner_radius(6)
         .inner_margin(egui::Margin::same(10))
         .show(ui, |ui| {
-            ui.visuals_mut().override_text_color = Some(color);
+            ui.set_width(ui.available_width());
+            if warning {
+                ui.visuals_mut().override_text_color = Some(color);
+            }
             content(ui);
         });
 }
