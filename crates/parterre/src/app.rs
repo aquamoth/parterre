@@ -150,16 +150,25 @@ struct Details {
     cache: std::collections::HashMap<parterre_core::Oid, Option<Result<CommitDetails, String>>>,
     rx: Option<std::sync::mpsc::Receiver<(parterre_core::Oid, Result<CommitDetails, String>)>>,
     tx: Option<std::sync::mpsc::Sender<parterre_core::Oid>>,
+    /// The folder the worker asks git in.
+    path: Option<std::path::PathBuf>,
 }
 
 impl Details {
-    /// The details of `oid` if already loaded; otherwise requests them.
+    /// The details of `oid` if already loaded; otherwise requests them. Asked from another
+    /// folder (another worktree went to, perhaps since deleted), it starts afresh.
     fn get(
         &mut self,
         repo_path: &std::path::Path,
         oid: parterre_core::Oid,
         ctx: &egui::Context,
     ) -> Option<&Result<CommitDetails, String>> {
+        if self.path.as_deref() != Some(repo_path) {
+            *self = Details {
+                path: Some(repo_path.to_owned()),
+                ..Details::default()
+            };
+        }
         while let Some(Ok((oid, details))) = self.rx.as_ref().map(|rx| rx.try_recv()) {
             self.cache.insert(oid, Some(details));
         }

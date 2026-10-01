@@ -531,6 +531,8 @@ pub struct Lister<K, V> {
     /// Results; `None` for a request dropped because a newer one came in.
     rx: Option<mpsc::Receiver<(K, Option<V>)>>,
     tx: Option<mpsc::Sender<K>>,
+    /// The folder the worker asks git in.
+    path: Option<std::path::PathBuf>,
 }
 
 impl<K, V> Default for Lister<K, V> {
@@ -539,6 +541,7 @@ impl<K, V> Default for Lister<K, V> {
             cache: HashMap::new(),
             rx: None,
             tx: None,
+            path: None,
         }
     }
 }
@@ -549,7 +552,8 @@ where
     V: Send + 'static,
 {
     /// The list for `key` if it is known; otherwise asks for it. The first call starts the
-    /// worker, which runs `work` with git in `repo_path` for every key asked for.
+    /// worker, which runs `work` with git in `repo_path` for every key asked for. Asked from
+    /// another folder (another worktree went to, perhaps since deleted), it starts afresh.
     pub fn get(
         &mut self,
         repo_path: &std::path::Path,
@@ -557,6 +561,12 @@ where
         ctx: &egui::Context,
         work: fn(&Git, &K) -> V,
     ) -> Option<&V> {
+        if self.path.as_deref() != Some(repo_path) {
+            *self = Lister {
+                path: Some(repo_path.to_owned()),
+                ..Lister::default()
+            };
+        }
         while let Some(Ok((key, value))) = self.rx.as_ref().map(|rx| rx.try_recv()) {
             match value {
                 Some(value) => self.cache.insert(key, Some(value)),
@@ -787,6 +797,24 @@ fn filter_field(ui: &mut Ui, text: &mut String, id: Id, width: f32) -> Response 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Asked from another folder (another worktree went to, maybe deleted since), the lister
+    /// forgets what the first folder's worker found and asks again in the new one.
+    #[test]
+    fn a_lister_asked_from_another_folder_starts_afresh() {
+        let ctx = egui::Context::default();
+        let mut lister: Lister<u32, String> = Lister::default();
+        let wait = |lister: &mut Lister<u32, String>, path: &str| loop {
+            if let Some(v) = lister.get(std::path::Path::new(path), 1, &ctx, |git, _| {
+                git.dir().display().to_string()
+            }) {
+                return v.clone();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(wait(&mut lister, "/gone"), "/gone");
+        assert_eq!(wait(&mut lister, "/open"), "/open");
+    }
 
     fn renamed() -> ChangedFile {
         ChangedFile {
