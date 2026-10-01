@@ -160,7 +160,14 @@ fn longest_remote_prefix_and_duplicate_tracking_use_upstream_relationships() {
     let mut r = TestRepo::new();
     let start = oid(&r.commit("base"));
     r.git(&["remote", "add", "team", "https://example.invalid/a"]);
-    r.git(&["remote", "add", "team/sub", "https://example.invalid/b"]);
+    // Existing configurations can have overlapping remote names. Recent Git refuses
+    // creating that overlap with `remote add`, so reproduce the older config directly.
+    r.git(&["config", "remote.team/sub.url", "https://example.invalid/b"]);
+    r.git(&[
+        "config",
+        "remote.team/sub.fetch",
+        "+refs/heads/*:refs/remotes/team/sub/*",
+    ]);
     for name in ["different-name", "another-name"] {
         done(execute(
             &r,
@@ -223,7 +230,10 @@ fn occupied_current_and_other_worktree_branches_are_not_deleted_or_switched_to()
         assert!(matches!(execute(&r, a), Outcome::Failed { .. }));
     }
     let c = Catalog::load(r.path()).unwrap();
-    assert_eq!(c.occupied.get("topic"), Some(&path));
+    assert_eq!(
+        c.occupied["topic"].canonicalize().unwrap(),
+        path.canonicalize().unwrap()
+    );
     assert_eq!(c.locals.len(), 2);
 }
 
@@ -262,7 +272,10 @@ fn rebase_and_bisect_reserve_a_branch_even_when_head_is_detached() {
         )
         .unwrap();
         let c = Catalog::load(r.path()).unwrap();
-        assert_eq!(c.occupied.get("topic"), Some(&path));
+        assert_eq!(
+            c.occupied["topic"].canonicalize().unwrap(),
+            path.canonicalize().unwrap()
+        );
         assert!(matches!(
             execute(&r, deletion(&r, "topic")),
             Outcome::Failed { .. }
