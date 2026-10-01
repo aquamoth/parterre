@@ -298,7 +298,46 @@ pub fn commit_line(ui: &mut Ui, c: &Commit, abbrev: usize) -> bool {
     clicked
 }
 
-/// Text input with the native popover button; empty is an explicit no-selection choice.
+/// A non-editable dropdown, styled like the dialog's text fields. Returns true for an explicit
+/// choice, including picking the same value again.
+pub fn choice(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    selected: &mut Option<String>,
+    none: &str,
+    choices: &[String],
+) -> bool {
+    ui.scope(|ui| {
+        let tones = widgets::tones(ui);
+        ui.spacing_mut().button_padding = vec2(8.0, 5.0);
+        let w = &mut ui.visuals_mut().widgets;
+        for v in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+            v.bg_fill = tones.field;
+            v.weak_bg_fill = tones.field;
+            v.bg_stroke = egui::Stroke::new(1.0, tones.field_line);
+            v.corner_radius = egui::CornerRadius::same(7);
+            v.expansion = 0.0;
+        }
+        let mut chosen = false;
+        egui::ComboBox::from_id_salt(id)
+            .width(ui.available_width())
+            .selected_text(selected.as_deref().unwrap_or(none))
+            .popup_style(menu::style.into())
+            .show_ui(ui, |ui| {
+                chosen |= ui.selectable_value(selected, None, none).clicked();
+                for value in choices {
+                    chosen |= ui
+                        .selectable_value(selected, Some(value.clone()), value)
+                        .clicked();
+                }
+            });
+        chosen
+    })
+    .inner
+}
+
+/// Text input with the native popover button. Picking the current value still marks it changed,
+/// so a caller can distinguish an explicit selection from an automatically suggested value.
 pub fn editable_choice(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
@@ -309,8 +348,12 @@ pub fn editable_choice(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let width = ui.available_width() - 24.0;
-        let response = widgets::text_field(ui, text, hint, width);
-        let button = widgets::popover_button(ui, ui.id().with(id), None, false);
+        let mut response = widgets::text_field(ui, text, hint, width);
+        let button = ui
+            .add_enabled_ui(!choices.is_empty(), |ui| {
+                widgets::popover_button(ui, ui.id().with(id), None, false)
+            })
+            .inner;
         egui::Popup::from_toggle_button_response(&button)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .align(egui::RectAlign::BOTTOM_END)
@@ -318,13 +361,6 @@ pub fn editable_choice(
             .style(menu::popover_style)
             .show(|ui| {
                 ui.set_min_width(240.0);
-                if ui
-                    .add(egui::Button::selectable(text.is_empty(), hint))
-                    .clicked()
-                {
-                    text.clear();
-                    ui.close();
-                }
                 egui::ScrollArea::vertical()
                     .max_height(280.0)
                     .show(ui, |ui| {
@@ -334,6 +370,7 @@ pub fn editable_choice(
                                 .clicked()
                             {
                                 *text = choice.clone();
+                                response.mark_changed();
                                 ui.close();
                             }
                         }

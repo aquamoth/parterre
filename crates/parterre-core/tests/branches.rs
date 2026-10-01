@@ -3,7 +3,9 @@ mod common;
 
 use common::TestRepo;
 use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Cancel, Catalog, Create, Outcome, Warning};
+use parterre_core::branches::{
+    Action, Branches, Cancel, Catalog, Create, CreateDraft, Outcome, Warning,
+};
 
 fn oid(s: &str) -> Oid {
     Oid::from_hex(s).unwrap()
@@ -34,6 +36,137 @@ fn unique_branch() -> (TestRepo, Action, Oid) {
     r.checkout("main");
     let a = deletion(&r, "topic");
     (r, a, tip)
+}
+
+fn draft_repository() -> (TestRepo, Oid, Catalog) {
+    let mut r = TestRepo::new();
+    let start = oid(&r.commit("selected"));
+    for remote in ["origin", "upstream"] {
+        r.git(&[
+            "remote",
+            "add",
+            remote,
+            &format!("https://example.invalid/{remote}"),
+        ]);
+        r.git(&[
+            "update-ref",
+            &format!("refs/remotes/{remote}/topic"),
+            &start.to_hex(),
+        ]);
+    }
+    r.git(&[
+        "update-ref",
+        "refs/remotes/origin/team/feature",
+        &start.to_hex(),
+    ]);
+    let catalog = Catalog::load(r.path()).unwrap();
+    (r, start, catalog)
+}
+
+#[test]
+fn selected_remote_follows_local_name_until_a_tracking_branch_is_chosen() {
+    let (_r, start, catalog) = draft_repository();
+    let mut draft = CreateDraft::new(&catalog, start, None);
+    draft.set_name("my-work".into());
+    draft.set_remote(Some("origin".into()));
+    assert_eq!(draft.upstream().as_deref(), Some("origin/my-work"));
+    draft.set_name("renamed-work".into());
+    assert_eq!(draft.upstream().as_deref(), Some("origin/renamed-work"));
+    // Explicitly picking the same value pins it too.
+    draft.set_track_name(&catalog, "renamed-work".into());
+    draft.set_name("local-only-name".into());
+    assert_eq!(draft.upstream().as_deref(), Some("origin/renamed-work"));
+    // Choosing another remote starts automatic naming again.
+    draft.set_remote(Some("upstream".into()));
+    assert_eq!(
+        draft.upstream().as_deref(),
+        Some("upstream/local-only-name")
+    );
+    draft.set_name("last-name".into());
+    assert_eq!(draft.upstream().as_deref(), Some("upstream/last-name"));
+}
+
+#[test]
+fn none_remote_clears_tracking_and_reselection_generates_a_future_branch() {
+    let (r, start, catalog) = draft_repository();
+    let mut draft = CreateDraft::new(&catalog, start, None);
+    draft.set_name("new-local".into());
+    draft.set_remote(None);
+    assert_eq!(draft.track_name(), "");
+    draft.set_name("untracked".into());
+    assert!(draft.upstream().is_none());
+    assert!(draft.remote_branches(&catalog).is_empty());
+    done(execute(
+        &r,
+        Action::Create(Create {
+            start,
+            name: draft.name().into(),
+            track: draft.upstream(),
+            switch: false,
+        }),
+    ));
+    assert!(
+        Catalog::load(r.path())
+            .unwrap()
+            .locals
+            .iter()
+            .find(|b| b.name == "untracked")
+            .unwrap()
+            .upstream
+            .is_none()
+    );
+    draft.set_name("future-local".into());
+    draft.set_remote(Some("origin".into()));
+    done(execute(
+        &r,
+        Action::Create(Create {
+            start,
+            name: draft.name().into(),
+            track: draft.upstream(),
+            switch: false,
+        }),
+    ));
+    assert_eq!(
+        r.git(&["config", "branch.future-local.merge"]),
+        "refs/heads/future-local"
+    );
+}
+
+#[test]
+fn remote_branch_choices_are_scoped_and_explicit_choices_keep_local_name_rules() {
+    let (r, start, mut catalog) = draft_repository();
+    let mut draft = CreateDraft::new(&catalog, start, None);
+    draft.set_remote(Some("upstream".into()));
+    assert_eq!(draft.remote_branches(&catalog), ["topic"]);
+    draft.set_remote(Some("origin".into()));
+    assert_eq!(draft.remote_branches(&catalog), ["team/feature", "topic"]);
+    r.git(&["branch", "topic"]);
+    r.git(&["branch", "--set-upstream-to=origin/topic", "topic"]);
+    catalog = Catalog::load(r.path()).unwrap();
+    draft.set_track_name(&catalog, "topic".into());
+    assert_eq!(draft.name(), "topic-2");
+    assert_eq!(catalog.trackers(&draft.upstream().unwrap()), ["topic"]);
+    draft.set_name("my-local".into());
+    draft.set_track_name(&catalog, "team/feature".into());
+    assert_eq!(draft.name(), "my-local");
+    draft.restore_suggested_name(&catalog);
+    assert_eq!(draft.name(), "team/feature");
+    assert_eq!(draft.upstream().as_deref(), Some("origin/team/feature"));
+}
+
+#[test]
+fn remote_switch_pins_its_selected_branch_while_default_recommendation_can_follow_edits() {
+    let (_r, start, catalog) = draft_repository();
+    let mut explicit = CreateDraft::new(&catalog, start, Some("upstream/topic"));
+    explicit.set_name("different-local".into());
+    assert_eq!(explicit.upstream().as_deref(), Some("upstream/topic"));
+    let mut suggested = CreateDraft::new(&catalog, start, None);
+    assert_eq!(suggested.upstream().as_deref(), Some("origin/team/feature"));
+    suggested.set_name("different-local".into());
+    assert_eq!(
+        suggested.upstream().as_deref(),
+        Some("origin/different-local")
+    );
 }
 
 #[test]

@@ -328,6 +328,123 @@ pub struct Create {
     pub switch: bool,
 }
 
+/// Creation-field state: the tracking name follows local edits until the user chooses
+/// or types a particular remote branch. Selecting a remote starts that automatic mode again.
+#[derive(Clone, Debug)]
+pub struct CreateDraft {
+    name: String,
+    remote: Option<String>,
+    track_name: String,
+    name_edited: bool,
+    track_edited: bool,
+    suggestion_source: Option<String>,
+}
+
+impl CreateDraft {
+    pub fn new(catalog: &Catalog, start: Oid, prefer: Option<&str>) -> Self {
+        let upstream = prefer.or_else(|| {
+            catalog
+                .remotes
+                .iter()
+                .find(|r| {
+                    r.tip == start
+                        && catalog.trackers(&r.name).is_empty()
+                        && catalog.tracking_parts(&r.name).is_some()
+                })
+                .map(|r| r.name.as_str())
+        });
+        let parts = upstream.and_then(|s| catalog.tracking_parts(s));
+        Self {
+            name: upstream
+                .map(|s| catalog.suggested_name(s))
+                .unwrap_or_default(),
+            remote: parts.map(|(remote, _)| remote.to_owned()),
+            track_name: parts
+                .map(|(_, branch)| branch.to_owned())
+                .unwrap_or_default(),
+            name_edited: false,
+            // A remote Switch is already an explicit choice of that upstream branch.
+            track_edited: prefer.is_some(),
+            suggestion_source: upstream.map(str::to_owned),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn remote(&self) -> Option<&str> {
+        self.remote.as_deref()
+    }
+    pub fn track_name(&self) -> &str {
+        &self.track_name
+    }
+
+    pub fn upstream(&self) -> Option<String> {
+        self.remote
+            .as_ref()
+            .map(|remote| format!("{remote}/{}", self.track_name.trim()))
+    }
+
+    pub fn set_name(&mut self, name: String) {
+        self.name = name;
+        self.name_edited = true;
+        self.follow_name();
+    }
+
+    pub fn set_remote(&mut self, remote: Option<String>) {
+        self.remote = remote;
+        self.track_edited = false;
+        self.suggestion_source = None;
+        self.follow_name();
+    }
+
+    /// A selection counts even when it matches the current automatically generated name.
+    pub fn set_track_name(&mut self, catalog: &Catalog, branch: String) {
+        self.track_name = branch;
+        self.track_edited = true;
+        self.suggestion_source = self.upstream();
+        let suggested = self.suggested_name(catalog);
+        if !self.name_edited && !suggested.is_empty() {
+            self.name = suggested;
+        }
+    }
+
+    pub fn suggested_name(&self, catalog: &Catalog) -> String {
+        self.suggestion_source
+            .as_deref()
+            .map(|s| catalog.suggested_name(s))
+            .unwrap_or_default()
+    }
+
+    pub fn restore_suggested_name(&mut self, catalog: &Catalog) {
+        let suggested = self.suggested_name(catalog);
+        if !suggested.is_empty() {
+            self.name = suggested;
+            self.name_edited = false;
+            self.follow_name();
+        }
+    }
+
+    pub fn remote_branches(&self, catalog: &Catalog) -> Vec<String> {
+        catalog
+            .remotes
+            .iter()
+            .filter_map(|r| {
+                let (remote, branch) = catalog.tracking_parts(&r.name)?;
+                (Some(remote) == self.remote()).then(|| branch.to_owned())
+            })
+            .collect()
+    }
+
+    fn follow_name(&mut self) {
+        if self.remote.is_none() {
+            self.track_name.clear();
+        } else if !self.track_edited {
+            self.track_name.clone_from(&self.name);
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Create(Create),

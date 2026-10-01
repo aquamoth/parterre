@@ -6,7 +6,7 @@ use std::sync::{Arc, mpsc};
 
 use eframe::egui::{self, Color32, Id, RichText, Ui, vec2};
 use parterre_core::branches::{
-    Action, Branches, Cancel, Catalog, Create, Outcome, Report, Warning, command_text,
+    Action, Branches, Cancel, Catalog, Create, CreateDraft, Outcome, Report, Warning, command_text,
 };
 use parterre_core::{Oid, RefKind, Repo};
 
@@ -167,9 +167,7 @@ struct Form {
     repo: Arc<Repo>,
     catalog: Arc<Catalog>,
     start: Oid,
-    name: String,
-    track: String,
-    edited: bool,
+    draft: CreateDraft,
     switch: bool,
     fresh: bool,
 }
@@ -182,22 +180,12 @@ impl Form {
         prefer: Option<String>,
         switch: bool,
     ) -> Self {
-        let track = prefer.unwrap_or_else(|| {
-            catalog
-                .remotes
-                .iter()
-                .find(|r| r.tip == start && catalog.trackers(&r.name).is_empty())
-                .map(|r| r.name.clone())
-                .unwrap_or_default()
-        });
-        let name = catalog.suggested_name(&track);
+        let draft = CreateDraft::new(&catalog, start, prefer.as_deref());
         Self {
             repo,
             catalog,
             start,
-            name,
-            track,
-            edited: false,
+            draft,
             switch,
             fresh: true,
         }
@@ -205,8 +193,8 @@ impl Form {
     fn action(&self) -> Action {
         Action::Create(Create {
             start: self.start,
-            name: self.name.clone(),
-            track: (!self.track.trim().is_empty()).then(|| self.track.trim().to_owned()),
+            name: self.draft.name().to_owned(),
+            track: self.draft.upstream(),
             switch: self.switch,
         })
     }
@@ -255,53 +243,73 @@ impl Form {
 
     fn name_field(&mut self, ui: &mut Ui) {
         ui.label(RichText::new("Local branch name").strong());
-        let suggestion = self.catalog.suggested_name(self.track.trim());
+        let suggestion = self.draft.suggested_name(&self.catalog);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let width = ui.available_width() - widgets::BUTTON - 4.0;
-            let response = widgets::text_field(ui, &mut self.name, "Enter a branch name", width);
+            let mut name = self.draft.name().to_owned();
+            let response = widgets::text_field(ui, &mut name, "Enter a branch name", width);
             if self.fresh {
                 response.request_focus();
             }
             if response.changed() {
-                self.edited = true;
+                self.draft.set_name(name);
             }
             if ui
-                .add_enabled_ui(!suggestion.is_empty() && self.name != suggestion, |ui| {
-                    widgets::icon_button(ui, parterre_core::glyphs::RESET, false)
-                })
+                .add_enabled_ui(
+                    !suggestion.is_empty() && self.draft.name() != suggestion,
+                    |ui| widgets::icon_button(ui, parterre_core::glyphs::RESET, false),
+                )
                 .inner
                 .on_hover_text(format!("Use suggested name: {suggestion}"))
                 .clicked()
             {
-                self.name = suggestion;
-                self.edited = false;
+                self.draft.restore_suggested_name(&self.catalog);
             }
         });
-        if !self.name.is_empty()
-            && let Some(error) = self.catalog.name_error(&self.name)
+        if !self.draft.name().is_empty()
+            && let Some(error) = self.catalog.name_error(self.draft.name())
         {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
     }
 
     fn track_field(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Track").strong());
-        let before = self.track.clone();
-        let choices = self
-            .catalog
-            .remotes
-            .iter()
-            .map(|r| r.name.clone())
-            .collect::<Vec<_>>();
-        dialogs::editable_choice(ui, "track-branch", &mut self.track, "None", &choices);
-        if let Some(error) = self.catalog.track_error(&self.track) {
+        ui.label(RichText::new("Remote").strong());
+        let mut selected = self.draft.remote().map(str::to_owned);
+        let mut remotes = self.catalog.remote_names.clone();
+        remotes.sort();
+        if dialogs::choice(ui, "track-remote", &mut selected, "None", &remotes) {
+            self.draft.set_remote(selected);
+        }
+        ui.add_space(8.0);
+        ui.label(RichText::new("Track branch").strong());
+        let choices = self.draft.remote_branches(&self.catalog);
+        let mut branch = self.draft.track_name().to_owned();
+        let response = ui
+            .add_enabled_ui(self.draft.remote().is_some(), |ui| {
+                dialogs::editable_choice(ui, "track-branch", &mut branch, "Branch name", &choices)
+            })
+            .inner;
+        if response.changed() {
+            self.draft.set_track_name(&self.catalog, branch);
+        }
+        let upstream = self.draft.upstream();
+        let track_error =
+            if self.draft.remote().is_some() && self.draft.track_name().trim().is_empty() {
+                Some("Enter a branch name to track.")
+            } else {
+                upstream
+                    .as_deref()
+                    .and_then(|s| self.catalog.track_error(s))
+            };
+        if let Some(error) = track_error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
-        if before != self.track && !self.track.trim().is_empty() && !self.edited {
-            self.name = self.catalog.suggested_name(self.track.trim());
-        }
-        let trackers = self.catalog.trackers(self.track.trim());
+        let trackers = upstream
+            .as_deref()
+            .map(|s| self.catalog.trackers(s))
+            .unwrap_or_default();
         if !trackers.is_empty() {
             let color = if ui.visuals().dark_mode {
                 Color32::from_rgb(240, 191, 95)
@@ -318,7 +326,7 @@ impl Form {
                         format!(
                             "Already tracked by {}. This creates another local branch tracking {}.",
                             trackers.join(", "),
-                            self.track.trim()
+                            upstream.as_deref().unwrap_or_default()
                         ),
                     );
                 });
