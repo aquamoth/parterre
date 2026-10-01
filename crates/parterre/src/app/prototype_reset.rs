@@ -29,22 +29,20 @@ enum Mode {
     Soft,
     Mixed,
     Keep,
-    Merge,
     Hard,
 }
 
 impl Mode {
-    /// In order of how much they touch.
-    const ALL: [Mode; 5] = [Mode::Soft, Mode::Mixed, Mode::Keep, Mode::Merge, Mode::Hard];
-    /// Which of several modes that do the same here stays: the gentlest name.
-    const PREFERRED: [Mode; 5] = [Mode::Soft, Mode::Mixed, Mode::Keep, Mode::Hard, Mode::Merge];
+    /// In order of how much they touch, which is also which of several modes that do the same
+    /// here stays: the one that does least harm if the repository changed meanwhile. `--merge`
+    /// is left to the command line: it's for aborting a merge.
+    const ALL: [Mode; 4] = [Mode::Soft, Mode::Mixed, Mode::Keep, Mode::Hard];
 
     fn name(self) -> &'static str {
         match self {
             Mode::Soft => "Soft",
             Mode::Mixed => "Mixed",
             Mode::Keep => "Keep",
-            Mode::Merge => "Merge",
             Mode::Hard => "Hard",
         }
     }
@@ -54,7 +52,6 @@ impl Mode {
             Mode::Soft => "--soft",
             Mode::Mixed => "--mixed",
             Mode::Keep => "--keep",
-            Mode::Merge => "--merge",
             Mode::Hard => "--hard",
         }
     }
@@ -202,7 +199,7 @@ impl Facts {
         let staged = match mode {
             Mode::Soft => Staged,
             Mode::Mixed | Mode::Keep => Unstaged,
-            Mode::Merge | Mode::Hard => Dropped,
+            Mode::Hard => Dropped,
         };
         let unstaged = match mode {
             Mode::Hard => Dropped,
@@ -210,7 +207,7 @@ impl Facts {
         };
         let in_the_way = match mode {
             Mode::Soft | Mode::Mixed => Kept,
-            Mode::Keep | Mode::Merge => Refused,
+            Mode::Keep => Refused,
             Mode::Hard => Dropped,
         };
         [
@@ -244,13 +241,6 @@ impl Facts {
                     None => self.in_the_way.iter().next().and_then(untracked),
                 }
             }
-            Mode::Merge => {
-                let touched: BTreeSet<String> = self.changed.union(&self.staged).cloned().collect();
-                match self.unstaged.intersection(&touched).next() {
-                    Some(p) => not_uptodate(p),
-                    None => self.in_the_way.iter().next().and_then(untracked),
-                }
-            }
         }
     }
 
@@ -262,11 +252,6 @@ impl Facts {
                 .partly_staged()
                 .into_iter()
                 .map(|f| (f, "staged version"))
-                .collect(),
-            Mode::Merge => self
-                .staged
-                .iter()
-                .map(|f| (f.clone(), "staged changes"))
                 .collect(),
             Mode::Hard => {
                 let local: BTreeSet<&String> = self.staged.union(&self.unstaged).collect();
@@ -298,7 +283,7 @@ impl Facts {
     /// The mode a greyed-out one would do the same as, when it isn't refused.
     fn same_as(&self, mode: Mode) -> Option<Mode> {
         let fates = self.fates(mode);
-        Mode::PREFERRED
+        Mode::ALL
             .into_iter()
             .take_while(|&m| m != mode)
             .find(|&m| self.refusal(m).is_none() && self.fates(m) == fates)
@@ -364,43 +349,44 @@ impl Facts {
     fn explanation(&self, mode: Mode) -> Vec<String> {
         let to = self.short();
         let mut lines = Vec::new();
-        let left = !self.changed.is_empty() && self.behind > 0;
-        let theirs = if self.gained > 0 && self.behind == 0 {
-            "The difference to the new commit"
+        let files = plural(self.changed.len(), "file");
+        let theirs = if self.behind == 0 {
+            format!("The difference to {to} ({files})")
         } else {
-            "The changes of the commits left behind"
+            format!(
+                "The changes of the {} left behind ({files})",
+                if self.behind == 1 { "commit" } else { "commits" }
+            )
         };
+        let local = !self.staged.is_empty() || !self.unstaged.is_empty();
         match mode {
             Mode::Soft => {
-                lines.push("Your files and staged changes stay as they are.".into());
-                if left || self.gained > 0 {
-                    lines.push(format!("{theirs} show up as staged."));
+                if !self.changed.is_empty() {
+                    lines.push(format!("{theirs} become staged, ready to commit again."));
+                }
+                lines.push("Your files stay as they are.".into());
+                if !self.staged.is_empty() {
+                    lines.push("Your staged changes stay staged.".into());
                 }
             }
             Mode::Mixed => {
-                lines.push("Your files stay as they are; nothing stays staged.".into());
-                if left || self.gained > 0 {
-                    lines.push(format!("{theirs} show up as modified files."));
+                if !self.changed.is_empty() {
+                    lines.push(format!("{theirs} show up as modified, not staged."));
+                }
+                lines.push("Your files stay as they are.".into());
+                if !self.staged.is_empty() {
+                    lines.push("Your staged changes become unstaged.".into());
                 }
             }
             Mode::Keep => {
                 lines.push(format!("Your files are updated to {to}."));
-                if !self.staged.is_empty() || !self.unstaged.is_empty() {
+                if local {
                     lines.push("Your changes are kept, as modified files; nothing stays staged.".into());
-                }
-            }
-            Mode::Merge => {
-                lines.push(format!("Your files are updated to {to}."));
-                if !self.staged.is_empty() {
-                    lines.push("Your staged changes are dropped.".into());
-                }
-                if !self.unstaged.is_empty() {
-                    lines.push("Your changes that aren't staged are kept.".into());
                 }
             }
             Mode::Hard => {
                 lines.push(format!("Your files are updated to {to}."));
-                if !self.staged.is_empty() || !self.unstaged.is_empty() {
+                if local {
                     lines.push("All your uncommitted changes are dropped.".into());
                 }
                 if !self.in_the_way.is_empty() {
