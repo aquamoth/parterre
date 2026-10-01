@@ -2430,8 +2430,11 @@ impl eframe::App for ParterreApp {
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         self.about_window(&ctx);
-        if let Some(repo) = self.repo.as_deref() {
-            crate::prototype_branch_create::show(&ctx, repo);
+        if let Some(repo) = self.repo.clone() {
+            crate::prototype_branch_create::show(&ctx, &repo);
+            if let Some(commit) = crate::prototype_branch_create::take_log() {
+                self.open_log(repo, &[commit]);
+            }
         }
 
         // Scripted runs wait for the graph, unless there is none to wait for, and for the diffs

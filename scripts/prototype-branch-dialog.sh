@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # THROWAWAY native UI. Scratch repository only; Create previews a command.
-# Bottom bar: five scenarios and A/B/C layouts; arrows preserve the current form.
-# PARTERRE_BRANCH_PROTO=0..4 and PARTERRE_BRANCH_VARIANT=A|B|C choose startup state.
-# Selecting a remote preserves a manually edited name; use the suggested-name button to reset.
+# Bottom bar: six scenarios and A/B/C layouts; A is the chosen layout.
+# PARTERRE_BRANCH_PROTO=0..5 and PARTERRE_BRANCH_VARIANT=A|B|C choose startup state.
+# Track is editable, including future upstreams. The reset icon restores the suggested name.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 proto_repo=$(mktemp -d /tmp/parterre-branch-dialog-XXXXXX)
