@@ -23,6 +23,36 @@ pub struct RemoteBranch {
     pub tip: Oid,
 }
 
+/// One of the repository's worktrees, as the worktree tool needs it.
+#[derive(Clone, Debug)]
+pub struct Worktree {
+    /// Its folder, as git lists it.
+    pub path: PathBuf,
+    /// `None` for an unborn branch.
+    pub head: Option<Oid>,
+    /// The branch checked out; `None` when detached.
+    pub branch: Option<String>,
+    pub main: bool,
+    /// The worktree this catalogue was loaded from.
+    pub open: bool,
+    /// The lock's reason (empty when none was given), when it's locked.
+    pub locked: Option<String>,
+    /// Its folder is gone.
+    pub missing: bool,
+    /// An operation git left unfinished there, such as "a rebase".
+    pub in_progress: Option<&'static str>,
+}
+
+impl Worktree {
+    /// Its folder's name.
+    pub fn name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
+}
+
 /// A fresh catalogue for menus and creation forms. Refresh after repository changes; execution
 /// always reads Git again, rather than trusting the catalogue the user first saw.
 #[derive(Clone, Debug)]
@@ -34,10 +64,15 @@ pub struct Catalog {
     pub current: Option<String>,
     pub head: Option<Oid>,
     pub has_working_tree: bool,
+    /// Every worktree, the main one first. Not the main one of a bare repository.
+    pub worktrees: Vec<Worktree>,
+    /// The main worktree's folder (a bare repository's git dir).
+    pub main: PathBuf,
+    /// The open worktree's folder.
+    pub root: PathBuf,
     auto_setup_rebase: bool,
     roots: Vec<(String, Oid)>,
-    worktrees: Vec<(PathBuf, Oid)>,
-    root: PathBuf,
+    heads: Vec<(PathBuf, Oid)>,
 }
 
 impl Catalog {
@@ -108,7 +143,6 @@ impl Catalog {
         locals.sort_by(|a, b| a.name.cmp(&b.name));
         remotes.sort_by(|a, b| a.name.cmp(&b.name));
         let mut occupied = HashMap::new();
-        let mut worktrees = Vec::new();
         // Unlike the viewer's compatibility fallback, safety checks propagate listing errors.
         let listing = match git.run(&["worktree", "list", "--porcelain", "-z"]) {
             Ok(listing) => listing,
@@ -143,26 +177,12 @@ impl Catalog {
             .find_map(|s| s.strip_prefix("worktree "))
             .map(PathBuf::from)
             .unwrap_or_else(|| root.clone());
-        let mut place = None;
-        for field in listing.split('\0') {
-            if let Some(p) = field.strip_prefix("worktree ") {
-                place = Some(PathBuf::from(p));
-            } else if let Some(name) = field.strip_prefix("branch refs/heads/") {
-                if let Some(p) = &place {
-                    occupied.insert(name.to_owned(), p.clone());
-                }
-            } else if let Some(oid) = field.strip_prefix("HEAD ")
-                && let Some(p) = &place
-                && !oid.bytes().all(|b| b == b'0')
-            {
-                worktrees.push((p.clone(), parse_oid(oid)?));
-            }
-        }
         let common = PathBuf::from(
             git.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?
                 .trim(),
         );
-        reservations(&common, &main_place, &mut occupied)?;
+        // Each linked worktree's administrative folder, by the worktree's own folder.
+        let mut admins = vec![(main_place.clone(), common.clone())];
         let linked = common.join("worktrees");
         match std::fs::read_dir(&linked) {
             Ok(entries) => {
@@ -173,12 +193,74 @@ impl Catalog {
                         std::fs::read_to_string(&backlink).map_err(|e| io_error(&backlink, e))?;
                     let path = dir.join(text.trim());
                     if let Some(p) = path.parent() {
-                        reservations(&dir, p, &mut occupied)?;
+                        admins.push((p.to_owned(), dir));
                     }
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(io_error(&linked, e)),
+        }
+        let reftable = common.join("reftable").is_dir();
+        let mut records: Vec<Vec<&str>> = vec![Vec::new()];
+        for field in listing.split('\0') {
+            if field.is_empty() {
+                records.push(Vec::new());
+            } else {
+                records.last_mut().expect("never empty").push(field);
+            }
+        }
+        let mut worktrees = Vec::new();
+        let mut heads = Vec::new();
+        for record in records.iter().filter(|r| !r.is_empty()) {
+            let Some(path) = record.iter().find_map(|f| f.strip_prefix("worktree ")) else {
+                return Err(Error::Invalid("Unexpected Git worktree listing.".into()));
+            };
+            let path = PathBuf::from(path);
+            let head = record
+                .iter()
+                .find_map(|f| f.strip_prefix("HEAD "))
+                .filter(|oid| !oid.bytes().all(|b| b == b'0'))
+                .map(parse_oid)
+                .transpose()?;
+            if let Some(head) = head {
+                heads.push((path.clone(), head));
+            }
+            let branch = record
+                .iter()
+                .find_map(|f| f.strip_prefix("branch refs/heads/"))
+                .map(str::to_owned);
+            if let Some(name) = &branch {
+                occupied.insert(name.clone(), path.clone());
+            }
+            if record.contains(&"bare") {
+                continue;
+            }
+            let locked = record.iter().find_map(|f| {
+                (*f == "locked")
+                    .then(String::new)
+                    .or_else(|| f.strip_prefix("locked ").map(str::to_owned))
+            });
+            let admin = admins
+                .iter()
+                .find(|(p, _)| crate::worktree_folder::same_path(p, &path))
+                .map(|(_, a)| a.clone());
+            let in_progress = match &admin {
+                Some(admin) => in_progress(admin, reftable),
+                None => None,
+            };
+            worktrees.push(Worktree {
+                main: path == main_place,
+                open: crate::worktree_folder::same_path(&path, &root),
+                missing: !path.is_dir(),
+                path,
+                head,
+                branch,
+                locked,
+                in_progress,
+            });
+        }
+        for (place, admin) in &admins {
+            reservations(admin, place, &mut occupied)?;
         }
         Ok(Self {
             locals,
@@ -188,10 +270,12 @@ impl Catalog {
             current,
             head,
             has_working_tree,
+            worktrees,
+            main: main_place,
+            root,
             auto_setup_rebase,
             roots,
-            worktrees,
-            root,
+            heads,
         })
     }
 
@@ -264,6 +348,47 @@ impl Catalog {
             }
         }
     }
+}
+
+/// The operation git left unfinished in a worktree, from its administrative folder. Rebases,
+/// merges and bisects always leave files; cherry-picks and reverts leave refs, which a reftable
+/// keeps out of the folder.
+fn in_progress(admin: &Path, reftable: bool) -> Option<&'static str> {
+    if admin.join("rebase-merge").is_dir() {
+        return Some("a rebase");
+    }
+    if admin.join("rebase-apply").is_dir() {
+        return Some(if admin.join("rebase-apply/applying").exists() {
+            "git am"
+        } else {
+            "a rebase"
+        });
+    }
+    if admin.join("MERGE_HEAD").is_file() {
+        return Some("a merge");
+    }
+    let pseudo = |name: &str| {
+        admin.join(name).is_file()
+            || reftable
+                && Git::new(admin)
+                    .query(&["--git-dir=.", "rev-parse", "--verify", "--quiet", name])
+                    .ok()
+                    .flatten()
+                    .is_some()
+    };
+    if pseudo("CHERRY_PICK_HEAD") {
+        return Some("a cherry-pick");
+    }
+    if pseudo("REVERT_HEAD") {
+        return Some("a revert");
+    }
+    if admin.join("sequencer").is_dir() {
+        return Some("a cherry-pick or revert");
+    }
+    if admin.join("BISECT_START").is_file() {
+        return Some("a bisect");
+    }
+    None
 }
 
 fn reservations(
@@ -461,11 +586,38 @@ impl CreateDraft {
     }
 }
 
+/// What a new worktree checks out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Checkout {
+    /// A new branch at the start commit, with an optional upstream as in [`Create::track`].
+    New { name: String, track: Option<String> },
+    /// An existing local branch that no worktree has, whose tip is the start commit.
+    Existing(String),
+    /// The start commit, detached.
+    Detached,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddWorktree {
+    pub start: Oid,
+    /// The new worktree's folder: absolute, and empty or not there yet.
+    pub path: PathBuf,
+    pub checkout: Checkout,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Create(Create),
     Switch(String),
-    Delete { name: String, tip: Oid },
+    Delete {
+        name: String,
+        tip: Oid,
+    },
+    AddWorktree(AddWorktree),
+    /// Removes another worktree from git and deletes its folder.
+    DeleteWorktree {
+        path: PathBuf,
+    },
 }
 
 impl Action {
@@ -480,8 +632,16 @@ impl Action {
             }
             Self::Switch(b) => format!("Switch to {b}"),
             Self::Delete { name, .. } => format!("Delete branch {name}"),
+            Self::AddWorktree(a) => format!("Add worktree {}", folder(&a.path)),
+            Self::DeleteWorktree { path } => format!("Delete worktree {}", folder(path)),
         }
     }
+}
+
+fn folder(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -562,14 +722,27 @@ pub struct Step {
     pub success: bool,
 }
 
-/// The approval is tied to the source HEAD, deletion tip and exact endangered commit ids.
+/// What an operation would lose, for the user to approve first. The approval is tied to the
+/// HEAD concerned, the exact endangered commit ids and changed files. Deleting a worktree always
+/// asks: with nothing lost, this is a confirmation.
 #[derive(Clone, Debug)]
 pub struct Warning {
     pub action: Action,
     pub commits: Vec<Oid>,
+    /// Uncommitted changes to files that aren't ignored, by path in their worktree.
+    pub files: Vec<String>,
+    /// Git's own refusal, when it refused after parterre found nothing at risk.
+    pub refusal: Option<String>,
     pub repo: Arc<Repo>,
     pub commands: Vec<Vec<String>>,
     head: Option<Oid>,
+}
+
+impl Warning {
+    /// Nothing is lost; it only confirms.
+    pub fn is_confirmation(&self) -> bool {
+        self.commits.is_empty() && self.files.is_empty() && self.refusal.is_none()
+    }
 }
 
 #[derive(Debug)]
@@ -604,50 +777,47 @@ impl Branches {
                     words(&["branch", "--no-track", "--", &c.name, &start])
                 };
                 let mut commands = vec![create];
-                if let Some(track) = c.track.as_deref().filter(|s| !s.trim().is_empty()) {
-                    let Some((remote, branch)) = catalog.tracking_parts(track.trim()) else {
-                        return Err(Error::Invalid("Use a configured remote followed by a branch name, such as origin/topic.".into()));
-                    };
-                    if catalog.track_error(track).is_some() {
-                        return Err(Error::Invalid("Enter a valid remote branch name.".into()));
-                    }
-                    if catalog.remotes.iter().any(|r| r.name == track.trim()) {
-                        commands.push(words(&[
-                            "branch",
-                            &format!("--set-upstream-to=refs/remotes/{}", track.trim()),
-                            "--",
-                            &c.name,
-                        ]));
-                        return Ok(commands);
-                    }
-                    // Configuration works before a remote ref exists, and does not change the
-                    // selected start commit even when the upstream points somewhere else.
-                    commands.push(words(&[
-                        "config",
-                        "--local",
-                        "--replace-all",
-                        &format!("branch.{}.remote", c.name),
-                        remote,
-                    ]));
-                    commands.push(words(&[
-                        "config",
-                        "--local",
-                        "--replace-all",
-                        &format!("branch.{}.merge", c.name),
-                        &format!("refs/heads/{branch}"),
-                    ]));
-                    if catalog.auto_setup_rebase {
-                        commands.push(words(&[
-                            "config",
-                            "--local",
-                            "--replace-all",
-                            &format!("branch.{}.rebase", c.name),
-                            "true",
-                        ]));
-                    }
-                }
+                commands.extend(track_commands(catalog, &c.name, c.track.as_deref())?);
                 Ok(commands)
             }
+            Action::AddWorktree(a) => {
+                let path = a.path.to_string_lossy().into_owned();
+                if !a.path.is_absolute() {
+                    return Err(Error::Invalid("Choose a folder for the worktree.".into()));
+                }
+                let start = a.start.to_hex();
+                Ok(match &a.checkout {
+                    Checkout::New { name, track } => {
+                        if let Some(error) = catalog.name_error(name) {
+                            return Err(Error::Invalid(error.into()));
+                        }
+                        let mut commands = vec![words(&[
+                            "worktree",
+                            "add",
+                            "--no-track",
+                            "-b",
+                            name,
+                            "--",
+                            &path,
+                            &start,
+                        ])];
+                        commands.extend(track_commands(catalog, name, track.as_deref())?);
+                        commands
+                    }
+                    Checkout::Existing(name) => {
+                        vec![words(&["worktree", "add", "--", &path, name])]
+                    }
+                    Checkout::Detached => {
+                        vec![words(&["worktree", "add", "--detach", "--", &path, &start])]
+                    }
+                })
+            }
+            Action::DeleteWorktree { path } => Ok(vec![words(&[
+                "worktree",
+                "remove",
+                "--",
+                &path.to_string_lossy(),
+            ])]),
             Action::Switch(name) => Ok(vec![words(&["switch", "--no-guess", "--", name])]),
             Action::Delete { name, .. } => Ok(vec![words(&["branch", "-D", "--", name])]),
         }
@@ -660,7 +830,7 @@ impl Branches {
             Ok(Some(warning)) => Outcome::Warning(warning),
             Ok(None) => Outcome::Done(report),
             Err(error) => {
-                let error = if let Action::Create(c) = requested
+                let error = if let Action::Create(c) = &requested
                     && !report.steps.is_empty()
                     && Git::new(&self.path)
                         .query(&["rev-parse", "--verify", &format!("refs/heads/{}", c.name)])
@@ -687,6 +857,14 @@ impl Branches {
                             ""
                         }
                     ))
+                } else if let Action::AddWorktree(a) = &requested
+                    && report.steps.len() > 1
+                    && report.steps.first().is_some_and(|s| s.success)
+                {
+                    Error::Failed(format!(
+                        "Worktree {} was added. Configuring its branch's upstream did not finish: {error}",
+                        folder(&a.path)
+                    ))
                 } else {
                     error
                 };
@@ -704,6 +882,9 @@ impl Branches {
     ) -> Result<Option<Warning>, Error> {
         let git = Git::new(&self.path);
         let mut catalog = Catalog::load(&self.path)?;
+        if let Action::DeleteWorktree { path } = &action {
+            return self.delete_worktree(&catalog, path, &action, approval, cancel, report);
+        }
         let mut commands = Self::commands(&catalog, &action)?;
         let switching = matches!(
             &action,
@@ -715,6 +896,36 @@ impl Branches {
             ));
         }
         match &action {
+            Action::AddWorktree(a) => {
+                verify_commit(&git, a.start)?;
+                let registered: Vec<PathBuf> =
+                    catalog.worktrees.iter().map(|w| w.path.clone()).collect();
+                if crate::worktree_folder::taken(&a.path, &registered) {
+                    return Err(Error::Invalid(format!(
+                        "The folder {} already exists.",
+                        a.path.display()
+                    )));
+                }
+                match &a.checkout {
+                    Checkout::New { name, .. } => {
+                        git.run(&["check-ref-format", &format!("refs/heads/{name}")])?;
+                    }
+                    Checkout::Existing(name) => {
+                        if !catalog
+                            .locals
+                            .iter()
+                            .any(|b| b.name == *name && b.tip == a.start)
+                        {
+                            return Err(Error::Invalid(format!(
+                                "Branch {name} moved or no longer exists. Reload and try again."
+                            )));
+                        }
+                        check_occupied(&catalog, name)?;
+                    }
+                    Checkout::Detached => {}
+                }
+            }
+            Action::DeleteWorktree { .. } => unreachable!("handled above"),
             Action::Switch(name) => {
                 if !catalog.locals.iter().any(|b| b.name == *name) {
                     return Err(Error::Invalid(
@@ -790,12 +1001,13 @@ impl Branches {
                 Action::Create(c) => Some(c.start),
                 _ => None,
             };
+            let leaving = departing.then(|| catalog.root.clone());
             let commits = lost_commits(
                 &git,
                 &catalog,
                 start,
                 excluded_ref.as_deref(),
-                departing,
+                leaving.as_deref(),
                 future_root,
             )?;
             if !commits.is_empty()
@@ -813,6 +1025,8 @@ impl Branches {
                 return Ok(Some(Warning {
                     action,
                     commits,
+                    files: Vec::new(),
+                    refusal: None,
                     head: catalog.head,
                     repo,
                     commands: commands.clone(),
@@ -826,6 +1040,251 @@ impl Branches {
         }
         Ok(None)
     }
+
+    /// Deleting another worktree. Git's own check misses lost work there (it deletes ignored
+    /// files and a clean detached HEAD's commits without a word), so parterre always asks first:
+    /// a confirmation when nothing is lost, a warning listing what is. Only after that, or after
+    /// git refused anyway, does it force.
+    fn delete_worktree(
+        &self,
+        catalog: &Catalog,
+        path: &Path,
+        action: &Action,
+        approval: Option<&Warning>,
+        cancel: &Cancel,
+        report: &mut Report,
+    ) -> Result<Option<Warning>, Error> {
+        let git = Git::new(&self.path);
+        let wt = find_worktree(catalog, path)?;
+        let (files, commits) = worktree_loss(&git, catalog, wt)?;
+        let approved = approval.filter(|w| {
+            w.action == *action && w.head == wt.head && w.files == files && w.commits == commits
+        });
+        let remove = |force: bool| {
+            let mut args = vec!["worktree".to_owned(), "remove".to_owned()];
+            if force {
+                args.push("--force".to_owned());
+            }
+            args.extend(["--".to_owned(), wt.path.to_string_lossy().into_owned()]);
+            args
+        };
+        let Some(approved) = approved else {
+            return Ok(Some(Warning {
+                action: action.clone(),
+                head: wt.head,
+                repo: Arc::new(git.load()?),
+                commands: vec![remove(!files.is_empty())],
+                files,
+                commits,
+                refusal: None,
+            }));
+        };
+        let force = !files.is_empty() || approved.refusal.is_some();
+        let removed = run(&git, remove(force), cancel, report)?;
+        let output = report
+            .steps
+            .last()
+            .map(|s| s.output.clone())
+            .unwrap_or_default();
+        let after = Catalog::load(&self.path)?;
+        let registered = after
+            .worktrees
+            .iter()
+            .any(|w| crate::worktree_folder::same_path(&w.path, &wt.path));
+        if !registered {
+            if wt.path.exists() {
+                // Windows: a file in use stops the deletion halfway, after git has let go.
+                return Err(Error::Failed(format!(
+                    "The worktree is gone from git, but its folder was left behind: {}. Delete it yourself.{}",
+                    wt.path.display(),
+                    if output.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n\n{output}")
+                    }
+                )));
+            }
+            return Ok(None);
+        }
+        if removed || force {
+            return Err(Error::Failed(output));
+        }
+        // Git refused although nothing was found at risk: it changed since, or git knows of
+        // something parterre doesn't (submodules). Ask again, with what's at risk now.
+        let wt = find_worktree(&after, path)?;
+        let (files, commits) = worktree_loss(&git, &after, wt)?;
+        Ok(Some(Warning {
+            action: action.clone(),
+            head: wt.head,
+            repo: Arc::new(git.load()?),
+            commands: vec![remove(true)],
+            files,
+            commits,
+            refusal: Some(output),
+        }))
+    }
+}
+
+/// The worktree at `path`, when it may be deleted.
+fn find_worktree<'a>(catalog: &'a Catalog, path: &Path) -> Result<&'a Worktree, Error> {
+    let Some(wt) = catalog
+        .worktrees
+        .iter()
+        .find(|w| crate::worktree_folder::same_path(&w.path, path))
+    else {
+        return Err(Error::Invalid(
+            "The worktree is no longer there. Reload and try again.".into(),
+        ));
+    };
+    if wt.main {
+        return Err(Error::Invalid("The main worktree can't be deleted.".into()));
+    }
+    if wt.open {
+        return Err(Error::Invalid(
+            "The open worktree can't be deleted. Go to another worktree first.".into(),
+        ));
+    }
+    if let Some(reason) = &wt.locked {
+        return Err(Error::Invalid(if reason.is_empty() {
+            "The worktree is locked.".to_owned()
+        } else {
+            format!("The worktree is locked: {reason}")
+        }));
+    }
+    if let Some(what) = wt.in_progress {
+        return Err(Error::Invalid(format!(
+            "{} is in progress in the worktree. Go to the worktree and finish or abort it first.",
+            capitalized(what)
+        )));
+    }
+    Ok(wt)
+}
+
+fn capitalized(s: &str) -> String {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// What deleting a worktree would lose: its changed files, and the commits only its detached
+/// HEAD reaches. A branch's commits stay with the branch.
+fn worktree_loss(
+    git: &Git,
+    catalog: &Catalog,
+    wt: &Worktree,
+) -> Result<(Vec<String>, Vec<Oid>), Error> {
+    let files = if wt.missing {
+        Vec::new()
+    } else {
+        changed_files(&wt.path)?
+    };
+    let commits = match (&wt.branch, wt.head) {
+        (None, Some(head)) => lost_commits(git, catalog, head, None, Some(&wt.path), None)?,
+        _ => Vec::new(),
+    };
+    Ok((files, commits))
+}
+
+/// Configures a new branch's upstream: one already fetched, or one that doesn't exist yet.
+fn track_commands(
+    catalog: &Catalog,
+    name: &str,
+    track: Option<&str>,
+) -> Result<Vec<Vec<String>>, Error> {
+    let words = |s: &[&str]| s.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let Some(track) = track.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let Some((remote, branch)) = catalog.tracking_parts(track) else {
+        return Err(Error::Invalid(
+            "Use a configured remote followed by a branch name, such as origin/topic.".into(),
+        ));
+    };
+    if catalog.track_error(track).is_some() {
+        return Err(Error::Invalid("Enter a valid remote branch name.".into()));
+    }
+    if catalog.remotes.iter().any(|r| r.name == track) {
+        return Ok(vec![words(&[
+            "branch",
+            &format!("--set-upstream-to=refs/remotes/{track}"),
+            "--",
+            name,
+        ])]);
+    }
+    // Configuration works before a remote ref exists, and does not change the selected start
+    // commit even when the upstream points somewhere else.
+    let mut commands = vec![
+        words(&[
+            "config",
+            "--local",
+            "--replace-all",
+            &format!("branch.{name}.remote"),
+            remote,
+        ]),
+        words(&[
+            "config",
+            "--local",
+            "--replace-all",
+            &format!("branch.{name}.merge"),
+            &format!("refs/heads/{branch}"),
+        ]),
+    ];
+    if catalog.auto_setup_rebase {
+        commands.push(words(&[
+            "config",
+            "--local",
+            "--replace-all",
+            &format!("branch.{name}.rebase"),
+            "true",
+        ]));
+    }
+    Ok(commands)
+}
+
+fn verify_commit(git: &Git, oid: Oid) -> Result<(), Error> {
+    if git
+        .query(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{}^{{commit}}", oid.to_hex()),
+        ])?
+        .is_none()
+    {
+        return Err(Error::Invalid(
+            "The commit is no longer in the repository. Reload and try again.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Uncommitted changes to files that aren't ignored, in the worktree at `path`: staged,
+/// modified and untracked. Ignored files never count.
+fn changed_files(path: &Path) -> Result<Vec<String>, Error> {
+    let out = Git::new(path).run(&[
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    ])?;
+    let mut files = Vec::new();
+    let mut fields = out.split('\0');
+    while let Some(entry) = fields.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let (status, file) = entry.split_at(3);
+        files.push(file.to_owned());
+        // A rename or copy is followed by the path it came from.
+        if status.starts_with(['R', 'C']) {
+            fields.next();
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 fn check_occupied(catalog: &Catalog, name: &str) -> Result<(), Error> {
@@ -843,12 +1302,14 @@ fn check_occupied(catalog: &Catalog, name: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Commits reachable from `start` that nothing else will reach: no ref but `excluded_ref`, and
+/// no worktree's HEAD but the one at `leaving`.
 fn lost_commits(
     git: &Git,
     catalog: &Catalog,
     start: Oid,
     excluded_ref: Option<&str>,
-    departing: bool,
+    leaving: Option<&Path>,
     future_root: Option<Oid>,
 ) -> Result<Vec<Oid>, Error> {
     let mut protected: HashSet<Oid> = catalog
@@ -859,9 +1320,9 @@ fn lost_commits(
         .collect();
     protected.extend(
         catalog
-            .worktrees
+            .heads
             .iter()
-            .filter(|(p, _)| !departing || *p != catalog.root)
+            .filter(|(p, _)| leaving.is_none_or(|l| !crate::worktree_folder::same_path(p, l)))
             .map(|(_, oid)| *oid),
     );
     let mut input = format!("{}\n", start.to_hex());

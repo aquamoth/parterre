@@ -27,6 +27,7 @@ pub mod route;
 pub mod text;
 pub mod text_size;
 pub mod watch;
+pub mod worktree_folder;
 
 pub use oid::Oid;
 pub use repo::{Commit, CommitIx, GitRef, Head, Label, RefKind, Repo, Worktree};

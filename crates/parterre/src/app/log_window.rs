@@ -864,6 +864,7 @@ impl LogWindow {
         let marked = env.marked;
         let branches = env.branches;
         let branch_busy = env.branch_busy;
+        let worktrees = env.graph.show_worktrees;
         let query = self.find.query.as_str();
         let mut request = None;
         table.show(
@@ -900,9 +901,14 @@ impl LogWindow {
                 if let Some(r) = row_menu(ui, commit, &env) {
                     request = Some(r);
                 }
-                if let Some(r) =
-                    super::branches::node_menu(ui, repo, commit.oid, branches, branch_busy)
-                {
+                if let Some(r) = super::branches::node_menu(
+                    ui,
+                    repo,
+                    commit.oid,
+                    branches,
+                    branch_busy,
+                    worktrees,
+                ) {
                     self.branch_requests.push(r);
                 }
             },

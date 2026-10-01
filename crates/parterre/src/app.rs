@@ -865,6 +865,84 @@ impl ParterreApp {
         }
     }
 
+    /// Automation: opens the branch or worktree form (`--demo-open create-branch:REF` or
+    /// `add-worktree:REF`), or asks to delete a worktree (`delete-worktree:FOLDER`, its name),
+    /// once the branch information is in.
+    fn demo_dialog(&mut self, ctx: &egui::Context) {
+        let Some((kind, name)) = self
+            .automation
+            .demo_open
+            .as_deref()
+            .and_then(|o| o.split_once(':'))
+            .filter(|(k, _)| matches!(*k, "create-branch" | "add-worktree" | "delete-worktree"))
+            .map(|(k, n)| (k.to_owned(), n.to_owned()))
+        else {
+            return;
+        };
+        let (Some(repo), Some(catalog)) = (self.repo.clone(), self.branches.catalog.clone()) else {
+            return;
+        };
+        // Still something to wait for, so the screenshot waits as for the other popups.
+        self.automation.demo_open = Some("dialog".into());
+        if kind == "delete-worktree" {
+            if let Some(w) = catalog.worktrees.iter().find(|w| w.name() == name) {
+                let action = parterre_core::branches::Action::DeleteWorktree {
+                    path: w.path.clone(),
+                };
+                let request = branches::Request::Run(action);
+                self.branches.request(ctx, request, egui::ViewportId::ROOT);
+            }
+            return;
+        }
+        let Some(start) = repo.resolve(&name).map(|c| repo.commit(c).oid) else {
+            return;
+        };
+        let request = if kind == "add-worktree" {
+            branches::Request::AddWorktree { start }
+        } else {
+            branches::Request::Create {
+                start,
+                track: None,
+                switch: false,
+            }
+        };
+        self.branches.request(ctx, request, egui::ViewportId::ROOT);
+    }
+
+    /// Makes another worktree of the same repository the open one. It's the same history, so
+    /// the layout, the view, moved nodes and the other windows stay; only HEAD and what hangs on
+    /// the open worktree change.
+    fn go_to_worktree(&mut self, path: &Path) {
+        match parterre_core::git::load_repo(path) {
+            Ok(repo) => {
+                self.record_moves();
+                let offsets = self.rest_offsets();
+                self.recent.add(&repo.path);
+                let name = repo
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| repo.path.display().to_string());
+                self.install_reloaded(repo, &format!("Went to worktree {name}"));
+                // Moved nodes are remembered by folder; they go along.
+                if self.settings.remember_moves
+                    && let (Some(key), Some(offsets)) = (self.repo_key(), offsets)
+                {
+                    if offsets.is_empty() {
+                        self.moves.remove(&key);
+                    } else {
+                        self.moves.insert(key, offsets);
+                    }
+                }
+                // The watcher follows the open worktree's own git folder.
+                self.watcher = None;
+            }
+            Err(e) => {
+                self.status = Some((format!("Could not go to {}: {e}", path.display()), true));
+            }
+        }
+    }
+
     /// Shows a newer snapshot of the same repository. The scene on screen keeps its own
     /// snapshot until the new layout replaces it; the selection and moved nodes are carried
     /// over by commit id.
@@ -1831,6 +1909,7 @@ impl ParterreApp {
                         oid,
                         self.branches.catalog.as_deref(),
                         self.branches.busy(),
+                        worktrees_shown,
                     ) {
                         action = Some(MenuAction::Branch(request));
                     }
@@ -2428,6 +2507,10 @@ impl eframe::App for ParterreApp {
         {
             self.reload();
         }
+        if let Some(path) = self.branches.go_to.take() {
+            self.go_to_worktree(&path);
+        }
+        self.demo_dialog(&ctx);
         self.update_pull_requests(&ctx);
         self.ensure_scene(&ctx);
         self.view_before = self.view;

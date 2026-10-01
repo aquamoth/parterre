@@ -156,8 +156,10 @@ struct Cli {
     #[arg(long, value_enum, hide = true)]
     demo_menu: Option<DemoMenuArg>,
 
-    /// Open the menu, a toolbar popover (filter, zoom, drag) or the settings (settings, or
-    /// settings:PAGE) before taking the screenshot.
+    /// Open the menu, a toolbar popover (filter, zoom, drag), the settings (settings, or
+    /// settings:PAGE), the branch or worktree form at a commit (create-branch:REF,
+    /// add-worktree:REF), or the question before deleting a worktree (delete-worktree:FOLDER)
+    /// before taking the screenshot.
     #[arg(long, value_name = "WHAT", hide = true)]
     demo_open: Option<String>,
 

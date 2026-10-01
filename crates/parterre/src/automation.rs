@@ -140,7 +140,7 @@ impl Automation {
         }
         if self.frame == MENU_START
             && let Some(name) = &self.demo_open
-            && !name.starts_with("settings")
+            && matches!(name.as_str(), "menu" | "filter" | "zoom" | "drag")
         {
             egui::Popup::open_id(ctx, crate::app::popup_id(name));
         }
