@@ -39,6 +39,8 @@ pub struct FileTable {
     selection: FileSelection,
     /// Until the window closes.
     pub widths: ColumnWidths,
+    /// PROTOTYPE (#172): the status column's text per path, and whether it's lost work.
+    pub status_words: Option<HashMap<String, (String, bool)>>,
 }
 
 /// Changed files chosen in the list, by path, for the list they belong to. Showing another
@@ -300,10 +302,20 @@ impl FileTable {
                         FileStatus::Renamed | FileStatus::Copied => c.renamed,
                         _ => text,
                     };
+                    // PROTOTYPE (#172): the reset dialog's words.
+                    let (status_text, status_color) = match self
+                        .status_words
+                        .as_ref()
+                        .and_then(|words| words.get(&file.path))
+                    {
+                        Some((words, true)) => (words.as_str(), c.removed),
+                        Some((words, false)) => (words.as_str(), text),
+                        None => (file.status.name(), status_color),
+                    };
                     put(
                         cell(
                             ui,
-                            file.status.name(),
+                            status_text,
                             body.clone(),
                             status_color,
                             w[2] - 2.0 * CELL_PAD,

@@ -22,7 +22,7 @@ use eframe::egui::{self, Color32, Id, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::Catalog;
 use parterre_core::{Oid, Repo};
 
-use crate::{dialogs, menu, widgets};
+use crate::{dialogs, menu};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
@@ -61,16 +61,6 @@ impl Mode {
             .into_iter()
             .find(|m| m.name().eq_ignore_ascii_case(s))
     }
-}
-
-/// What happens to one kind of change; `None` where there is none of that kind.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Fate {
-    Staged,
-    Unstaged,
-    Kept,
-    Dropped,
-    Refused,
 }
 
 /// What a reset of the open worktree's branch to `target` would meet.
@@ -223,36 +213,6 @@ impl Facts {
         self.staged.intersection(&self.unstaged).cloned().collect()
     }
 
-    /// What happens to the commits' changes, your staged changes, your unstaged changes and
-    /// untracked files in the way. Two modes with the same fates do the same here.
-    fn fates(&self, mode: Mode) -> [Option<Fate>; 4] {
-        use Fate::*;
-        let commits = match mode {
-            Mode::Soft => Staged,
-            Mode::Mixed => Unstaged,
-            _ => Dropped,
-        };
-        let staged = match mode {
-            Mode::Soft => Staged,
-            Mode::Mixed | Mode::Keep => Unstaged,
-            Mode::Hard => Dropped,
-        };
-        let unstaged = match mode {
-            Mode::Hard => Dropped,
-            _ => Kept,
-        };
-        let in_the_way = match mode {
-            Mode::Soft | Mode::Mixed => Kept,
-            Mode::Keep => Refused,
-            Mode::Hard => Dropped,
-        };
-        [
-            (!self.changed.is_empty()).then_some(commits),
-            (!self.staged.is_empty()).then_some(staged),
-            (!self.unstaged.is_empty()).then_some(unstaged),
-            (!self.in_the_way.is_empty()).then_some(in_the_way),
-        ]
-    }
 
     /// Git's refusal, as git words it (git 2.34 and 2.43).
     fn refusal(&self, mode: Mode) -> Option<String> {
@@ -277,6 +237,22 @@ impl Facts {
                     None => self.in_the_way.iter().next().and_then(untracked),
                 }
             }
+        }
+    }
+
+    /// The file git names when it refuses `mode`, and why it refuses.
+    fn blocker(&self, mode: Mode) -> Option<(String, &'static str)> {
+        if mode != Mode::Keep {
+            return None;
+        }
+        let local: BTreeSet<String> = self.staged.union(&self.unstaged).cloned().collect();
+        match local.intersection(&self.changed).next() {
+            Some(p) => Some((p.clone(), "changed here and in the commits: git refuses")),
+            None => self
+                .in_the_way
+                .iter()
+                .next()
+                .map(|p| (p.clone(), "untracked, in the way: git refuses")),
         }
     }
 
@@ -316,17 +292,9 @@ impl Facts {
         !self.commits.is_empty() || !self.lost_files(mode).is_empty()
     }
 
-    /// The mode a greyed-out one would do the same as, when it isn't refused.
-    fn same_as(&self, mode: Mode) -> Option<Mode> {
-        let fates = self.fates(mode);
-        Mode::ALL
-            .into_iter()
-            .take_while(|&m| m != mode)
-            .find(|&m| self.refusal(m).is_none() && self.fates(m) == fates)
-    }
 
     fn enabled(&self, mode: Mode) -> bool {
-        self.refusal(mode).is_none() && self.same_as(mode).is_none()
+        self.refusal(mode).is_none()
     }
 
     /// The first of Keep, Mixed and Soft that loses nothing, else the first that can be picked.
@@ -352,34 +320,6 @@ impl Facts {
         }
     }
 
-    /// The uncommitted changes, in git status's words.
-    fn changes(&self) -> String {
-        let mut parts = Vec::new();
-        let only_staged = self.staged.len() - self.partly_staged().len();
-        if only_staged > 0 {
-            parts.push(format!("{only_staged} staged"));
-        }
-        let partly = self.partly_staged().len();
-        if partly > 0 {
-            parts.push(format!("{partly} staged and modified since"));
-        }
-        let only_unstaged = self.unstaged.len() - partly;
-        if only_unstaged > 0 {
-            parts.push(format!("{only_unstaged} modified"));
-        }
-        if !self.in_the_way.is_empty() {
-            parts.push(format!(
-                "{} untracked where {} has a file",
-                self.in_the_way.len(),
-                self.short()
-            ));
-        }
-        if parts.is_empty() {
-            "No uncommitted changes.".into()
-        } else {
-            format!("Uncommitted: {}.", parts.join(", "))
-        }
-    }
 
     /// What `mode` does, in plain words.
     fn headline(&self, mode: Mode) -> String {
@@ -523,6 +463,9 @@ struct Open {
     fresh: bool,
     /// Asked for again while open: left out for a frame, so its window opens anew in front.
     reopen: bool,
+    table: super::file_table::FileTable,
+    /// The left side's height in the last frame, for the table beside it.
+    height: f32,
 }
 
 #[derive(Debug)]
@@ -583,6 +526,8 @@ pub fn menu(ui: &mut Ui, repo: &Arc<Repo>, commit: Oid, catalog: Option<&Catalog
                 opener: ui.ctx().viewport_id(),
                 fresh: true,
                 reopen,
+                table: Default::default(),
+                height: 380.0,
             });
             ui.close();
         }
@@ -654,6 +599,8 @@ pub fn show(
                         opener: log,
                         fresh: true,
                         reopen: false,
+                        table: Default::default(),
+                        height: 380.0,
                     });
                 }
             }
@@ -677,86 +624,71 @@ pub fn show(
     });
 }
 
-const TRIANGLE: parterre_core::glyphs::Glyph = &[parterre_core::glyphs::Part::Path(
-    "M12 3 2 21h20ZM12 9v5m0 3v1",
-)];
-
 fn dialog(
     ctx: &egui::Context,
     open: &mut Open,
     log: &mut Option<(Arc<Repo>, Vec<Oid>)>,
 ) -> dialogs::Answer {
     let facts = &open.facts;
-    let loses = facts.loses(open.mode);
-    let lost_files = facts.lost_files(open.mode);
-    let files = plural(lost_files.len(), "file");
-    let commits = plural(facts.commits.len(), "commit");
-    let title = if loses {
-        let cost = match (lost_files.is_empty(), facts.commits.is_empty()) {
-            (false, false) => format!("{files} and {commits}"),
-            (false, true) => files.clone(),
-            _ => commits.clone(),
-        };
-        format!("Reset {} and lose {cost}?", facts.branch)
-    } else {
-        format!("Reset {} to {}", facts.branch, facts.short())
-    };
-    let mut dialog = dialogs::Dialog::new("prototype-reset", &title)
-        .width(1000.0)
+    let title = format!("Reset {} to {}", facts.branch, facts.short());
+    let dialog = dialogs::Dialog::new("prototype-reset", &title)
+        .width(1040.0)
         .opener(open.opener)
         .raise(open.fresh);
-    if loses {
-        dialog = dialog.icon(TRIANGLE, true);
-    }
     let mut mode = open.mode;
     let fresh = open.fresh;
+    let height = open.height;
+    let table = &mut open.table;
     let mut show_log = false;
+    let mut left_height = height;
     let shown = dialog.show(ctx, |ui| {
         ui.horizontal_top(|ui| {
             let left = ui.vertical(|ui| {
-                ui.set_width(400.0);
+                ui.set_width(440.0);
                 dialogs::fields(ui, |ui| {
                     if let Some(ix) = facts.repo.lookup(&facts.target) {
                         dialogs::commit_line(ui, facts.repo.commit(ix), facts.repo.abbrev_len);
                     }
                     ui.label(facts.movement());
-                    ui.label(RichText::new(facts.changes()).weak());
                     ui.add_space(4.0);
                     for m in Mode::ALL {
-                        let response = ui
-                            .add_enabled(facts.enabled(m), egui::RadioButton::new(mode == m, m.name()))
-                            .on_hover_text(m.flag());
-                        let response = match (facts.refusal(m), facts.same_as(m)) {
-                            (Some(refusal), _) => response.on_disabled_hover_text(
-                                RichText::new(format!("git reset {} refuses:\n{refusal}", m.flag()))
-                                    .monospace(),
-                            ),
-                            (None, Some(same)) => response
-                                .on_disabled_hover_text(format!("Same as {} here", same.name())),
-                            _ => response,
-                        };
-                        if response.clicked() {
-                            mode = m;
-                        }
+                        ui.horizontal_top(|ui| {
+                            let response = ui
+                                .radio(mode == m, m.name())
+                                .on_hover_text(m.flag());
+                            if response.clicked() {
+                                mode = m;
+                            }
+                            let help = ui.add(
+                                egui::Label::new(RichText::new(facts.headline(m)).weak())
+                                    .wrap()
+                                    .sense(egui::Sense::click()),
+                            );
+                            if help.clicked() {
+                                mode = m;
+                            }
+                        });
+                        ui.add_space(2.0);
                     }
-                    ui.add_space(4.0);
-                    let lost_files = facts.lost_files(mode);
-                    let loses = facts.loses(mode);
-                    explanation_box(ui, loses, |ui| {
-                        ui.label(RichText::new(facts.headline(mode)).strong());
-                        if !lost_files.is_empty() {
-                            ui.add_space(4.0);
-                            ui.label(format!("Lost: {}.", plural(lost_files.len(), "file")));
-                        }
-                        if !facts.commits.is_empty() {
-                            ui.add_space(4.0);
-                            ui.label(format!(
-                                "Lost: {}, on no branch, tag or worktree afterwards.",
-                                plural(facts.commits.len(), "commit")
-                            ));
+                    let red = ui.visuals().error_fg_color;
+                    if let Some(refusal) = facts.refusal(mode) {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(format!("git reset {} refuses:", mode.flag())).color(red));
+                        ui.label(RichText::new(refusal).monospace().small().color(red));
+                    }
+                    if !facts.commits.is_empty() {
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Lost: {}, on no branch, tag or worktree afterwards.",
+                                    plural(facts.commits.len(), "commit")
+                                ))
+                                .color(red),
+                            );
                             show_log |= ui.link("Show in log").clicked();
-                        }
-                    });
+                        });
+                    }
                 });
                 dialogs::command_box(ui, &[facts.command(mode)]);
                 let loses = facts.loses(mode);
@@ -765,26 +697,27 @@ fn dialog(
                 // Enter runs a reset that loses nothing.
                 if answer == dialogs::Answer::Open
                     && !loses
+                    && facts.enabled(mode)
                     && ui.input(|i| i.key_pressed(egui::Key::Enter))
                 {
                     return dialogs::Answer::Primary;
                 }
                 answer
             });
-            // A rule as tall as the left side; `separator` would stretch the dialog.
-            let x = ui.cursor().left() + 12.0;
-            let rule = left.response.rect.y_range();
-            ui.painter().vline(x, rule, ui.visuals().widgets.noninteractive.bg_stroke);
-            ui.add_space(24.0);
-            ui.vertical(|ui| {
-                ui.set_min_width(520.0);
-                file_list(ui, facts, mode)
+            left_height = left.response.rect.height();
+            ui.add_space(16.0);
+            let size = vec2((ui.available_width() - 28.0).max(520.0), height.max(240.0));
+            ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(size.x);
+                ui.set_height(size.y);
+                file_table(ui, facts, mode, table);
             });
             left.inner
         })
         .inner
     });
     open.mode = mode;
+    open.height = left_height;
     if show_log {
         *log = Some((facts.repo.clone(), facts.commits.clone()));
     }
@@ -794,82 +727,66 @@ fn dialog(
     shown.inner
 }
 
-/// Information in a quiet box, or a warning in a red one.
-fn explanation_box(ui: &mut Ui, warning: bool, content: impl FnOnce(&mut Ui)) {
-    let color = if warning {
-        ui.visuals().error_fg_color
-    } else {
-        widgets::tones(ui).accent
-    };
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.10))
-        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.5)))
-        .corner_radius(6)
-        .inner_margin(egui::Margin::same(10))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            if warning {
-                ui.visuals_mut().override_text_color = Some(color);
+/// The files the reset concerns, in the log and compare windows' changed-files table: what
+/// each is afterwards, in words, and the lines added and removed on disk.
+fn file_table(ui: &mut Ui, facts: &Facts, mode: Mode, table: &mut super::file_table::FileTable) {
+    use parterre_core::changed_files::{ChangedFile, FileStatus};
+    let mut words = std::collections::HashMap::new();
+    let blocker = facts.blocker(mode);
+    let files: Vec<ChangedFile> = facts
+        .paths()
+        .into_iter()
+        .map(|p| {
+            // When git refuses, nothing changes: the file it names says why.
+            let (added, removed) = if let Some((b, why)) = &blocker {
+                let (text, red) = if b == p {
+                    (why.to_string(), true)
+                } else {
+                    ("unchanged".to_owned(), false)
+                };
+                words.insert(p.clone(), (text, red));
+                (Some(0), Some(0))
+            } else {
+                let (text, lost) = facts.words(mode, p);
+                let text = match (text.is_empty(), lost) {
+                    (_, None) => text,
+                    (true, Some(why)) => format!("lost: {why}"),
+                    (false, Some(why)) => format!("{text}; lost: {why}"),
+                };
+                words.insert(p.clone(), (text, lost.is_some()));
+                match facts.disk_change(mode, p) {
+                    Some(Some((a, r))) => (Some(a), Some(r)),
+                    Some(None) => (None, None),
+                    None => (Some(0), Some(0)),
+                }
+            };
+            let status = if !facts.target_files.contains(p) {
+                FileStatus::Added
+            } else if !facts.root.join(p).exists() {
+                FileStatus::Deleted
+            } else {
+                FileStatus::Modified
+            };
+            ChangedFile {
+                path: p.clone(),
+                old_path: None,
+                status,
+                modes: [0o100644, 0o100644],
+                added,
+                removed,
             }
-            content(ui);
-        });
+        })
+        .collect();
+    table.status_words = Some(words);
+    // The status column holds words here: wider than in the log window, unless dragged.
+    if table.widths.picked(2).is_none() {
+        table.widths.pick(2, 260.0);
+    }
+    let listing: super::file_table::Listing = Ok(files);
+    let c = super::log_window::colors(ui);
+    // Double-clicking would open the file's diff, now to after: not in the prototype.
+    let _ = table.show(ui, &c, "prototype-reset", Id::new("prototype-reset-files"), Some(&listing), |_| {});
 }
 
-/// The files the reset concerns, as the log window lists changed files: what each is
-/// afterwards, in words, and the lines added and removed on disk.
-fn file_list(ui: &mut Ui, facts: &Facts, mode: Mode) {
-    let weak = ui.visuals().weak_text_color();
-    let red = ui.visuals().error_fg_color;
-    let green = if ui.visuals().dark_mode {
-        Color32::from_rgb(75, 165, 105)
-    } else {
-        Color32::from_rgb(35, 120, 65)
-    };
-    let paths = facts.paths();
-    if paths.is_empty() {
-        ui.label(RichText::new("No files change.").weak());
-        return;
-    }
-    egui::Grid::new("prototype-reset-files")
-        .num_columns(5)
-        .striped(true)
-        .spacing(vec2(16.0, 6.0))
-        .show(ui, |ui| {
-            for h in ["Path", "Ext.", "Status", "Added", "Removed"] {
-                ui.label(RichText::new(h).color(weak));
-            }
-            ui.end_row();
-            for p in paths {
-                let (words, lost) = facts.words(mode, p);
-                let color = if lost.is_some() { red } else { ui.visuals().text_color() };
-                ui.label(RichText::new(p).color(color));
-                let ext = Path::new(p)
-                    .extension()
-                    .map(|e| e.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                ui.label(RichText::new(ext).color(weak));
-                let status = match (words.is_empty(), lost) {
-                    (_, None) => words,
-                    (true, Some(why)) => format!("lost: {why}"),
-                    (false, Some(why)) => format!("{words}; lost: {why}"),
-                };
-                ui.label(RichText::new(status).color(color));
-                match facts.disk_change(mode, p) {
-                    Some(Some((added, removed))) => {
-                        ui.label(RichText::new(added.to_string()).color(green));
-                        ui.label(RichText::new(removed.to_string()).color(red));
-                    }
-                    Some(None) => {
-                        ui.label(RichText::new("binary").color(weak));
-                        ui.label("");
-                    }
-                    None => {
-                        ui.label("");
-                        ui.label("");
-                    }
-                }
-                ui.end_row();
-            }
-        });
-}
+
 
