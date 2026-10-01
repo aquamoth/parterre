@@ -24,6 +24,7 @@ mod compare_window;
 mod diff_window;
 mod file_table;
 mod log_window;
+mod prototype_reset;
 mod pull_requests;
 mod settings_window;
 mod toolbar;
@@ -2552,6 +2553,16 @@ impl eframe::App for ParterreApp {
         self.blame_windows(&ctx);
         self.about_window(&ctx);
         self.branches.show(&ctx);
+        // PROTOTYPE: resetting a branch (#172).
+        prototype_reset::show(
+            &ctx,
+            self.repo.as_ref(),
+            self.branches.catalog.as_deref(),
+            log_window::viewport_id(),
+        );
+        if let Some((repo, oids)) = prototype_reset::take_log_request() {
+            self.open_loss_log(repo, &oids);
+        }
         if let Some((repo, commits, exact)) = self.branches.log_request.take() {
             if exact {
                 self.open_loss_log(repo, &commits);

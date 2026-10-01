@@ -57,7 +57,7 @@ pub(super) const CELL_PAD: f32 = 8.0;
 /// How long a copy button shows a check mark.
 const COPIED_SECONDS: f64 = 1.2;
 
-fn viewport_id() -> egui::ViewportId {
+pub(super) fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("log")
 }
 
@@ -914,6 +914,8 @@ impl LogWindow {
                 ) {
                     self.branch_requests.push(r);
                 }
+                // PROTOTYPE: resetting a branch (#172).
+                super::prototype_reset::menu(ui, repo, commit.oid, branches);
             },
             // The details pane shows the whole message.
             None,
@@ -1714,6 +1716,8 @@ impl ParterreApp {
             egui::CentralPanel::default()
                 .frame(egui::Frame::central_panel(&ui.ctx().global_style()).inner_margin(0))
                 .show(ui, |ui| log.contents(ui, &mut env));
+            // PROTOTYPE: resetting a branch (#172).
+            super::prototype_reset::overlay(ui.ctx());
         });
         for request in self.log.take_compare_requests() {
             self.compare_request(request);
