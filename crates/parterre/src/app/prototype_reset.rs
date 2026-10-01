@@ -423,7 +423,8 @@ impl Facts {
             let status = match mode {
                 Mode::Soft => {
                     if untracked {
-                        "??".to_owned()
+                        // The index keeps HEAD's, without it: git lists it twice.
+                        "D  ??".to_owned()
                     } else {
                         let x = if self.changed.contains(p) || self.staged.contains(p) {
                             if !in_target {
@@ -466,7 +467,6 @@ struct Open {
     fresh: bool,
     /// Asked for again while open: left out for a frame, so its window opens anew in front.
     reopen: bool,
-    show_files: bool,
 }
 
 #[derive(Debug)]
@@ -527,7 +527,6 @@ pub fn menu(ui: &mut Ui, repo: &Arc<Repo>, commit: Oid, catalog: Option<&Catalog
                 opener: ui.ctx().viewport_id(),
                 fresh: true,
                 reopen,
-                show_files: false,
             });
             ui.close();
         }
@@ -599,7 +598,6 @@ pub fn show(
                         opener: log,
                         fresh: true,
                         reopen: false,
-                        show_files: true,
                     });
                 }
             }
@@ -648,13 +646,13 @@ fn dialog(
         format!("Reset {} to {}", facts.branch, facts.short())
     };
     let mut dialog = dialogs::Dialog::new("prototype-reset", &title)
+        .width(600.0)
         .opener(open.opener)
         .raise(open.fresh);
     if loses {
         dialog = dialog.icon(TRIANGLE, true);
     }
     let mut mode = open.mode;
-    let show_files = &mut open.show_files;
     let fresh = open.fresh;
     let mut show_log = false;
     let shown = dialog.show(ctx, |ui| {
@@ -665,48 +663,15 @@ fn dialog(
             ui.label(facts.movement());
             ui.label(RichText::new(facts.changes()).weak());
             ui.add_space(4.0);
-            for m in Mode::ALL {
-                let enabled = facts.enabled(m);
-                let response = ui
-                    .add_enabled(enabled, egui::RadioButton::new(mode == m, m.name()))
-                    .on_hover_text(m.flag());
-                let response = match (facts.refusal(m), facts.same_as(m)) {
-                    (Some(refusal), _) => response.on_disabled_hover_text(
-                        RichText::new(format!("git reset {} refuses:\n{refusal}", m.flag()))
-                            .monospace(),
-                    ),
-                    (None, Some(same)) => response
-                        .on_disabled_hover_text(format!("Same as {} here", same.name())),
-                    _ => response,
-                };
-                if response.clicked() {
-                    mode = m;
-                }
-            }
+            mode_matrix(ui, facts, &mut mode);
             ui.add_space(4.0);
             let lost_files = facts.lost_files(mode);
             let loses = facts.loses(mode);
             explanation_box(ui, loses, |ui| {
                 ui.label(RichText::new(facts.headline(mode)).strong());
-                ui.add_space(4.0);
-                status_table(ui, facts, mode);
                 if !lost_files.is_empty() {
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Lost: {}", plural(lost_files.len(), "file")));
-                        let label = if *show_files { "Hide" } else { "Show" };
-                        if ui.link(label).clicked() {
-                            *show_files = !*show_files;
-                        }
-                    });
-                    if *show_files {
-                        for (file, why) in &lost_files {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(file).monospace());
-                                ui.label(RichText::new(*why).small());
-                            });
-                        }
-                    }
+                    ui.label(format!("Lost: {}.", plural(lost_files.len(), "file")));
                 }
                 if !facts.commits.is_empty() {
                     ui.add_space(4.0);
@@ -764,36 +729,149 @@ fn explanation_box(ui: &mut Ui, warning: bool, content: impl FnOnce(&mut Ui)) {
         });
 }
 
-/// `git status --short` now and after `mode`, for the paths that matter.
-fn status_table(ui: &mut Ui, facts: &Facts, mode: Mode) {
-    let after = facts.after(mode);
-    let paths = facts.paths();
-    if paths.is_empty() {
-        return;
-    }
+/// The modes side by side: `git status --short` now and after each, for every path that
+/// matters, and the commits that would be lost. A column header is the mode's radio button;
+/// clicking anywhere in a column picks it. Cells that lose work are red.
+fn mode_matrix(ui: &mut Ui, facts: &Facts, mode: &mut Mode) {
     let weak = ui.visuals().weak_text_color();
-    egui::Grid::new("prototype-reset-status")
-        .num_columns(3)
-        .spacing(vec2(16.0, 2.0))
+    let red = ui.visuals().error_fg_color;
+    let accent = widgets::tones(ui).accent;
+    let afters: Vec<_> = Mode::ALL.iter().map(|&m| facts.after(m)).collect();
+    let lost: Vec<_> = Mode::ALL.iter().map(|&m| facts.lost_files(m)).collect();
+    let why_disabled = |m: Mode| match (facts.refusal(m), facts.same_as(m)) {
+        (Some(refusal), _) => Some(format!("git reset {} refuses:\n{refusal}", m.flag())),
+        (None, Some(same)) => Some(format!("Same as {} here", same.name())),
+        _ => None,
+    };
+    egui::Frame::new()
+        .fill(widgets::tones(ui).seg_bg)
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
-            ui.label(RichText::new("git status --short").small().color(weak));
-            ui.label(RichText::new("now").small().color(weak));
-            ui.label(RichText::new("after").small().color(weak));
-            ui.end_row();
-            for p in paths {
-                let now = facts.status.get(p).map_or("  ", String::as_str);
-                let then = after.get(p).map_or("  ", String::as_str);
-                ui.label(RichText::new(p).monospace());
-                let cell = |s: &str| {
-                    if s == "  " {
-                        RichText::new("clean").small().color(weak)
-                    } else {
-                        RichText::new(s).monospace()
+            egui::Grid::new("prototype-reset-matrix")
+                .num_columns(2 + Mode::ALL.len())
+                .spacing(vec2(10.0, 4.0))
+                .min_col_width(64.0)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("git status --short").small().color(weak));
+                    ui.label(RichText::new("now").small().color(weak));
+                    for m in Mode::ALL {
+                        let response = centered(ui, |ui| {
+                            ui.add_enabled(
+                                facts.enabled(m),
+                                egui::RadioButton::new(*mode == m, m.name()),
+                            )
+                        })
+                        .on_hover_text(m.flag());
+                        let response = match why_disabled(m) {
+                            Some(why) => {
+                                response.on_disabled_hover_text(RichText::new(why).monospace())
+                            }
+                            None => response,
+                        };
+                        if response.clicked() {
+                            *mode = m;
+                        }
                     }
-                };
-                ui.label(cell(now));
-                ui.label(cell(then).strong());
-                ui.end_row();
-            }
+                    ui.end_row();
+                    let selected = *mode;
+                    let mut picked = None;
+                    let mut cell = |ui: &mut Ui, m: Mode, text: RichText, hover: Option<&str>| {
+                        let enabled = facts.enabled(m);
+                        let text = if facts.refusal(m).is_some() {
+                            RichText::new("–").color(weak.gamma_multiply(0.6))
+                        } else if !enabled {
+                            text.color(weak.gamma_multiply(0.6))
+                        } else if selected == m {
+                            text.strong()
+                        } else {
+                            text
+                        };
+                        let mut response =
+                            centered(ui, |ui| ui.add(egui::Label::new(text).sense(egui::Sense::click())));
+                        if let Some(hover) = hover {
+                            response = response.on_hover_text(hover);
+                        }
+                        if enabled && response.clicked() {
+                            picked = Some(m);
+                        }
+                    };
+                    for p in facts.paths() {
+                        ui.label(RichText::new(p).monospace());
+                        let now = facts.status.get(p).map_or("  ", String::as_str);
+                        ui.label(status_text(now, weak));
+                        for (i, &m) in Mode::ALL.iter().enumerate() {
+                            let after = afters[i].get(p).map_or("  ", String::as_str);
+                            match lost[i].iter().find(|(f, _)| f == p) {
+                                Some((_, why)) => {
+                                    let text = if after == "  " {
+                                        RichText::new("lost").small()
+                                    } else {
+                                        RichText::new(after).monospace()
+                                    };
+                                    cell(ui, m, text.color(red), Some(&format!("Lost: {why}")));
+                                }
+                                None => {
+                                    let text = status_text(after, weak);
+                                    let text = if selected == m && after != "  " {
+                                        text.color(accent)
+                                    } else {
+                                        text
+                                    };
+                                    cell(ui, m, text, None);
+                                }
+                            }
+                        }
+                        ui.end_row();
+                    }
+                    for oid in &facts.commits {
+                        let subject = facts
+                            .repo
+                            .lookup(oid)
+                            .map(|ix| facts.repo.commit(ix).subject.clone())
+                            .unwrap_or_default();
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(oid.short(facts.repo.abbrev_len.max(7))).monospace(),
+                            );
+                            ui.add(
+                                egui::Label::new(RichText::new(subject).small().color(weak))
+                                    .truncate(),
+                            );
+                        });
+                        ui.label(RichText::new("commit").small().color(weak));
+                        for m in Mode::ALL {
+                            cell(
+                                ui,
+                                m,
+                                RichText::new("lost").small().color(red),
+                                Some("On no branch, tag or worktree afterwards"),
+                            );
+                        }
+                        ui.end_row();
+                    }
+                    if let Some(m) = picked {
+                        *mode = m;
+                    }
+                });
         });
+}
+
+/// A `git status --short` code, or a quiet "clean".
+fn status_text(code: &str, weak: Color32) -> RichText {
+    if code == "  " {
+        RichText::new("clean").small().color(weak)
+    } else {
+        RichText::new(code).monospace()
+    }
+}
+
+/// `add` centred in its grid cell.
+fn centered(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> egui::Response) -> egui::Response {
+    ui.allocate_ui_with_layout(
+        vec2(64.0, ui.spacing().interact_size.y),
+        egui::Layout::top_down(egui::Align::Center),
+        add,
+    )
+    .inner
 }
