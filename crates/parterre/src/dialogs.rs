@@ -39,6 +39,8 @@ struct Window {
     /// Where it opened, over the window that opened it. Left alone after: the user moves it.
     position: Option<Pos2>,
     theme: Option<egui::SystemTheme>,
+    /// The size its window was last told to be and keep; `None` before it exists.
+    hinted: Option<Vec2>,
     /// When its size was last asked for again, after the window didn't take it.
     resized: f64,
     /// The main window's frame it was last shown in.
@@ -149,12 +151,19 @@ impl<'a> Dialog<'a> {
             .with_title(self.title)
             .with_app_id(crate::settings::APP_ID)
             .with_inner_size(size)
-            .with_min_inner_size(size)
-            .with_max_inner_size(size)
-            .with_resizable(false)
             .with_minimize_button(false)
             .with_maximize_button(false)
             .with_window_type(egui::X11WindowType::Dialog);
+        // Same size always. On Wayland that is told to the window once it exists (below):
+        // told here, winit would set the hints before its title bar exists and leave the bar
+        // out of them; the compositor then holds the window to the hints, with the bar outside
+        // its frame (above the screen, at the top) and the content cut short by its height.
+        if !wayland() {
+            builder = builder
+                .with_min_inner_size(size)
+                .with_max_inner_size(size)
+                .with_resizable(false);
+        }
         if let Some(look) = &look {
             builder = builder.with_icon(look.icon.clone());
         }
@@ -182,19 +191,32 @@ impl<'a> Dialog<'a> {
                         }
                     }
                     close = ui.input(|i| i.viewport().close_requested());
-                    // A Wayland compositor may hand a window back the size it last knew (on
-                    // focus, say), and winit takes it. The builder only asks when the size it
-                    // wants changes, so ask again until the window has it.
+                    // Once the window exists (its title bar with it): its size, and to keep
+                    // it. Asked for again whenever the content changes size.
                     let now = ui.input(|i| i.time);
+                    if wayland() && window.hinted != Some(size) {
+                        window.hinted = Some(size);
+                        window.resized = now;
+                        for command in [
+                            egui::ViewportCommand::InnerSize(size),
+                            egui::ViewportCommand::MinInnerSize(size),
+                            egui::ViewportCommand::MaxInnerSize(size),
+                        ] {
+                            ui.ctx().send_viewport_cmd(command);
+                        }
+                    }
+                    // A Wayland compositor may hand a window back the size it last knew (on
+                    // focus, or from a configure sent before its title bar was in its frame),
+                    // and winit takes it. Ask again until the window has it.
                     let off = ui.ctx().content_rect().size() - size;
                     if off.abs().max_elem() > 1.0 {
-                        if now - window.resized > 0.2 {
+                        if now - window.resized > 0.03 {
                             window.resized = now;
                             ui.ctx()
                                 .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
                         }
                         ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_millis(250));
+                            .request_repaint_after(std::time::Duration::from_millis(40));
                     }
                     if self.modal {
                         if ModalLock::shown(ui.ctx(), viewport) == Some(true) {
@@ -321,6 +343,11 @@ impl<'a> Dialog<'a> {
             ui.add(egui::Label::new(RichText::new(self.title).size(16.0).strong()).wrap());
         });
     }
+}
+
+/// Whether the windows are Wayland ones: winit picks Wayland over X11 when this is set.
+fn wayland() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 /// Locks parterre's windows while a modal dialog is shown: their input is dropped (a click or a
