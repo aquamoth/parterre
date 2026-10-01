@@ -7,6 +7,7 @@ mod app;
 mod automation;
 mod browser;
 mod console;
+mod dialogs;
 mod export;
 mod file_dialog;
 mod file_manager;

@@ -93,6 +93,7 @@ pub struct LogWindow {
     diffs: DiffQueue<(Arc<Repo>, FileDiffSpec)>,
     /// Marks and comparisons asked for, for the app to take.
     requests: Vec<CompareRequest>,
+    branch_requests: Vec<super::branches::Request>,
     /// Blame windows asked for, for the app to take.
     blames: Vec<(Arc<Repo>, BlameSpec)>,
     /// Find in the list, kept when Show log replaces the contents.
@@ -128,6 +129,8 @@ struct LogView {
     query: LogQuery,
     /// The walk options the list was made with.
     options: LogOptions,
+    /// Safety warnings pin both membership and the snapshot, even after the last ref is gone.
+    exact: Option<Vec<CommitIx>>,
     commits: Vec<CommitIx>,
     /// The graph column's lanes, a row for each of `commits`.
     graph: LogGraph,
@@ -144,6 +147,7 @@ impl LogView {
             repo,
             query,
             options,
+            exact: None,
             list: CommitList {
                 selected: (!list.commits.is_empty()).then_some(0),
                 reveal: true,
@@ -161,14 +165,53 @@ impl LogView {
     /// Re-runs the query on a newly loaded snapshot, keeping the selected commit if it is still
     /// listed. Commits of the query that are gone from the snapshot are dropped from it.
     fn reload(&mut self, repo: Arc<Repo>) {
+        if self.exact.is_some() {
+            return;
+        }
         self.rebuild(repo, self.options);
     }
 
     /// Re-runs the query with other walk options, keeping the selected commit in view if it is
     /// still listed.
     fn set_options(&mut self, options: LogOptions) {
+        if self.exact.is_some() {
+            self.options = options;
+            return;
+        }
         self.rebuild(self.repo.clone(), options);
         self.list.reveal = true;
+    }
+
+    fn pin_exact(&mut self, commits: Vec<CommitIx>) {
+        let wanted: std::collections::HashSet<_> = commits.iter().copied().collect();
+        let options = LogOptions {
+            order: self.options.order,
+            ..LogOptions::default()
+        };
+        let all = self.query.list(&self.repo, &options);
+        let mut list = parterre_core::log::LogList {
+            commits: Vec::new(),
+            parents: Vec::new(),
+            outside: Vec::new(),
+        };
+        for (row, &c) in all.commits.iter().enumerate() {
+            if wanted.contains(&c) {
+                list.commits.push(c);
+                list.parents.push(
+                    all.parents[row]
+                        .iter()
+                        .copied()
+                        .filter(|p| wanted.contains(p))
+                        .collect(),
+                );
+                list.outside
+                    .push(all.outside[row] || all.parents[row].iter().any(|p| !wanted.contains(p)));
+            }
+        }
+        self.commits = list.commits.clone();
+        self.graph = LogGraph::new(&list);
+        self.list.selected = (!self.commits.is_empty()).then_some(0);
+        self.exact = Some(commits);
     }
 
     /// Re-runs the query on `repo` with `options`, keeping the selected commit if it is still
@@ -215,6 +258,8 @@ struct Env<'a> {
     settings: &'a mut LogWindowSettings,
     /// The commit marked for comparison, and its name.
     marked: Option<&'a (Oid, String)>,
+    branches: Option<&'a parterre_core::branches::Catalog>,
+    branch_busy: bool,
 }
 
 /// Where a layout puts the panes and dividers in the window body.
@@ -470,6 +515,10 @@ impl LogWindow {
         std::mem::take(&mut self.requests)
     }
 
+    pub fn take_branch_requests(&mut self) -> Vec<super::branches::Request> {
+        std::mem::take(&mut self.branch_requests)
+    }
+
     /// After F5: re-runs the query on the new snapshot.
     pub fn reload(&mut self, repo: &Arc<Repo>) {
         if let Some(view) = &mut self.view {
@@ -669,7 +718,9 @@ impl LogWindow {
         tools.spacing_mut().item_spacing.x = 4.0;
         layout_tools(&mut tools, env.settings);
         tools.add_space(12.0);
-        walk_tools(&mut tools, &mut env.settings.options);
+        tools.add_enabled_ui(view.exact.is_none(), |ui| {
+            walk_tools(ui, &mut env.settings.options)
+        });
         if let (Some(&from), Some(&to)) = (view.query.exclude.first(), view.query.tips.first()) {
             tools.add_space(8.0);
             let compare = widgets::tip_explained(
@@ -692,9 +743,17 @@ impl LogWindow {
             rect.bottom() - 0.5,
             Stroke::new(1.0, c.line),
         );
-        let label = view
+        let mut label = view
             .query
             .label(&view.repo, &view.refs, |r| env.graph.shows(r.kind));
+        if view.exact.is_some() {
+            label.from = None;
+            let count = view.commits.len();
+            label.to = format!(
+                "{count} commit{} at risk",
+                if count == 1 { "" } else { "s" }
+            );
+        }
         let font = FontId::proportional(13.5);
         let weak = ui.visuals().weak_text_color();
         let mut job = LayoutJob::default();
@@ -803,6 +862,8 @@ impl LogWindow {
         };
         let head = repo.head_commit().map(|c| repo.commit(c).oid);
         let marked = env.marked;
+        let branches = env.branches;
+        let branch_busy = env.branch_busy;
         let query = self.find.query.as_str();
         let mut request = None;
         table.show(
@@ -838,6 +899,11 @@ impl LogWindow {
                 };
                 if let Some(r) = row_menu(ui, commit, &env) {
                     request = Some(r);
+                }
+                if let Some(r) =
+                    super::branches::node_menu(ui, repo, commit.oid, branches, branch_busy)
+                {
+                    self.branch_requests.push(r);
                 }
             },
             // The details pane shows the whole message.
@@ -1518,6 +1584,22 @@ fn message_ui(ui: &mut Ui, message: &str, subject: bool) {
 }
 
 impl ParterreApp {
+    pub(super) fn open_loss_log(&mut self, repo: Arc<Repo>, oids: &[Oid]) {
+        let commits: Vec<_> = oids.iter().filter_map(|oid| repo.lookup(oid)).collect();
+        let mut query = LogQuery::default();
+        query.tips = commits.clone();
+        let was_open = self.log.is_open();
+        let [w, h] = self.settings.log_window.size;
+        self.log
+            .open(repo, query, self.settings.log_window.options, vec2(w, h));
+        if let Some(view) = &mut self.log.view {
+            view.pin_exact(commits);
+        }
+        if was_open {
+            self.focus_log = true;
+        }
+    }
+
     /// Show log on graph nodes: one gives the node's log, two the range between them in the
     /// order they were selected; anything else does nothing.
     pub(super) fn show_log(&mut self, nodes: &[usize]) {
@@ -1615,6 +1697,8 @@ impl ParterreApp {
                 graph: &self.settings.graph,
                 settings: &mut self.settings.log_window,
                 marked: self.marked.as_ref(),
+                branches: self.branches.catalog.as_deref(),
+                branch_busy: self.branches.busy(),
             };
             let log = &mut self.log;
             egui::CentralPanel::default()
@@ -1623,6 +1707,9 @@ impl ParterreApp {
         });
         for request in self.log.take_compare_requests() {
             self.compare_request(request);
+        }
+        for request in self.log.take_branch_requests() {
+            self.branches.request(ctx, request);
         }
         for (repo, spec) in self.log.take_diff_requests() {
             self.diffs.open(repo, spec, &self.settings.diff_window, ctx);
@@ -1638,6 +1725,38 @@ mod tests {
     use super::*;
     use crate::app::commit_table::ROW;
     use parterre_core::log_layout::Dividers;
+
+    #[test]
+    fn loss_log_keeps_exact_membership_with_saved_filters_and_after_refs_disappear() {
+        let mut w = window(&["tip", "at risk", "protected", "root"]);
+        let view = w.view.as_mut().unwrap();
+        let original = view.repo.clone();
+        let wanted = vec![CommitIx(0), CommitIx(1)];
+        view.options = LogOptions {
+            all_branches: true,
+            first_parent: true,
+            no_merges: true,
+            branchings_only: true,
+            ..LogOptions::default()
+        };
+        view.pin_exact(wanted.clone());
+        assert_eq!(view.commits, wanted);
+        let empty = Arc::new(Repo::new(
+            original.path.clone(),
+            Vec::new(),
+            Vec::new(),
+            parterre_core::Head::Branch {
+                name: "main".into(),
+                target: None,
+            },
+        ));
+        w.reload(&empty);
+        let view = w.view.as_mut().unwrap();
+        view.set_options(LogOptions::default());
+        assert!(Arc::ptr_eq(&view.repo, &original));
+        assert_eq!(view.commits, wanted);
+        assert_eq!(view.graph.rows(0..wanted.len()).len(), wanted.len());
+    }
 
     #[test]
     fn layouts_tile_the_body_with_their_panes_and_dividers() {
@@ -1774,6 +1893,8 @@ mod tests {
                 graph: &graph,
                 settings: &mut settings,
                 marked: None,
+                branches: None,
+                branch_busy: false,
             };
             w.handle_keys(ui);
             if w.is_open() {
