@@ -1831,6 +1831,7 @@ impl ParterreApp {
                         oid,
                         self.branches.catalog.as_deref(),
                         self.branches.busy(),
+                        worktrees_shown,
                     ) {
                         action = Some(MenuAction::Branch(request));
                     }

@@ -20,11 +20,64 @@ pub enum Request {
         track: Option<String>,
         switch: bool,
     },
+    // PROTOTYPE (#163): the branch form in worktree mode.
+    AddWorktree {
+        start: Oid,
+    },
     Run(Action),
 }
 
 /// One ref target gets a direct named item; several get the existing app's submenu treatment.
 pub fn node_menu(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    catalog: Option<&Catalog>,
+    busy: bool,
+    worktrees: bool,
+) -> Option<Request> {
+    let mut request = branch_menu(ui, repo, commit, catalog, busy);
+    // PROTOTYPE (#163): the worktree section, only when worktrees are shown.
+    if worktrees && catalog.is_some() {
+        menu::separator(ui);
+        if ui
+            .add_enabled(!busy, egui::Button::new("Add worktree here…"))
+            .clicked()
+        {
+            request = Some(Request::AddWorktree { start: commit });
+            ui.close();
+        }
+        let others: Vec<String> = repo
+            .worktrees
+            .iter()
+            .filter(|w| !w.open && w.head.is_some_and(|h| repo.commit(h).oid == commit))
+            .map(|w| folder_name(&w.path))
+            .collect();
+        for verb in ["Go to worktree", "Delete worktree…"] {
+            match others.as_slice() {
+                [] => {}
+                [one] => {
+                    ui.add_enabled(false, egui::Button::new(format!("{verb} {one}")))
+                        .on_disabled_hover_text("Prototype: not part of this question");
+                }
+                many => menu::plain_submenu(ui, verb, |ui| {
+                    for name in many {
+                        ui.add_enabled(false, egui::Button::new(name));
+                    }
+                }),
+            }
+        }
+    }
+    request
+}
+
+fn folder_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn branch_menu(
     ui: &mut Ui,
     repo: &Repo,
     commit: Oid,
@@ -173,6 +226,423 @@ struct Form {
     fresh: bool,
     /// The window it was asked from.
     opener: ViewportId,
+    /// PROTOTYPE (#163): `Some` when this form adds a worktree.
+    wt: Option<Wt>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// PROTOTYPE (#163) — throwaway. One form for Create branch and Add worktree, with three layouts
+// of the worktree mode to flip between (the floating bar, or PARTERRE_PROTOTYPE_VARIANT=1..3).
+// Nothing runs in worktree mode: Add shows what would run.
+// ---------------------------------------------------------------------------------------------
+
+static VARIANT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const VARIANTS: [&str; 3] = ["Worktree on top", "Branch on top", "Summaries"];
+
+fn variant() -> usize {
+    let v = VARIANT.load(std::sync::atomic::Ordering::Relaxed);
+    if v != 0 {
+        return v;
+    }
+    let v = std::env::var("PARTERRE_PROTOTYPE_VARIANT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| (1..=VARIANTS.len()).contains(v))
+        .unwrap_or(1);
+    VARIANT.store(v, std::sync::atomic::Ordering::Relaxed);
+    v
+}
+
+/// A strip at the top of the dialog (dialogs are windows of their own) that flips the layout.
+fn variant_strip(ui: &mut Ui) {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(40, 20, 80))
+        .corner_radius(12)
+        .inner_margin(egui::Margin::symmetric(10, 4))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let v = variant();
+                let n = VARIANTS.len();
+                let text = |t: &str| RichText::new(t).color(Color32::WHITE).strong();
+                let mut next = None;
+                if ui.add(egui::Button::new(text("◀")).frame(false)).clicked() {
+                    next = Some((v + n - 2) % n + 1);
+                }
+                ui.label(text(&format!("PROTOTYPE  {v} — {}", VARIANTS[v - 1])));
+                if ui.add(egui::Button::new(text("▶")).frame(false)).clicked() {
+                    next = Some(v % n + 1);
+                }
+                if let Some(v) = next {
+                    VARIANT.store(v, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        });
+}
+
+#[derive(Debug)]
+struct Wt {
+    root: String,
+    name: String,
+    name_edited: bool,
+    go_to: bool,
+    /// Variant 3: the folder and tracking rows opened from their summaries.
+    folder_open: bool,
+    track_open: bool,
+}
+
+/// What the branch field in worktree mode amounts to.
+enum Checkout<'a> {
+    Detached,
+    Existing(&'a str),
+    New,
+}
+
+fn slug(name: &str) -> String {
+    name.chars()
+        .map(|c| if c == '/' || c == '\\' { '-' } else { c })
+        .collect()
+}
+
+fn subject_slug(subject: &str) -> String {
+    let mut out = String::new();
+    for word in subject.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).take(3) {
+        if !out.is_empty() {
+            out.push('-');
+        }
+        out.push_str(&word.to_lowercase());
+    }
+    out
+}
+
+fn with_separator(mut path: String) -> String {
+    if !path.ends_with(std::path::MAIN_SEPARATOR) {
+        path.push(std::path::MAIN_SEPARATOR);
+    }
+    path
+}
+
+fn taken(path: &std::path::Path) -> bool {
+    std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_some()) || path.is_file()
+}
+
+impl Wt {
+    fn new(repo: &Repo) -> Self {
+        let open = repo.worktrees.iter().find(|w| w.open).map(|w| w.path.clone());
+        let main = repo.worktrees.first().map(|w| w.path.clone());
+        let base = open.clone().unwrap_or_else(|| repo.path.clone());
+        let root = match (&open, &main) {
+            (Some(o), Some(m)) if o != m => base.parent().map(PathBuf::from).unwrap_or(base),
+            _ => {
+                let parent = base.parent().map(PathBuf::from).unwrap_or_default();
+                parent.join(format!("{}.worktrees", folder_name(&base)))
+            }
+        };
+        Self {
+            root: with_separator(root.display().to_string()),
+            name: String::new(),
+            name_edited: false,
+            go_to: false,
+            folder_open: false,
+            track_open: false,
+        }
+    }
+
+    fn path(&self) -> PathBuf {
+        PathBuf::from(&self.root).join(self.name.trim())
+    }
+
+    /// Follows the branch: `/` → `-`, the short hash when detached, `-1`, `-2` when taken.
+    fn follow(&mut self, branch: &str, short: &str) {
+        if self.name_edited {
+            return;
+        }
+        let base = if branch.is_empty() { short.to_owned() } else { slug(branch) };
+        let mut name = base.clone();
+        let mut i = 1;
+        while taken(&PathBuf::from(&self.root).join(&name)) {
+            name = format!("{base}-{i}");
+            i += 1;
+        }
+        self.name = name;
+    }
+
+    fn name_error(&self) -> Option<String> {
+        let name = self.name.trim();
+        if name.is_empty() || name == "." || name == ".." {
+            return Some("Enter a folder name.".into());
+        }
+        if self.name_edited && taken(&self.path()) {
+            return Some(format!("The folder '{name}' already exists."));
+        }
+        None
+    }
+}
+
+impl Form {
+    fn new_worktree(repo: Arc<Repo>, catalog: Arc<Catalog>, start: Oid, opener: ViewportId) -> Self {
+        let mut form = Self::new(repo.clone(), catalog.clone(), start, None, false, opener);
+        // The commit's first free local branch, else a remote one (the draft's own default),
+        // else a name made from the subject.
+        let free = form.free_locals();
+        if let Some(local) = free.first() {
+            form.draft.set_name(local.clone());
+        } else if form.draft.name().is_empty()
+            && let Some(ix) = repo.lookup(&start)
+        {
+            form.draft.set_name(subject_slug(&repo.commit(ix).subject));
+        }
+        form.wt = Some(Wt::new(&repo));
+        form.follow();
+        form
+    }
+
+    fn short(&self) -> String {
+        let hex = self.start.to_hex();
+        hex[..self.repo.abbrev_len.min(hex.len())].to_owned()
+    }
+
+    fn free_locals(&self) -> Vec<String> {
+        self.catalog
+            .locals
+            .iter()
+            .filter(|b| {
+                b.tip == self.start
+                    && self.catalog.current.as_deref() != Some(&b.name)
+                    && !self.catalog.occupied.contains_key(&b.name)
+            })
+            .map(|b| b.name.clone())
+            .collect()
+    }
+
+    fn free_remotes(&self) -> Vec<String> {
+        self.catalog
+            .remotes
+            .iter()
+            .filter(|r| r.tip == self.start && !r.name.ends_with("/HEAD"))
+            .filter(|r| {
+                let local = self.catalog.suggested_name(&r.name);
+                !self.catalog.locals.iter().any(|b| b.name == local)
+            })
+            .map(|r| r.name.clone())
+            .collect()
+    }
+
+    fn checkout(&self) -> Checkout<'_> {
+        let name = self.draft.name().trim();
+        if name.is_empty() {
+            Checkout::Detached
+        } else if self.catalog.locals.iter().any(|b| b.name == name) {
+            Checkout::Existing(name)
+        } else {
+            Checkout::New
+        }
+    }
+
+    fn follow(&mut self) {
+        let short = self.short();
+        let branch = self.draft.name().trim().to_owned();
+        if let Some(wt) = &mut self.wt {
+            wt.follow(&branch, &short);
+        }
+    }
+
+    fn wt_commands(&self) -> Result<Vec<Vec<String>>, String> {
+        let wt = self.wt.as_ref().expect("worktree mode");
+        if let Some(e) = wt.name_error() {
+            return Err(e);
+        }
+        let path = wt.path().display().to_string();
+        let start = self.start.to_hex();
+        let s = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        match self.checkout() {
+            Checkout::Detached => Ok(vec![s(&["worktree", "add", "--detach", "--", &path, &start])]),
+            Checkout::Existing(name) => {
+                let b = self.catalog.locals.iter().find(|b| b.name == name).expect("listed");
+                if let Some(at) = self.catalog.occupied.get(name) {
+                    Err(format!("{name} is checked out in {}.", at.display()))
+                } else if self.catalog.current.as_deref() == Some(name) {
+                    Err(format!("{name} is checked out here."))
+                } else if b.tip != self.start {
+                    Err(format!("A branch {name} already exists at another commit."))
+                } else {
+                    Ok(vec![s(&["worktree", "add", "--", &path, name])])
+                }
+            }
+            Checkout::New => {
+                let mut commands =
+                    Branches::commands(&self.catalog, &self.action()).map_err(|e| e.to_string())?;
+                commands[0] = s(&["worktree", "add", "--no-track", "-b", self.draft.name().trim(), "--", &path, &start]);
+                Ok(commands)
+            }
+        }
+    }
+
+    /// The branch field in worktree mode: a field with a dropdown of the commit's usable branches.
+    fn wt_branch_field(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Branch name").strong());
+        let mut choices = self.free_locals();
+        choices.extend(self.free_remotes());
+        let mut text = self.draft.name().to_owned();
+        let response = dialogs::editable_choice(ui, "wt-branch", &mut text, "(detached)", &choices);
+        if self.fresh {
+            response.request_focus();
+        }
+        if response.changed() {
+            if self.catalog.remotes.iter().any(|r| r.name == text.trim()) {
+                // A remote branch becomes a local branch that tracks it, as Switch does.
+                self.draft = CreateDraft::new(&self.catalog, self.start, Some(text.trim()));
+            } else {
+                self.draft.set_name(text);
+            }
+            self.follow();
+        }
+        let weak = ui.visuals().weak_text_color();
+        match self.checkout() {
+            Checkout::Detached => {
+                ui.colored_label(weak, format!("Detached HEAD at {}", self.short()));
+            }
+            Checkout::Existing(name) => {
+                let upstream = self
+                    .catalog
+                    .locals
+                    .iter()
+                    .find(|b| b.name == name)
+                    .and_then(|b| b.upstream.clone());
+                let text = match upstream {
+                    Some(u) => format!("Existing branch, tracking {u}"),
+                    None => "Existing branch".to_owned(),
+                };
+                ui.colored_label(weak, text);
+            }
+            Checkout::New => {
+                if let Some(error) = self.catalog.name_error(self.draft.name()) {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            }
+        }
+    }
+
+    fn go_to_box(&mut self, ui: &mut Ui) {
+        let wt = self.wt.as_mut().expect("worktree mode");
+        ui.checkbox(&mut wt.go_to, "Go to new worktree");
+    }
+
+    fn folder_fields(&mut self, ui: &mut Ui) {
+        let short = self.short();
+        let branch = self.draft.name().trim().to_owned();
+        let wt = self.wt.as_mut().expect("worktree mode");
+        ui.label(RichText::new("Worktree root").strong());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let width = ui.available_width() - 80.0;
+            if widgets::text_field(ui, &mut wt.root, "Folder", width).changed() {
+                wt.root = with_separator(wt.root.clone());
+                wt.follow(&branch, &short);
+            }
+            ui.add_enabled(false, egui::Button::new("Browse…"))
+                .on_disabled_hover_text("Prototype");
+        });
+        ui.add_space(6.0);
+        ui.label(RichText::new("Worktree name").strong());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let width = ui.available_width() - widgets::BUTTON - 4.0;
+            if widgets::text_field(ui, &mut wt.name, "Folder name", width).changed() {
+                wt.name_edited = true;
+            }
+            if ui
+                .add_enabled_ui(wt.name_edited, |ui| {
+                    widgets::icon_button(ui, parterre_core::glyphs::RESET, false)
+                })
+                .inner
+                .on_hover_text("Follow the branch name")
+                .clicked()
+            {
+                wt.name_edited = false;
+                wt.follow(&branch, &short);
+            }
+        });
+        if let Some(e) = wt.name_error() {
+            ui.colored_label(ui.visuals().error_fg_color, e);
+        }
+    }
+
+    /// Variant 3: one line that opens into the real fields.
+    fn summary(ui: &mut Ui, label: &str, value: &str, open: &mut bool) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(label).strong());
+            ui.add(egui::Label::new(RichText::new(value).monospace()).truncate());
+            if ui.small_button("Change…").clicked() {
+                *open = true;
+            }
+        });
+    }
+
+    fn wt_fields(&mut self, ui: &mut Ui) {
+        let new = matches!(self.checkout(), Checkout::New);
+        match variant() {
+            1 => {
+                self.folder_fields(ui);
+                ui.add_space(2.0);
+                self.go_to_box(ui);
+                ui.separator();
+                self.wt_branch_field(ui);
+                if new {
+                    ui.add_space(8.0);
+                    self.track_field(ui);
+                }
+            }
+            2 => {
+                self.wt_branch_field(ui);
+                ui.add_space(2.0);
+                self.go_to_box(ui);
+                if new {
+                    ui.add_space(8.0);
+                    self.track_field(ui);
+                }
+                ui.separator();
+                self.folder_fields(ui);
+            }
+            _ => {
+                self.wt_branch_field(ui);
+                ui.add_space(2.0);
+                self.go_to_box(ui);
+                ui.add_space(8.0);
+                let path = self.wt.as_ref().expect("worktree mode").path().display().to_string();
+                let mut open = self.wt.as_ref().expect("worktree mode").folder_open;
+                if open {
+                    self.folder_fields(ui);
+                } else {
+                    Self::summary(ui, "Folder", &path, &mut open);
+                }
+                self.wt.as_mut().expect("worktree mode").folder_open = open;
+                if new {
+                    ui.add_space(4.0);
+                    self.track_summary(ui);
+                }
+            }
+        }
+    }
+
+    /// Variant 3, both modes: the tracking row as one line until it's changed.
+    fn track_summary(&mut self, ui: &mut Ui) {
+        let mut open = self.wt.as_ref().is_some_and(|w| w.track_open) || TRACK_OPEN.load(std::sync::atomic::Ordering::Relaxed);
+        if open {
+            self.track_field(ui);
+        } else {
+            let value = match self.draft.remote() {
+                None => "None".to_owned(),
+                Some(r) if self.draft.track_name().trim().is_empty() => format!("{r}/<branch name>"),
+                Some(_) => self.draft.upstream().unwrap_or_default(),
+            };
+            Self::summary(ui, "Track", &value, &mut open);
+        }
+        if let Some(wt) = &mut self.wt {
+            wt.track_open = open;
+        } else {
+            TRACK_OPEN.store(open, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 impl Form {
@@ -193,6 +663,7 @@ impl Form {
             switch,
             fresh: true,
             opener,
+            wt: None,
         }
     }
     fn action(&self) -> Action {
@@ -206,11 +677,15 @@ impl Form {
 
     /// `busy` while another Git operation runs: it can't start until that one is done.
     fn show(&mut self, ctx: &egui::Context, busy: bool) -> (dialogs::Answer, bool) {
+        if self.wt.is_some() {
+            return self.show_worktree(ctx, busy);
+        }
         let mut log = false;
         let shown = dialogs::Dialog::new("create-branch", "Create branch")
             .opener(self.opener)
             .raise(self.fresh)
             .show(ctx, |ui| {
+                variant_strip(ui);
                 let commands = dialogs::fields(ui, |ui| {
                     if let Some(ix) = self.repo.lookup(&self.start) {
                         log = dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len);
@@ -222,7 +697,11 @@ impl Form {
                         egui::Checkbox::new(&mut self.switch, "Switch to new branch"),
                     );
                     ui.add_space(8.0);
-                    self.track_field(ui);
+                    if variant() == 3 {
+                        self.track_summary(ui);
+                    } else {
+                        self.track_field(ui);
+                    }
                     Branches::commands(&self.catalog, &self.action())
                 });
                 let shown = commands
@@ -237,6 +716,42 @@ impl Form {
                     } else {
                         "Create"
                     },
+                    commands.is_ok() && !busy,
+                    false,
+                    false,
+                )
+            });
+        self.fresh = false;
+        let mut answer = shown.inner;
+        if shown.should_close() && answer == dialogs::Answer::Open {
+            answer = dialogs::Answer::Cancel;
+        }
+        (answer, log)
+    }
+
+    fn show_worktree(&mut self, ctx: &egui::Context, busy: bool) -> (dialogs::Answer, bool) {
+        let mut log = false;
+        let shown = dialogs::Dialog::new("add-worktree", "Add a worktree")
+            .opener(self.opener)
+            .raise(self.fresh)
+            .show(ctx, |ui| {
+                variant_strip(ui);
+                let commands = dialogs::fields(ui, |ui| {
+                    if let Some(ix) = self.repo.lookup(&self.start) {
+                        log = dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len);
+                    }
+                    self.wt_fields(ui);
+                    self.wt_commands()
+                });
+                let shown = commands
+                    .as_ref()
+                    .map(|cmds| cmds.iter().map(|a| command_text(a)).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                dialogs::command_box(ui, &shown);
+                let go_to = self.wt.as_ref().is_some_and(|w| w.go_to);
+                dialogs::actions(
+                    ui,
+                    if go_to { "Add and go to" } else { "Add" },
                     commands.is_ok() && !busy,
                     false,
                     false,
@@ -378,6 +893,8 @@ impl Form {
     }
 }
 
+static TRACK_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Debug)]
 struct Job {
     path: PathBuf,
@@ -468,6 +985,7 @@ impl Tool {
                         form.catalog = catalog.clone();
                     }
                     self.catalog = Some(catalog);
+                    self.prototype_open(ctx);
                 }
                 Err(e) => {
                     self.catalog = None;
@@ -541,8 +1059,37 @@ impl Tool {
                     self.form = Some(Form::new(repo, catalog, start, track, switch, opener));
                 }
             }
+            Request::AddWorktree { start } => {
+                if let Some(catalog) = self.catalog.clone() {
+                    self.form = Some(Form::new_worktree(repo, catalog, start, opener));
+                }
+            }
             Request::Run(action) => self.run(ctx, repo.path.clone(), action, None, opener),
         }
+    }
+
+    /// PROTOTYPE (#163): PARTERRE_PROTOTYPE_DIALOG=worktree:<ref> or branch:<ref> opens the form
+    /// once, for screenshots.
+    fn prototype_open(&mut self, ctx: &egui::Context) {
+        static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let Ok(spec) = std::env::var("PARTERRE_PROTOTYPE_DIALOG") else {
+            return;
+        };
+        if DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let Some(repo) = self.repo.clone() else { return };
+        let (mode, name) = spec.split_once(':').unwrap_or(("worktree", spec.as_str()));
+        let Some(r) = repo.refs.iter().find(|r| r.name == name) else {
+            return;
+        };
+        let start = repo.commit(r.target).oid;
+        let request = if mode == "branch" {
+            Request::Create { start, track: None, switch: false }
+        } else {
+            Request::AddWorktree { start }
+        };
+        self.request(ctx, request, ViewportId::ROOT);
     }
 
     fn run(
@@ -600,6 +1147,11 @@ impl Tool {
                 self.log_request = Some((form.repo.clone(), vec![form.start], false));
             }
             match answer {
+                dialogs::Answer::Primary if form.wt.is_some() => {
+                    let commands = form.wt_commands().unwrap_or_default();
+                    let text = commands.iter().map(|a| command_text(a)).collect::<Vec<_>>().join("\n");
+                    self.notice(ctx, form.repo.path.clone(), "Prototype: nothing ran".into(), Report::default(), Some(text));
+                }
                 dialogs::Answer::Primary => self.run(
                     ctx,
                     form.repo.path.clone(),

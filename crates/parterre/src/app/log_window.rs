@@ -901,7 +901,7 @@ impl LogWindow {
                     request = Some(r);
                 }
                 if let Some(r) =
-                    super::branches::node_menu(ui, repo, commit.oid, branches, branch_busy)
+                    super::branches::node_menu(ui, repo, commit.oid, branches, branch_busy, true)
                 {
                     self.branch_requests.push(r);
                 }
