@@ -609,6 +609,8 @@ pub struct AddWorktree {
 pub enum Action {
     Create(Create),
     Switch(String),
+    /// Switches the open worktree to a commit, detached.
+    Detach(Oid),
     Delete {
         name: String,
         tip: Oid,
@@ -631,11 +633,16 @@ impl Action {
                 }
             }
             Self::Switch(b) => format!("Switch to {b}"),
+            Self::Detach(oid) => format!("Switch to {} (detached)", short(*oid)),
             Self::Delete { name, .. } => format!("Delete branch {name}"),
             Self::AddWorktree(a) => format!("Add worktree {}", folder(&a.path)),
             Self::DeleteWorktree { path } => format!("Delete worktree {}", folder(path)),
         }
     }
+}
+
+fn short(oid: Oid) -> String {
+    oid.to_hex()[..7].to_owned()
 }
 
 fn folder(path: &Path) -> String {
@@ -818,6 +825,7 @@ impl Branches {
                 "--",
                 &path.to_string_lossy(),
             ])]),
+            Action::Detach(oid) => Ok(vec![words(&["switch", "--detach", &oid.to_hex()])]),
             Action::Switch(name) => Ok(vec![words(&["switch", "--no-guess", "--", name])]),
             Action::Delete { name, .. } => Ok(vec![words(&["branch", "-D", "--", name])]),
         }
@@ -888,7 +896,7 @@ impl Branches {
         let mut commands = Self::commands(&catalog, &action)?;
         let switching = matches!(
             &action,
-            Action::Switch(_) | Action::Create(Create { switch: true, .. })
+            Action::Switch(_) | Action::Detach(_) | Action::Create(Create { switch: true, .. })
         );
         if switching && !catalog.has_working_tree {
             return Err(Error::Invalid(
@@ -896,6 +904,12 @@ impl Branches {
             ));
         }
         match &action {
+            Action::Detach(oid) => {
+                verify_commit(&git, *oid)?;
+                if catalog.current.is_none() && catalog.head == Some(*oid) {
+                    return Ok(None);
+                }
+            }
             Action::AddWorktree(a) => {
                 verify_commit(&git, a.start)?;
                 let registered: Vec<PathBuf> =
@@ -999,6 +1013,7 @@ impl Branches {
         if let Some(start) = start {
             let future_root = match &action {
                 Action::Create(c) => Some(c.start),
+                Action::Detach(oid) => Some(*oid),
                 _ => None,
             };
             let leaving = departing.then(|| catalog.root.clone());

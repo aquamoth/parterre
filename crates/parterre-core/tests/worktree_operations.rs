@@ -644,6 +644,77 @@ fn when_git_refuses_anyway_parterre_asks_again_before_forcing() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Switching to a detached HEAD.
+
+#[test]
+fn switching_to_a_commit_detaches_head_there() {
+    let (mut r, _others, base) = repository();
+    r.commit("later");
+    done(execute(&r, Action::Detach(base), None));
+    assert_eq!(r.git(&["rev-parse", "HEAD"]), base.to_hex());
+    assert_eq!(r.git(&["branch", "--show-current"]), "");
+    // Already there: nothing runs.
+    match execute(&r, Action::Detach(base), None) {
+        Outcome::Done(report) => assert!(report.steps.is_empty()),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn detaching_keeps_changes_git_can_carry_and_refuses_the_rest() {
+    let (mut r, _others, base) = repository();
+    r.write("file", b"later\n");
+    r.commit_all("later");
+    r.write("file", b"uncommitted\n");
+    r.write("loose", b"untracked\n");
+    let out = execute(&r, Action::Detach(base), None);
+    assert!(matches!(out, Outcome::Failed { .. }), "{out:?}");
+    assert_eq!(r.git(&["branch", "--show-current"]), "main");
+    assert_eq!(
+        std::fs::read(r.path().join("file")).unwrap(),
+        b"uncommitted\n"
+    );
+    assert_eq!(
+        std::fs::read(r.path().join("loose")).unwrap(),
+        b"untracked\n"
+    );
+}
+
+#[test]
+fn detaching_away_from_a_detached_head_with_lost_commits_warns_first() {
+    let (mut r, _others, base) = repository();
+    r.git(&["switch", "-q", "--detach"]);
+    let only = oid(&r.commit("only on the detached HEAD"));
+    let w = warning(execute(&r, Action::Detach(base), None));
+    assert_eq!(w.commits, [only]);
+    assert_eq!(r.git(&["rev-parse", "HEAD"]), only.to_hex());
+    done(execute(&r, Action::Detach(base), Some(&w)));
+    assert_eq!(r.git(&["rev-parse", "HEAD"]), base.to_hex());
+}
+
+#[test]
+fn detaching_forward_from_a_detached_head_loses_nothing() {
+    let (mut r, _others, base) = repository();
+    let later = oid(&r.commit("later"));
+    r.git(&["switch", "-q", "--detach", &base.to_hex()]);
+    let _ = r.git(&["branch", "-f", "main", &base.to_hex()]);
+    // `later` is now reachable only from where we're going.
+    done(execute(&r, Action::Detach(later), None));
+    assert_eq!(r.git(&["rev-parse", "HEAD"]), later.to_hex());
+}
+
+#[test]
+fn a_commit_that_is_gone_is_refused() {
+    let (r, _others, _) = repository();
+    let error = failed(execute(
+        &r,
+        Action::Detach(oid("1234567890123456789012345678901234567890")),
+        None,
+    ));
+    assert!(error.contains("no longer in the repository"), "{error}");
+}
+
+// ---------------------------------------------------------------------------------------------
 // A worktree root inside a repository.
 
 #[test]

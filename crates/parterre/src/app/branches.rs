@@ -147,6 +147,16 @@ fn branch_section(
         }
     }
     switches.sort_by(|a, b| a.0.cmp(&b.0));
+    // The commit itself, detached, last.
+    if catalog.has_working_tree && !(catalog.current.is_none() && catalog.head == Some(commit)) {
+        let hex = commit.to_hex();
+        let short = &hex[..repo.abbrev_len.clamp(4, hex.len())];
+        switches.push((
+            format!("{short} (detached)"),
+            Request::Run(Action::Detach(commit)),
+            None,
+        ));
+    }
     target_menu(ui, "Switch to", &switches, busy, &mut request);
     let deletions: Vec<_> = refs
         .iter()
@@ -1238,7 +1248,12 @@ impl Tool {
             }
             _ => (
                 format!(
-                    "Switch branches and lose {}?",
+                    "Switch {} and lose {}?",
+                    if matches!(warning.action, Action::Detach(_)) {
+                        "to a detached HEAD"
+                    } else {
+                        "branches"
+                    },
                     plural(warning.commits.len(), "detached commit")
                 ),
                 "Switch anyway",
