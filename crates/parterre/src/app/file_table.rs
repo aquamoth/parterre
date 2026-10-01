@@ -506,6 +506,7 @@ impl<T> DiffQueue<T> {
                 ui.add_space(4.0);
                 ui.label("A window opens for every selected file.");
                 ui.add_space(12.0);
+                ui.separator();
                 match crate::dialogs::actions(ui, "Open all", true, false, false) {
                     crate::dialogs::Answer::Primary => open = true,
                     crate::dialogs::Answer::Cancel => cancel = true,

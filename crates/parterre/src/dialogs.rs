@@ -10,6 +10,8 @@ use crate::{menu, widgets};
 struct Placement {
     screen: egui::Vec2,
     top: f32,
+    height: f32,
+    settled: bool,
     frame: u64,
 }
 
@@ -57,7 +59,8 @@ impl<'a> Dialog<'a> {
         let old: Option<Placement> = ctx.data(|d| d.get_temp(key));
         let area = egui::Modal::default_area(self.id);
         let frame = ctx.cumulative_frame_nr();
-        let area = match old.filter(|p| p.screen == screen.size() && frame <= p.frame + 1) {
+        let old = old.filter(|p| p.screen == screen.size() && frame <= p.frame + 1);
+        let area = match old.filter(|p| p.settled) {
             Some(p) => area.anchor(egui::Align2::CENTER_TOP, vec2(0.0, p.top)),
             None => area,
         };
@@ -112,12 +115,18 @@ impl<'a> Dialog<'a> {
                 content(ui)
             });
         let rect = modal.response.rect;
+        let settled = old.is_some_and(|p| p.settled || (p.height - rect.height()).abs() < 0.5);
+        if !settled {
+            ctx.request_repaint();
+        }
         ctx.data_mut(|d| {
             d.insert_temp(
                 key,
                 Placement {
                     screen: screen.size(),
                     top: rect.top() - screen.top(),
+                    height: rect.height(),
+                    settled,
                     frame,
                 },
             )
@@ -127,13 +136,22 @@ impl<'a> Dialog<'a> {
 }
 
 pub fn fields<R>(ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> R {
-    let remaining = ui.ctx().content_rect().bottom() - ui.cursor().top() - 165.0;
-    egui::ScrollArea::vertical()
-        .id_salt("dialog-fields")
-        .max_height(remaining.clamp(70.0, 560.0))
-        .auto_shrink([false, true])
-        .show(ui, content)
-        .inner
+    let used = ui.cursor().top() - ui.min_rect().top();
+    let remaining = (ui.ctx().content_rect().bottom() - ui.cursor().top() - 165.0)
+        .min(630.0 - 40.0 - used - 165.0);
+    ui.scope(|ui| {
+        let inside = visible_scroll_bars(ui);
+        egui::ScrollArea::vertical()
+            .id_salt("dialog-fields")
+            .max_height(remaining.clamp(70.0, 560.0))
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                *ui.visuals_mut() = inside;
+                content(ui)
+            })
+            .inner
+    })
+    .inner
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,7 +170,6 @@ pub fn actions(
     focus_cancel: bool,
 ) -> Answer {
     let mut answer = Answer::Open;
-    ui.separator();
     let size = vec2(ui.available_width(), 34.0);
     ui.allocate_ui_with_layout(size, Layout::right_to_left(Align::Center), |ui| {
         if !label.is_empty() {
@@ -199,54 +216,167 @@ pub fn actions(
 }
 
 pub fn command_box(ui: &mut Ui, commands: &[String]) {
-    let key = Id::new("git-command-expanded");
-    let open = ui
-        .data_mut(|d| d.get_persisted::<bool>(key))
-        .unwrap_or(false);
-    let response = egui::CollapsingHeader::new("Git command")
-        .open(Some(open))
+    ui.separator();
+    let id = egui::Id::new("git-command-expanded");
+    let mut shown = ui.data_mut(|d| *d.get_persisted_mut_or(id, false));
+    // The heading as tall as its text, close to the box.
+    let row = ui.spacing().interact_size.y;
+    ui.spacing_mut().interact_size.y = 16.0;
+    let heading = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(12.0), egui::Sense::hover());
+            let glyph = if shown {
+                parterre_core::glyphs::CHEVRON_DOWN
+            } else {
+                parterre_core::glyphs::CHEVRON_RIGHT
+            };
+            let weak = ui.visuals().weak_text_color();
+            widgets::paint_glyph(ui.painter(), rect, glyph, weak);
+            ui.label(RichText::new("Git command").small().weak());
+        })
+        .response;
+    let head = ui
+        .interact(
+            heading.rect,
+            ui.id().with("git-command-heading"),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    ui.spacing_mut().interact_size.y = row;
+    if head.clicked() {
+        shown = !shown;
+        ui.data_mut(|d| d.insert_persisted(id, shown));
+    }
+    if !shown {
+        return;
+    }
+    ui.add_space(-4.0);
+    let t = widgets::tones(ui);
+    let text = commands.join("\n");
+    egui::Frame::new()
+        .fill(t.seg_bg)
+        .corner_radius(8)
+        .inner_margin(egui::Margin {
+            left: 12,
+            right: 4,
+            top: 4,
+            bottom: 6,
+        })
         .show(ui, |ui| {
-            let text = commands.join("\n");
-            let tones = widgets::tones(ui);
-            egui::Frame::new()
-                .fill(tones.seg_bg)
-                .corner_radius(8)
-                .inner_margin(egui::Margin::symmetric(10, 6))
-                .show(ui, |ui| {
-                    ui.horizontal_top(|ui| {
-                        let width = (ui.available_width() - 30.0).max(50.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt("command-lines")
-                            .max_height(65.0)
-                            .show(ui, |ui| {
-                                ui.set_width(width);
-                                ui.add(
-                                    egui::Label::new(RichText::new(&text).monospace().size(13.0))
-                                        .wrap(),
-                                );
-                                ui.set_min_height(28.0);
-                            });
-                        let now = ui.input(|i| i.time);
-                        let copied_key = ui.id().with("copied-command");
-                        let copied = ui
-                            .data(|d| d.get_temp::<f64>(copied_key))
-                            .is_some_and(|t| now - t < 1.5);
-                        if copied {
-                            ui.ctx()
-                                .request_repaint_after(std::time::Duration::from_millis(250));
-                        }
-                        if widgets::copy_button(ui, copied, tones.accent)
-                            .on_hover_text("Copy the command")
-                            .clicked()
-                        {
-                            ui.ctx().copy_text(text);
-                            ui.data_mut(|d| d.insert_temp(copied_key, now));
-                        }
-                    });
+            ui.set_width(ui.available_width());
+            // Two lines high at least, so the dialog keeps its shape; empty while there's no
+            // command.
+            // A line as the commands are drawn: one row of their font.
+            let line = ui
+                .painter()
+                .layout_no_wrap("git".into(), egui::FontId::monospace(11.5), Color32::WHITE)
+                .size()
+                .y;
+            ui.set_min_height(2.0 * line + 4.0);
+            if commands.is_empty() {
+                return;
+            }
+            ui.horizontal_top(|ui| {
+                let w = ui.available_width() - 28.0;
+                // Its own column: the row it's in would lay the lines side by side.
+                // Three lines at most; more scroll, with a bar that shows it.
+                ui.vertical(|ui| {
+                    ui.set_width(w);
+                    let inside = visible_scroll_bars(ui);
+                    // egui keeps a scrolling area 64 points high at least: three lines are less.
+                    let three = 3.0 * line + 4.0;
+                    egui::ScrollArea::vertical()
+                        .id_salt("command-lines")
+                        .max_height(three)
+                        .min_scrolled_height(three)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            *ui.visuals_mut() = inside;
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            ui.add_space(4.0);
+                            wrapped_commands(ui, commands, w - 16.0);
+                        });
                 });
+                // A check mark for a moment after a click.
+                let copied_id = egui::Id::new("copied-command").with(&text);
+                let now = ui.input(|i| i.time);
+                let at: Option<f64> = ui.data(|d| d.get_temp(copied_id));
+                let copied = at.is_some_and(|at| now - at < 1.5);
+                if copied {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(300));
+                }
+                let done = Color32::from_rgb(0x2e, 0xa0, 0x43);
+                if widgets::copy_button(ui, copied, done)
+                    .on_hover_text("Copy, to run in a terminal")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(text.clone());
+                    ui.data_mut(|d| d.insert_temp(copied_id, now));
+                }
+            });
         });
-    if response.header_response.clicked() {
-        ui.data_mut(|d| d.insert_persisted(key, !open));
+}
+
+/// Scroll bars that show there's more: a solid bar with a gray track the whole height of the
+/// area and a darker handle, instead of egui's track in the dialog's own colour (white on
+/// white) and a handle only on hover. Returns the visuals to put back inside the area, so its
+/// content looks as it would outside.
+fn visible_scroll_bars(ui: &mut Ui) -> egui::Visuals {
+    let inside = ui.visuals().clone();
+    let t = widgets::tones(ui);
+    ui.spacing_mut().scroll = egui::style::ScrollStyle {
+        bar_width: 8.0,
+        ..egui::style::ScrollStyle::solid()
+    };
+    let weak = inside.weak_text_color();
+    let v = ui.visuals_mut();
+    v.extreme_bg_color = t.seg_bg;
+    v.widgets.inactive.bg_fill = weak.gamma_multiply(0.6);
+    v.widgets.hovered.bg_fill = weak;
+    v.widgets.active.bg_fill = inside.text_color();
+    inside
+}
+
+/// A return arrow, where a command is broken.
+const RETURN: Glyph = &[
+    parterre_core::glyphs::Part::Path("M19 5v9H6"),
+    parterre_core::glyphs::Part::Path("M10 10l-4 4 4 4"),
+];
+
+/// Each command broken where the room ends, not at its spaces, with a return arrow at each
+/// break; space between the commands, so each can be told apart.
+fn wrapped_commands(ui: &mut Ui, commands: &[String], width: f32) {
+    const MARK: f32 = 13.0;
+    let font = egui::FontId::monospace(11.5);
+    let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+    let per_line = (((width - MARK) / char_w).floor() as usize).max(10);
+    let color = ui.visuals().text_color();
+    let weak = ui.visuals().weak_text_color();
+    for (k, command) in commands.iter().enumerate() {
+        if k > 0 {
+            ui.add_space(10.0);
+        }
+        // One block of text, a row per line, so the lines sit exactly a font's height apart
+        // (three of them fill the box).
+        let chars: Vec<char> = command.chars().collect();
+        let lines: Vec<String> = chars.chunks(per_line).map(|l| l.iter().collect()).collect();
+        let galley = ui
+            .painter()
+            .layout_no_wrap(lines.join("\n"), font.clone(), color);
+        let size = egui::vec2(galley.size().x + MARK + 2.0, galley.size().y);
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let rows = galley.rows.len();
+        for (i, row) in galley.rows.iter().enumerate() {
+            if i + 1 < rows {
+                let r = row.rect().translate(rect.min.to_vec2());
+                let at = egui::pos2(r.right() + 2.0 + MARK / 2.0, r.center().y);
+                let mark = egui::Rect::from_center_size(at, egui::Vec2::splat(11.0));
+                widgets::paint_glyph(ui.painter(), mark, RETURN, weak);
+            }
+        }
+        ui.painter().galley(rect.min, galley, color);
     }
 }
 
@@ -321,6 +451,7 @@ pub fn choice(
         let mut chosen = false;
         egui::ComboBox::from_id_salt(id)
             .width(ui.available_width())
+            .wrap_mode(egui::TextWrapMode::Truncate)
             .selected_text(selected.as_deref().unwrap_or(none))
             .popup_style(menu::style.into())
             .show_ui(ui, |ui| {

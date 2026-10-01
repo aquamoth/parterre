@@ -87,6 +87,67 @@ fn selected_remote_follows_local_name_until_a_tracking_branch_is_chosen() {
 }
 
 #[test]
+fn creation_defaults_to_first_remote_even_without_a_branch_at_the_selected_commit() {
+    let (mut r, start, catalog) = draft_repository();
+    let mut first = CreateDraft::new(&catalog, start, None);
+    assert_eq!(first.remote(), Some("origin"));
+    // An eligible branch on a later remote does not change the default remote.
+    r.git(&["update-ref", "-d", "refs/remotes/origin/topic"]);
+    r.git(&["update-ref", "-d", "refs/remotes/origin/team/feature"]);
+    let catalog = Catalog::load(r.path()).unwrap();
+    first = CreateDraft::new(&catalog, start, None);
+    assert_eq!(first.remote(), Some("origin"));
+    assert_eq!(first.track_name(), "");
+    let selected = oid(&r.commit("no remote branches here"));
+    let catalog = Catalog::load(r.path()).unwrap();
+    let mut draft = CreateDraft::new(&catalog, selected, None);
+    assert_eq!(draft.remote(), Some("origin"));
+    draft.set_name("future-work".into());
+    assert_eq!(draft.upstream().as_deref(), Some("origin/future-work"));
+    r.git(&["remote", "remove", "origin"]);
+    r.git(&["remote", "remove", "upstream"]);
+    let catalog = Catalog::load(r.path()).unwrap();
+    let mut draft = CreateDraft::new(&catalog, selected, None);
+    assert!(draft.remote().is_none());
+    draft.set_name("local-only".into());
+    assert!(draft.upstream().is_none());
+}
+
+#[test]
+fn tracking_reset_resumes_following_the_local_name_without_changing_remote() {
+    let (_r, start, catalog) = draft_repository();
+    let mut draft = CreateDraft::new(&catalog, start, Some("upstream/topic"));
+    draft.set_name("my-local".into());
+    assert!(draft.can_restore_track_name());
+    draft.restore_track_name();
+    assert_eq!(draft.remote(), Some("upstream"));
+    assert_eq!(draft.name(), "my-local");
+    assert_eq!(draft.upstream().as_deref(), Some("upstream/my-local"));
+    assert!(!draft.can_restore_track_name());
+    draft.set_name("next-local".into());
+    assert_eq!(draft.upstream().as_deref(), Some("upstream/next-local"));
+    draft.set_track_name(&catalog, "custom-upstream".into());
+    draft.set_name("last-local".into());
+    assert_eq!(
+        draft.upstream().as_deref(),
+        Some("upstream/custom-upstream")
+    );
+    draft.restore_track_name();
+    assert_eq!(draft.upstream().as_deref(), Some("upstream/last-local"));
+    // A same-value explicit selection still needs a reset to resume automatic naming.
+    draft.set_track_name(&catalog, "last-local".into());
+    assert!(draft.can_restore_track_name());
+    draft.restore_track_name();
+    draft.set_name("follows-again".into());
+    assert_eq!(draft.upstream().as_deref(), Some("upstream/follows-again"));
+    draft.set_remote(None);
+    assert!(!draft.can_restore_track_name());
+    draft.restore_track_name();
+    assert!(draft.upstream().is_none());
+    assert_eq!(draft.track_name(), "");
+}
+
+#[test]
 fn none_remote_clears_tracking_and_reselection_generates_a_future_branch() {
     let (r, start, catalog) = draft_repository();
     let mut draft = CreateDraft::new(&catalog, start, None);

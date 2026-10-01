@@ -208,13 +208,13 @@ impl Form {
                     log = dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len);
                 }
                 self.name_field(ui);
-                ui.add_space(8.0);
-                self.track_field(ui);
-                ui.add_space(6.0);
+                ui.add_space(2.0);
                 ui.add_enabled(
                     self.catalog.has_working_tree,
                     egui::Checkbox::new(&mut self.switch, "Switch to new branch"),
                 );
+                ui.add_space(8.0);
+                self.track_field(ui);
                 Branches::commands(&self.catalog, &self.action())
             });
             let shown = commands
@@ -275,29 +275,64 @@ impl Form {
     }
 
     fn track_field(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Remote").strong());
-        let mut selected = self.draft.remote().map(str::to_owned);
-        let mut remotes = self.catalog.remote_names.clone();
-        remotes.sort();
-        if dialogs::choice(ui, "track-remote", &mut selected, "None", &remotes) {
-            self.draft.set_remote(selected);
-        }
-        ui.add_space(8.0);
         ui.label(RichText::new("Track branch").strong());
-        let choices = self.draft.remote_branches(&self.catalog);
-        let mut branch = self.draft.track_name().to_owned();
-        let response = ui
-            .add_enabled_ui(self.draft.remote().is_some(), |ui| {
-                dialogs::editable_choice(ui, "track-branch", &mut branch, "Branch name", &choices)
-            })
-            .inner;
-        if response.changed() {
-            self.draft.set_track_name(&self.catalog, branch);
-        }
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), widgets::BUTTON),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let mut selected = self.draft.remote().map(str::to_owned);
+                let mut remotes = self.catalog.remote_names.clone();
+                remotes.sort();
+                let chosen = ui
+                    .allocate_ui_with_layout(
+                        vec2(110.0, widgets::BUTTON),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| dialogs::choice(ui, "track-remote", &mut selected, "None", &remotes),
+                    )
+                    .inner;
+                if chosen {
+                    self.draft.set_remote(selected);
+                }
+                let width = ui.available_width() - widgets::BUTTON - 4.0;
+                ui.allocate_ui_with_layout(
+                    vec2(width, widgets::BUTTON),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        let choices = self.draft.remote_branches(&self.catalog);
+                        let mut branch = self.draft.track_name().to_owned();
+                        let response = ui
+                            .add_enabled_ui(self.draft.remote().is_some(), |ui| {
+                                dialogs::editable_choice(
+                                    ui,
+                                    "track-branch",
+                                    &mut branch,
+                                    "Branch name",
+                                    &choices,
+                                )
+                            })
+                            .inner;
+                        if response.changed() {
+                            self.draft.set_track_name(&self.catalog, branch);
+                        }
+                    },
+                );
+                if ui
+                    .add_enabled_ui(self.draft.can_restore_track_name(), |ui| {
+                        widgets::icon_button(ui, parterre_core::glyphs::RESET, false)
+                    })
+                    .inner
+                    .on_hover_text(format!("Use local branch name: {}", self.draft.name()))
+                    .clicked()
+                {
+                    self.draft.restore_track_name();
+                }
+            },
+        );
         let upstream = self.draft.upstream();
         let track_error =
             if self.draft.remote().is_some() && self.draft.track_name().trim().is_empty() {
-                Some("Enter a branch name to track.")
+                (!self.draft.name().is_empty()).then_some("Enter a branch name to track.")
             } else {
                 upstream
                     .as_deref()
@@ -671,6 +706,7 @@ impl Tool {
                             }
                         }
                     });
+                    ui.separator();
                     close =
                         dialogs::actions(ui, "", false, false, false) == dialogs::Answer::Cancel;
                 });

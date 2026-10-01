@@ -342,6 +342,10 @@ pub struct CreateDraft {
 
 impl CreateDraft {
     pub fn new(catalog: &Catalog, start: Oid, prefer: Option<&str>) -> Self {
+        let remote = prefer
+            .and_then(|s| catalog.tracking_parts(s))
+            .map(|(remote, _)| remote.to_owned())
+            .or_else(|| catalog.remote_names.iter().min().cloned());
         let upstream = prefer.or_else(|| {
             catalog
                 .remotes
@@ -349,7 +353,9 @@ impl CreateDraft {
                 .find(|r| {
                     r.tip == start
                         && catalog.trackers(&r.name).is_empty()
-                        && catalog.tracking_parts(&r.name).is_some()
+                        && catalog
+                            .tracking_parts(&r.name)
+                            .is_some_and(|(r, _)| Some(r) == remote.as_deref())
                 })
                 .map(|r| r.name.as_str())
         });
@@ -358,7 +364,7 @@ impl CreateDraft {
             name: upstream
                 .map(|s| catalog.suggested_name(s))
                 .unwrap_or_default(),
-            remote: parts.map(|(remote, _)| remote.to_owned()),
+            remote,
             track_name: parts
                 .map(|(_, branch)| branch.to_owned())
                 .unwrap_or_default(),
@@ -407,6 +413,16 @@ impl CreateDraft {
         if !self.name_edited && !suggested.is_empty() {
             self.name = suggested;
         }
+    }
+
+    pub fn can_restore_track_name(&self) -> bool {
+        self.remote.is_some() && (self.track_edited || self.track_name != self.name)
+    }
+
+    /// Resume following local-name edits without changing the local name or selected remote.
+    pub fn restore_track_name(&mut self) {
+        self.track_edited = false;
+        self.follow_name();
     }
 
     pub fn suggested_name(&self, catalog: &Catalog) -> String {
