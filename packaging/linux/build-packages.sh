@@ -48,7 +48,15 @@ esac
 
 cargo deb -p parterre --no-build --no-strip --no-dbgsym ${target:+--target "$target"} \
     --deb-version "$version" -o "$out/"
+# Its own automatic requirements, but for weak glibc versions (rpm-find-requires.sh).
+# cargo-generate-rpm ignores how the script exits, so a broken one would go unnoticed.
+find_requires=$root/packaging/linux/rpm-find-requires.sh
+if ! echo "$root/$bin" | "$find_requires" | grep -q '^libc\.so\.6()'; then
+    echo "$find_requires found no libc requirement for $bin" >&2
+    exit 1
+fi
 cargo generate-rpm -p crates/parterre ${target:+--target "$target"} \
+    --auto-req "$find_requires" \
     -s "version = \"$version\"" -o "$out/"
 # The ~ stays inside the packages but not in their file names, which GitHub may rewrite.
 for f in "$out"/parterre*~*; do
