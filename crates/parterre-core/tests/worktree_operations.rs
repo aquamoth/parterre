@@ -207,7 +207,9 @@ fn adding_a_worktree_with_a_new_branch_starts_it_at_the_commit() {
     done(execute(&r, action, None));
     assert_eq!(git_in(&path, &["branch", "--show-current"]), "topic");
     assert_eq!(git_in(&path, &["rev-parse", "HEAD"]), base.to_hex());
-    assert_eq!(std::fs::read(path.join("file")).unwrap(), b"base\n");
+    // Line endings as the user's git checks them out (CRLF with Git for Windows' autocrlf).
+    let checked_out = std::fs::read_to_string(path.join("file")).unwrap();
+    assert_eq!(checked_out.replace("\r\n", "\n"), "base\n");
     // No upstream unless one was asked for.
     assert!(!r.git(&["config", "--list"]).contains("branch.topic."));
     // The open worktree stays on its branch.
