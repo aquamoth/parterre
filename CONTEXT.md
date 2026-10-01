@@ -64,6 +64,14 @@ Commits no other branch, remote branch, tag or worktree reaches, and uncommitted
 non-ignored files, whether staged, modified or untracked.
 _Avoid_: unpushed work, dirty worktree
 
+**Adding a worktree**:
+Creating a new worktree in its own folder, with a branch or a detached HEAD checked out.
+_Avoid_: creating a worktree, new worktree
+
+**Going to a worktree**:
+Making another worktree of the same repository the open worktree, in the same window.
+_Avoid_: switching to a worktree, opening a worktree
+
 **Deleting a worktree**:
 Removing a worktree from git and deleting its folder and everything in it.
 _Avoid_: removing a worktree, closing a worktree

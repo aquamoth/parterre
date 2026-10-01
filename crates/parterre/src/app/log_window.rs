@@ -252,6 +252,9 @@ enum Pane {
 /// What the panes need from the app besides the log window's own state.
 struct Env<'a> {
     details: &'a mut Details,
+    /// The open worktree, where git is asked about commits. A pinned view keeps an older
+    /// snapshot, perhaps of a worktree since deleted; any worktree of the repository answers.
+    open: Option<std::path::PathBuf>,
     palette: Palette,
     graph: &'a GraphOptions,
     /// The layout and the dividers.
@@ -864,6 +867,7 @@ impl LogWindow {
         let marked = env.marked;
         let branches = env.branches;
         let branch_busy = env.branch_busy;
+        let worktrees = env.graph.show_worktrees;
         let query = self.find.query.as_str();
         let mut request = None;
         table.show(
@@ -900,9 +904,14 @@ impl LogWindow {
                 if let Some(r) = row_menu(ui, commit, &env) {
                     request = Some(r);
                 }
-                if let Some(r) =
-                    super::branches::node_menu(ui, repo, commit.oid, branches, branch_busy)
-                {
+                if let Some(r) = super::branches::node_menu(
+                    ui,
+                    repo,
+                    commit.oid,
+                    branches,
+                    branch_busy,
+                    worktrees,
+                ) {
                     self.branch_requests.push(r);
                 }
             },
@@ -937,7 +946,8 @@ impl LogWindow {
         let mut copy = None;
         let mut jump = None;
         let ctx = ui.ctx().clone();
-        let details = env.details.get(&view.repo.path, commit.oid, &ctx);
+        let path = env.open.clone().unwrap_or_else(|| view.repo.path.clone());
+        let details = env.details.get(&path, commit.oid, &ctx);
         let loaded = details.and_then(|d| d.as_ref().ok());
         let refs = badges(&view.repo, &view.refs[ix.ix()], Some(ix), env.graph);
         ScrollArea::vertical()
@@ -1037,7 +1047,7 @@ impl LogWindow {
     }
 
     /// The selected commit's changed files: a filter and a sortable table.
-    fn files_pane(&mut self, ui: &mut Ui, _env: &mut Env, c: &Colors) {
+    fn files_pane(&mut self, ui: &mut Ui, env: &mut Env, c: &Colors) {
         let Some(view) = &self.view else { return };
         let Some(ix) = view.selected_commit() else {
             return;
@@ -1045,11 +1055,10 @@ impl LogWindow {
         let commit = view.repo.commit(ix);
         let merge = commit.parents.len() > 1;
         let ctx = ui.ctx().clone();
-        let files = self
-            .files
-            .get(&view.repo.path, commit.oid, &ctx, |git, oid| {
-                git.changed_files(oid).map_err(|e| e.to_string())
-            });
+        let path = env.open.clone().unwrap_or_else(|| view.repo.path.clone());
+        let files = self.files.get(&path, commit.oid, &ctx, |git, oid| {
+            git.changed_files(oid).map_err(|e| e.to_string())
+        });
         let weak = ui.visuals().weak_text_color();
         let action = self
             .table
@@ -1693,6 +1702,7 @@ impl ParterreApp {
             let palette = Palette::new(ui.visuals().dark_mode, &self.settings.branch_colors);
             let mut env = Env {
                 details: &mut self.details,
+                open: self.repo.as_ref().map(|r| r.path.clone()),
                 palette,
                 graph: &self.settings.graph,
                 settings: &mut self.settings.log_window,
@@ -1889,6 +1899,7 @@ mod tests {
         ctx.run_ui(input, |ui| {
             let mut env = Env {
                 details: &mut details,
+                open: None,
                 palette: Palette::new(false, &[]),
                 graph: &graph,
                 settings: &mut settings,

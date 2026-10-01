@@ -106,6 +106,11 @@ impl Git {
         Git { dir: dir.into() }
     }
 
+    /// The folder git runs in.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     fn command<I, S>(&self, args: I) -> Command
     where
         I: IntoIterator<Item = S>,
