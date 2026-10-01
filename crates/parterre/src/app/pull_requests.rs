@@ -218,39 +218,18 @@ pub enum DialogAnswer {
     Install,
 }
 
-/// The dialog saying why pull requests the user turned on can't be shown: a modal in the
-/// look of the menus and popovers, with the command that helps, if one does, ready to copy.
+/// The dialog saying why pull requests the user turned on can't be shown: a modal over the main
+/// window, with the command that helps, if one does, ready to copy.
 pub fn dialog(ctx: &egui::Context, error: &ForgeError) -> DialogAnswer {
-    use egui::{Align, Frame, Layout, Margin, RichText, Vec2};
+    use egui::{Align, Layout};
 
     let explanation = error.explain();
-    let style = {
-        let mut style = (*ctx.global_style()).clone();
-        crate::menu::popover_style(&mut style);
-        style
-    };
-    let frame = Frame::popup(&style)
-        .inner_margin(Margin::same(20))
-        .corner_radius(12);
-    let mut answer = DialogAnswer::Open;
-    let modal = egui::Modal::new(egui::Id::new("pull-requests-error"))
-        .frame(frame)
-        .backdrop_color(egui::Color32::from_black_alpha(
-            if style.visuals.dark_mode { 90 } else { 40 },
-        ))
+    let shown = crate::dialogs::Dialog::new("pull-requests-error", explanation.title)
+        .icon(glyphs::PULL_REQUEST, false)
+        .width(380.0)
+        .modal()
         .show(ctx, |ui| {
-            ui.set_style(style.clone());
-            ui.set_width(380.0);
-            ui.spacing_mut().item_spacing.y = 10.0;
-            let t = widgets::tones(ui);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                let (badge, _) = ui.allocate_exact_size(Vec2::splat(32.0), egui::Sense::hover());
-                ui.painter().circle_filled(badge.center(), 16.0, t.on_bg);
-                let icon = egui::Rect::from_center_size(badge.center(), Vec2::splat(18.0));
-                widgets::paint_glyph(ui.painter(), icon, glyphs::PULL_REQUEST, t.on_fg);
-                ui.label(RichText::new(explanation.title).size(16.0).strong());
-            });
+            let mut answer = DialogAnswer::Open;
             ui.label(&explanation.body);
             if let Some(command) = explanation.command {
                 command_box(ui, command);
@@ -267,12 +246,16 @@ pub fn dialog(ctx: &egui::Context, error: &ForgeError) -> DialogAnswer {
                     answer = DialogAnswer::Install;
                 }
             });
+            if ui.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) {
+                answer = DialogAnswer::Close;
+            }
+            answer
         });
-    let keys = ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter));
-    if modal.should_close() || keys {
-        answer = DialogAnswer::Close;
+    if shown.should_close() {
+        DialogAnswer::Close
+    } else {
+        shown.inner
     }
-    answer
 }
 
 /// A command to run in a terminal, in a field of its own, with a button copying it.

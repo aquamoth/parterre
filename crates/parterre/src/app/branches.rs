@@ -1,10 +1,11 @@
 //! The local-branch tool. Graph nodes and log rows share the same menu and controller.
 //! Slow Git queries and all mutations run on workers; forms retain their selected commit.
+//! Its dialogs are modeless windows, opened over the window they were asked from.
 
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 
-use eframe::egui::{self, Color32, Id, RichText, Ui, vec2};
+use eframe::egui::{self, Color32, Id, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::{
     Action, Branches, Cancel, Catalog, Create, CreateDraft, Outcome, Report, Warning, command_text,
 };
@@ -170,6 +171,8 @@ struct Form {
     draft: CreateDraft,
     switch: bool,
     fresh: bool,
+    /// The window it was asked from.
+    opener: ViewportId,
 }
 
 impl Form {
@@ -179,6 +182,7 @@ impl Form {
         start: Oid,
         prefer: Option<String>,
         switch: bool,
+        opener: ViewportId,
     ) -> Self {
         let draft = CreateDraft::new(&catalog, start, prefer.as_deref());
         Self {
@@ -188,6 +192,7 @@ impl Form {
             draft,
             switch,
             fresh: true,
+            opener,
         }
     }
     fn action(&self) -> Action {
@@ -199,43 +204,47 @@ impl Form {
         })
     }
 
-    fn show(&mut self, ctx: &egui::Context) -> (dialogs::Answer, bool) {
+    /// `busy` while another Git operation runs: it can't start until that one is done.
+    fn show(&mut self, ctx: &egui::Context, busy: bool) -> (dialogs::Answer, bool) {
         let mut log = false;
-        let mut answer = dialogs::Answer::Open;
-        let modal = dialogs::Dialog::new("create-branch", "Create branch").show(ctx, |ui| {
-            let commands = dialogs::fields(ui, |ui| {
-                if let Some(ix) = self.repo.lookup(&self.start) {
-                    log = dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len);
-                }
-                self.name_field(ui);
-                ui.add_space(2.0);
-                ui.add_enabled(
-                    self.catalog.has_working_tree,
-                    egui::Checkbox::new(&mut self.switch, "Switch to new branch"),
-                );
-                ui.add_space(8.0);
-                self.track_field(ui);
-                Branches::commands(&self.catalog, &self.action())
+        let shown = dialogs::Dialog::new("create-branch", "Create branch")
+            .opener(self.opener)
+            .raise(self.fresh)
+            .show(ctx, |ui| {
+                let commands = dialogs::fields(ui, |ui| {
+                    if let Some(ix) = self.repo.lookup(&self.start) {
+                        log = dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len);
+                    }
+                    self.name_field(ui);
+                    ui.add_space(2.0);
+                    ui.add_enabled(
+                        self.catalog.has_working_tree,
+                        egui::Checkbox::new(&mut self.switch, "Switch to new branch"),
+                    );
+                    ui.add_space(8.0);
+                    self.track_field(ui);
+                    Branches::commands(&self.catalog, &self.action())
+                });
+                let shown = commands
+                    .as_ref()
+                    .map(|cmds| cmds.iter().map(|a| command_text(a)).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                dialogs::command_box(ui, &shown);
+                dialogs::actions(
+                    ui,
+                    if self.switch {
+                        "Create and switch"
+                    } else {
+                        "Create"
+                    },
+                    commands.is_ok() && !busy,
+                    false,
+                    false,
+                )
             });
-            let shown = commands
-                .as_ref()
-                .map(|cmds| cmds.iter().map(|a| command_text(a)).collect::<Vec<_>>())
-                .unwrap_or_default();
-            dialogs::command_box(ui, &shown);
-            answer = dialogs::actions(
-                ui,
-                if self.switch {
-                    "Create and switch"
-                } else {
-                    "Create"
-                },
-                commands.is_ok(),
-                false,
-                false,
-            );
-        });
         self.fresh = false;
-        if modal.should_close() && answer == dialogs::Answer::Open {
+        let mut answer = shown.inner;
+        if shown.should_close() && answer == dialogs::Answer::Open {
             answer = dialogs::Answer::Cancel;
         }
         (answer, log)
@@ -373,6 +382,7 @@ impl Form {
 struct Job {
     path: PathBuf,
     label: String,
+    opener: ViewportId,
     cancel: Cancel,
     rx: mpsc::Receiver<Outcome>,
 }
@@ -387,13 +397,22 @@ struct Notice {
     at: f64,
 }
 
+/// A warning before losing work, waiting for an answer.
+#[derive(Debug)]
+struct Loss {
+    path: PathBuf,
+    warning: Warning,
+    fresh: bool,
+    opener: ViewportId,
+}
+
 #[derive(Debug, Default)]
 pub struct Tool {
     repo: Option<Arc<Repo>>,
     pub catalog: Option<Arc<Catalog>>,
     loading: Option<mpsc::Receiver<Result<Catalog, String>>>,
     form: Option<Form>,
-    warning: Option<(PathBuf, Warning, bool)>,
+    warning: Option<Loss>,
     job: Option<Job>,
     notices: Vec<Notice>,
     next_notice: u64,
@@ -476,8 +495,15 @@ impl Tool {
             let job = self.job.take().unwrap();
             self.reload = Some(job.path.clone());
             match result {
-                Outcome::Warning(w) if self.repo.as_ref().is_some_and(|r| r.path == job.path) => {
-                    self.warning = Some((job.path, w, true));
+                Outcome::Warning(warning)
+                    if self.repo.as_ref().is_some_and(|r| r.path == job.path) =>
+                {
+                    self.warning = Some(Loss {
+                        path: job.path,
+                        warning,
+                        fresh: true,
+                        opener: job.opener,
+                    });
                 }
                 Outcome::Warning(_) => self.notice(
                     ctx,
@@ -497,7 +523,8 @@ impl Tool {
         }
     }
 
-    pub fn request(&mut self, ctx: &egui::Context, request: Request) {
+    /// `opener` is the window it was asked from, where its dialogs open.
+    pub fn request(&mut self, ctx: &egui::Context, request: Request, opener: ViewportId) {
         if self.busy() {
             return;
         }
@@ -511,10 +538,10 @@ impl Tool {
                 switch,
             } => {
                 if let Some(catalog) = self.catalog.clone() {
-                    self.form = Some(Form::new(repo, catalog, start, track, switch));
+                    self.form = Some(Form::new(repo, catalog, start, track, switch, opener));
                 }
             }
-            Request::Run(action) => self.run(ctx, repo.path.clone(), action, None),
+            Request::Run(action) => self.run(ctx, repo.path.clone(), action, None, opener),
         }
     }
 
@@ -524,6 +551,7 @@ impl Tool {
         path: PathBuf,
         action: Action,
         approval: Option<Warning>,
+        opener: ViewportId,
     ) {
         let (tx, rx) = mpsc::channel();
         let cancel = Cancel::default();
@@ -540,6 +568,7 @@ impl Tool {
         self.job = Some(Job {
             path,
             label,
+            opener,
             cancel,
             rx,
         });
@@ -566,24 +595,29 @@ impl Tool {
 
     pub fn show(&mut self, ctx: &egui::Context) {
         if let Some(mut form) = self.form.take() {
-            let (answer, log) = form.show(ctx);
+            let (answer, log) = form.show(ctx, self.busy());
             if log {
                 self.log_request = Some((form.repo.clone(), vec![form.start], false));
             }
             match answer {
-                dialogs::Answer::Primary => {
-                    self.run(ctx, form.repo.path.clone(), form.action(), None)
-                }
+                dialogs::Answer::Primary => self.run(
+                    ctx,
+                    form.repo.path.clone(),
+                    form.action(),
+                    None,
+                    form.opener,
+                ),
                 dialogs::Answer::Cancel => {}
                 dialogs::Answer::Open => self.form = Some(form),
             }
         }
-        if let Some((path, warning, fresh)) = self.warning.take() {
+        if let Some(loss) = self.warning.take() {
+            let warning = &loss.warning;
             let count = warning.commits.len();
-            let loss = format!("{count} commit{}", if count == 1 { "" } else { "s" });
+            let lost = format!("{count} commit{}", if count == 1 { "" } else { "s" });
             let title = match &warning.action {
                 Action::Delete { name, .. } => {
-                    format!("Delete branch {name} and lose {loss}?")
+                    format!("Delete branch {name} and lose {lost}?")
                 }
                 _ => format!(
                     "Switch branches and lose {count} detached commit{}?",
@@ -593,10 +627,12 @@ impl Tool {
             const TRIANGLE: parterre_core::glyphs::Glyph = &[parterre_core::glyphs::Part::Path(
                 "M12 3 2 21h20ZM12 9v5m0 3v1",
             )];
-            let mut answer = dialogs::Answer::Open;
             let mut show_log = false;
-            let modal = dialogs::Dialog::new("branch-loss", &title)
+            let busy = self.busy();
+            let shown = dialogs::Dialog::new("branch-loss", &title)
                 .icon(TRIANGLE, true)
+                .opener(loss.opener)
+                .raise(loss.fresh)
                 .show(ctx, |ui| {
                     ui.label("These commits are not reachable from any surviving branch, tag or worktree.");
                     egui::Frame::new()
@@ -605,28 +641,32 @@ impl Tool {
                         .inner_margin(egui::Margin::symmetric(12, 8))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(&loss);
+                                ui.label(&lost);
                                 show_log = ui.link("Show in log").clicked();
                             });
                         });
                     let commands = warning.commands.iter().map(|a| command_text(a)).collect::<Vec<_>>();
                     dialogs::command_box(ui, &commands);
-                    answer = dialogs::actions(
+                    dialogs::actions(
                         ui,
                         if matches!(warning.action, Action::Delete { .. }) { "Delete anyway" } else { "Switch anyway" },
-                        true, true, fresh,
-                    );
+                        !busy, true, loss.fresh,
+                    )
                 });
             if show_log {
                 self.log_request = Some((warning.repo.clone(), warning.commits.clone(), true));
             }
-            match answer {
+            match shown.inner {
                 dialogs::Answer::Primary => {
-                    self.run(ctx, path, warning.action.clone(), Some(warning))
+                    let action = warning.action.clone();
+                    self.run(ctx, loss.path, action, Some(loss.warning), loss.opener)
                 }
                 dialogs::Answer::Cancel => {}
-                dialogs::Answer::Open if !modal.should_close() => {
-                    self.warning = Some((path, warning, false))
+                dialogs::Answer::Open if !shown.should_close() => {
+                    self.warning = Some(Loss {
+                        fresh: false,
+                        ..loss
+                    })
                 }
                 _ => {}
             }
@@ -687,8 +727,7 @@ impl Tool {
                 }
             });
         if let Some(n) = self.notices.iter().find(|n| Some(n.id) == self.details) {
-            let mut close = false;
-            let modal = dialogs::Dialog::new("git-operation-details", &n.title)
+            let shown = dialogs::Dialog::new("git-operation-details", &n.title)
                 .width(600.0)
                 .show(ctx, |ui| {
                     dialogs::fields(ui, |ui| {
@@ -707,10 +746,9 @@ impl Tool {
                         }
                     });
                     ui.separator();
-                    close =
-                        dialogs::actions(ui, "", false, false, false) == dialogs::Answer::Cancel;
+                    dialogs::actions(ui, "", false, false, false)
                 });
-            if close || modal.should_close() {
+            if shown.inner == dialogs::Answer::Cancel || shown.should_close() {
                 self.details = None;
             }
         }
