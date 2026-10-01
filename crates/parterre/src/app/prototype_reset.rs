@@ -13,7 +13,7 @@
 //! dialog at startup, for `--screenshot`.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -77,6 +77,12 @@ enum Fate {
 #[derive(Clone, Debug)]
 struct Facts {
     repo: Arc<Repo>,
+    root: PathBuf,
+    /// Paths in the index now (`ls-files`), and in the target.
+    tracked: BTreeSet<String>,
+    target_files: BTreeSet<String>,
+    /// `git status --short` now, for the paths that matter.
+    status: BTreeMap<String, String>,
     branch: String,
     head: Oid,
     target: Oid,
@@ -167,6 +173,17 @@ impl Facts {
             in_the_way: untracked.intersection(&target_files).cloned().collect(),
             changed: names(&root, &["diff", "--name-only", "-z", &h, &t]),
             commits,
+            tracked: names(&root, &["ls-files", "-z"]),
+            status: git(
+                &root,
+                &["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"],
+            )
+            .split('\0')
+            .filter(|e| e.len() > 3)
+            .map(|e| (e[3..].to_owned(), e[..2].to_owned()))
+            .collect(),
+            target_files,
+            root,
         })
     }
 
@@ -345,56 +362,99 @@ impl Facts {
         }
     }
 
-    /// What `mode` does here, sentence by sentence.
-    fn explanation(&self, mode: Mode) -> Vec<String> {
-        let to = self.short();
-        let mut lines = Vec::new();
-        let files = plural(self.changed.len(), "file");
-        let theirs = if self.behind == 0 {
-            format!("The difference to {to} ({files})")
+    /// What `mode` does, in plain words.
+    fn headline(&self, mode: Mode) -> String {
+        let (b, to) = (&self.branch, self.short());
+        let n = self.behind;
+        let last = if n == 1 {
+            "the last commit".to_owned()
         } else {
-            format!(
-                "The changes of the {} left behind ({files})",
-                if self.behind == 1 { "commit" } else { "commits" }
-            )
+            format!("the last {n} commits")
         };
-        let local = !self.staged.is_empty() || !self.unstaged.is_empty();
+        let its = if n == 1 { "its" } else { "their" };
+        let back = self.gained == 0;
         match mode {
-            Mode::Soft => {
-                if !self.changed.is_empty() {
-                    lines.push(format!("{theirs} become staged, ready to commit again."));
-                }
-                lines.push("Your files stay as they are.".into());
-                if !self.staged.is_empty() {
-                    lines.push("Your staged changes stay staged.".into());
-                }
+            Mode::Soft if back => format!("Undo {last}, keeping {its} changes staged."),
+            Mode::Mixed if back => format!("Undo {last}, keeping {its} changes as unstaged edits."),
+            Mode::Keep if back => {
+                format!("Undo {last} and drop {its} changes, but keep your uncommitted changes.")
             }
-            Mode::Mixed => {
-                if !self.changed.is_empty() {
-                    lines.push(format!("{theirs} show up as modified, not staged."));
-                }
-                lines.push("Your files stay as they are.".into());
-                if !self.staged.is_empty() {
-                    lines.push("Your staged changes become unstaged.".into());
-                }
+            Mode::Hard if back => {
+                format!("Undo {last} and drop {its} changes, and all your uncommitted changes.")
             }
-            Mode::Keep => {
-                lines.push(format!("Your files are updated to {to}."));
-                if local {
-                    lines.push("Your changes are kept, as modified files; nothing stays staged.".into());
+            Mode::Soft => format!("Move {b} to {to}; your files and what's staged stay as they are."),
+            Mode::Mixed => format!("Move {b} to {to}; your files stay as they are, nothing stays staged."),
+            Mode::Keep => format!("Move {b} to {to} and update your files, keeping your uncommitted changes."),
+            Mode::Hard => format!("Make your files exactly {to}, dropping all uncommitted changes."),
+        }
+    }
+
+    /// The paths that matter here, in `git status --short` order.
+    fn paths(&self) -> BTreeSet<&String> {
+        self.changed
+            .iter()
+            .chain(&self.staged)
+            .chain(&self.unstaged)
+            .chain(&self.in_the_way)
+            .collect()
+    }
+
+    /// `git status --short` afterwards, for the paths that matter, as the tests on git 2.34
+    /// and 2.43 behaved. Clean paths are left out.
+    fn after(&self, mode: Mode) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        for p in self.paths() {
+            let on_disk = self.root.join(p).exists();
+            let in_target = self.target_files.contains(p);
+            let local = self.staged.contains(p) || self.unstaged.contains(p);
+            let untracked = self.in_the_way.contains(p);
+            // The working tree kept as it is, against an index at the target.
+            let unstaged_vs_target = || {
+                if untracked {
+                    " M"
+                } else if !in_target && on_disk {
+                    "??"
+                } else if in_target && !on_disk {
+                    " D"
+                } else {
+                    " M"
                 }
-            }
-            Mode::Hard => {
-                lines.push(format!("Your files are updated to {to}."));
-                if local {
-                    lines.push("All your uncommitted changes are dropped.".into());
+            };
+            let status = match mode {
+                Mode::Soft => {
+                    if untracked {
+                        "??".to_owned()
+                    } else {
+                        let x = if self.changed.contains(p) || self.staged.contains(p) {
+                            if !in_target {
+                                'A'
+                            } else if !self.tracked.contains(p) {
+                                'D'
+                            } else {
+                                'M'
+                            }
+                        } else {
+                            ' '
+                        };
+                        let y = if !self.unstaged.contains(p) {
+                            ' '
+                        } else if on_disk {
+                            'M'
+                        } else {
+                            'D'
+                        };
+                        format!("{x}{y}")
+                    }
                 }
-                if !self.in_the_way.is_empty() {
-                    lines.push("Untracked files where it has a file are overwritten.".into());
-                }
+                Mode::Mixed => unstaged_vs_target().to_owned(),
+                Mode::Keep if local => unstaged_vs_target().to_owned(),
+                Mode::Keep | Mode::Hard => "  ".to_owned(),
+            };
+            if status != "  " {
+                out.insert(p.clone(), status);
             }
         }
-        lines
+        out
     }
 }
 
@@ -627,9 +687,9 @@ fn dialog(
             let lost_files = facts.lost_files(mode);
             let loses = facts.loses(mode);
             explanation_box(ui, loses, |ui| {
-                for line in facts.explanation(mode) {
-                    ui.label(line);
-                }
+                ui.label(RichText::new(facts.headline(mode)).strong());
+                ui.add_space(4.0);
+                status_table(ui, facts, mode);
                 if !lost_files.is_empty() {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
@@ -701,5 +761,39 @@ fn explanation_box(ui: &mut Ui, warning: bool, content: impl FnOnce(&mut Ui)) {
                 ui.visuals_mut().override_text_color = Some(color);
             }
             content(ui);
+        });
+}
+
+/// `git status --short` now and after `mode`, for the paths that matter.
+fn status_table(ui: &mut Ui, facts: &Facts, mode: Mode) {
+    let after = facts.after(mode);
+    let paths = facts.paths();
+    if paths.is_empty() {
+        return;
+    }
+    let weak = ui.visuals().weak_text_color();
+    egui::Grid::new("prototype-reset-status")
+        .num_columns(3)
+        .spacing(vec2(16.0, 2.0))
+        .show(ui, |ui| {
+            ui.label(RichText::new("git status --short").small().color(weak));
+            ui.label(RichText::new("now").small().color(weak));
+            ui.label(RichText::new("after").small().color(weak));
+            ui.end_row();
+            for p in paths {
+                let now = facts.status.get(p).map_or("  ", String::as_str);
+                let then = after.get(p).map_or("  ", String::as_str);
+                ui.label(RichText::new(p).monospace());
+                let cell = |s: &str| {
+                    if s == "  " {
+                        RichText::new("clean").small().color(weak)
+                    } else {
+                        RichText::new(s).monospace()
+                    }
+                };
+                ui.label(cell(now));
+                ui.label(cell(then).strong());
+                ui.end_row();
+            }
         });
 }
