@@ -75,6 +75,7 @@ enum Fate {
 
 /// What a reset of the open worktree's branch to `target` would meet.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct Facts {
     repo: Arc<Repo>,
     root: PathBuf,
@@ -83,6 +84,9 @@ struct Facts {
     target_files: BTreeSet<String>,
     /// `git status --short` now, for the paths that matter.
     status: BTreeMap<String, String>,
+    /// Lines added and removed from the working tree to the target (`diff --numstat -R`);
+    /// `None` for a binary file.
+    to_target: BTreeMap<String, Option<(u32, u32)>>,
     branch: String,
     head: Oid,
     target: Oid,
@@ -115,6 +119,20 @@ fn names(root: &Path, args: &[&str]) -> BTreeSet<String> {
         .split('\0')
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+        .collect()
+}
+
+/// `git diff --numstat -R <target>`: per path, lines added and removed going from the working
+/// tree to the target.
+fn numstat(root: &Path, target: &str) -> BTreeMap<String, Option<(u32, u32)>> {
+    git(root, &["diff", "--numstat", "--no-renames", "-R", "-z", target])
+        .split('\0')
+        .filter_map(|e| {
+            let mut parts = e.splitn(3, '\t');
+            let (a, r, p) = (parts.next()?, parts.next()?, parts.next()?);
+            let counts = a.parse().ok().zip(r.parse().ok());
+            Some((p.to_owned(), counts))
+        })
         .collect()
 }
 
@@ -182,6 +200,7 @@ impl Facts {
             .filter(|e| e.len() > 3)
             .map(|e| (e[3..].to_owned(), e[..2].to_owned()))
             .collect(),
+            to_target: numstat(&root, &t),
             target_files,
             root,
         })
@@ -457,6 +476,43 @@ impl Facts {
         }
         out
     }
+
+    /// What a path is afterwards, in words, and what's lost of it.
+    fn words(&self, mode: Mode, p: &String) -> (String, Option<&'static str>) {
+        let after = self.after(mode);
+        let code = after.get(p).map_or("  ", String::as_str);
+        let lost = self
+            .lost_files(mode)
+            .into_iter()
+            .find(|(f, _)| f == p)
+            .map(|(_, why)| why);
+        let text = match code {
+            "??" => "untracked",
+            "A " => "staged, new",
+            "M " => "staged",
+            "D " => "staged, deleted",
+            " M" => "modified, not staged",
+            " D" => "deleted, not staged",
+            "MM" => "staged, modified since",
+            "AM" => "staged, new, modified since",
+            "D  ??" => "staged deletion, untracked",
+            _ if lost.is_some() => "",
+            _ if self.disk_change(mode, p).is_some() => "updated",
+            _ => "unchanged",
+        };
+        (text.to_owned(), lost)
+    }
+
+    /// Lines added and removed on disk, now to afterwards; `None` when the file isn't touched.
+    fn disk_change(&self, mode: Mode, p: &String) -> Option<Option<(u32, u32)>> {
+        let local = self.staged.contains(p) || self.unstaged.contains(p);
+        let touched = match mode {
+            Mode::Soft | Mode::Mixed => false,
+            Mode::Keep => !local && self.changed.contains(p),
+            Mode::Hard => !self.in_the_way.contains(p),
+        };
+        touched.then(|| self.to_target.get(p).copied().flatten())
+    }
 }
 
 #[derive(Debug)]
@@ -646,7 +702,7 @@ fn dialog(
         format!("Reset {} to {}", facts.branch, facts.short())
     };
     let mut dialog = dialogs::Dialog::new("prototype-reset", &title)
-        .width(600.0)
+        .width(1000.0)
         .opener(open.opener)
         .raise(open.fresh);
     if loses {
@@ -656,47 +712,77 @@ fn dialog(
     let fresh = open.fresh;
     let mut show_log = false;
     let shown = dialog.show(ctx, |ui| {
-        dialogs::fields(ui, |ui| {
-            if let Some(ix) = facts.repo.lookup(&facts.target) {
-                dialogs::commit_line(ui, facts.repo.commit(ix), facts.repo.abbrev_len);
-            }
-            ui.label(facts.movement());
-            ui.label(RichText::new(facts.changes()).weak());
-            ui.add_space(4.0);
-            mode_matrix(ui, facts, &mut mode);
-            ui.add_space(4.0);
-            let lost_files = facts.lost_files(mode);
-            let loses = facts.loses(mode);
-            explanation_box(ui, loses, |ui| {
-                ui.label(RichText::new(facts.headline(mode)).strong());
-                if !lost_files.is_empty() {
+        ui.horizontal_top(|ui| {
+            let left = ui.vertical(|ui| {
+                ui.set_width(400.0);
+                dialogs::fields(ui, |ui| {
+                    if let Some(ix) = facts.repo.lookup(&facts.target) {
+                        dialogs::commit_line(ui, facts.repo.commit(ix), facts.repo.abbrev_len);
+                    }
+                    ui.label(facts.movement());
+                    ui.label(RichText::new(facts.changes()).weak());
                     ui.add_space(4.0);
-                    ui.label(format!("Lost: {}.", plural(lost_files.len(), "file")));
-                }
-                if !facts.commits.is_empty() {
+                    for m in Mode::ALL {
+                        let response = ui
+                            .add_enabled(facts.enabled(m), egui::RadioButton::new(mode == m, m.name()))
+                            .on_hover_text(m.flag());
+                        let response = match (facts.refusal(m), facts.same_as(m)) {
+                            (Some(refusal), _) => response.on_disabled_hover_text(
+                                RichText::new(format!("git reset {} refuses:\n{refusal}", m.flag()))
+                                    .monospace(),
+                            ),
+                            (None, Some(same)) => response
+                                .on_disabled_hover_text(format!("Same as {} here", same.name())),
+                            _ => response,
+                        };
+                        if response.clicked() {
+                            mode = m;
+                        }
+                    }
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "Lost: {}, on no branch, tag or worktree afterwards.",
-                            plural(facts.commits.len(), "commit")
-                        ));
-                        show_log |= ui.link("Show in log").clicked();
+                    let lost_files = facts.lost_files(mode);
+                    let loses = facts.loses(mode);
+                    explanation_box(ui, loses, |ui| {
+                        ui.label(RichText::new(facts.headline(mode)).strong());
+                        if !lost_files.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(format!("Lost: {}.", plural(lost_files.len(), "file")));
+                        }
+                        if !facts.commits.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(format!(
+                                "Lost: {}, on no branch, tag or worktree afterwards.",
+                                plural(facts.commits.len(), "commit")
+                            ));
+                            show_log |= ui.link("Show in log").clicked();
+                        }
                     });
+                });
+                dialogs::command_box(ui, &[facts.command(mode)]);
+                let loses = facts.loses(mode);
+                let label = if loses { "Reset anyway" } else { "Reset" };
+                let answer = dialogs::actions(ui, label, facts.enabled(mode), loses, fresh && loses);
+                // Enter runs a reset that loses nothing.
+                if answer == dialogs::Answer::Open
+                    && !loses
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                {
+                    return dialogs::Answer::Primary;
                 }
+                answer
             });
-        });
-        dialogs::command_box(ui, &[facts.command(mode)]);
-        let loses = facts.loses(mode);
-        let label = if loses { "Reset anyway" } else { "Reset" };
-        let answer = dialogs::actions(ui, label, facts.enabled(mode), loses, fresh && loses);
-        // Enter runs a reset that loses nothing.
-        if answer == dialogs::Answer::Open
-            && !loses
-            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-        {
-            return dialogs::Answer::Primary;
-        }
-        answer
+            // A rule as tall as the left side; `separator` would stretch the dialog.
+            let x = ui.cursor().left() + 12.0;
+            let rule = left.response.rect.y_range();
+            ui.painter().vline(x, rule, ui.visuals().widgets.noninteractive.bg_stroke);
+            ui.add_space(24.0);
+            ui.vertical(|ui| {
+                ui.set_min_width(520.0);
+                file_list(ui, facts, mode)
+            });
+            left.inner
+        })
+        .inner
     });
     open.mode = mode;
     if show_log {
@@ -729,149 +815,61 @@ fn explanation_box(ui: &mut Ui, warning: bool, content: impl FnOnce(&mut Ui)) {
         });
 }
 
-/// The modes side by side: `git status --short` now and after each, for every path that
-/// matters, and the commits that would be lost. A column header is the mode's radio button;
-/// clicking anywhere in a column picks it. Cells that lose work are red.
-fn mode_matrix(ui: &mut Ui, facts: &Facts, mode: &mut Mode) {
+/// The files the reset concerns, as the log window lists changed files: what each is
+/// afterwards, in words, and the lines added and removed on disk.
+fn file_list(ui: &mut Ui, facts: &Facts, mode: Mode) {
     let weak = ui.visuals().weak_text_color();
     let red = ui.visuals().error_fg_color;
-    let accent = widgets::tones(ui).accent;
-    let afters: Vec<_> = Mode::ALL.iter().map(|&m| facts.after(m)).collect();
-    let lost: Vec<_> = Mode::ALL.iter().map(|&m| facts.lost_files(m)).collect();
-    let why_disabled = |m: Mode| match (facts.refusal(m), facts.same_as(m)) {
-        (Some(refusal), _) => Some(format!("git reset {} refuses:\n{refusal}", m.flag())),
-        (None, Some(same)) => Some(format!("Same as {} here", same.name())),
-        _ => None,
+    let green = if ui.visuals().dark_mode {
+        Color32::from_rgb(75, 165, 105)
+    } else {
+        Color32::from_rgb(35, 120, 65)
     };
-    egui::Frame::new()
-        .fill(widgets::tones(ui).seg_bg)
-        .corner_radius(8)
-        .inner_margin(egui::Margin::symmetric(12, 8))
+    let paths = facts.paths();
+    if paths.is_empty() {
+        ui.label(RichText::new("No files change.").weak());
+        return;
+    }
+    egui::Grid::new("prototype-reset-files")
+        .num_columns(5)
+        .striped(true)
+        .spacing(vec2(16.0, 6.0))
         .show(ui, |ui| {
-            egui::Grid::new("prototype-reset-matrix")
-                .num_columns(2 + Mode::ALL.len())
-                .spacing(vec2(10.0, 4.0))
-                .min_col_width(64.0)
-                .show(ui, |ui| {
-                    ui.label(RichText::new("git status --short").small().color(weak));
-                    ui.label(RichText::new("now").small().color(weak));
-                    for m in Mode::ALL {
-                        let response = centered(ui, |ui| {
-                            ui.add_enabled(
-                                facts.enabled(m),
-                                egui::RadioButton::new(*mode == m, m.name()),
-                            )
-                        })
-                        .on_hover_text(m.flag());
-                        let response = match why_disabled(m) {
-                            Some(why) => {
-                                response.on_disabled_hover_text(RichText::new(why).monospace())
-                            }
-                            None => response,
-                        };
-                        if response.clicked() {
-                            *mode = m;
-                        }
+            for h in ["Path", "Ext.", "Status", "Added", "Removed"] {
+                ui.label(RichText::new(h).color(weak));
+            }
+            ui.end_row();
+            for p in paths {
+                let (words, lost) = facts.words(mode, p);
+                let color = if lost.is_some() { red } else { ui.visuals().text_color() };
+                ui.label(RichText::new(p).color(color));
+                let ext = Path::new(p)
+                    .extension()
+                    .map(|e| e.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                ui.label(RichText::new(ext).color(weak));
+                let status = match (words.is_empty(), lost) {
+                    (_, None) => words,
+                    (true, Some(why)) => format!("lost: {why}"),
+                    (false, Some(why)) => format!("{words}; lost: {why}"),
+                };
+                ui.label(RichText::new(status).color(color));
+                match facts.disk_change(mode, p) {
+                    Some(Some((added, removed))) => {
+                        ui.label(RichText::new(added.to_string()).color(green));
+                        ui.label(RichText::new(removed.to_string()).color(red));
                     }
-                    ui.end_row();
-                    let selected = *mode;
-                    let mut picked = None;
-                    let mut cell = |ui: &mut Ui, m: Mode, text: RichText, hover: Option<&str>| {
-                        let enabled = facts.enabled(m);
-                        let text = if facts.refusal(m).is_some() {
-                            RichText::new("–").color(weak.gamma_multiply(0.6))
-                        } else if !enabled {
-                            text.color(weak.gamma_multiply(0.6))
-                        } else if selected == m {
-                            text.strong()
-                        } else {
-                            text
-                        };
-                        let mut response =
-                            centered(ui, |ui| ui.add(egui::Label::new(text).sense(egui::Sense::click())));
-                        if let Some(hover) = hover {
-                            response = response.on_hover_text(hover);
-                        }
-                        if enabled && response.clicked() {
-                            picked = Some(m);
-                        }
-                    };
-                    for p in facts.paths() {
-                        ui.label(RichText::new(p).monospace());
-                        let now = facts.status.get(p).map_or("  ", String::as_str);
-                        ui.label(status_text(now, weak));
-                        for (i, &m) in Mode::ALL.iter().enumerate() {
-                            let after = afters[i].get(p).map_or("  ", String::as_str);
-                            match lost[i].iter().find(|(f, _)| f == p) {
-                                Some((_, why)) => {
-                                    let text = if after == "  " {
-                                        RichText::new("lost").small()
-                                    } else {
-                                        RichText::new(after).monospace()
-                                    };
-                                    cell(ui, m, text.color(red), Some(&format!("Lost: {why}")));
-                                }
-                                None => {
-                                    let text = status_text(after, weak);
-                                    let text = if selected == m && after != "  " {
-                                        text.color(accent)
-                                    } else {
-                                        text
-                                    };
-                                    cell(ui, m, text, None);
-                                }
-                            }
-                        }
-                        ui.end_row();
+                    Some(None) => {
+                        ui.label(RichText::new("binary").color(weak));
+                        ui.label("");
                     }
-                    for oid in &facts.commits {
-                        let subject = facts
-                            .repo
-                            .lookup(oid)
-                            .map(|ix| facts.repo.commit(ix).subject.clone())
-                            .unwrap_or_default();
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(oid.short(facts.repo.abbrev_len.max(7))).monospace(),
-                            );
-                            ui.add(
-                                egui::Label::new(RichText::new(subject).small().color(weak))
-                                    .truncate(),
-                            );
-                        });
-                        ui.label(RichText::new("commit").small().color(weak));
-                        for m in Mode::ALL {
-                            cell(
-                                ui,
-                                m,
-                                RichText::new("lost").small().color(red),
-                                Some("On no branch, tag or worktree afterwards"),
-                            );
-                        }
-                        ui.end_row();
+                    None => {
+                        ui.label("");
+                        ui.label("");
                     }
-                    if let Some(m) = picked {
-                        *mode = m;
-                    }
-                });
+                }
+                ui.end_row();
+            }
         });
 }
 
-/// A `git status --short` code, or a quiet "clean".
-fn status_text(code: &str, weak: Color32) -> RichText {
-    if code == "  " {
-        RichText::new("clean").small().color(weak)
-    } else {
-        RichText::new(code).monospace()
-    }
-}
-
-/// `add` centred in its grid cell.
-fn centered(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> egui::Response) -> egui::Response {
-    ui.allocate_ui_with_layout(
-        vec2(64.0, ui.spacing().interact_size.y),
-        egui::Layout::top_down(egui::Align::Center),
-        add,
-    )
-    .inner
-}
