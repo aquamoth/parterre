@@ -2,6 +2,7 @@
 //! and lay that graph out. Nothing in this crate depends on a GUI toolkit.
 
 pub mod blame;
+pub mod branches;
 pub mod changed_files;
 pub mod columns;
 pub mod compare;

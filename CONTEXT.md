@@ -22,6 +22,52 @@ One of the repository's checkouts that git knows about: the main one and each li
 with its own folder and its own HEAD. The one parterre opened is one of them.
 _Avoid_: checkout, clone, working copy
 
+### Repository operations
+
+**Local branch**:
+A named line of work in this repository, pointing to a commit. A worktree can have it checked
+out.
+_Avoid_: worktree, checkout
+
+**Remote-tracking branch**:
+A local record of a branch on a remote, reflecting the last fetch from that remote.
+_Avoid_: remote worktree
+
+**Local tracking branch**:
+A local branch configured with an upstream. Several local branches can share an upstream,
+and their names and commits can differ from it.
+_Avoid_: remote branch
+
+**Switching branches**:
+Changing which branch the open worktree has checked out.
+_Avoid_: going to a worktree, opening a branch
+
+**Open worktree**:
+The worktree parterre currently shows in its main window.
+_Avoid_: active checkout, current working copy
+
+**Operation**:
+A git action run from parterre that changes the repository or one of its worktrees.
+_Avoid_: command, task
+
+**Upstream**:
+The branch configured as a local branch's tracking target, against which git counts ahead and
+behind commits.
+_Avoid_: parent branch, remote counterpart
+
+**Operation in progress**:
+A merge, rebase, cherry-pick or revert that git has started and left unfinished in a worktree.
+_Avoid_: running command, pending task
+
+**Lost work**:
+Commits no other branch, remote branch, tag or worktree reaches, and uncommitted changes to
+non-ignored files, whether staged, modified or untracked.
+_Avoid_: unpushed work, dirty worktree
+
+**Deleting a worktree**:
+Removing a worktree from git and deleting its folder and everything in it.
+_Avoid_: removing a worktree, closing a worktree
+
 ### The log
 
 **Log window**:

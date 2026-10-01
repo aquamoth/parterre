@@ -500,17 +500,19 @@ impl<T> DiffQueue<T> {
         let Some(pending) = &self.confirm else { return };
         let n = pending.len();
         let (mut open, mut cancel) = (false, false);
-        let modal = egui::Modal::new(id).show(ui.ctx(), |ui| {
-            ui.set_width(340.0);
-            ui.label(RichText::new(format!("Open {n} diff windows?")).strong());
-            ui.add_space(4.0);
-            ui.label("A window opens for every selected file.");
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                open = widgets::text_button(ui, "Open all").clicked();
-                cancel = widgets::text_button(ui, "Cancel").clicked();
+        let modal = crate::dialogs::Dialog::new(id, &format!("Open {n} diff windows?"))
+            .width(340.0)
+            .show(ui.ctx(), |ui| {
+                ui.add_space(4.0);
+                ui.label("A window opens for every selected file.");
+                ui.add_space(12.0);
+                ui.separator();
+                match crate::dialogs::actions(ui, "Open all", true, false, false) {
+                    crate::dialogs::Answer::Primary => open = true,
+                    crate::dialogs::Answer::Cancel => cancel = true,
+                    _ => {}
+                }
             });
-        });
         if open {
             self.ready.extend(self.confirm.take().unwrap_or_default());
         } else if cancel || modal.should_close() {

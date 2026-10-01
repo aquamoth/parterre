@@ -17,6 +17,7 @@ use parterre_core::{Oid, Repo};
 
 mod auto_reload;
 mod blame_window;
+mod branches;
 mod column_borders;
 mod commit_table;
 mod compare_window;
@@ -223,6 +224,7 @@ pub struct ParterreApp {
     /// The most recently loaded snapshot, used for new layouts. The scene on screen keeps its
     /// own snapshot until a new layout replaces it. `None` until a repository is opened.
     repo: Option<Arc<Repo>>,
+    branches: branches::Tool,
     /// Repositories opened before, newest first.
     recent: Recent,
     /// Show the folder picker at the end of this frame.
@@ -404,6 +406,7 @@ impl ParterreApp {
             selection: Selection::default(),
             selected_edge: None,
             preview: None,
+            branches: branches::Tool::default(),
             context_node: None,
             pending_select: Vec::new(),
             drag: None,
@@ -1821,6 +1824,15 @@ impl ParterreApp {
                             ui.close();
                         }
                     });
+                    if let Some(request) = branches::node_menu(
+                        ui,
+                        &scene.repo,
+                        oid,
+                        self.branches.catalog.as_deref(),
+                        self.branches.busy(),
+                    ) {
+                        action = Some(MenuAction::Branch(request));
+                    }
                     // The worktrees shown on the node, the open one at HEAD among them.
                     let worktrees: Vec<&parterre_core::Worktree> = scene
                         .worktrees_on(node)
@@ -1981,6 +1993,7 @@ impl ParterreApp {
             Some(MenuAction::Center(node)) => self.center_on(node),
             Some(MenuAction::ShowLog(nodes)) => self.show_log(&nodes),
             Some(MenuAction::Compare(request)) => self.compare_request(request),
+            Some(MenuAction::Branch(request)) => self.branches.request(&response.ctx, request),
             Some(MenuAction::OpenPullRequest(url)) => {
                 if let Err(e) = crate::browser::open(&url) {
                     self.status = Some((e, true));
@@ -2368,6 +2381,7 @@ enum MenuAction {
     ShowLog(Vec<usize>),
     /// Mark a commit for comparison, or compare two.
     Compare(CompareRequest),
+    Branch(branches::Request),
     /// Open a pull request's page in the browser.
     OpenPullRequest(String),
     /// Open a worktree's folder in the file manager or a terminal.
@@ -2397,6 +2411,12 @@ impl eframe::App for ParterreApp {
             self.title = title;
         }
         self.auto_reload(&ctx);
+        self.branches.update(&ctx, self.repo.as_ref());
+        if let Some(path) = self.branches.reload.take()
+            && self.repo.as_ref().is_some_and(|r| r.path == path)
+        {
+            self.reload();
+        }
         self.update_pull_requests(&ctx);
         self.ensure_scene(&ctx);
         self.view_before = self.view;
@@ -2428,6 +2448,15 @@ impl eframe::App for ParterreApp {
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         self.about_window(&ctx);
+        self.branches.show(&ctx);
+        if let Some((repo, commits, exact)) = self.branches.log_request.take() {
+            if exact {
+                self.open_loss_log(repo, &commits);
+            } else {
+                let indices: Vec<_> = commits.iter().filter_map(|oid| repo.lookup(oid)).collect();
+                self.open_log(repo, &indices);
+            }
+        }
 
         // Scripted runs wait for the graph, unless there is none to wait for, and for the diffs
         // and the pull requests (and the layout with them) being loaded.

@@ -1,0 +1,726 @@
+//! The local-branch tool. Graph nodes and log rows share the same menu and controller.
+//! Slow Git queries and all mutations run on workers; forms retain their selected commit.
+
+use std::path::PathBuf;
+use std::sync::{Arc, mpsc};
+
+use eframe::egui::{self, Color32, Id, RichText, Ui, vec2};
+use parterre_core::branches::{
+    Action, Branches, Cancel, Catalog, Create, CreateDraft, Outcome, Report, Warning, command_text,
+};
+use parterre_core::{Oid, RefKind, Repo};
+
+use crate::{dialogs, menu, widgets};
+
+#[derive(Clone, Debug)]
+pub enum Request {
+    Create {
+        start: Oid,
+        track: Option<String>,
+        switch: bool,
+    },
+    Run(Action),
+}
+
+/// One ref target gets a direct named item; several get the existing app's submenu treatment.
+pub fn node_menu(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    catalog: Option<&Catalog>,
+    busy: bool,
+) -> Option<Request> {
+    let mut request = None;
+    menu::separator(ui);
+    if ui
+        .add_enabled(
+            !busy && catalog.is_some(),
+            egui::Button::new("Create branch here…"),
+        )
+        .on_disabled_hover_text(if busy {
+            "A Git operation is running"
+        } else {
+            "Loading branch information"
+        })
+        .clicked()
+    {
+        request = Some(Request::Create {
+            start: commit,
+            track: None,
+            switch: false,
+        });
+        ui.close();
+    }
+    let Some(catalog) = catalog else {
+        return request;
+    };
+    let refs: Vec<_> = repo
+        .refs
+        .iter()
+        .filter(|r| repo.commit(r.target).oid == commit)
+        .filter(|r| match r.kind {
+            RefKind::LocalBranch => catalog
+                .locals
+                .iter()
+                .any(|b| b.name == r.name && b.tip == commit),
+            RefKind::RemoteBranch => catalog
+                .remotes
+                .iter()
+                .any(|b| b.name == r.name && b.tip == commit),
+            _ => false,
+        })
+        .collect();
+    let mut switches: Vec<(String, Request)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if catalog.has_working_tree {
+        for r in &refs {
+            let candidates: Vec<&str> = match r.kind {
+                RefKind::LocalBranch => vec![r.name.as_str()],
+                RefKind::RemoteBranch => catalog.trackers(&r.name),
+                _ => continue,
+            };
+            if r.kind == RefKind::RemoteBranch
+                && candidates.is_empty()
+                && !r.name.ends_with("/HEAD")
+            {
+                switches.push((
+                    r.name.clone(),
+                    Request::Create {
+                        start: commit,
+                        track: Some(r.name.clone()),
+                        switch: true,
+                    },
+                ));
+            }
+            for name in candidates {
+                if catalog.current.as_deref() != Some(name)
+                    && !catalog.occupied.contains_key(name)
+                    && seen.insert(name.to_owned())
+                {
+                    switches.push((
+                        name.to_owned(),
+                        Request::Run(Action::Switch(name.to_owned())),
+                    ));
+                }
+            }
+        }
+    }
+    let local_targets: std::collections::HashSet<_> = switches
+        .iter()
+        .filter(|(_, request)| matches!(request, Request::Run(Action::Switch(_))))
+        .map(|(name, _)| name.clone())
+        .collect();
+    for (name, request) in &mut switches {
+        if matches!(request, Request::Create { .. }) && local_targets.contains(name) {
+            name.push_str(" (remote)");
+        }
+    }
+    switches.sort_by(|a, b| a.0.cmp(&b.0));
+    target_menu(ui, "Switch to", &switches, busy, &mut request);
+    let deletions: Vec<_> = refs
+        .iter()
+        .filter(|r| {
+            r.kind == RefKind::LocalBranch
+                && catalog.current.as_ref() != Some(&r.name)
+                && !catalog.occupied.contains_key(&r.name)
+        })
+        .map(|r| {
+            (
+                r.name.clone(),
+                Request::Run(Action::Delete {
+                    name: r.name.clone(),
+                    tip: commit,
+                }),
+            )
+        })
+        .collect();
+    target_menu(ui, "Delete branch", &deletions, busy, &mut request);
+    request
+}
+
+fn target_menu(
+    ui: &mut Ui,
+    verb: &str,
+    targets: &[(String, Request)],
+    busy: bool,
+    request: &mut Option<Request>,
+) {
+    let mut item = |ui: &mut Ui, label: String, value: &Request| {
+        if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
+            *request = Some(value.clone());
+            ui.close();
+        }
+    };
+    match targets {
+        [] => {}
+        [(name, target)] => item(ui, format!("{verb} {name}"), target),
+        many => menu::plain_submenu(ui, verb, |ui| {
+            for (name, target) in many {
+                item(ui, name.clone(), target);
+            }
+        }),
+    }
+}
+
+#[derive(Debug)]
+struct Form {
+    repo: Arc<Repo>,
+    catalog: Arc<Catalog>,
+    start: Oid,
+    draft: CreateDraft,
+    switch: bool,
+    fresh: bool,
+}
+
+impl Form {
+    fn new(
+        repo: Arc<Repo>,
+        catalog: Arc<Catalog>,
+        start: Oid,
+        prefer: Option<String>,
+        switch: bool,
+    ) -> Self {
+        let draft = CreateDraft::new(&catalog, start, prefer.as_deref());
+        Self {
+            repo,
+            catalog,
+            start,
+            draft,
+            switch,
+            fresh: true,
+        }
+    }
+    fn action(&self) -> Action {
+        Action::Create(Create {
+            start: self.start,
+            name: self.draft.name().to_owned(),
+            track: self.draft.upstream(),
+            switch: self.switch,
+        })
+    }
+
+    fn show(&mut self, ctx: &egui::Context) -> (dialogs::Answer, bool) {
+        let mut log = false;
+        let mut answer = dialogs::Answer::Open;
+        let modal = dialogs::Dialog::new("create-branch", "Create branch").show(ctx, |ui| {
+            let commands = dialogs::fields(ui, |ui| {
+                if let Some(ix) = self.repo.lookup(&self.start) {
+                    log = dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len);
+                }
+                self.name_field(ui);
+                ui.add_space(2.0);
+                ui.add_enabled(
+                    self.catalog.has_working_tree,
+                    egui::Checkbox::new(&mut self.switch, "Switch to new branch"),
+                );
+                ui.add_space(8.0);
+                self.track_field(ui);
+                Branches::commands(&self.catalog, &self.action())
+            });
+            let shown = commands
+                .as_ref()
+                .map(|cmds| cmds.iter().map(|a| command_text(a)).collect::<Vec<_>>())
+                .unwrap_or_default();
+            dialogs::command_box(ui, &shown);
+            answer = dialogs::actions(
+                ui,
+                if self.switch {
+                    "Create and switch"
+                } else {
+                    "Create"
+                },
+                commands.is_ok(),
+                false,
+                false,
+            );
+        });
+        self.fresh = false;
+        if modal.should_close() && answer == dialogs::Answer::Open {
+            answer = dialogs::Answer::Cancel;
+        }
+        (answer, log)
+    }
+
+    fn name_field(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Local branch name").strong());
+        let suggestion = self.draft.suggested_name(&self.catalog);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let width = ui.available_width() - widgets::BUTTON - 4.0;
+            let mut name = self.draft.name().to_owned();
+            let response = widgets::text_field(ui, &mut name, "Enter a branch name", width);
+            if self.fresh {
+                response.request_focus();
+            }
+            if response.changed() {
+                self.draft.set_name(name);
+            }
+            if ui
+                .add_enabled_ui(
+                    !suggestion.is_empty() && self.draft.name() != suggestion,
+                    |ui| widgets::icon_button(ui, parterre_core::glyphs::RESET, false),
+                )
+                .inner
+                .on_hover_text(format!("Use suggested name: {suggestion}"))
+                .clicked()
+            {
+                self.draft.restore_suggested_name(&self.catalog);
+            }
+        });
+        if !self.draft.name().is_empty()
+            && let Some(error) = self.catalog.name_error(self.draft.name())
+        {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+    }
+
+    fn track_field(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Track branch").strong());
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), widgets::BUTTON),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let mut selected = self.draft.remote().map(str::to_owned);
+                let mut remotes = self.catalog.remote_names.clone();
+                remotes.sort();
+                let chosen = ui
+                    .allocate_ui_with_layout(
+                        vec2(110.0, widgets::BUTTON),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| dialogs::choice(ui, "track-remote", &mut selected, "None", &remotes),
+                    )
+                    .inner;
+                if chosen {
+                    self.draft.set_remote(selected);
+                }
+                let width = ui.available_width() - widgets::BUTTON - 4.0;
+                ui.allocate_ui_with_layout(
+                    vec2(width, widgets::BUTTON),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        let choices = self.draft.remote_branches(&self.catalog);
+                        let mut branch = self.draft.track_name().to_owned();
+                        let response = ui
+                            .add_enabled_ui(self.draft.remote().is_some(), |ui| {
+                                dialogs::editable_choice(
+                                    ui,
+                                    "track-branch",
+                                    &mut branch,
+                                    "Branch name",
+                                    &choices,
+                                )
+                            })
+                            .inner;
+                        if response.changed() {
+                            self.draft.set_track_name(&self.catalog, branch);
+                        }
+                    },
+                );
+                if ui
+                    .add_enabled_ui(self.draft.can_restore_track_name(), |ui| {
+                        widgets::icon_button(ui, parterre_core::glyphs::RESET, false)
+                    })
+                    .inner
+                    .on_hover_text(format!("Use local branch name: {}", self.draft.name()))
+                    .clicked()
+                {
+                    self.draft.restore_track_name();
+                }
+            },
+        );
+        let upstream = self.draft.upstream();
+        let track_error =
+            if self.draft.remote().is_some() && self.draft.track_name().trim().is_empty() {
+                (!self.draft.name().is_empty()).then_some("Enter a branch name to track.")
+            } else {
+                upstream
+                    .as_deref()
+                    .and_then(|s| self.catalog.track_error(s))
+            };
+        if let Some(error) = track_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        let trackers = upstream
+            .as_deref()
+            .map(|s| self.catalog.trackers(s))
+            .unwrap_or_default();
+        if !trackers.is_empty() {
+            let color = if ui.visuals().dark_mode {
+                Color32::from_rgb(240, 191, 95)
+            } else {
+                Color32::from_rgb(139, 86, 0)
+            };
+            egui::Frame::new()
+                .fill(color.gamma_multiply(0.10))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.colored_label(
+                        color,
+                        format!(
+                            "Already tracked by {}. This creates another local branch tracking {}.",
+                            trackers.join(", "),
+                            upstream.as_deref().unwrap_or_default()
+                        ),
+                    );
+                });
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Job {
+    path: PathBuf,
+    label: String,
+    cancel: Cancel,
+    rx: mpsc::Receiver<Outcome>,
+}
+
+#[derive(Debug)]
+struct Notice {
+    id: u64,
+    title: String,
+    path: PathBuf,
+    report: Report,
+    error: Option<String>,
+    at: f64,
+}
+
+#[derive(Debug, Default)]
+pub struct Tool {
+    repo: Option<Arc<Repo>>,
+    pub catalog: Option<Arc<Catalog>>,
+    loading: Option<mpsc::Receiver<Result<Catalog, String>>>,
+    form: Option<Form>,
+    warning: Option<(PathBuf, Warning, bool)>,
+    job: Option<Job>,
+    notices: Vec<Notice>,
+    next_notice: u64,
+    details: Option<u64>,
+    pub log_request: Option<(Arc<Repo>, Vec<Oid>, bool)>,
+    pub reload: Option<PathBuf>,
+}
+
+impl Tool {
+    pub fn busy(&self) -> bool {
+        self.job.is_some()
+    }
+
+    pub fn update(&mut self, ctx: &egui::Context, repo: Option<&Arc<Repo>>) {
+        let changed = match (&self.repo, repo) {
+            (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+            (None, None) => false,
+            _ => true,
+        };
+        if changed {
+            let different_path = self.repo.as_ref().map(|r| &r.path) != repo.map(|r| &r.path);
+            if different_path {
+                self.form = None;
+                self.warning = None;
+                self.catalog = None;
+            }
+            self.repo = repo.cloned();
+            self.loading = repo.map(|r| {
+                let path = r.path.clone();
+                let ctx = ctx.clone();
+                let (tx, rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let result = Catalog::load(&path).map_err(|e| e.to_string());
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                });
+                rx
+            });
+        }
+        let loaded = self.loading.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Some(Err("Branch information worker stopped unexpectedly.".into()))
+            }
+        });
+        if let Some(result) = loaded {
+            self.loading = None;
+            match result {
+                Ok(catalog) => {
+                    let catalog = Arc::new(catalog);
+                    if let Some(form) = &mut self.form {
+                        form.catalog = catalog.clone();
+                    }
+                    self.catalog = Some(catalog);
+                }
+                Err(e) => {
+                    self.catalog = None;
+                    if let Some(repo) = &self.repo {
+                        self.notice(
+                            ctx,
+                            repo.path.clone(),
+                            "Could not load branch information".into(),
+                            Report::default(),
+                            Some(e),
+                        );
+                    }
+                }
+            }
+        }
+        let completed = self.job.as_ref().and_then(|job| match job.rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(Outcome::Failed {
+                error: parterre_core::branches::Error::Failed("Git operation worker stopped unexpectedly. Review the reloaded repository before retrying.".into()),
+                report: Report::default(),
+            }),
+        });
+        if let Some(result) = completed {
+            let job = self.job.take().unwrap();
+            self.reload = Some(job.path.clone());
+            match result {
+                Outcome::Warning(w) if self.repo.as_ref().is_some_and(|r| r.path == job.path) => {
+                    self.warning = Some((job.path, w, true));
+                }
+                Outcome::Warning(_) => self.notice(
+                    ctx,
+                    job.path,
+                    job.label,
+                    Report::default(),
+                    Some(
+                        "Open this repository again to review the commits at risk before retrying."
+                            .into(),
+                    ),
+                ),
+                Outcome::Done(report) => self.notice(ctx, job.path, job.label, report, None),
+                Outcome::Failed { error, report } => {
+                    self.notice(ctx, job.path, job.label, report, Some(error.to_string()))
+                }
+            }
+        }
+    }
+
+    pub fn request(&mut self, ctx: &egui::Context, request: Request) {
+        if self.busy() {
+            return;
+        }
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
+        match request {
+            Request::Create {
+                start,
+                track,
+                switch,
+            } => {
+                if let Some(catalog) = self.catalog.clone() {
+                    self.form = Some(Form::new(repo, catalog, start, track, switch));
+                }
+            }
+            Request::Run(action) => self.run(ctx, repo.path.clone(), action, None),
+        }
+    }
+
+    fn run(
+        &mut self,
+        ctx: &egui::Context,
+        path: PathBuf,
+        action: Action,
+        approval: Option<Warning>,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        let cancel = Cancel::default();
+        let worker_cancel = cancel.clone();
+        let worker_path = path.clone();
+        let ctx = ctx.clone();
+        let label = action.label();
+        std::thread::spawn(move || {
+            let outcome =
+                Branches::new(worker_path).execute(action, approval.as_ref(), &worker_cancel);
+            let _ = tx.send(outcome);
+            ctx.request_repaint();
+        });
+        self.job = Some(Job {
+            path,
+            label,
+            cancel,
+            rx,
+        });
+    }
+
+    fn notice(
+        &mut self,
+        ctx: &egui::Context,
+        path: PathBuf,
+        title: String,
+        report: Report,
+        error: Option<String>,
+    ) {
+        self.next_notice += 1;
+        self.notices.push(Notice {
+            id: self.next_notice,
+            title,
+            path,
+            report,
+            error,
+            at: ctx.input(|i| i.time),
+        });
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context) {
+        if let Some(mut form) = self.form.take() {
+            let (answer, log) = form.show(ctx);
+            if log {
+                self.log_request = Some((form.repo.clone(), vec![form.start], false));
+            }
+            match answer {
+                dialogs::Answer::Primary => {
+                    self.run(ctx, form.repo.path.clone(), form.action(), None)
+                }
+                dialogs::Answer::Cancel => {}
+                dialogs::Answer::Open => self.form = Some(form),
+            }
+        }
+        if let Some((path, warning, fresh)) = self.warning.take() {
+            let count = warning.commits.len();
+            let loss = format!("{count} commit{}", if count == 1 { "" } else { "s" });
+            let title = match &warning.action {
+                Action::Delete { name, .. } => {
+                    format!("Delete branch {name} and lose {loss}?")
+                }
+                _ => format!(
+                    "Switch branches and lose {count} detached commit{}?",
+                    if count == 1 { "" } else { "s" }
+                ),
+            };
+            const TRIANGLE: parterre_core::glyphs::Glyph = &[parterre_core::glyphs::Part::Path(
+                "M12 3 2 21h20ZM12 9v5m0 3v1",
+            )];
+            let mut answer = dialogs::Answer::Open;
+            let mut show_log = false;
+            let modal = dialogs::Dialog::new("branch-loss", &title)
+                .icon(TRIANGLE, true)
+                .show(ctx, |ui| {
+                    ui.label("These commits are not reachable from any surviving branch, tag or worktree.");
+                    egui::Frame::new()
+                        .fill(widgets::tones(ui).seg_bg)
+                        .corner_radius(8)
+                        .inner_margin(egui::Margin::symmetric(12, 8))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(&loss);
+                                show_log = ui.link("Show in log").clicked();
+                            });
+                        });
+                    let commands = warning.commands.iter().map(|a| command_text(a)).collect::<Vec<_>>();
+                    dialogs::command_box(ui, &commands);
+                    answer = dialogs::actions(
+                        ui,
+                        if matches!(warning.action, Action::Delete { .. }) { "Delete anyway" } else { "Switch anyway" },
+                        true, true, fresh,
+                    );
+                });
+            if show_log {
+                self.log_request = Some((warning.repo.clone(), warning.commits.clone(), true));
+            }
+            match answer {
+                dialogs::Answer::Primary => {
+                    self.run(ctx, path, warning.action.clone(), Some(warning))
+                }
+                dialogs::Answer::Cancel => {}
+                dialogs::Answer::Open if !modal.should_close() => {
+                    self.warning = Some((path, warning, false))
+                }
+                _ => {}
+            }
+        }
+        self.notifications(ctx);
+    }
+
+    fn notifications(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        self.notices
+            .retain(|n| n.error.is_some() || self.details == Some(n.id) || now - n.at < 5.0);
+        if !self.notices.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        egui::Area::new(Id::new("branch-notifications"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-16.0, -40.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_max_width(360.0);
+                if let Some(job) = &self.job {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(&job.label);
+                            if ui.button("Cancel").clicked() {
+                                job.cancel.cancel();
+                            }
+                        });
+                    });
+                }
+                let mut remove = None;
+                for n in &self.notices {
+                    let color = if n.error.is_some() {
+                        ui.visuals().error_fg_color
+                    } else if ui.visuals().dark_mode {
+                        Color32::from_rgb(75, 165, 105)
+                    } else {
+                        Color32::from_rgb(35, 120, 65)
+                    };
+                    egui::Frame::popup(ui.style())
+                        .stroke(egui::Stroke::new(1.0, color))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.link(RichText::new(&n.title).color(color)).clicked() {
+                                    self.details = Some(n.id);
+                                }
+                                if ui.small_button("×").clicked() {
+                                    remove = Some(n.id);
+                                }
+                            });
+                            if let Some(error) = &n.error {
+                                ui.add(egui::Label::new(error).wrap());
+                            }
+                        });
+                }
+                if let Some(id) = remove {
+                    self.notices.retain(|n| n.id != id);
+                }
+            });
+        if let Some(n) = self.notices.iter().find(|n| Some(n.id) == self.details) {
+            let mut close = false;
+            let modal = dialogs::Dialog::new("git-operation-details", &n.title)
+                .width(600.0)
+                .show(ctx, |ui| {
+                    dialogs::fields(ui, |ui| {
+                        ui.weak(n.path.display().to_string());
+                        if let Some(error) = &n.error {
+                            ui.colored_label(ui.visuals().error_fg_color, error);
+                        }
+                        for step in &n.report.steps {
+                            ui.label(RichText::new(command_text(&step.args)).monospace());
+                            if !step.output.is_empty() {
+                                ui.add(
+                                    egui::Label::new(RichText::new(&step.output).monospace())
+                                        .wrap(),
+                                );
+                            }
+                        }
+                    });
+                    ui.separator();
+                    close =
+                        dialogs::actions(ui, "", false, false, false) == dialogs::Answer::Cancel;
+                });
+            if close || modal.should_close() {
+                self.details = None;
+            }
+        }
+    }
+}
+
+impl Drop for Tool {
+    fn drop(&mut self) {
+        if let Some(job) = &self.job {
+            job.cancel.cancel();
+        }
+    }
+}

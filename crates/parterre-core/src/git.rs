@@ -140,6 +140,26 @@ impl Git {
         self.command(args).output().map_err(GitError::Spawn)
     }
 
+    /// Repository-changing porcelain: locks enabled and the user's locale inherited.
+    /// Kept separate from the viewer's read-only runner.
+    pub(crate) fn operation_command(&self, args: &[String]) -> Command {
+        let mut cmd = self.command(args);
+        cmd.env("GIT_OPTIONAL_LOCKS", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_EDITOR", ":");
+        if let Some(locale) = std::env::var_os("LC_ALL") {
+            cmd.env("LC_ALL", locale);
+        } else {
+            cmd.env_remove("LC_ALL");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        cmd
+    }
+
     /// Runs git and returns stdout, failing on a non-zero exit status.
     pub(crate) fn run(&self, args: &[&str]) -> Result<String, GitError> {
         let out = self.output(args)?;
@@ -165,7 +185,7 @@ impl Git {
     }
 
     /// Runs git with `input` on stdin and returns stdout, failing on a non-zero exit status.
-    fn run_with_input(&self, args: &[&str], input: String) -> Result<String, GitError> {
+    pub(crate) fn run_with_input(&self, args: &[&str], input: String) -> Result<String, GitError> {
         use std::io::Write as _;
         let mut child = self
             .command(args)
