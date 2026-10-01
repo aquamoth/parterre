@@ -359,6 +359,7 @@ impl ParterreApp {
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         // One screenshot shows everything: the settings in the main window.
         cc.egui_ctx.set_embed_viewports(automation.is_active());
+        cc.egui_ctx.add_plugin(crate::dialogs::ModalLock::default());
         let demo_settings = automation
             .demo_open
             .as_deref()
@@ -1993,7 +1994,10 @@ impl ParterreApp {
             Some(MenuAction::Center(node)) => self.center_on(node),
             Some(MenuAction::ShowLog(nodes)) => self.show_log(&nodes),
             Some(MenuAction::Compare(request)) => self.compare_request(request),
-            Some(MenuAction::Branch(request)) => self.branches.request(&response.ctx, request),
+            Some(MenuAction::Branch(request)) => {
+                self.branches
+                    .request(&response.ctx, request, egui::ViewportId::ROOT)
+            }
             Some(MenuAction::OpenPullRequest(url)) => {
                 if let Err(e) = crate::browser::open(&url) {
                     self.status = Some((e, true));
@@ -2403,6 +2407,13 @@ impl eframe::App for ParterreApp {
         }
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
+        crate::dialogs::set_look(
+            &ctx,
+            crate::dialogs::Look {
+                icon: self.window_icon.clone(),
+                theme: self.window_theme,
+            },
+        );
         self.view.text_size = ctx.zoom_factor();
         self.graph_hovered = false;
         let title = window_title(self.repo.as_deref());
@@ -2483,8 +2494,10 @@ impl eframe::App for ParterreApp {
         }
     }
 
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.automation.inject_input(raw_input);
+        // Before eframe sees a close request: the main window stays while a modal dialog is up.
+        crate::dialogs::ModalLock::filter(ctx, raw_input);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

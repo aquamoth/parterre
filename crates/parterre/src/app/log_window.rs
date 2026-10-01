@@ -1709,7 +1709,7 @@ impl ParterreApp {
             self.compare_request(request);
         }
         for request in self.log.take_branch_requests() {
-            self.branches.request(ctx, request);
+            self.branches.request(ctx, request, viewport_id());
         }
         for (repo, spec) in self.log.take_diff_requests() {
             self.diffs.open(repo, spec, &self.settings.diff_window, ctx);

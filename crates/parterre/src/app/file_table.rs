@@ -495,28 +495,29 @@ impl<T> DiffQueue<T> {
         self.confirm = None;
     }
 
-    /// Asks before opening more than [`MANY_DIFFS`] diff windows at once.
+    /// Asks before opening more than [`MANY_DIFFS`] diff windows at once, in a modal dialog over
+    /// the window `ui` is in.
     pub fn confirm_many(&mut self, ui: &mut Ui, id: Id) {
         let Some(pending) = &self.confirm else { return };
         let n = pending.len();
-        let (mut open, mut cancel) = (false, false);
-        let modal = crate::dialogs::Dialog::new(id, &format!("Open {n} diff windows?"))
+        let shown = crate::dialogs::Dialog::new(id, &format!("Open {n} diff windows?"))
             .width(340.0)
+            .modal()
+            .opener(ui.ctx().viewport_id())
             .show(ui.ctx(), |ui| {
                 ui.add_space(4.0);
                 ui.label("A window opens for every selected file.");
                 ui.add_space(12.0);
                 ui.separator();
-                match crate::dialogs::actions(ui, "Open all", true, false, false) {
-                    crate::dialogs::Answer::Primary => open = true,
-                    crate::dialogs::Answer::Cancel => cancel = true,
-                    _ => {}
-                }
+                crate::dialogs::actions(ui, "Open all", true, false, false)
             });
-        if open {
-            self.ready.extend(self.confirm.take().unwrap_or_default());
-        } else if cancel || modal.should_close() {
-            self.confirm = None;
+        match shown.inner {
+            crate::dialogs::Answer::Primary => {
+                self.ready.extend(self.confirm.take().unwrap_or_default())
+            }
+            crate::dialogs::Answer::Cancel => self.confirm = None,
+            crate::dialogs::Answer::Open if shown.should_close() => self.confirm = None,
+            crate::dialogs::Answer::Open => {}
         }
     }
 }
