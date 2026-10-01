@@ -228,6 +228,8 @@ struct Form {
     opener: ViewportId,
     /// PROTOTYPE (#163): `Some` when this form adds a worktree.
     wt: Option<Wt>,
+    /// PROTOTYPE (#163): the tracking row only shows an existing branch's upstream.
+    track_frozen: bool,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -449,30 +451,39 @@ impl Form {
             }
             self.follow();
         }
-        let weak = ui.visuals().weak_text_color();
+        // No notes for an existing branch or detached: the disabled tracking row and the
+        // (detached) placeholder say it, until a message proves needed.
         match self.checkout() {
-            Checkout::Detached => {
-                ui.colored_label(weak, format!("Detached HEAD at {}", self.short()));
-            }
-            Checkout::Existing(name) => {
-                let upstream = self
-                    .catalog
-                    .locals
-                    .iter()
-                    .find(|b| b.name == name)
-                    .and_then(|b| b.upstream.clone());
-                let text = match upstream {
-                    Some(u) => format!("Existing branch, tracking {u}"),
-                    None => "Existing branch".to_owned(),
-                };
-                ui.colored_label(weak, text);
-            }
+            Checkout::Detached | Checkout::Existing(_) => {}
             Checkout::New => {
                 if let Some(error) = self.catalog.name_error(self.draft.name()) {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
             }
         }
+    }
+
+    /// An existing branch keeps its own upstream, and detached has none: the tracking row shows
+    /// that, disabled.
+    fn frozen_track_field(&mut self, ui: &mut Ui) {
+        let upstream = match self.checkout() {
+            Checkout::Existing(name) => self
+                .catalog
+                .locals
+                .iter()
+                .find(|b| b.name == name)
+                .and_then(|b| b.upstream.clone()),
+            _ => None,
+        };
+        let mut shown = CreateDraft::new(&self.catalog, self.start, upstream.as_deref());
+        if upstream.is_none() {
+            shown.set_remote(None);
+        }
+        let draft = std::mem::replace(&mut self.draft, shown);
+        self.track_frozen = true;
+        ui.add_enabled_ui(false, |ui| self.track_field(ui));
+        self.track_frozen = false;
+        self.draft = draft;
     }
 
     fn go_to_box(&mut self, ui: &mut Ui) {
@@ -540,6 +551,7 @@ impl Form {
             fresh: true,
             opener,
             wt: None,
+            track_frozen: false,
         }
     }
     fn action(&self) -> Action {
@@ -574,9 +586,11 @@ impl Form {
                     } else {
                         self.name_field(ui);
                     }
+                    ui.add_space(8.0);
                     if !worktree || matches!(self.checkout(), Checkout::New) {
-                        ui.add_space(8.0);
                         self.track_field(ui);
+                    } else {
+                        self.frozen_track_field(ui);
                     }
                     // The worktree controls.
                     if worktree {
@@ -708,6 +722,9 @@ impl Form {
                 }
             },
         );
+        if self.track_frozen {
+            return;
+        }
         let upstream = self.draft.upstream();
         let track_error =
             if self.draft.remote().is_some() && self.draft.track_name().trim().is_empty() {
