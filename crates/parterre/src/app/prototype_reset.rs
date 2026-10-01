@@ -624,6 +624,13 @@ pub fn show(
     });
 }
 
+/// The files table's width, the gap with the divider in it, and the side with the modes.
+const TABLE: f32 = 520.0;
+const GAP: f32 = 40.0;
+const SIDE: f32 = 420.0;
+/// The dialog's margin (`dialogs::MARGIN`), which the files pane covers.
+const MARGIN: f32 = 20.0;
+
 fn dialog(
     ctx: &egui::Context,
     open: &mut Open,
@@ -632,7 +639,7 @@ fn dialog(
     let facts = &open.facts;
     let title = format!("Reset {} to {}", facts.branch, facts.short());
     let dialog = dialogs::Dialog::new("prototype-reset", &title)
-        .width(1040.0)
+        .width(TABLE + GAP + SIDE)
         .opener(open.opener)
         .raise(open.fresh);
     let mut mode = open.mode;
@@ -642,9 +649,28 @@ fn dialog(
     let mut show_log = false;
     let mut left_height = height;
     let shown = dialog.show(ctx, |ui| {
+        let top = ui.cursor().top();
         ui.horizontal_top(|ui| {
-            let left = ui.vertical(|ui| {
-                ui.set_width(440.0);
+            // The files, as a pane of the log window: to the window's edges, then a divider.
+            let (slot, _) = ui.allocate_exact_size(vec2(TABLE, height), egui::Sense::hover());
+            let pane = egui::Rect::from_min_max(
+                egui::pos2(slot.left() - MARGIN, top - MARGIN),
+                egui::pos2(slot.right() + GAP / 2.0, top + height + MARGIN),
+            );
+            let c = super::log_window::colors(ui);
+            ui.painter().rect_filled(pane, 0.0, c.pane);
+            ui.painter().vline(pane.right(), pane.y_range(), egui::Stroke::new(1.0, c.line));
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(pane)
+                    .id_salt("prototype-reset-pane")
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            child.set_clip_rect(pane);
+            file_table(&mut child, facts, mode, table);
+            ui.add_space(GAP);
+            let right = ui.vertical(|ui| {
+                ui.set_width(SIDE);
                 dialogs::fields(ui, |ui| {
                     if let Some(ix) = facts.repo.lookup(&facts.target) {
                         dialogs::commit_line(ui, facts.repo.commit(ix), facts.repo.abbrev_len);
@@ -653,27 +679,34 @@ fn dialog(
                     ui.add_space(4.0);
                     for m in Mode::ALL {
                         ui.horizontal_top(|ui| {
-                            let response = ui
-                                .radio(mode == m, m.name())
+                            // Every help text starts at the same edge.
+                            let radio = ui
+                                .allocate_ui_with_layout(
+                                    vec2(70.0, 18.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.set_min_width(70.0);
+                                        ui.radio(mode == m, m.name())
+                                    },
+                                )
+                                .inner
                                 .on_hover_text(m.flag());
-                            if response.clicked() {
-                                mode = m;
-                            }
                             let help = ui.add(
-                                egui::Label::new(RichText::new(facts.headline(m)).weak())
+                                egui::Label::new(RichText::new(facts.headline(m)).small().weak())
                                     .wrap()
                                     .sense(egui::Sense::click()),
                             );
-                            if help.clicked() {
+                            if radio.clicked() || help.clicked() {
                                 mode = m;
                             }
                         });
-                        ui.add_space(2.0);
                     }
                     let red = ui.visuals().error_fg_color;
                     if let Some(refusal) = facts.refusal(mode) {
                         ui.add_space(4.0);
-                        ui.label(RichText::new(format!("git reset {} refuses:", mode.flag())).color(red));
+                        ui.label(
+                            RichText::new(format!("git reset {} refuses:", mode.flag())).color(red),
+                        );
                         ui.label(RichText::new(refusal).monospace().small().color(red));
                     }
                     if !facts.commits.is_empty() {
@@ -693,7 +726,8 @@ fn dialog(
                 dialogs::command_box(ui, &[facts.command(mode)]);
                 let loses = facts.loses(mode);
                 let label = if loses { "Reset anyway" } else { "Reset" };
-                let answer = dialogs::actions(ui, label, facts.enabled(mode), loses, fresh && loses);
+                let answer =
+                    dialogs::actions(ui, label, facts.enabled(mode), loses, fresh && loses);
                 // Enter runs a reset that loses nothing.
                 if answer == dialogs::Answer::Open
                     && !loses
@@ -704,15 +738,8 @@ fn dialog(
                 }
                 answer
             });
-            left_height = left.response.rect.height();
-            ui.add_space(16.0);
-            let size = vec2((ui.available_width() - 28.0).max(520.0), height.max(240.0));
-            ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.set_width(size.x);
-                ui.set_height(size.y);
-                file_table(ui, facts, mode, table);
-            });
-            left.inner
+            left_height = right.response.rect.height();
+            right.inner
         })
         .inner
     });
@@ -730,36 +757,75 @@ fn dialog(
 /// The files the reset concerns, in the log and compare windows' changed-files table: what
 /// each is afterwards, in words, and the lines added and removed on disk.
 fn file_table(ui: &mut Ui, facts: &Facts, mode: Mode, table: &mut super::file_table::FileTable) {
+    use super::file_table::StatusIcon;
     use parterre_core::changed_files::{ChangedFile, FileStatus};
-    let mut words = std::collections::HashMap::new();
+    let c = super::log_window::colors(ui);
+    let amber = if ui.visuals().dark_mode {
+        Color32::from_rgb(0xe0, 0xa8, 0x40)
+    } else {
+        Color32::from_rgb(0xa8, 0x6a, 0x00)
+    };
+    let letter_color = |l: char| match l {
+        'A' | 'U' | '✔' => c.added,
+        'D' | '!' => c.removed,
+        _ => amber,
+    };
+    let after = facts.after(mode);
     let blocker = facts.blocker(mode);
+    let mut icons = std::collections::HashMap::new();
     let files: Vec<ChangedFile> = facts
         .paths()
         .into_iter()
         .map(|p| {
+            let mut badges: Vec<(char, bool, Color32)> = Vec::new();
+            let mut badge = |l: char, filled: bool| badges.push((l, filled, letter_color(l)));
             // When git refuses, nothing changes: the file it names says why.
-            let (added, removed) = if let Some((b, why)) = &blocker {
-                let (text, red) = if b == p {
-                    (why.to_string(), true)
+            let (tooltip, added, removed) = if let Some((b, why)) = &blocker {
+                if b == p {
+                    badge('!', true);
+                    (why.to_string(), Some(0), Some(0))
                 } else {
-                    ("unchanged".to_owned(), false)
-                };
-                words.insert(p.clone(), (text, red));
-                (Some(0), Some(0))
+                    ("Unchanged".to_owned(), Some(0), Some(0))
+                }
             } else {
+                let code = after.get(p).map_or("  ", String::as_str);
+                match code {
+                    "??" => badge('U', false),
+                    "D  ??" => {
+                        badge('D', true);
+                        badge('U', false);
+                    }
+                    _ => {
+                        let mut chars = code.chars();
+                        let (x, y) = (chars.next().unwrap_or(' '), chars.next().unwrap_or(' '));
+                        if x != ' ' {
+                            badge(x, true);
+                        }
+                        if y != ' ' {
+                            badge(y, false);
+                        }
+                    }
+                }
                 let (text, lost) = facts.words(mode, p);
+                if code == "  " && lost.is_none() && text == "updated" {
+                    badge('✔', false);
+                }
+                if lost.is_some() {
+                    badge('!', true);
+                }
                 let text = match (text.is_empty(), lost) {
                     (_, None) => text,
                     (true, Some(why)) => format!("lost: {why}"),
                     (false, Some(why)) => format!("{text}; lost: {why}"),
                 };
-                words.insert(p.clone(), (text, lost.is_some()));
-                match facts.disk_change(mode, p) {
+                let (a, r) = match facts.disk_change(mode, p) {
                     Some(Some((a, r))) => (Some(a), Some(r)),
                     Some(None) => (None, None),
                     None => (Some(0), Some(0)),
-                }
+                };
+                (capitalized(&text), a, r)
             };
+            icons.insert(p.clone(), StatusIcon { badges, tooltip });
             let status = if !facts.target_files.contains(p) {
                 FileStatus::Added
             } else if !facts.root.join(p).exists() {
@@ -777,16 +843,19 @@ fn file_table(ui: &mut Ui, facts: &Facts, mode: Mode, table: &mut super::file_ta
             }
         })
         .collect();
-    table.status_words = Some(words);
-    // The status column holds words here: wider than in the log window, unless dragged.
-    if table.widths.picked(2).is_none() {
-        table.widths.pick(2, 260.0);
-    }
+    table.status_icons = Some(icons);
     let listing: super::file_table::Listing = Ok(files);
-    let c = super::log_window::colors(ui);
     // Double-clicking would open the file's diff, now to after: not in the prototype.
     let _ = table.show(ui, &c, "prototype-reset", Id::new("prototype-reset-files"), Some(&listing), |_| {});
 }
 
 
 
+
+fn capitalized(s: &str) -> String {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}

@@ -39,8 +39,17 @@ pub struct FileTable {
     selection: FileSelection,
     /// Until the window closes.
     pub widths: ColumnWidths,
-    /// PROTOTYPE (#172): the status column's text per path, and whether it's lost work.
-    pub status_words: Option<HashMap<String, (String, bool)>>,
+    /// PROTOTYPE (#172): the status column's badges per path, instead of git's status.
+    pub status_icons: Option<HashMap<String, StatusIcon>>,
+}
+
+/// PROTOTYPE (#172): what a file is after a reset, as git-style letter badges: filled when
+/// staged, outlined when only in the working tree; the words in a tooltip.
+#[derive(Clone, Debug)]
+pub struct StatusIcon {
+    /// Letter, filled, colour.
+    pub badges: Vec<(char, bool, Color32)>,
+    pub tooltip: String,
 }
 
 /// Changed files chosen in the list, by path, for the list they belong to. Showing another
@@ -302,26 +311,46 @@ impl FileTable {
                         FileStatus::Renamed | FileStatus::Copied => c.renamed,
                         _ => text,
                     };
-                    // PROTOTYPE (#172): the reset dialog's words.
-                    let (status_text, status_color) = match self
-                        .status_words
+                    // PROTOTYPE (#172): the reset dialog's badges.
+                    let icon = self
+                        .status_icons
                         .as_ref()
-                        .and_then(|words| words.get(&file.path))
-                    {
-                        Some((words, true)) => (words.as_str(), c.removed),
-                        Some((words, false)) => (words.as_str(), text),
-                        None => (file.status.name(), status_color),
-                    };
-                    put(
-                        cell(
-                            ui,
-                            status_text,
-                            body.clone(),
-                            status_color,
-                            w[2] - 2.0 * CELL_PAD,
-                        ),
-                        x[2] + CELL_PAD,
-                    );
+                        .and_then(|icons| icons.get(&file.path));
+                    if let Some(icon) = icon {
+                        let mut at = x[2] + CELL_PAD;
+                        for &(letter, filled, color) in &icon.badges {
+                            let r = Rect::from_center_size(pos2(at + 8.0, y), vec2(16.0, 16.0));
+                            if filled {
+                                ui.painter().rect_filled(r, 3.0, color);
+                            } else {
+                                ui.painter().rect_stroke(
+                                    r.shrink(0.5),
+                                    3.0,
+                                    Stroke::new(1.2, color),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            let fg = if filled { Color32::WHITE } else { color };
+                            let g = ui.painter().layout_no_wrap(
+                                letter.to_string(),
+                                FontId::monospace(11.0),
+                                fg,
+                            );
+                            ui.painter().galley(r.center() - g.size() / 2.0, g, fg);
+                            at += 20.0;
+                        }
+                    } else {
+                        put(
+                            cell(
+                                ui,
+                                file.status.name(),
+                                body.clone(),
+                                status_color,
+                                w[2] - 2.0 * CELL_PAD,
+                            ),
+                            x[2] + CELL_PAD,
+                        );
+                    }
                     // Binary files have no line counts.
                     let count = |n: Option<u32>, color| {
                         let (s, color) = match n {
@@ -333,6 +362,15 @@ impl FileTable {
                     put_right(count(file.added, c.added), x[3] + w[3] - CELL_PAD);
                     put_right(count(file.removed, c.removed), x[4] + w[4] - CELL_PAD);
                     let path_rect = Rect::from_x_y_ranges(x[0]..=x[0] + w[0], rect.y_range());
+                    let status_rect = Rect::from_x_y_ranges(x[2]..=x[2] + w[2], rect.y_range());
+                    let response = match icon {
+                        Some(icon)
+                            if response.hover_pos().is_some_and(|p| status_rect.contains(p)) =>
+                        {
+                            response.on_hover_text(&icon.tooltip)
+                        }
+                        _ => response,
+                    };
                     let response =
                         if elided && response.hover_pos().is_some_and(|p| path_rect.contains(p)) {
                             response.on_hover_ui(|ui| {

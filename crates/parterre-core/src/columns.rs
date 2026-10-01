@@ -39,14 +39,6 @@ impl ColumnWidths {
         self.set.get(i).copied().flatten()
     }
 
-    /// PROTOTYPE (#172): picks column `i`'s width, as if the user had dragged it.
-    pub fn pick(&mut self, i: usize, width: f32) {
-        if self.set.len() <= i {
-            self.set.resize(i + 1, None);
-        }
-        self.set[i] = Some(width);
-    }
-
     /// The columns from `left`, `width` wide in all: column `flex` takes what the others leave,
     /// but no less than `flex_min`; the others are as picked, or as in `defaults` (whose entry
     /// for `flex` is ignored).
