@@ -14,9 +14,9 @@ use parterre_core::glyphs;
 use parterre_core::upstream::{Side, Upstream};
 use parterre_core::{Repo, revgraph::RevGraph};
 
-use crate::render::{Marks, edge_path, link_path};
+use crate::render::{Marks, edge_path};
 use crate::scene::Scene;
-use crate::settings::Settings;
+use crate::settings::{EdgeStyle, Settings};
 use crate::theme::Palette;
 use crate::view::View;
 
@@ -74,11 +74,10 @@ pub fn paint(
                 (true, true) => palette.lost,
                 (true, false) => palette.behind,
             };
-            let time = |n: usize| repo.commit(graph.nodes[n].commit).commit_time;
-            let (child, parent) = if time(b) >= time(t) { (b, t) } else { (t, b) };
             let node_box = |n: usize| view.rect_to_screen(canvas, scene.node_rect(n));
             let scale = to_screen(pos2(1.0, 0.0)).x - to_screen(Pos2::ZERO).x;
-            let path = dashed_route(scene, node_box(child), node_box(parent), settings, scale);
+            let style = settings.edge_style;
+            let path = dashed_route(node_box(b), node_box(t), scene, style, scale);
             let dash = 6.0 * zoom.max(0.5);
             painter.extend(Shape::dashed_line(
                 &path,
@@ -144,33 +143,39 @@ fn sub_path(path: &[Pos2], t0: f32, t1: f32) -> Vec<Pos2> {
     out
 }
 
-/// The dashed edge's route: as an edge would go when one box is further along the history
-/// than the other; side by side, from facing side to facing side, the same way turned across.
-fn dashed_route(
-    scene: &Scene,
-    child: Rect,
-    parent: Rect,
-    settings: &Settings,
-    scale: f32,
-) -> Vec<Pos2> {
+/// The dashed edge's route, from side to side across the flow (left and right when the
+/// newest commits are on top): the sides that face each other when the boxes are apart, else
+/// the same side of both, towards the upstream. Curved, or with straight segments, as the
+/// edges are. `scale` is screen pixels per world unit.
+fn dashed_route(a: Rect, b: Rect, scene: &Scene, style: EdgeStyle, scale: f32) -> Vec<Pos2> {
     let f = scene.layout.direction.flow();
-    let flow = vec2(f.x, f.y);
-    let across = vec2(flow.y.abs(), flow.x.abs());
-    let depth = |r: Rect| (flow.x.abs() * r.width() + flow.y.abs() * r.height()) / 2.0;
+    let across = vec2(f.y.abs(), f.x.abs());
     let breadth = |r: Rect| (across.x * r.width() + across.y * r.height()) / 2.0;
-    let along = |p: Pos2| p.to_vec2().dot(flow);
     let side = |p: Pos2| p.to_vec2().dot(across);
-    let level = along(parent.center()) - depth(parent) < along(child.center()) + depth(child);
-    let apart =
-        (side(parent.center()) - side(child.center())).abs() > breadth(parent) + breadth(child);
-    if !(level && apart) {
-        return link_path(scene, child, parent, settings.edge_style, scale);
+    let gap = side(b.center()) - side(a.center());
+    let sign = if gap < 0.0 { -1.0 } else { 1.0 };
+    let apart = gap.abs() > breadth(a) + breadth(b);
+    let p0 = a.center() + across * (sign * breadth(a));
+    let (p3, c1, c2) = if apart {
+        let p3 = b.center() - across * (sign * breadth(b));
+        // Out sideways only briefly, so it heads for the other box rather than along the
+        // row of boxes it starts in.
+        let reach = ((side(p3) - side(p0)).abs() / 2.0).clamp(15.0 * scale, 40.0 * scale);
+        (
+            p3,
+            p0 + across * (sign * reach),
+            p3 - across * (sign * reach),
+        )
+    } else {
+        // Out of the same side of both, round the wider one.
+        let p3 = b.center() + across * (sign * breadth(b));
+        let far = (sign * side(p0)).max(sign * side(p3)) + 30.0 * scale;
+        let beyond = |p: Pos2| p + across * (sign * far - side(p));
+        (p3, beyond(p0), beyond(p3))
+    };
+    if style == EdgeStyle::Straight {
+        return vec![p0, c1, c2, p3];
     }
-    let sign = (side(parent.center()) - side(child.center())).signum();
-    let p0 = child.center() + across * (sign * breadth(child));
-    let p3 = parent.center() - across * (sign * breadth(parent));
-    let reach = ((side(p3) - side(p0)).abs() / 2.0).max(20.0 * scale);
-    let (c1, c2) = (p0 + across * (sign * reach), p3 - across * (sign * reach));
     (0..=32)
         .map(|i| {
             let t = i as f32 / 32.0;
