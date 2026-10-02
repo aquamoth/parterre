@@ -1922,15 +1922,22 @@ impl ParterreApp {
                     ) {
                         action = Some(MenuAction::Branch(request));
                     }
-                    // The worktrees shown on the node, the open one at HEAD among them.
-                    let worktrees: Vec<&parterre_core::Worktree> = scene
-                        .worktrees_on(node)
-                        .into_iter()
-                        .map(|k| &scene.repo.worktrees[k])
-                        .collect();
+                    // The worktrees shown on the node, the open one at HEAD among them. Hidden,
+                    // the open one is still at HEAD.
+                    let open_worktree = scene.repo.worktrees.iter().find(|w| w.open);
+                    let worktrees: Vec<&parterre_core::Worktree> = if worktrees_shown {
+                        scene
+                            .worktrees_on(node)
+                            .into_iter()
+                            .map(|k| &scene.repo.worktrees[k])
+                            .collect()
+                    } else {
+                        open_worktree.filter(|_| n.is_head).into_iter().collect()
+                    };
+                    let folders_shown = worktrees_shown || open_worktree.is_some();
                     menu::separator(ui);
                     // Greyed out rather than left out, so the menu keeps its shape.
-                    if !(pull_requests_shown || worktrees_shown) {
+                    if !(pull_requests_shown || folders_shown) {
                         ui.add_enabled(false, egui::Button::new("Open"))
                             .on_disabled_hover_text("Show pull requests or worktrees to open them");
                     } else {
@@ -1961,7 +1968,7 @@ impl ParterreApp {
                                     }),
                                 }
                             }
-                            if !worktrees_shown {
+                            if !folders_shown {
                                 return;
                             }
                             for (what, opener) in [
@@ -1985,10 +1992,13 @@ impl ParterreApp {
                                     };
                                 match worktrees.as_slice() {
                                     [] => {
+                                        let why = if worktrees_shown {
+                                            "No worktree is checked out here"
+                                        } else {
+                                            "Not HEAD; show worktrees to open others"
+                                        };
                                         ui.add_enabled(false, egui::Button::new(what))
-                                            .on_disabled_hover_text(
-                                                "No worktree is checked out here",
-                                            );
+                                            .on_disabled_hover_text(why);
                                     }
                                     [w] => open_item(ui, what, w),
                                     several => menu::plain_submenu(ui, what, |ui| {
