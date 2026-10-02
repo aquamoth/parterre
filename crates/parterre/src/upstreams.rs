@@ -378,9 +378,91 @@ pub fn paint_rebasing(
         }
         let node_box = |n: usize| view.rect_to_screen(canvas, scene.node_rect(n));
         let scale = to_screen(pos2(1.0, 0.0)).x - to_screen(Pos2::ZERO).x;
-        let path = dashed_route(node_box(h), node_box(b), scene, settings.edge_style, scale);
+        // Every other box in view, to route around.
+        let others: Vec<Rect> = (0..graph.nodes.len())
+            .filter(|&n| n != h && n != b)
+            .map(node_box)
+            .filter(|r| canvas.expand(200.0).intersects(*r))
+            .collect();
+        let amp = 3.0 * zoom.max(0.5);
+        let path = route_around(
+            node_box(h),
+            node_box(b),
+            &others,
+            amp + 3.0,
+            scene,
+            settings.edge_style,
+            scale,
+        );
         stuck_line(painter, &path, color, width, zoom.max(0.5));
     }
+}
+
+/// PROTOTYPE: rebasing (#184). A route from box `a` to box `b` that crosses as few of the
+/// `others` as it can (each kept `margin` clear), then is as short as it can be: from either
+/// side of `a` to either side of `b`, bowed more or less along the flow.
+fn route_around(
+    a: Rect,
+    b: Rect,
+    others: &[Rect],
+    margin: f32,
+    scene: &Scene,
+    style: EdgeStyle,
+    scale: f32,
+) -> Vec<Pos2> {
+    let f = scene.layout.direction.flow();
+    let flow = vec2(f.x, f.y);
+    let across = vec2(f.y.abs(), f.x.abs());
+    let breadth = |r: Rect| (across.x * r.width() + across.y * r.height()) / 2.0;
+    let curve = |p0: Pos2, c1: Pos2, c2: Pos2, p3: Pos2| -> Vec<Pos2> {
+        if style == EdgeStyle::Straight {
+            return vec![p0, c1, c2, p3];
+        }
+        (0..=48)
+            .map(|i| {
+                let t = i as f32 / 48.0;
+                let u = 1.0 - t;
+                (p0.to_vec2() * (u * u * u)
+                    + c1.to_vec2() * (3.0 * u * u * t)
+                    + c2.to_vec2() * (3.0 * u * t * t)
+                    + p3.to_vec2() * (t * t * t))
+                    .to_pos2()
+            })
+            .collect()
+    };
+    let crossings = |path: &[Pos2]| {
+        let dense: Vec<Pos2> = along(path, 4.0).into_iter().map(|(p, _)| p).collect();
+        others
+            .iter()
+            .filter(|r| {
+                let r = r.expand(margin);
+                dense.iter().any(|p| r.contains(*p))
+            })
+            .count()
+    };
+    let length = |path: &[Pos2]| -> f32 { path.windows(2).map(|w| w[0].distance(w[1])).sum() };
+    let mut best: Option<(usize, f32, Vec<Pos2>)> = None;
+    for sa in [-1.0f32, 1.0] {
+        for sb in [-1.0f32, 1.0] {
+            let p0 = a.center() + across * (sa * breadth(a));
+            let p3 = b.center() + across * (sb * breadth(b));
+            let reach = 30.0 * scale;
+            for bow in [0.0f32, -1.0, 1.0, -2.0, 2.0, -3.0, 3.0, -5.0, 5.0] {
+                let lift = flow * (bow * 40.0 * scale);
+                let c1 = p0 + across * (sa * reach) + lift;
+                let c2 = p3 + across * (sb * reach) + lift;
+                let path = curve(p0, c1, c2, p3);
+                let score = (crossings(&path), length(&path));
+                if best
+                    .as_ref()
+                    .is_none_or(|(n, l, _)| score.0 < *n || score.0 == *n && score.1 < *l)
+                {
+                    best = Some((score.0, score.1, path));
+                }
+            }
+        }
+    }
+    best.map(|(_, _, path)| path).unwrap_or_default()
 }
 
 /// PROTOTYPE: rebasing (#184). The looks to choose between for a rebasing worktree's edge.
