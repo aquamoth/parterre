@@ -2563,6 +2563,9 @@ impl eframe::App for ParterreApp {
         if let Some((repo, oids)) = prototype_reset::take_log_request() {
             self.open_loss_log(repo, &oids);
         }
+        for (repo, spec) in prototype_reset::take_diff_requests() {
+            self.diffs.open(repo, spec, &self.settings.diff_window, &ctx);
+        }
         if let Some((repo, commits, exact)) = self.branches.log_request.take() {
             if exact {
                 self.open_loss_log(repo, &commits);

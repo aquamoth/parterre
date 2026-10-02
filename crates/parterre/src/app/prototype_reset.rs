@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32, Id, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::Catalog;
+use parterre_core::file_diff::{FileDiffSpec, Rev};
 use parterre_core::{Oid, Repo};
 
 use crate::{dialogs, menu};
@@ -482,6 +483,7 @@ struct State {
     open: Option<Open>,
     notices: Vec<Notice>,
     log: Option<(Arc<Repo>, Vec<Oid>)>,
+    diffs: Vec<(Arc<Repo>, FileDiffSpec)>,
     demo_done: bool,
 }
 
@@ -570,6 +572,11 @@ pub fn overlay(ctx: &egui::Context) {
     });
 }
 
+/// File diffs to open, from double-clicking a file.
+pub fn take_diff_requests() -> Vec<(Arc<Repo>, FileDiffSpec)> {
+    STATE.with_borrow_mut(|state| std::mem::take(&mut state.diffs))
+}
+
 /// Commits to show in the log window, from *Show in log*.
 pub fn take_log_request() -> Option<(Arc<Repo>, Vec<Oid>)> {
     STATE.with_borrow_mut(|state| state.log.take())
@@ -613,7 +620,7 @@ pub fn show(
             state.open = Some(open);
             return;
         }
-        match dialog(ctx, &mut open, &mut state.log) {
+        match dialog(ctx, &mut open, &mut state.log, &mut state.diffs) {
             dialogs::Answer::Primary => notify(state, ctx, &open.facts, open.mode),
             dialogs::Answer::Cancel => {}
             dialogs::Answer::Open => {
@@ -628,6 +635,8 @@ pub fn show(
 const TABLE: f32 = 520.0;
 const GAP: f32 = 40.0;
 const SIDE: f32 = 420.0;
+/// The files pane's width while folded away.
+const FOLDED: f32 = 24.0;
 /// The dialog's margin (`dialogs::MARGIN`), which the files pane covers.
 const MARGIN: f32 = 20.0;
 
@@ -635,11 +644,17 @@ fn dialog(
     ctx: &egui::Context,
     open: &mut Open,
     log: &mut Option<(Arc<Repo>, Vec<Oid>)>,
+    diffs: &mut Vec<(Arc<Repo>, FileDiffSpec)>,
 ) -> dialogs::Answer {
     let facts = &open.facts;
+    // The files pane can be folded away; remembered, as the Git command section is.
+    let files_id = Id::new("prototype-reset-files-shown");
+    let files_shown = ctx.data_mut(|d| *d.get_persisted_mut_or(files_id, true));
+    let table_width = if files_shown { TABLE } else { FOLDED };
+    let mut toggle = false;
     let title = format!("Reset {} to {}", facts.branch, facts.short());
     let dialog = dialogs::Dialog::new("prototype-reset", &title)
-        .width(TABLE + GAP + SIDE)
+        .width(table_width + GAP + SIDE)
         .opener(open.opener)
         .raise(open.fresh);
     let mut mode = open.mode;
@@ -652,7 +667,8 @@ fn dialog(
         let top = ui.cursor().top();
         ui.horizontal_top(|ui| {
             // The files, as a pane of the log window: to the window's edges, then a divider.
-            let (slot, _) = ui.allocate_exact_size(vec2(TABLE, height), egui::Sense::hover());
+            let (slot, _) =
+                ui.allocate_exact_size(vec2(table_width, height), egui::Sense::hover());
             let pane = egui::Rect::from_min_max(
                 egui::pos2(slot.left() - MARGIN, top - MARGIN),
                 egui::pos2(slot.right() + GAP / 2.0, top + height + MARGIN),
@@ -667,7 +683,19 @@ fn dialog(
                     .layout(egui::Layout::top_down(egui::Align::Min)),
             );
             child.set_clip_rect(pane);
-            file_table(&mut child, facts, mode, table);
+            if files_shown {
+                let opened = file_table(&mut child, facts, mode, table, &mut toggle);
+                diffs.extend(opened.into_iter().map(|spec| (facts.repo.clone(), spec)));
+            } else {
+                child.add_space(8.0);
+                child.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    toggle |= ui
+                        .small_button("›")
+                        .on_hover_text(format!("Show the {}", plural(facts.paths().len(), "file")))
+                        .clicked();
+                });
+            }
             ui.add_space(GAP);
             let right = ui.vertical(|ui| {
                 ui.set_width(SIDE);
@@ -743,6 +771,9 @@ fn dialog(
         })
         .inner
     });
+    if toggle {
+        ctx.data_mut(|d| d.insert_persisted(files_id, !files_shown));
+    }
     open.mode = mode;
     open.height = left_height;
     if show_log {
@@ -756,7 +787,15 @@ fn dialog(
 
 /// The files the reset concerns, in the log and compare windows' changed-files table: what
 /// each is afterwards, in words, and the lines added and removed on disk.
-fn file_table(ui: &mut Ui, facts: &Facts, mode: Mode, table: &mut super::file_table::FileTable) {
+/// Returns the diffs a double-click asks for: for a file the reset changes on disk, from now
+/// to afterwards; otherwise what stays uncommitted afterwards, from the target to the files.
+fn file_table(
+    ui: &mut Ui,
+    facts: &Facts,
+    mode: Mode,
+    table: &mut super::file_table::FileTable,
+    toggle: &mut bool,
+) -> Vec<FileDiffSpec> {
     use super::file_table::StatusIcon;
     use parterre_core::changed_files::{ChangedFile, FileStatus};
     let c = super::log_window::colors(ui);
@@ -846,7 +885,41 @@ fn file_table(ui: &mut Ui, facts: &Facts, mode: Mode, table: &mut super::file_ta
     table.status_icons = Some(icons);
     let listing: super::file_table::Listing = Ok(files);
     // Double-clicking would open the file's diff, now to after: not in the prototype.
-    let _ = table.show(ui, &c, "prototype-reset", Id::new("prototype-reset-files"), Some(&listing), |_| {});
+    let action = table.show(
+        ui,
+        &c,
+        "prototype-reset",
+        Id::new("prototype-reset-files"),
+        Some(&listing),
+        |ui| {
+            *toggle |= ui.small_button("‹").on_hover_text("Hide the files").clicked();
+        },
+    );
+    let on_disk = |p: &str| facts.root.join(p).exists();
+    let in_target = |p: &str| facts.target_files.contains(p);
+    action
+        .open
+        .into_iter()
+        .map(|f| {
+            let p = &f.path;
+            let mut file = f.clone();
+            if facts.disk_change(mode, p).is_some() {
+                file.status = match (on_disk(p), in_target(p)) {
+                    (false, _) => FileStatus::Added,
+                    (_, false) => FileStatus::Deleted,
+                    _ => FileStatus::Modified,
+                };
+                FileDiffSpec::between(Some(Rev::WorkingTree), Rev::Commit(facts.target), &file)
+            } else {
+                file.status = match (in_target(p), on_disk(p)) {
+                    (false, _) => FileStatus::Added,
+                    (_, false) => FileStatus::Deleted,
+                    _ => FileStatus::Modified,
+                };
+                FileDiffSpec::between(Some(Rev::Commit(facts.target)), Rev::WorkingTree, &file)
+            }
+        })
+        .collect()
 }
 
 
