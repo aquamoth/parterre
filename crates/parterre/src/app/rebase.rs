@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use eframe::egui::{self, Color32, Id, RichText, Ui, ViewportId, vec2};
-use parterre_core::branches::{Catalog, command_text};
+use parterre_core::branches::{Catalog, Stuck, command_text};
 use parterre_core::log::{LogOptions, LogQuery};
 use parterre_core::log_graph::LogGraph;
 use parterre_core::rebase::{self, Preview};
@@ -16,6 +16,9 @@ use super::commit_table::{CommitList, CommitTable, ROW, Row};
 use super::log_window::{self, HEADING};
 use crate::dialogs;
 use crate::theme::Palette;
+
+/// What the banner says to do about an operation in progress.
+const FINISH: &str = "Finish or abort it with git, or go to another worktree.";
 
 /// The commits listed before the table scrolls.
 const MAX_ROWS: usize = 12;
@@ -28,19 +31,6 @@ pub fn stuck_color(ui: &Ui) -> Color32 {
     } else {
         Color32::from_rgb(170, 90, 0)
     }
-}
-
-/// Why an operation isn't offered while the open worktree is stuck.
-pub fn stuck_reason(what: &str) -> String {
-    format!("{} is in progress in this worktree", capitalized(what))
-}
-
-fn capitalized(s: &str) -> String {
-    let mut chars = s.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
 }
 
 fn plural(n: usize, what: &str) -> String {
@@ -226,13 +216,14 @@ impl RebaseDialog {
     }
 }
 
-/// The banner across the graph while the open worktree has an operation in progress: what's
-/// stopped there, its conflicted files on hover, and *Open in terminal*. Call before the
-/// central panel. Returns why the terminal didn't open, if it didn't.
+/// The banner across the graph while the open worktree is stuck: what's stopped there, if
+/// anything, its conflicted files on hover, and *Open in terminal*. Call before the central
+/// panel. Returns why the terminal didn't open, if it didn't.
 pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
-    let what = catalog.stuck()?;
+    let stuck = catalog.stuck()?;
     let open = catalog.worktrees.iter().find(|w| w.open);
-    let mut text = match open.and_then(|w| w.rebasing.as_ref()) {
+    let files = &catalog.conflicted;
+    let (mut text, hint) = match open.and_then(|w| w.rebasing.as_ref()) {
         Some(r) => {
             let branch = r.branch.as_deref().unwrap_or("HEAD");
             // Git records only the commit, and `git status` names it the same way.
@@ -240,12 +231,22 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
                 .onto
                 .map(|o| format!(" onto {}", o.short(repo.abbrev_len.max(7))))
                 .unwrap_or_default();
-            format!("Rebasing {branch}{onto} stopped at {}/{}", r.done, r.total)
+            (
+                format!("Rebasing {branch}{onto} stopped at {}/{}", r.done, r.total),
+                FINISH,
+            )
         }
-        None => stuck_reason(what),
+        None if stuck == Stuck::Conflicts => (
+            plural(files.len(), "conflicted file"),
+            if files.len() == 1 {
+                "Resolve it with git, or go to another worktree."
+            } else {
+                "Resolve them with git, or go to another worktree."
+            },
+        ),
+        None => (stuck.reason(), FINISH),
     };
-    let files = &catalog.conflicted;
-    if !files.is_empty() {
+    if !files.is_empty() && stuck != Stuck::Conflicts {
         text.push_str(&format!(": {}", plural(files.len(), "conflicted file")));
     }
     let (fill, color) = if ui.visuals().dark_mode {
@@ -278,12 +279,7 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
                         if !files.is_empty() {
                             label.on_hover_text(files.join("\n"));
                         }
-                        ui.label(
-                            RichText::new(
-                                "Finish or abort it with git, or go to another worktree.",
-                            )
-                            .color(color),
-                        );
+                        ui.label(RichText::new(hint).color(color));
                     });
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -305,7 +301,7 @@ mod tests {
     use std::path::Path;
 
     use eframe::egui::{self, Pos2, Rect};
-    use parterre_core::branches::Catalog;
+    use parterre_core::branches::{Catalog, Stuck};
     use parterre_core::{Oid, Repo};
 
     use super::super::branches::{self, Request};
@@ -387,7 +383,11 @@ mod tests {
         h.click("Git command");
         assert!(h.shows_part("git rebase --autostash up"), "{:?}", h.texts);
         h.click("Rebase");
-        h.until("the branch is rebased", |h| h.rev("main") != tip);
+        // Git moves the branch before it puts the changes back: wait for it to finish.
+        h.until("the notification", |h| {
+            h.shows("Rebase main onto up") && !h.shows("Cancel")
+        });
+        assert_ne!(h.rev("main"), tip);
         assert_eq!(read(h.path(), "feature"), "edited\n");
     }
 
@@ -513,6 +513,61 @@ mod tests {
         assert!(row("main~1", None).0.is_empty());
     }
 
+    /// The texts `banner` shows for the repository at `dir`.
+    fn banner_texts(dir: &Path) -> Vec<String> {
+        let (repo, catalog) = load(dir);
+        let ctx = egui::Context::default();
+        let mut texts = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            super::banner(ui, &repo, &catalog);
+        });
+        output.textures_delta.clear();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut texts);
+        }
+        texts.into_iter().map(|(t, _)| t).collect()
+    }
+
+    /// An autostash that couldn't be put back leaves conflicted files, and no operation in
+    /// progress: the worktree is stuck all the same.
+    #[test]
+    fn conflicts_left_by_the_autostash_show_the_banner_and_grey_switching() {
+        let dir = repository();
+        let p = dir.path();
+        // up changes the file the uncommitted edit is to; old's own commits don't touch it.
+        git(p, &["switch", "-q", "up"]);
+        commit(p, "file", "theirs\n", "their file");
+        git(p, &["switch", "-q", "-c", "old", "main~1"]);
+        git(p, &["branch", "other", "main"]);
+        write(p, "file", "my edit\n");
+        let mut h = Harness::new(dir);
+        let onto = h.rev("up");
+        let request = Request::Rebase {
+            onto,
+            target: "up".into(),
+        };
+        h.ask(request, "Rebase old onto up");
+        h.click("Stash changes");
+        h.click("Rebase");
+        h.until("the orange notice", |h| h.shows("Rebased old onto up"));
+        assert!(h.shows_part("conflicted in 1 file"), "{:?}", h.texts);
+        let p = h.path();
+        assert_eq!(git(p, &["stash", "list"]).lines().count(), 1);
+        let texts = banner_texts(p);
+        assert!(texts.contains(&"1 conflicted file".to_owned()), "{texts:?}");
+        assert!(texts.contains(&"Resolve it with git, or go to another worktree.".to_owned()));
+
+        let (repo, catalog) = load(p);
+        let main = rev(p, "main");
+        let (texts, asked) = menu(
+            |ui| branches::node_menu(ui, &repo, main, Some(&catalog), false, false),
+            Some("Switch to"),
+        );
+        // main, other and the commit detached: one greyed-out item for all of them.
+        assert!(texts.contains(&"Switch to".to_owned()), "{texts:?}");
+        assert!(asked.is_none(), "switching is greyed out");
+    }
+
     #[test]
     fn a_stuck_worktree_greys_out_what_would_change_it_and_shows_a_banner() {
         let dir = repository();
@@ -532,7 +587,7 @@ mod tests {
             .unwrap();
         assert!(!out.status.success(), "the rebase stops on its conflict");
         let (repo, catalog) = load(p);
-        assert_eq!(catalog.stuck(), Some("a rebase"));
+        assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a rebase")));
 
         // Rebase and Switch to are shown, but clicking them asks for nothing.
         let node = |click: Option<&str>| {

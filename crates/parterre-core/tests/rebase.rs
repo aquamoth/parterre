@@ -5,7 +5,7 @@ mod common;
 
 use common::TestRepo;
 use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Cancel, Catalog, Outcome, Report};
+use parterre_core::branches::{Action, Branches, Cancel, Catalog, Outcome, Report, Stuck};
 use parterre_core::rebase::{self, Preview, Skipped};
 
 fn oid(s: &str) -> Oid {
@@ -140,7 +140,7 @@ fn a_conflict_stops_it_and_leaves_the_worktree_stuck() {
     assert_eq!(attention.title, "Rebase stopped on conflicts in 1 file");
 
     let catalog = Catalog::load(r.path()).unwrap();
-    assert_eq!(catalog.stuck(), Some("a rebase"));
+    assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a rebase")));
     assert_eq!(catalog.conflicted, ["file"]);
     let rebasing = catalog
         .worktrees
@@ -232,11 +232,24 @@ fn changes_the_autostash_cant_put_back_stay_in_the_stash() {
     let report = done(execute(&r, preview(&r, "up").rebase("up".into(), true)));
     let attention = report.attention.expect("an orange notice");
     assert_eq!(attention.title, "Rebased main onto up");
-    assert!(attention.message.contains("stash"), "{}", attention.message);
-    // Rebased, and the changes are kept.
+    assert_eq!(
+        attention.message,
+        "Putting your changes back conflicted in 1 file. Resolve it with git; your changes \
+         are also kept in a stash entry until you drop it."
+    );
+    // Rebased, and the changes are kept: in the stash, and in the file between markers.
     assert_eq!(rev(&r, "main~1"), rev(&r, "up"));
     assert_eq!(r.git(&["stash", "list"]).lines().count(), 1);
-    assert_eq!(Catalog::load(r.path()).unwrap().stuck(), None);
+    assert!(common::read_text(&r.path().join("file")).contains("my edit"));
+    // No operation in progress, but the conflicted file sticks the worktree all the same.
+    let catalog = Catalog::load(r.path()).unwrap();
+    assert!(catalog.worktrees.iter().all(|w| w.in_progress.is_none()));
+    assert_eq!(catalog.conflicted, ["file"]);
+    assert_eq!(catalog.stuck(), Some(Stuck::Conflicts));
+    let refused = Preview::load(r.path(), rev(&r, "up"))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(refused, "This worktree has conflicted files.");
 }
 
 #[test]

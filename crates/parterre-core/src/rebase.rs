@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::branches::{Attention, Cancel, Catalog, Error, Report, run};
+use crate::branches::{Attention, Cancel, Catalog, Error, Report, Stuck, run};
 use crate::git::Git;
 use crate::log::is_ancestor;
 use crate::{Oid, Repo};
@@ -89,11 +89,8 @@ pub struct Preview {
 impl Preview {
     pub fn load(path: &Path, onto: Oid) -> Result<Preview, Error> {
         let catalog = Catalog::load(path)?;
-        if let Some(what) = catalog.stuck() {
-            return Err(Error::Invalid(format!(
-                "{} is in progress here. Finish or abort it with git first.",
-                capitalized(what)
-            )));
+        if let Some(stuck) = catalog.stuck() {
+            return Err(Error::Invalid(format!("{}.", stuck.reason())));
         }
         let (Some(branch), Some(head)) = (catalog.current.clone(), catalog.head) else {
             return Err(Error::Invalid(
@@ -189,11 +186,8 @@ pub(crate) fn execute(
             rebase.branch
         )));
     }
-    if let Some(what) = catalog.stuck() {
-        return Err(Error::Invalid(format!(
-            "{} is in progress here. Finish or abort it with git first.",
-            capitalized(what)
-        )));
+    if let Some(stuck) = catalog.stuck() {
+        return Err(Error::Invalid(format!("{}.", stuck.reason())));
     }
     let git = Git::new(&catalog.root);
     let stashes = || {
@@ -204,7 +198,7 @@ pub(crate) fn execute(
     let before = stashes();
     let ok = run(&git, command(rebase), cancel, report)?;
     let after = Catalog::load(&catalog.root)?;
-    if after.stuck().is_some() {
+    if let Some(Stuck::InProgress(_)) = after.stuck() {
         let n = after.conflicted.len();
         report.attention = Some(Attention {
             title: if n == 0 {
@@ -220,11 +214,21 @@ pub(crate) fn execute(
         return Err(Error::Failed(report.steps.last().unwrap().output.clone()));
     }
     if stashes() > before {
+        // Git applied what it could, with conflict markers, and kept the stash entry too.
+        let message = match after.conflicted.len() {
+            0 => "Git couldn't put your changes back, and kept them in a stash entry. \
+                  Recover them with git stash pop."
+                .to_owned(),
+            n => format!(
+                "Putting your changes back conflicted in {}. Resolve {} with git; your \
+                 changes are also kept in a stash entry until you drop it.",
+                plural(n, "file"),
+                if n == 1 { "it" } else { "them" }
+            ),
+        };
         report.attention = Some(Attention {
             title: format!("Rebased {} onto {}", rebase.branch, short_target(rebase)),
-            message: "Putting your changes back conflicted, so git kept them in a stash \
-                      entry. Recover them with git stash pop."
-                .into(),
+            message,
         });
     }
     Ok(())
@@ -241,12 +245,4 @@ pub fn short_target(rebase: &Rebase) -> String {
 
 fn plural(n: usize, what: &str) -> String {
     format!("{n} {what}{}", if n == 1 { "" } else { "s" })
-}
-
-fn capitalized(s: &str) -> String {
-    let mut chars = s.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
 }

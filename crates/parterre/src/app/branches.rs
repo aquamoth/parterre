@@ -15,7 +15,7 @@ use parterre_core::reset::{Mode, Preview};
 use parterre_core::worktree_folder;
 use parterre_core::{Oid, RefKind, Repo};
 
-use super::rebase::{RebaseDialog, stuck_color, stuck_reason};
+use super::rebase::{RebaseDialog, stuck_color};
 use super::reset::ResetDialog;
 use crate::theme::Palette;
 use crate::{dialogs, menu, widgets};
@@ -167,7 +167,7 @@ fn branch_section(
     }
     switches.sort_by(|a, b| a.0.cmp(&b.0));
     // A stuck worktree switches nowhere until its operation is finished with git.
-    let stuck = catalog.stuck().map(stuck_reason);
+    let stuck = catalog.stuck().map(|s| s.reason());
     // The commit itself, detached, last.
     if catalog.has_working_tree && !(catalog.current.is_none() && catalog.head == Some(commit)) {
         let hex = commit.to_hex();
@@ -229,7 +229,7 @@ fn rebase_targets(
     if names.is_empty() {
         return;
     }
-    let stuck = catalog.stuck().map(stuck_reason);
+    let stuck = catalog.stuck().map(|s| s.reason());
     let branch = match &stuck {
         Some(_) => stuck_branch(catalog),
         None => match rebase::offered(repo, catalog, commit) {
@@ -282,7 +282,7 @@ pub fn rebase_item(
 ) -> Option<Request> {
     let catalog = catalog?;
     let short = commit.short(repo.abbrev_len.max(7));
-    let stuck = catalog.stuck().map(stuck_reason);
+    let stuck = catalog.stuck().map(|s| s.reason());
     let branch = match &stuck {
         Some(_) => stuck_branch(catalog),
         None => rebase::offered(repo, catalog, commit)?.to_owned(),
@@ -379,10 +379,10 @@ pub fn reset_item(
     busy: bool,
 ) -> Option<Request> {
     // Greyed out, not hidden, while the worktree is stuck: it's only for now.
-    if let Some(what) = catalog.and_then(Catalog::stuck) {
+    if let Some(stuck) = catalog.and_then(Catalog::stuck) {
         menu::separator(ui);
         ui.add_enabled(false, egui::Button::new("Reset to here…"))
-            .on_disabled_hover_text(stuck_reason(what));
+            .on_disabled_hover_text(stuck.reason());
         return None;
     }
     let branch = parterre_core::reset::branch(catalog?, commit).ok()?;
@@ -756,8 +756,8 @@ impl Form {
                                 self.catalog.has_working_tree && stuck.is_none(),
                                 egui::Checkbox::new(&mut self.switch, "Switch to new branch"),
                             );
-                            if let Some(what) = stuck {
-                                response.on_disabled_hover_text(stuck_reason(what));
+                            if let Some(stuck) = stuck {
+                                response.on_disabled_hover_text(stuck.reason());
                             }
                         }
                     }

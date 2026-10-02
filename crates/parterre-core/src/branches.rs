@@ -45,6 +45,33 @@ pub struct Worktree {
     pub rebasing: Option<Rebasing>,
 }
 
+/// Why the open worktree is stuck.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stuck {
+    /// An operation git left unfinished there, such as "a rebase".
+    InProgress(&'static str),
+    /// Conflicted files with no operation in progress, as a stash that couldn't be put back
+    /// cleanly leaves them.
+    Conflicts,
+}
+
+impl Stuck {
+    /// Why an operation isn't offered.
+    pub fn reason(self) -> String {
+        match self {
+            Stuck::InProgress(what) => {
+                let mut chars = what.chars();
+                let what: String = chars
+                    .next()
+                    .map(|c| c.to_uppercase().chain(chars).collect())
+                    .unwrap_or_default();
+                format!("{what} is in progress in this worktree")
+            }
+            Stuck::Conflicts => "This worktree has conflicted files".into(),
+        }
+    }
+}
+
 /// A rebase git left stopped in a worktree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rebasing {
@@ -109,7 +136,7 @@ pub struct Catalog {
     pub main: PathBuf,
     /// The open worktree's folder.
     pub root: PathBuf,
-    /// The open worktree's conflicted files, while it has an operation in progress.
+    /// The open worktree's conflicted (unmerged) files.
     pub conflicted: Vec<String>,
     auto_setup_rebase: bool,
     roots: Vec<(String, Oid)>,
@@ -310,8 +337,9 @@ impl Catalog {
         for (place, admin) in &admins {
             reservations(admin, place, &mut occupied, &mut uses)?;
         }
-        let stuck = worktrees.iter().any(|w| w.open && w.in_progress.is_some());
-        let conflicted = if stuck {
+        // Conflicted files outlive an operation: an autostash or `git stash pop` that
+        // conflicted leaves them with none in progress.
+        let conflicted = if has_working_tree {
             git.run(&["diff", "--name-only", "-z", "--diff-filter=U"])?
                 .split('\0')
                 .filter(|p| !p.is_empty())
@@ -339,13 +367,20 @@ impl Catalog {
         })
     }
 
-    /// The operation in progress in the open worktree, such as "a rebase". Until it's finished
-    /// with git, nothing that changes that worktree's HEAD, index or files is offered.
-    pub fn stuck(&self) -> Option<&'static str> {
-        self.worktrees
+    /// Why the open worktree is stuck, if it is: an operation in progress, or conflicted files.
+    /// Until that's sorted out with git, nothing that changes that worktree's HEAD, index or
+    /// files is offered.
+    pub fn stuck(&self) -> Option<Stuck> {
+        let in_progress = self
+            .worktrees
             .iter()
             .find(|w| w.open)
-            .and_then(|w| w.in_progress)
+            .and_then(|w| w.in_progress);
+        match in_progress {
+            Some(what) => Some(Stuck::InProgress(what)),
+            None if !self.conflicted.is_empty() => Some(Stuck::Conflicts),
+            None => None,
+        }
     }
 
     /// A worktree other than the open one that has branch `name` checked out, or is rebasing
