@@ -916,6 +916,15 @@ impl LogWindow {
                 }
                 let reset = super::branches::reset_item(ui, commit.oid, branches, branch_busy);
                 self.branch_requests.extend(reset);
+                // PROTOTYPE: rebasing (#184).
+                super::prototype_rebase::log_menu(
+                    ui,
+                    repo,
+                    commit.oid,
+                    branches,
+                    branch_busy,
+                    viewport_id(),
+                );
             },
             // The details pane shows the whole message.
             None,

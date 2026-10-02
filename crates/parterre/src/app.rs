@@ -24,6 +24,7 @@ mod compare_window;
 mod diff_window;
 mod file_table;
 mod log_window;
+mod prototype_rebase;
 mod pull_requests;
 mod reset;
 mod settings_window;
@@ -893,7 +894,7 @@ impl ParterreApp {
             .filter(|(k, _)| {
                 matches!(
                     *k,
-                    "create-branch" | "add-worktree" | "delete-worktree" | "reset"
+                    "create-branch" | "add-worktree" | "delete-worktree" | "reset" | "rebase"
                 )
             })
             .map(|(k, n)| (k.to_owned(), n.to_owned()))
@@ -912,6 +913,17 @@ impl ParterreApp {
                 };
                 let request = branches::Request::Run(action);
                 self.branches.request(ctx, request, egui::ViewportId::ROOT);
+            }
+            return;
+        }
+        // PROTOTYPE: rebasing (#184). rebase:REF opens the confirmation.
+        if kind == "rebase" {
+            let (name, run) = match name.strip_suffix(":run") {
+                Some(name) => (name.to_owned(), true),
+                None => (name.clone(), false),
+            };
+            if let Some(target) = repo.resolve(&name).map(|c| repo.commit(c).oid) {
+                prototype_rebase::demo_open(&repo, &catalog, target, name.clone(), run);
             }
             return;
         }
@@ -1974,6 +1986,14 @@ impl ParterreApp {
                     ) {
                         action = Some(MenuAction::Branch(request));
                     }
+                    // PROTOTYPE: rebasing (#184).
+                    prototype_rebase::graph_menu(
+                        ui,
+                        &scene.repo,
+                        oid,
+                        self.branches.catalog.as_deref(),
+                        self.branches.busy(),
+                    );
                     // The worktrees shown on the node, the open one at HEAD among them. Hidden,
                     // the open one is still at HEAD.
                     let open_worktree = scene.repo.worktrees.iter().find(|w| w.open);
@@ -2596,6 +2616,8 @@ impl eframe::App for ParterreApp {
         if self.settings.show_status_bar {
             egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         }
+        // PROTOTYPE: rebasing (#184).
+        prototype_rebase::banner(ui, self.repo.as_ref(), self.branches.catalog.as_deref());
         if self.repo.is_some() {
             egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
         } else {
@@ -2614,6 +2636,8 @@ impl eframe::App for ParterreApp {
         self.blame_windows(&ctx);
         self.about_window(&ctx);
         self.branches.show(&ctx);
+        // PROTOTYPE: rebasing (#184).
+        prototype_rebase::show(&ctx, &mut self.branches);
         for (repo, spec) in std::mem::take(&mut self.branches.diff_requests) {
             self.diffs
                 .open(repo, spec, &self.settings.diff_window, &ctx);

@@ -156,6 +156,8 @@ fn branch_section(
         }
     }
     switches.sort_by(|a, b| a.0.cmp(&b.0));
+    // PROTOTYPE: rebasing (#184). A stuck worktree switches nowhere.
+    let stuck = super::prototype_rebase::stuck(catalog).map(super::prototype_rebase::stuck_reason);
     // The commit itself, detached, last.
     if catalog.has_working_tree && !(catalog.current.is_none() && catalog.head == Some(commit)) {
         let hex = commit.to_hex();
@@ -165,6 +167,11 @@ fn branch_section(
             Request::Run(Action::Detach(commit)),
             None,
         ));
+    }
+    if let Some(reason) = &stuck {
+        for target in &mut switches {
+            target.2 = Some(reason.clone());
+        }
     }
     target_menu(ui, "Switch to", &switches, busy, &mut request);
     let deletions: Vec<_> = refs
@@ -233,13 +240,11 @@ fn worktree_section(
         .iter()
         .filter(|w| !w.main)
         .map(|w| {
-            let blocked = match (&w.locked, w.in_progress) {
-                (Some(reason), _) if reason.is_empty() => Some("Locked".to_owned()),
-                (Some(reason), _) => Some(format!("Locked: {reason}")),
-                (None, Some(what)) => Some(format!(
-                    "{what} is in progress there; go to the worktree and finish or abort it first"
-                )),
-                (None, None) => None,
+            // PROTOTYPE: rebasing (#184). Deleting ends an operation in progress there.
+            let blocked = match &w.locked {
+                Some(reason) if reason.is_empty() => Some("Locked".to_owned()),
+                Some(reason) => Some(format!("Locked: {reason}")),
+                None => None,
             };
             (
                 w.name(),
@@ -262,6 +267,13 @@ pub fn reset_item(
     catalog: Option<&Catalog>,
     busy: bool,
 ) -> Option<Request> {
+    // PROTOTYPE: rebasing (#184). Greyed out, not hidden, while the worktree is stuck.
+    if let Some(what) = catalog.and_then(super::prototype_rebase::stuck) {
+        menu::separator(ui);
+        ui.add_enabled(false, egui::Button::new("Reset to here…"))
+            .on_disabled_hover_text(super::prototype_rebase::stuck_reason(what));
+        return None;
+    }
     let branch = parterre_core::reset::branch(catalog?, commit).ok()?;
     menu::separator(ui);
     let clicked = ui
@@ -300,9 +312,18 @@ fn target_menu(
             ui.close();
         }
     };
+    // PROTOTYPE: rebasing (#184). Every target blocked for the same reason greys the submenu.
+    let same = targets
+        .first()
+        .and_then(|t| t.2.clone())
+        .filter(|r| targets.iter().all(|t| t.2.as_ref() == Some(r)));
     match targets {
         [] => {}
         [(name, target, blocked)] => item(ui, format!("{verb} {name}"), target, blocked),
+        [_, _, ..] if same.is_some() => {
+            ui.add_enabled(false, egui::Button::new(verb))
+                .on_disabled_hover_text(capitalized(&same.unwrap_or_default()));
+        }
         many => menu::plain_submenu(ui, verb, |ui| {
             for (name, target, blocked) in many {
                 item(ui, name.clone(), target, blocked);
@@ -615,10 +636,20 @@ impl Form {
                             ui.checkbox(&mut wt.go_to, "Go to new worktree");
                         }
                         None => {
-                            ui.add_enabled(
-                                self.catalog.has_working_tree,
+                            // PROTOTYPE: rebasing (#184). A stuck worktree switches nowhere.
+                            let stuck = super::prototype_rebase::stuck(&self.catalog);
+                            if stuck.is_some() {
+                                self.switch = false;
+                            }
+                            let response = ui.add_enabled(
+                                self.catalog.has_working_tree && stuck.is_none(),
                                 egui::Checkbox::new(&mut self.switch, "Switch to new branch"),
                             );
+                            if let Some(what) = stuck {
+                                response.on_disabled_hover_text(
+                                    super::prototype_rebase::stuck_reason(what),
+                                );
+                            }
                         }
                     }
                     self.commands()
@@ -959,6 +990,15 @@ impl Form {
     }
 }
 
+/// PROTOTYPE: rebasing (#184).
+fn orange(ui: &Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(240, 160, 60)
+    } else {
+        Color32::from_rgb(170, 90, 0)
+    }
+}
+
 /// An amber box for something to be aware of that isn't lost work.
 fn caution(ui: &mut Ui, content: impl FnOnce(&mut Ui)) {
     let color = if ui.visuals().dark_mode {
@@ -995,6 +1035,8 @@ struct Notice {
     report: Report,
     error: Option<String>,
     at: f64,
+    /// PROTOTYPE: rebasing (#184). Orange: stopped, and stays until closed.
+    orange: bool,
 }
 
 /// A warning before losing work, waiting for an answer.
@@ -1293,7 +1335,28 @@ impl Tool {
             report,
             error,
             at: ctx.input(|i| i.time),
+            orange: false,
         });
+    }
+
+    /// PROTOTYPE: rebasing (#184). A notice from the prototype; `message` shows under the title.
+    pub fn prototype_notice(
+        &mut self,
+        ctx: &egui::Context,
+        path: PathBuf,
+        title: String,
+        report: Report,
+        message: Option<String>,
+        orange: bool,
+    ) {
+        let red = message.is_some() && !orange;
+        self.notice(ctx, path, title, report, message);
+        if let Some(n) = self.notices.last_mut() {
+            n.orange = orange;
+            if !red && !orange {
+                n.error = None;
+            }
+        }
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
@@ -1482,8 +1545,9 @@ impl Tool {
 
     fn notifications(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
-        self.notices
-            .retain(|n| n.error.is_some() || self.details == Some(n.id) || now - n.at < 5.0);
+        self.notices.retain(|n| {
+            n.error.is_some() || n.orange || self.details == Some(n.id) || now - n.at < 5.0
+        });
         if !self.notices.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
@@ -1505,7 +1569,9 @@ impl Tool {
                 }
                 let mut remove = None;
                 for n in &self.notices {
-                    let color = if n.error.is_some() {
+                    let color = if n.orange {
+                        orange(ui)
+                    } else if n.error.is_some() {
                         ui.visuals().error_fg_color
                     } else if ui.visuals().dark_mode {
                         Color32::from_rgb(75, 165, 105)
@@ -1539,7 +1605,12 @@ impl Tool {
                     dialogs::fields(ui, |ui| {
                         ui.weak(n.path.display().to_string());
                         if let Some(error) = &n.error {
-                            ui.colored_label(ui.visuals().error_fg_color, error);
+                            let color = if n.orange {
+                                orange(ui)
+                            } else {
+                                ui.visuals().error_fg_color
+                            };
+                            ui.colored_label(color, error);
                         }
                         for step in &n.report.steps {
                             ui.label(RichText::new(command_text(&step.args)).monospace());

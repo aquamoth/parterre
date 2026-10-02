@@ -1192,15 +1192,12 @@ fn find_worktree<'a>(catalog: &'a Catalog, path: &Path) -> Result<&'a Worktree, 
             format!("The worktree is locked: {reason}")
         }));
     }
-    if let Some(what) = wt.in_progress {
-        return Err(Error::Invalid(format!(
-            "{} is in progress in the worktree. Go to the worktree and finish or abort it first.",
-            capitalized(what)
-        )));
-    }
+    // PROTOTYPE: rebasing (#184). Deleting a worktree ends its operation in progress, through
+    // the usual warnings.
     Ok(wt)
 }
 
+#[allow(dead_code)] // PROTOTYPE: rebasing (#184).
 fn capitalized(s: &str) -> String {
     let mut chars = s.chars();
     chars
