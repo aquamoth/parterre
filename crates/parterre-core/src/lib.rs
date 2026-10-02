@@ -20,6 +20,7 @@ pub mod log_layout;
 pub mod oid;
 pub mod pattern;
 pub mod physics;
+pub mod rebase;
 pub mod recent;
 pub mod repo;
 pub mod reset;

@@ -101,6 +101,8 @@ pub struct Palette {
     pub behind: Color32,
     pub lost: Color32,
     pub replaced: Color32,
+    /// A worktree stuck with an operation in progress: its rebase's zigzag edge, as its banner.
+    pub stuck: Color32,
     /// Colours by branch name, first match first; they override the ref-kind colours.
     pub branch_colors: Vec<(BranchPatterns, Color32)>,
 }
@@ -151,6 +153,7 @@ impl Palette {
             behind: Color32::from_rgb(20, 110, 230),
             lost: Color32::from_rgb(215, 40, 30),
             replaced: Color32::from_gray(150),
+            stuck: Color32::from_rgb(220, 130, 30),
             branch_colors: Vec::new(),
         }
     }
@@ -182,6 +185,7 @@ impl Palette {
             behind: Color32::from_rgb(100, 170, 255),
             lost: Color32::from_rgb(255, 95, 85),
             replaced: Color32::from_gray(140),
+            stuck: Color32::from_rgb(240, 160, 60),
             branch_colors: Vec::new(),
         }
     }

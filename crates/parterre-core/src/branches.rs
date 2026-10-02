@@ -41,6 +41,45 @@ pub struct Worktree {
     pub missing: bool,
     /// An operation git left unfinished there, such as "a rebase".
     pub in_progress: Option<&'static str>,
+    /// The rebase stopped there, when the operation in progress is one.
+    pub rebasing: Option<Rebasing>,
+}
+
+/// A rebase git left stopped in a worktree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rebasing {
+    /// The branch being rebased; `None` for a detached HEAD.
+    pub branch: Option<String>,
+    /// The commit it is being replayed onto. Git records no name for it.
+    pub onto: Option<Oid>,
+    /// The commits replayed so far, the one it stopped at included, of how many.
+    pub done: usize,
+    pub total: usize,
+}
+
+/// The rebase in a worktree's administrative folder, if one is stopped there.
+fn rebasing(admin: &Path) -> Option<Rebasing> {
+    let (dir, done, total) = if admin.join("rebase-merge").is_dir() {
+        (admin.join("rebase-merge"), "msgnum", "end")
+    } else if admin.join("rebase-apply").is_dir() {
+        (admin.join("rebase-apply"), "next", "last")
+    } else {
+        return None;
+    };
+    let read = |name: &str| {
+        std::fs::read_to_string(dir.join(name))
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let number = |name: &str| read(name).parse().unwrap_or(0);
+    Some(Rebasing {
+        branch: read("head-name")
+            .strip_prefix("refs/heads/")
+            .map(str::to_owned),
+        onto: Oid::from_hex(&read("onto")),
+        done: number(done),
+        total: number(total),
+    })
 }
 
 impl Worktree {
@@ -70,6 +109,8 @@ pub struct Catalog {
     pub main: PathBuf,
     /// The open worktree's folder.
     pub root: PathBuf,
+    /// The open worktree's conflicted files, while it has an operation in progress.
+    pub conflicted: Vec<String>,
     auto_setup_rebase: bool,
     roots: Vec<(String, Oid)>,
     heads: Vec<(PathBuf, Oid)>,
@@ -253,6 +294,7 @@ impl Catalog {
                 Some(admin) => in_progress(admin, reftable),
                 None => None,
             };
+            let rebasing = admin.as_deref().and_then(rebasing);
             worktrees.push(Worktree {
                 main: path == main_place,
                 open: crate::worktree_folder::same_path(&path, &root),
@@ -262,11 +304,22 @@ impl Catalog {
                 branch,
                 locked,
                 in_progress,
+                rebasing,
             });
         }
         for (place, admin) in &admins {
             reservations(admin, place, &mut occupied, &mut uses)?;
         }
+        let stuck = worktrees.iter().any(|w| w.open && w.in_progress.is_some());
+        let conflicted = if stuck {
+            git.run(&["diff", "--name-only", "-z", "--diff-filter=U"])?
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(str::to_owned)
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             locals,
             remotes,
@@ -278,11 +331,21 @@ impl Catalog {
             worktrees,
             main: main_place,
             root,
+            conflicted,
             auto_setup_rebase,
             roots,
             heads,
             uses,
         })
+    }
+
+    /// The operation in progress in the open worktree, such as "a rebase". Until it's finished
+    /// with git, nothing that changes that worktree's HEAD, index or files is offered.
+    pub fn stuck(&self) -> Option<&'static str> {
+        self.worktrees
+            .iter()
+            .find(|w| w.open)
+            .and_then(|w| w.in_progress)
     }
 
     /// A worktree other than the open one that has branch `name` checked out, or is rebasing
@@ -640,6 +703,8 @@ pub enum Action {
     },
     /// Moves the open worktree's branch, with what the user agreed to lose.
     Reset(Box<crate::reset::Reset>),
+    /// Replays the open worktree's branch onto another commit.
+    Rebase(Box<crate::rebase::Rebase>),
 }
 
 impl Action {
@@ -658,6 +723,11 @@ impl Action {
             Self::AddWorktree(a) => format!("Add worktree {}", folder(&a.path)),
             Self::DeleteWorktree { path } => format!("Delete worktree {}", folder(path)),
             Self::Reset(r) => format!("Reset {} to {}", r.branch, short(r.target)),
+            Self::Rebase(r) => format!(
+                "Rebase {} onto {}",
+                r.branch,
+                crate::rebase::short_target(r)
+            ),
         }
     }
 }
@@ -741,6 +811,14 @@ fn signal_group(pid: u32, signal: &str) {
 #[derive(Clone, Debug, Default)]
 pub struct Report {
     pub steps: Vec<Step>,
+    /// Done, but with something the user must see to: shown in orange until closed.
+    pub attention: Option<Attention>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Attention {
+    pub title: String,
+    pub message: String,
 }
 
 #[derive(Clone, Debug)]
@@ -850,6 +928,7 @@ impl Branches {
             Action::Switch(name) => Ok(vec![words(&["switch", "--no-guess", "--", name])]),
             Action::Delete { name, .. } => Ok(vec![words(&["branch", "-D", "--", name])]),
             Action::Reset(r) => Ok(vec![crate::reset::command(r.mode, r.target)]),
+            Action::Rebase(r) => Ok(vec![crate::rebase::command(r)]),
         }
     }
 
@@ -919,6 +998,10 @@ impl Branches {
             crate::reset::execute(&catalog, reset, cancel, report)?;
             return Ok(None);
         }
+        if let Action::Rebase(rebase) = &action {
+            crate::rebase::execute(&catalog, rebase, cancel, report)?;
+            return Ok(None);
+        }
         let mut commands = Self::commands(&catalog, &action)?;
         let switching = matches!(
             &action,
@@ -965,7 +1048,9 @@ impl Branches {
                     Checkout::Detached => {}
                 }
             }
-            Action::DeleteWorktree { .. } | Action::Reset(_) => unreachable!("handled above"),
+            Action::DeleteWorktree { .. } | Action::Reset(_) | Action::Rebase(_) => {
+                unreachable!("handled above")
+            }
             Action::Switch(name) => {
                 if !catalog.locals.iter().any(|b| b.name == *name) {
                     return Err(Error::Invalid(
@@ -1192,21 +1277,9 @@ fn find_worktree<'a>(catalog: &'a Catalog, path: &Path) -> Result<&'a Worktree, 
             format!("The worktree is locked: {reason}")
         }));
     }
-    if let Some(what) = wt.in_progress {
-        return Err(Error::Invalid(format!(
-            "{} is in progress in the worktree. Go to the worktree and finish or abort it first.",
-            capitalized(what)
-        )));
-    }
+    // An operation in progress there is no reason to keep it: deleting the worktree ends it,
+    // through the usual warnings, and its branch is left where it was.
     Ok(wt)
-}
-
-fn capitalized(s: &str) -> String {
-    let mut chars = s.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
 }
 
 /// What deleting a worktree would lose: its changed files, and the commits only its detached

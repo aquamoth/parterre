@@ -25,8 +25,11 @@ mod diff_window;
 mod file_table;
 mod log_window;
 mod pull_requests;
+mod rebase;
 mod reset;
 mod settings_window;
+#[cfg(test)]
+mod tool_harness;
 mod toolbar;
 
 pub use toolbar::popup_id;
@@ -893,7 +896,7 @@ impl ParterreApp {
             .filter(|(k, _)| {
                 matches!(
                     *k,
-                    "create-branch" | "add-worktree" | "delete-worktree" | "reset"
+                    "create-branch" | "add-worktree" | "delete-worktree" | "reset" | "rebase"
                 )
             })
             .map(|(k, n)| (k.to_owned(), n.to_owned()))
@@ -911,6 +914,13 @@ impl ParterreApp {
                     path: w.path.clone(),
                 };
                 let request = branches::Request::Run(action);
+                self.branches.request(ctx, request, egui::ViewportId::ROOT);
+            }
+            return;
+        }
+        if kind == "rebase" {
+            if let Some(onto) = repo.resolve(&name).map(|c| repo.commit(c).oid) {
+                let request = branches::Request::Rebase { onto, target: name };
                 self.branches.request(ctx, request, egui::ViewportId::ROOT);
             }
             return;
@@ -1678,6 +1688,7 @@ impl ParterreApp {
             selected_edge: self.selected_edge,
             search_hits: hits,
             upstreams: self.settings.graph.show_upstreams,
+            rebasing: rebasing_marks(&scene.repo, self.branches.catalog.as_deref()),
         };
         let painter = ui.painter_at(canvas);
         render::paint_scene(
@@ -2522,6 +2533,27 @@ const GH_INSTALL: &str = "https://github.com/cli/cli#installation";
 /// How many recent folders the welcome screen lists; the menu has them all.
 const WELCOME_RECENT: usize = 5;
 
+/// Each worktree with a rebase in progress: its HEAD, and the branch it is rebasing.
+fn rebasing_marks(
+    repo: &Repo,
+    catalog: Option<&parterre_core::branches::Catalog>,
+) -> Vec<(parterre_core::CommitIx, usize)> {
+    let Some(catalog) = catalog else {
+        return Vec::new();
+    };
+    catalog
+        .worktrees
+        .iter()
+        .filter_map(|w| {
+            let branch = w.rebasing.as_ref()?.branch.as_deref()?;
+            let head = repo.lookup(&w.head?)?;
+            let full = format!("refs/heads/{branch}");
+            let r = repo.refs.iter().position(|r| r.full_name == full)?;
+            Some((head, r))
+        })
+        .collect()
+}
+
 fn palette_for(ui: &Ui, settings: &Settings) -> Palette {
     Palette::new(ui.visuals().dark_mode, &settings.branch_colors)
 }
@@ -2596,6 +2628,11 @@ impl eframe::App for ParterreApp {
         if self.settings.show_status_bar {
             egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         }
+        if let (Some(repo), Some(catalog)) = (&self.repo, &self.branches.catalog)
+            && let Some(error) = rebase::banner(ui, repo, catalog)
+        {
+            self.status = Some((error, true));
+        }
         if self.repo.is_some() {
             egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
         } else {
@@ -2613,7 +2650,11 @@ impl eframe::App for ParterreApp {
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         self.about_window(&ctx);
-        self.branches.show(&ctx);
+        let palette = Palette::new(
+            ctx.global_style().visuals.dark_mode,
+            &self.settings.branch_colors,
+        );
+        self.branches.show(&ctx, &palette, &self.settings.graph);
         for (repo, spec) in std::mem::take(&mut self.branches.diff_requests) {
             self.diffs
                 .open(repo, spec, &self.settings.diff_window, &ctx);

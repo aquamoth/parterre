@@ -34,6 +34,9 @@ pub struct Marks {
     pub marked: Option<usize>,
     /// Show how branches differ from their upstreams (see [`crate::upstreams`]).
     pub upstreams: bool,
+    /// Each worktree with a rebase in progress: its HEAD, and the branch it is rebasing (an
+    /// index into [`parterre_core::Repo::refs`]).
+    pub rebasing: Vec<(parterre_core::CommitIx, usize)>,
 }
 
 impl Marks {
@@ -109,6 +112,15 @@ pub fn paint_scene(
     if marks.upstreams {
         crate::upstreams::paint(painter, canvas, view, scene, palette, settings, marks);
     }
+    crate::upstreams::paint_rebasing(
+        painter,
+        canvas,
+        view,
+        scene,
+        settings,
+        palette,
+        &marks.rebasing,
+    );
 
     let font = FontId::monospace(fixed(FONT_SIZE * zoom));
     let draw_text = FONT_SIZE * zoom >= MIN_TEXT_PX;

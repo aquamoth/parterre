@@ -74,6 +74,12 @@ Moving a local branch to another commit. For the open worktree's branch, it also
 happens to the changes in the commits moved away from, and to uncommitted changes.
 _Avoid_: moving a branch, force-updating
 
+**Rebasing a branch**:
+Replaying the open worktree's branch's own commits onto another commit, one by one. Commits
+whose change is already there are left out, and merges are flattened. It can stop on a
+conflict, leaving an operation in progress.
+_Avoid_: moving a branch, updating a branch
+
 **Adding a worktree**:
 Creating a new worktree in its own folder, with a branch or a detached HEAD checked out.
 _Avoid_: creating a worktree, new worktree

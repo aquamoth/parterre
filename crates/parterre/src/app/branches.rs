@@ -15,8 +15,12 @@ use parterre_core::reset::{Mode, Preview};
 use parterre_core::worktree_folder;
 use parterre_core::{Oid, RefKind, Repo};
 
+use super::rebase::{RebaseDialog, stuck_color, stuck_reason};
 use super::reset::ResetDialog;
+use crate::theme::Palette;
 use crate::{dialogs, menu, widgets};
+use parterre_core::rebase;
+use parterre_core::revgraph::GraphOptions;
 
 #[derive(Clone, Debug)]
 pub enum Request {
@@ -37,6 +41,12 @@ pub enum Request {
     Reset {
         target: Oid,
         mode: Option<Mode>,
+    },
+    /// The confirmation for rebasing the open worktree's branch onto `onto`, which the command
+    /// names by `target`: a branch's name, or the full hash.
+    Rebase {
+        onto: Oid,
+        target: String,
     },
 }
 
@@ -156,6 +166,8 @@ fn branch_section(
         }
     }
     switches.sort_by(|a, b| a.0.cmp(&b.0));
+    // A stuck worktree switches nowhere until its operation is finished with git.
+    let stuck = catalog.stuck().map(stuck_reason);
     // The commit itself, detached, last.
     if catalog.has_working_tree && !(catalog.current.is_none() && catalog.head == Some(commit)) {
         let hex = commit.to_hex();
@@ -165,6 +177,11 @@ fn branch_section(
             Request::Run(Action::Detach(commit)),
             None,
         ));
+    }
+    if let Some(reason) = &stuck {
+        for target in &mut switches {
+            target.2 = Some(reason.clone());
+        }
     }
     target_menu(ui, "Switch to", &switches, busy, &mut request);
     let deletions: Vec<_> = refs
@@ -186,6 +203,107 @@ fn branch_section(
         })
         .collect();
     target_menu(ui, "Delete branch", &deletions, busy, &mut request);
+    rebase_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
+    request
+}
+
+/// *Rebase main onto X* for each branch on the node, when it would really rebase; greyed out
+/// while the open worktree is stuck.
+fn rebase_targets(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    refs: &[&parterre_core::GitRef],
+    catalog: &Catalog,
+    busy: bool,
+    request: &mut Option<Request>,
+) {
+    let mut names: Vec<&str> = refs
+        .iter()
+        .filter(|r| !r.name.ends_with("/HEAD"))
+        .map(|r| r.name.as_str())
+        .filter(|name| catalog.current.as_deref() != Some(*name))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        return;
+    }
+    let stuck = catalog.stuck().map(stuck_reason);
+    let branch = match &stuck {
+        Some(_) => stuck_branch(catalog),
+        None => match rebase::offered(repo, catalog, commit) {
+            Some(branch) => branch.to_owned(),
+            None => return,
+        },
+    };
+    let targets: Vec<Target> = names
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_owned(),
+                Request::Rebase {
+                    onto: commit,
+                    target: (*name).to_owned(),
+                },
+                stuck.clone(),
+            )
+        })
+        .collect();
+    target_menu(
+        ui,
+        &format!("Rebase {branch} onto"),
+        &targets,
+        busy,
+        request,
+    );
+}
+
+/// The branch a stuck worktree is rebasing, else its branch, for greyed-out labels.
+fn stuck_branch(catalog: &Catalog) -> String {
+    catalog
+        .worktrees
+        .iter()
+        .find(|w| w.open)
+        .and_then(|w| w.rebasing.as_ref())
+        .and_then(|r| r.branch.clone())
+        .or_else(|| catalog.current.clone())
+        .unwrap_or_else(|| "HEAD".into())
+}
+
+/// *Rebase main onto abc1234*, for a log row: only where it would really rebase; greyed out
+/// while the open worktree is stuck.
+pub fn rebase_item(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    catalog: Option<&Catalog>,
+    busy: bool,
+) -> Option<Request> {
+    let catalog = catalog?;
+    let short = commit.short(repo.abbrev_len.max(7));
+    let stuck = catalog.stuck().map(stuck_reason);
+    let branch = match &stuck {
+        Some(_) => stuck_branch(catalog),
+        None => rebase::offered(repo, catalog, commit)?.to_owned(),
+    };
+    let targets = [(
+        short,
+        Request::Rebase {
+            onto: commit,
+            target: commit.to_hex(),
+        },
+        stuck,
+    )];
+    let mut request = None;
+    menu::separator(ui);
+    target_menu(
+        ui,
+        &format!("Rebase {branch} onto"),
+        &targets,
+        busy,
+        &mut request,
+    );
     request
 }
 
@@ -233,13 +351,11 @@ fn worktree_section(
         .iter()
         .filter(|w| !w.main)
         .map(|w| {
-            let blocked = match (&w.locked, w.in_progress) {
-                (Some(reason), _) if reason.is_empty() => Some("Locked".to_owned()),
-                (Some(reason), _) => Some(format!("Locked: {reason}")),
-                (None, Some(what)) => Some(format!(
-                    "{what} is in progress there; go to the worktree and finish or abort it first"
-                )),
-                (None, None) => None,
+            // An operation in progress there doesn't keep it: deleting it ends that too.
+            let blocked = match &w.locked {
+                Some(reason) if reason.is_empty() => Some("Locked".to_owned()),
+                Some(reason) => Some(format!("Locked: {reason}")),
+                None => None,
             };
             (
                 w.name(),
@@ -262,6 +378,13 @@ pub fn reset_item(
     catalog: Option<&Catalog>,
     busy: bool,
 ) -> Option<Request> {
+    // Greyed out, not hidden, while the worktree is stuck: it's only for now.
+    if let Some(what) = catalog.and_then(Catalog::stuck) {
+        menu::separator(ui);
+        ui.add_enabled(false, egui::Button::new("Reset to here…"))
+            .on_disabled_hover_text(stuck_reason(what));
+        return None;
+    }
     let branch = parterre_core::reset::branch(catalog?, commit).ok()?;
     menu::separator(ui);
     let clicked = ui
@@ -300,9 +423,18 @@ fn target_menu(
             ui.close();
         }
     };
+    // Every target blocked for the same reason greys the submenu itself.
+    let same = targets
+        .first()
+        .and_then(|t| t.2.clone())
+        .filter(|r| targets.iter().all(|t| t.2.as_ref() == Some(r)));
     match targets {
         [] => {}
         [(name, target, blocked)] => item(ui, format!("{verb} {name}"), target, blocked),
+        [_, _, ..] if let Some(reason) = same => {
+            ui.add_enabled(false, egui::Button::new(verb))
+                .on_disabled_hover_text(capitalized(&reason));
+        }
         many => menu::plain_submenu(ui, verb, |ui| {
             for (name, target, blocked) in many {
                 item(ui, name.clone(), target, blocked);
@@ -615,10 +747,18 @@ impl Form {
                             ui.checkbox(&mut wt.go_to, "Go to new worktree");
                         }
                         None => {
-                            ui.add_enabled(
-                                self.catalog.has_working_tree,
+                            // A stuck worktree switches nowhere.
+                            let stuck = self.catalog.stuck();
+                            if stuck.is_some() {
+                                self.switch = false;
+                            }
+                            let response = ui.add_enabled(
+                                self.catalog.has_working_tree && stuck.is_none(),
                                 egui::Checkbox::new(&mut self.switch, "Switch to new branch"),
                             );
+                            if let Some(what) = stuck {
+                                response.on_disabled_hover_text(stuck_reason(what));
+                            }
                         }
                     }
                     self.commands()
@@ -995,6 +1135,9 @@ struct Notice {
     report: Report,
     error: Option<String>,
     at: f64,
+    /// Done, but needing the user's attention: orange, and it stays until closed. `error`
+    /// holds its message.
+    attention: bool,
 }
 
 /// A warning before losing work, waiting for an answer.
@@ -1019,6 +1162,14 @@ struct Previewing {
     rx: mpsc::Receiver<Result<Preview, String>>,
 }
 
+/// A rebase's preview, being read for its confirmation.
+#[derive(Debug)]
+struct RebaseLoading {
+    target: String,
+    opener: ViewportId,
+    rx: mpsc::Receiver<Result<rebase::Preview, String>>,
+}
+
 #[derive(Debug, Default)]
 pub struct Tool {
     repo: Option<Arc<Repo>>,
@@ -1028,6 +1179,8 @@ pub struct Tool {
     warning: Option<Loss>,
     reset: Option<ResetDialog>,
     previewing: Option<Previewing>,
+    rebase: Option<RebaseDialog>,
+    rebase_loading: Option<RebaseLoading>,
     /// Diff windows asked for from a dialog.
     pub diff_requests: Vec<(Arc<Repo>, FileDiffSpec)>,
     job: Option<Job>,
@@ -1058,6 +1211,8 @@ impl Tool {
                 self.warning = None;
                 self.reset = None;
                 self.previewing = None;
+                self.rebase = None;
+                self.rebase_loading = None;
                 self.catalog = None;
             } else if let Some(dialog) = &self.reset
                 && self.previewing.is_none()
@@ -1111,6 +1266,7 @@ impl Tool {
             }
         }
         self.previewed(ctx);
+        self.rebase_previewed(ctx);
         let completed = self.job.as_ref().and_then(|job| match job.rx.try_recv() {
             Ok(result) => Some(result),
             Err(mpsc::TryRecvError::Empty) => None,
@@ -1146,7 +1302,15 @@ impl Tool {
                 ),
                 Outcome::Done(report) => {
                     self.go_to = job.go_to;
-                    self.notice(ctx, job.path, job.label, report, None)
+                    match report.attention.clone() {
+                        Some(a) => {
+                            self.notice(ctx, job.path, a.title, report, Some(a.message));
+                            if let Some(n) = self.notices.last_mut() {
+                                n.attention = true;
+                            }
+                        }
+                        None => self.notice(ctx, job.path, job.label, report, None),
+                    }
                 }
                 Outcome::Failed { error, report } => {
                     self.notice(ctx, job.path, job.label, report, Some(error.to_string()))
@@ -1185,6 +1349,48 @@ impl Tool {
             Request::GoTo(_) => unreachable!("handled above"),
             Request::Run(action) => self.run(ctx, repo.path.clone(), action, None, opener),
             Request::Reset { target, mode } => self.preview(ctx, target, mode, opener, false),
+            Request::Rebase { onto, target } => {
+                let path = repo.path.clone();
+                let (tx, rx) = mpsc::channel();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(rebase::Preview::load(&path, onto).map_err(|e| e.to_string()));
+                    ctx.request_repaint();
+                });
+                self.rebase_loading = Some(RebaseLoading { target, opener, rx });
+            }
+        }
+    }
+
+    /// Opens the rebase's confirmation once its preview is read.
+    fn rebase_previewed(&mut self, ctx: &egui::Context) {
+        let Some(loading) = &self.rebase_loading else {
+            return;
+        };
+        let result = match loading.rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("The rebase preview stopped unexpectedly.".into())
+            }
+        };
+        let loading = self.rebase_loading.take().unwrap();
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
+        match result {
+            Ok(preview) => {
+                self.rebase = Some(RebaseDialog::new(
+                    preview,
+                    repo,
+                    loading.target,
+                    loading.opener,
+                ));
+            }
+            Err(e) => {
+                let title = format!("Rebase onto {}", loading.target);
+                self.notice(ctx, repo.path.clone(), title, Report::default(), Some(e));
+            }
         }
     }
 
@@ -1293,10 +1499,12 @@ impl Tool {
             report,
             error,
             at: ctx.input(|i| i.time),
+            attention: false,
         });
     }
 
-    pub fn show(&mut self, ctx: &egui::Context) {
+    /// The graph's `palette` and `options`, for the rebase's commit list.
+    pub fn show(&mut self, ctx: &egui::Context, palette: &Palette, options: &GraphOptions) {
         if let Some(mut form) = self.form.take() {
             let (answer, log) = form.show(ctx, self.busy());
             if log {
@@ -1325,6 +1533,7 @@ impl Tool {
             }
         }
         self.reset_dialog(ctx);
+        self.rebase_dialog(ctx, palette, options);
         self.loss_dialog(ctx);
         self.notifications(ctx);
     }
@@ -1352,6 +1561,27 @@ impl Tool {
             }
             Some(dialogs::Answer::Cancel) => self.previewing = None,
             _ => self.reset = Some(dialog),
+        }
+    }
+
+    fn rebase_dialog(&mut self, ctx: &egui::Context, palette: &Palette, options: &GraphOptions) {
+        let Some(mut dialog) = self.rebase.take() else {
+            return;
+        };
+        let asked = dialog.show(ctx, self.busy(), palette, options);
+        let repo = self.repo.clone();
+        if let (Some(oid), Some(repo)) = (asked.log, &repo) {
+            self.log_request = Some((repo.clone(), vec![oid], false));
+        }
+        match asked.answer {
+            Some(dialogs::Answer::Primary) if !self.busy() => {
+                if let Some(repo) = &repo {
+                    let action = Action::Rebase(Box::new(dialog.rebase()));
+                    self.run(ctx, repo.path.clone(), action, None, dialog.opener);
+                }
+            }
+            Some(dialogs::Answer::Cancel) => {}
+            _ => self.rebase = Some(dialog),
         }
     }
 
@@ -1505,7 +1735,9 @@ impl Tool {
                 }
                 let mut remove = None;
                 for n in &self.notices {
-                    let color = if n.error.is_some() {
+                    let color = if n.attention {
+                        stuck_color(ui)
+                    } else if n.error.is_some() {
                         ui.visuals().error_fg_color
                     } else if ui.visuals().dark_mode {
                         Color32::from_rgb(75, 165, 105)
@@ -1539,7 +1771,12 @@ impl Tool {
                     dialogs::fields(ui, |ui| {
                         ui.weak(n.path.display().to_string());
                         if let Some(error) = &n.error {
-                            ui.colored_label(ui.visuals().error_fg_color, error);
+                            let color = if n.attention {
+                                stuck_color(ui)
+                            } else {
+                                ui.visuals().error_fg_color
+                            };
+                            ui.colored_label(color, error);
                         }
                         for step in &n.report.steps {
                             ui.label(RichText::new(command_text(&step.args)).monospace());
