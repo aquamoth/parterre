@@ -210,18 +210,19 @@ fn a_branch_moved_back_is_only_behind() {
 }
 
 #[test]
-fn diverged_without_a_rebase_would_lose_theirs() {
-    // Both sides committed: a push would need force, and would drop the colleague's commit.
+fn diverged_without_a_rebase_is_only_behind() {
+    // Both sides committed, nothing rewritten: a pull brings the colleague's commit, and
+    // nobody force-pushes a branch that wasn't rewritten.
     let mut s = Setup::new();
     s.colleague_pushes("main", "theirs.txt", "Theirs");
     s.change("main.txt", "Mine");
     let repo = s.repo.load();
     let u = upstream(&repo, "main");
-    let want = named(&[("Mine", Side::Ahead), ("Theirs", Side::Lost)]);
+    let want = named(&[("Mine", Side::Ahead), ("Theirs", Side::Behind)]);
     assert_eq!(sides(&repo, u), want);
     assert_eq!(counts(u), git_track(&s.repo, "main"));
     assert!(!u.is_rebased());
-    assert!(u.loses_commits());
+    assert!(!u.loses_commits());
     assert_eq!(u.rebased_from, None);
 }
 
@@ -307,35 +308,118 @@ fn a_cherry_picked_copy_is_not_lost() {
 }
 
 #[test]
-fn without_a_reflog_everything_the_upstream_has_is_lost() {
-    // git's --force-if-includes can't vouch for any commit without a reflog, and neither can
-    // parterre; copies still count.
+fn a_rebase_that_drops_a_commit_loses_it() {
+    // Rebased with one commit dropped: the branch had it (its reflog says so, and git's
+    // --force-if-includes would allow the push), but nothing replaced it.
     let mut s = Setup::new();
-    s.pushed_branch("bare", &["Bare one"]);
+    let pushed = s.pushed_branch("drop", &["Keep me", "Drop me"]);
     s.main_moves_on();
-    s.rebase_onto_main("bare");
-    s.repo.git(&["reflog", "expire", "--expire=all", "--all"]);
-    let repo = s.repo.load();
-    let u = upstream(&repo, "bare");
-    let behind: Vec<(String, Side)> = sides(&repo, u)
-        .into_iter()
-        .filter(|&(_, side)| side != Side::Ahead)
-        .collect();
-    // The rebased copy keeps it from being lost.
-    assert_eq!(behind, named(&[("Bare one", Side::Replaced)]));
-
-    s.repo.git(&["switch", "-q", "bare"]);
+    s.repo.git(&["switch", "-q", "drop"]);
     s.repo.git(&["reset", "-q", "--hard", "main"]);
-    s.change("main.txt", "Something else");
+    s.repo.git(&["cherry-pick", &pushed[0]]);
     s.repo.git(&["switch", "-q", "main"]);
-    s.repo.git(&["reflog", "expire", "--expire=all", "--all"]);
     let repo = s.repo.load();
-    let u = upstream(&repo, "bare");
+    let u = upstream(&repo, "drop");
     let behind: Vec<(String, Side)> = sides(&repo, u)
         .into_iter()
         .filter(|&(_, side)| side != Side::Ahead)
         .collect();
-    assert_eq!(behind, named(&[("Bare one", Side::Lost)]));
+    let want = named(&[("Drop me", Side::Lost), ("Keep me", Side::Replaced)]);
+    assert_eq!(behind, want);
+    assert!(u.is_rebased());
+    assert!(u.loses_commits());
+}
+
+#[test]
+fn a_rebase_that_only_drops_is_only_behind() {
+    // `git rebase --onto main` with the upstream level: nothing to replay, so the branch's
+    // own commit is dropped and it moves to main. A pull brings the commit back.
+    let mut s = Setup::new();
+    s.pushed_branch("research", &["Research"]);
+    s.main_moves_on();
+    s.repo.git(&["switch", "-q", "research"]);
+    s.repo.git(&["rebase", "-q", "--onto", "main"]);
+    s.repo.git(&["switch", "-q", "main"]);
+    let repo = s.repo.load();
+    let u = upstream(&repo, "research");
+    let want = named(&[("Tidy up main", Side::Ahead), ("Research", Side::Behind)]);
+    assert_eq!(sides(&repo, u), want);
+    assert!(!u.is_rebased());
+}
+
+#[test]
+fn commits_in_the_same_second_are_told_apart() {
+    // A dropped commit made in the same second as the commit it was rebased onto, by the same
+    // author, as scripts and agents do: still not replaced.
+    let mut s = Setup::new();
+    s.repo.set_clock(50);
+    s.pushed_branch("quick", &["Quick"]);
+    s.repo.set_clock(50);
+    s.main_moves_on();
+    s.repo.git(&["switch", "-q", "quick"]);
+    s.repo.git(&["rebase", "-q", "--onto", "main"]);
+    s.repo.git(&["switch", "-q", "main"]);
+    let repo = s.repo.load();
+    let u = upstream(&repo, "quick");
+    let (quick, tidy) = (&u.commits[1].0, &u.commits[0].0);
+    assert_eq!(
+        repo.commit(*quick).author_time,
+        repo.commit(*tidy).author_time
+    );
+    let want = named(&[("Tidy up main", Side::Ahead), ("Quick", Side::Behind)]);
+    assert_eq!(sides(&repo, u), want);
+}
+
+#[test]
+fn a_conflict_resolved_in_a_rebase_still_replaces() {
+    // Resolving a conflict changes the patch, but rebase keeps the author date.
+    let mut s = Setup::new();
+    s.pushed_branch("clash", &["Clash"]);
+    s.repo.git(&["switch", "-q", "main"]);
+    s.repo.write("clash.txt", b"main's version\n");
+    s.repo.commit_all("Main clashes");
+    s.repo.git(&["switch", "-q", "clash"]);
+    let rebase = Command::new("git")
+        .current_dir(s.repo.path())
+        .args(["rebase", "-q", "main"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("run git");
+    assert!(!rebase.status.success(), "the rebase should conflict");
+    s.repo.write("clash.txt", b"both\n");
+    s.repo.git(&["add", "clash.txt"]);
+    s.repo
+        .git(&["-c", "core.editor=true", "rebase", "--continue"]);
+    s.repo.git(&["switch", "-q", "main"]);
+    let repo = s.repo.load();
+    let u = upstream(&repo, "clash");
+    let behind: Vec<(String, Side)> = sides(&repo, u)
+        .into_iter()
+        .filter(|&(_, side)| side != Side::Ahead)
+        .collect();
+    assert_eq!(behind, named(&[("Clash", Side::Replaced)]));
+}
+
+#[test]
+fn a_squash_shows_the_squashed_away_commits_lost() {
+    // The known false alarm: a squash keeps only the first commit's author date.
+    let mut s = Setup::new();
+    s.pushed_branch("squash", &["First", "Second"]);
+    s.repo.git(&["switch", "-q", "squash"]);
+    s.repo.git(&["reset", "-q", "--soft", "HEAD~2"]);
+    s.repo.git(&["commit", "-q", "-C", "origin/squash~1"]);
+    s.repo.git(&["switch", "-q", "main"]);
+    let repo = s.repo.load();
+    let u = upstream(&repo, "squash");
+    let behind: Vec<(String, Side)> = sides(&repo, u)
+        .into_iter()
+        .filter(|&(_, side)| side != Side::Ahead)
+        .collect();
+    assert_eq!(
+        behind,
+        named(&[("Second", Side::Lost), ("First", Side::Replaced)])
+    );
 }
 
 #[test]
@@ -378,7 +462,7 @@ fn a_local_upstream_counts_too() {
     let repo = s.repo.load();
     let u = upstream(&repo, "topic");
     assert_eq!(u.short_name(), "main");
-    let want = named(&[("Topic", Side::Ahead), ("Main", Side::Lost)]);
+    let want = named(&[("Topic", Side::Ahead), ("Main", Side::Behind)]);
     assert_eq!(sides(&repo, u), want);
     assert_eq!(counts(u), git_track(&s.repo, "topic"));
 }

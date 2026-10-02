@@ -28,8 +28,8 @@ crates/parterre-core   GUI-free; everything testable lives here
   text_size.rs         the text size's steps, and Ctrl+wheel and pinch turned into steps
   revgraph.rs          reduce the commit DAG to a revision graph (TortoiseGit's rules)
   upstream.rs          local branches against their upstreams: ahead, behind, lost to a force
-                       push (the reflog, as --force-if-includes reads it) or replaced by a
-                       rebase, and the edges that hold them
+                       push or replaced by a rebase (a counterpart by patch, or by author,
+                       author date and subject), and the edges that hold them
   pattern.rs           branch-name wildcards, for hiding and colouring branches
   forge.rs             open pull requests: the model, where each is shown (head commit and
                        base-branch refs), remotes and upstreams from git

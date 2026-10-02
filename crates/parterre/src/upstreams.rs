@@ -1,11 +1,13 @@
 //! Local branches against their upstreams, as the graph, the status bar and the log window
 //! show them (see [`parterre_core::upstream`]).
 //!
-//! Hovering or selecting a branch, its upstream, or the commit it was rebased from colours
-//! the commits between the two, each on its own stretch of the edge that holds it: green
+//! Hovering or selecting a node colours the commits between the branch the status bar names
+//! for it and that branch's upstream, each on its own stretch of the edge that holds it: green
 //! ahead, blue behind, red lost to a force push, grey dashed replaced by a rebase. A rebased
 //! branch always has a dashed edge to its upstream, red while hovered if a force push would
 //! lose commits.
+
+use std::collections::HashSet;
 
 use eframe::egui::{
     self, Color32, FontId, Painter, Pos2, Rect, RichText, Shape, Stroke, pos2, vec2,
@@ -52,17 +54,18 @@ pub fn paint(
     let zoom = view.fixed(view.zoom);
     let width = view.fixed((2.0 * view.zoom).max(1.0));
     let visible = canvas.expand(40.0);
-    let active = |n: Option<usize>| {
-        n.is_some_and(|n| marks.hovered == Some(n) || marks.selected.get(n) == Some(&true))
-    };
-    for u in &repo.upstreams {
+    // The upstreams the hovered and selected nodes stand for, as the status bar names them.
+    let selected = marks.selected.iter().enumerate().filter(|&(_, &s)| s);
+    let active: HashSet<usize> = marks
+        .hovered
+        .into_iter()
+        .chain(selected.map(|(n, _)| n))
+        .filter_map(|n| upstream_on(scene, n))
+        .collect();
+    for (i, u) in repo.upstreams.iter().enumerate() {
         let branch = node_of_ref(repo, graph, u.branch);
         let upstream = u.target.and_then(|t| node_of_ref(repo, graph, t));
-        let from = u
-            .rebased_from
-            .and_then(|c| graph.node_of(c))
-            .map(|n| n as usize);
-        let on = active(branch) || active(upstream) || active(from);
+        let on = active.contains(&i);
 
         if let (Some(b), Some(t)) = (branch, upstream)
             && b != t
@@ -189,19 +192,16 @@ fn dashed_route(a: Rect, b: Rect, scene: &Scene, style: EdgeStyle, scale: f32) -
         .collect()
 }
 
-/// The upstream the status bar shows for `node`: of a branch on it, else of the branch whose
-/// upstream is on it.
-fn upstream_on(scene: &Scene, node: usize) -> Option<&Upstream> {
-    let refs = &scene.graph.nodes.get(node)?.refs;
+/// The upstream a node stands for, as an index into [`Repo::upstreams`]: of a branch on it,
+/// else of the branch whose upstream is on it, else of the branch it is the rebased-from
+/// commit of. The status bar names it, and the graph colours it.
+fn upstream_on(scene: &Scene, node: usize) -> Option<usize> {
+    let n = scene.graph.nodes.get(node)?;
     let upstreams = &scene.repo.upstreams;
-    upstreams
-        .iter()
-        .find(|u| refs.contains(&u.branch))
-        .or_else(|| {
-            upstreams
-                .iter()
-                .find(|u| u.target.is_some_and(|t| refs.contains(&t)))
-        })
+    let find = |f: &dyn Fn(&Upstream) -> bool| upstreams.iter().position(f);
+    find(&|u| n.refs.contains(&u.branch))
+        .or_else(|| find(&|u| u.target.is_some_and(|t| n.refs.contains(&t))))
+        .or_else(|| find(&|u| u.rebased_from == Some(n.commit)))
 }
 
 /// The ahead|behind marker: `feature/x 3|2` for the hovered node's branch, else the selected
@@ -217,6 +217,7 @@ pub fn status_ui(
     let Some(u) = hovered
         .and_then(|n| upstream_on(scene, n))
         .or_else(|| selected.and_then(|n| upstream_on(scene, n)))
+        .map(|i| &repo.upstreams[i])
         .or_else(head)
     else {
         return;

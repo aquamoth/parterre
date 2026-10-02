@@ -2,8 +2,8 @@
 //! pull would do with each of them (see [`Side`]).
 //!
 //! Ahead and behind are worked out from the snapshot's own commits. Only a branch that has
-//! diverged from its upstream asks git more: its reflog, as `push --force-if-includes` reads
-//! it, and which of the upstream's commits have a copy on it (`rev-list --cherry-mark`).
+//! diverged from its upstream asks git more: which of the upstream's commits have a copy on it
+//! (`rev-list --cherry-mark`).
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
@@ -16,13 +16,13 @@ use crate::revgraph::RevGraph;
 pub enum Side {
     /// On the branch only: a push sends it.
     Ahead,
-    /// On the upstream only, while the branch has nothing of its own: a pull brings it.
+    /// On the upstream only, and the branch replaced none of them: a pull brings it.
     Behind,
-    /// On the upstream only while the branch has commits of its own, never on the branch (its
-    /// reflog) and with no copy on it: a force push would lose it.
+    /// On the upstream only, with no counterpart on a branch that replaced others: a force
+    /// push would lose it.
     Lost,
-    /// On the upstream only while the branch has commits of its own, but on the branch before
-    /// it was rewritten, or copied onto it: a rebase replaced it.
+    /// On the upstream only, with a counterpart on the branch: the same patch, or the same
+    /// author, author date and subject, which rebase, amend and conflict resolution keep.
     Replaced,
 }
 
@@ -71,10 +71,10 @@ impl Upstream {
         self.commits.len() - self.ahead()
     }
 
-    /// True when the branch was rebased (or otherwise rewritten) after it was pushed: it has
-    /// commits of its own, and the upstream has commits it replaced.
+    /// True when the branch was rebased (or otherwise rewritten) after it was pushed: the
+    /// upstream has commits it replaced.
     pub fn is_rebased(&self) -> bool {
-        self.ahead() > 0 && self.commits.iter().any(|&(_, s)| s == Side::Replaced)
+        self.commits.iter().any(|&(_, s)| s == Side::Replaced)
     }
 
     /// True when a force push would lose commits of the upstream.
@@ -117,7 +117,7 @@ impl Upstream {
 
 /// The upstream of every local branch that has one, by the branch's full name and the
 /// upstream's (from `for-each-ref`'s `%(upstream)`), classified against `repo`. A diverged
-/// branch also asks `git` for its reflog and for copies of the upstream's commits.
+/// branch also asks `git` for copies of the upstream's commits.
 pub fn load(git: &Git, repo: &Repo, configured: &[(String, String)]) -> Vec<Upstream> {
     let index: HashMap<&str, usize> = repo
         .refs
@@ -167,12 +167,29 @@ fn classify(
         return;
     }
     let branch = repo.refs[upstream.branch].full_name.as_str();
-    let never = never_on_branch(git, branch, &upstream.name);
     let copied = copied_onto_branch(git, branch, &upstream.name);
-    for c in behind {
-        let hex = repo.commit(c).oid.to_hex();
-        let lost = never.as_ref().is_none_or(|n| n.contains(&hex)) && !copied.contains(&hex);
-        commits.push((c, if lost { Side::Lost } else { Side::Replaced }));
+    // Rebase, amend and conflict resolution keep the author, the author date and (unless
+    // reworded) the subject. Several commits in one second by one author are common in scripts
+    // and agents, so the subject has to match too.
+    let authored = |c: CommitIx| {
+        let c = repo.commit(c);
+        let (email, name) = (c.author_email.as_str(), c.author_name.as_str());
+        (email, name, c.author_time, c.subject.as_str())
+    };
+    let rewritten: HashSet<_> = ahead.iter().map(|&c| authored(c)).collect();
+    let replaced: Vec<bool> = behind
+        .iter()
+        .map(|&c| copied.contains(&repo.commit(c).oid.to_hex()) || rewritten.contains(&authored(c)))
+        .collect();
+    // Without anything replaced it is plain divergence: a pull brings the rest.
+    let rebased = replaced.iter().any(|&r| r);
+    for (c, replaced) in behind.into_iter().zip(replaced) {
+        let side = match (rebased, replaced) {
+            (false, _) => Side::Behind,
+            (true, true) => Side::Replaced,
+            (true, false) => Side::Lost,
+        };
+        commits.push((c, side));
     }
     let tip = upstream.target.map(|u| repo.refs[u].target);
     upstream.rebased_from = upstream
@@ -181,25 +198,6 @@ fn classify(
         .find(|&&(_, s)| s == Side::Replaced)
         .map(|&(c, _)| c)
         .filter(|&c| Some(c) != tip);
-}
-
-/// The upstream's own commits that the branch never had, as its reflog remembers: those
-/// `push --force-if-includes` refuses to drop. `None` if git can't tell.
-fn never_on_branch(git: &Git, branch: &str, upstream: &str) -> Option<HashSet<String>> {
-    // No reflog (`core.logAllRefUpdates` off) means none.
-    let reflog = git
-        .query(&["reflog", "show", "--format=%H", branch, "--"])
-        .ok()?
-        .unwrap_or_default();
-    let mut input = format!("{upstream}\n^{branch}\n");
-    for oid in reflog.lines() {
-        input.push_str(&format!("^{oid}\n"));
-    }
-    // Entries whose commits were pruned are skipped.
-    let out = git
-        .run_with_input(&["rev-list", "--ignore-missing", "--stdin"], input)
-        .ok()?;
-    Some(out.lines().map(str::to_owned).collect())
 }
 
 /// The upstream's own commits with a patch-equivalent copy on the branch.
