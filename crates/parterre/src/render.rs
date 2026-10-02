@@ -32,6 +32,8 @@ pub struct Marks {
     pub search_hits: Vec<bool>,
     /// The node of the commit marked for comparison.
     pub marked: Option<usize>,
+    /// Show how branches differ from their upstreams (see [`crate::upstreams`]).
+    pub upstreams: bool,
 }
 
 impl Marks {
@@ -103,6 +105,9 @@ pub fn paint_scene(
     for e in emphasised {
         let stroke = Stroke::new(width * 1.6, palette.selection);
         paint_edge(painter, canvas, view, scene, settings, e, visible, stroke);
+    }
+    if marks.upstreams {
+        crate::upstreams::paint(painter, canvas, view, scene, palette, settings, marks);
     }
 
     let font = FontId::monospace(fixed(FONT_SIZE * zoom));
@@ -281,6 +286,25 @@ pub fn edge_path(
         EdgeStyle::Curved => curved_path(&pts, child, parent, flow, hook, turned),
     };
     (path.len() >= 2).then_some(path)
+}
+
+/// The path an edge from `child` to `parent` (screen boxes) would take with no bend points,
+/// in `style`. `zoom` is screen pixels per world unit.
+pub fn link_path(
+    scene: &Scene,
+    child: Rect,
+    parent: Rect,
+    style: EdgeStyle,
+    zoom: f32,
+) -> Vec<Pos2> {
+    let f = scene.layout.direction.flow();
+    let flow = vec2(f.x, f.y);
+    let pts = [child.center(), parent.center()];
+    let hook = HOOK_LEN * zoom;
+    match style {
+        EdgeStyle::Straight => straight_path(&pts, child, parent, flow, hook, false),
+        EdgeStyle::Curved => curved_path(&pts, child, parent, flow, hook, false),
+    }
 }
 
 /// The two triangles of an arrowhead for `path`, or `None` without arrows.

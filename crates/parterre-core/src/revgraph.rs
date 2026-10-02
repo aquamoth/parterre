@@ -85,6 +85,10 @@ pub struct GraphOptions {
     /// out, even where the local-branch switch or [`GraphOptions::hide_branches`] would hide
     /// them, and the detached HEADs, which start history like branches. Not in TortoiseGit.
     pub show_worktrees: bool,
+    /// Show how local branches differ from their upstreams (see [`Repo::upstreams`]). In the
+    /// graph itself, the commit a branch was rebased from is a node while that lasts. Not in
+    /// TortoiseGit.
+    pub show_upstreams: bool,
 }
 
 impl Default for GraphOptions {
@@ -103,6 +107,7 @@ impl Default for GraphOptions {
             hide_branches: String::new(),
             show_pull_requests: true,
             show_worktrees: false,
+            show_upstreams: true,
         }
     }
 }
@@ -395,6 +400,16 @@ pub fn build_with_pull_requests(
     for &(k, c) in &detached {
         worktrees_on[c].push(k);
         decorated[c] = true;
+    }
+
+    // The commit a branch was rebased from stays a node while the branch and its upstream are
+    // apart, wherever it is shown anyway.
+    if options.show_upstreams {
+        for c in repo.upstreams.iter().filter_map(|u| u.rebased_from) {
+            if c.ix() < n && visible[c.ix()] {
+                decorated[c.ix()] = true;
+            }
+        }
     }
 
     // Child counts, merge children, and a parents-first order (reverse Kahn from the tips).

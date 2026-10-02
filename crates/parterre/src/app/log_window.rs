@@ -1194,16 +1194,17 @@ pub(super) fn cell(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32
 /// HEAD.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Badge<'a> {
-    /// A ref, and the other worktree that has it checked out, while worktrees are shown.
-    Ref(&'a GitRef, Option<&'a Worktree>),
+    /// A ref, the other worktree that has it checked out, while worktrees are shown, and a
+    /// local branch's ahead and behind counts, while upstreams are shown and it has any.
+    Ref(&'a GitRef, Option<&'a Worktree>, Option<(usize, usize)>),
     Worktree(&'a Worktree),
 }
 
 impl Badge<'_> {
     fn text(&self) -> String {
         match self {
-            Badge::Ref(r, Some(w)) if r.kind == RefKind::DetachedHead => w.name(),
-            Badge::Ref(r, _) => r.name.clone(),
+            Badge::Ref(r, Some(w), _) if r.kind == RefKind::DetachedHead => w.name(),
+            Badge::Ref(r, _, _) => r.name.clone(),
             Badge::Worktree(w) => w.name(),
         }
     }
@@ -1211,7 +1212,7 @@ impl Badge<'_> {
     /// A detached worktree's name, in italics as in the graph.
     fn is_detached_worktree(&self) -> bool {
         match self {
-            Badge::Ref(r, w) => r.kind == RefKind::DetachedHead && w.is_some(),
+            Badge::Ref(r, w, _) => r.kind == RefKind::DetachedHead && w.is_some(),
             Badge::Worktree(_) => true,
         }
     }
@@ -1246,7 +1247,16 @@ pub(super) fn badges<'a>(
         .into_iter()
         .map(|label| match label {
             Label::Ref { index, worktree } => {
-                Badge::Ref(&repo.refs[index], worktree.map(|k| &repo.worktrees[k]))
+                let counts = repo
+                    .upstream_of(index)
+                    .filter(|_| graph.show_upstreams)
+                    .map(|u| (u.ahead(), u.behind()))
+                    .filter(|&(a, b)| a + b > 0);
+                Badge::Ref(
+                    &repo.refs[index],
+                    worktree.map(|k| &repo.worktrees[k]),
+                    counts,
+                )
             }
             Label::Worktree(k) => Badge::Worktree(&repo.worktrees[k]),
         })
@@ -1272,10 +1282,16 @@ pub(super) fn badge(
     // As in the graph: a worktree's folder glyph (crossed out if it is gone) before the
     // branch it has checked out, and a detached one in a colour of its own and in italics.
     let (fill, worktree) = match *badge {
-        Badge::Ref(r, w) => (palette.ref_fill(r.kind, r.is_head, &r.name), w),
+        Badge::Ref(r, w, _) => (palette.ref_fill(r.kind, r.is_head, &r.name), w),
         Badge::Worktree(w) => (worktree_fill(w), Some(w)),
     };
     let glyph = if worktree.is_some() { BADGE_GLYPH } else { 0.0 };
+    // A local branch's ↑ahead ↓behind after its name.
+    let counts = match *badge {
+        Badge::Ref(_, _, counts) => counts,
+        Badge::Worktree(_) => None,
+    };
+    let counts_width = counts.map_or(0.0, |c| crate::upstreams::counts_width(ui.painter(), c));
     let color = text_on(fill);
     let pad = 5.0;
     let mut job = LayoutJob::single_section(
@@ -1288,13 +1304,13 @@ pub(super) fn badge(
         },
     );
     job.wrap = TextWrapping {
-        max_width: (max_width - 2.0 * pad - glyph).max(1.0),
+        max_width: (max_width - 2.0 * pad - glyph - counts_width).max(1.0),
         max_rows: 1,
         break_anywhere: true,
         overflow_character: Some('…'),
     };
     let g = ui.painter().layout_job(job);
-    let size = vec2(g.size().x + 2.0 * pad + glyph, 17.0);
+    let size = vec2(g.size().x + 2.0 * pad + glyph + counts_width, 17.0);
     let rect = Rect::from_min_size(pos2(at.x, at.y - size.y / 2.0), size);
     let painter = ui.painter();
     painter.rect(
@@ -1324,6 +1340,10 @@ pub(super) fn badge(
         g,
         color,
     );
+    if let Some(c) = counts {
+        let at = pos2(rect.right() - pad - counts_width, rect.center().y);
+        crate::upstreams::paint_counts(painter, at, c, color);
+    }
     size.x
 }
 
@@ -1521,15 +1541,21 @@ fn badge_widget(ui: &mut Ui, b: &Badge, palette: &Palette) {
     let text =
         ui.painter()
             .layout_no_wrap(b.text(), FontId::proportional(11.5), Color32::PLACEHOLDER);
-    let glyph = if let Badge::Ref(_, Some(_)) | Badge::Worktree(_) = b {
+    let glyph = if let Badge::Ref(_, Some(_), _) | Badge::Worktree(_) = b {
         BADGE_GLYPH
     } else {
         0.0
     };
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(text.size().x + 11.0 + glyph, 17.0), Sense::hover());
+    let counts = match *b {
+        Badge::Ref(_, _, Some(c)) => crate::upstreams::counts_width(ui.painter(), c),
+        _ => 0.0,
+    };
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(text.size().x + 11.0 + glyph + counts, 17.0),
+        Sense::hover(),
+    );
     badge(ui, b, palette, rect.left_center(), rect.width());
-    if let Badge::Ref(_, Some(w)) | Badge::Worktree(w) = b {
+    if let Badge::Ref(_, Some(w), _) | Badge::Worktree(w) = b {
         response.on_hover_text(format!("Worktree {}", w.path.display()));
     }
 }

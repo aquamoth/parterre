@@ -1,0 +1,317 @@
+//! Local branches against their upstreams: the commits on one side only, and what a push or a
+//! pull would do with each of them (see [`Side`]).
+//!
+//! Ahead and behind are worked out from the snapshot's own commits. Only a branch that has
+//! diverged from its upstream asks git more: its reflog, as `push --force-if-includes` reads
+//! it, and which of the upstream's commits have a copy on it (`rev-list --cherry-mark`).
+
+use std::collections::{BinaryHeap, HashMap, HashSet};
+
+use crate::git::Git;
+use crate::repo::{CommitIx, Repo};
+use crate::revgraph::RevGraph;
+
+/// Where a commit between a branch and its upstream stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Side {
+    /// On the branch only: a push sends it.
+    Ahead,
+    /// On the upstream only, while the branch has nothing of its own: a pull brings it.
+    Behind,
+    /// On the upstream only while the branch has commits of its own, never on the branch (its
+    /// reflog) and with no copy on it: a force push would lose it.
+    Lost,
+    /// On the upstream only while the branch has commits of its own, but on the branch before
+    /// it was rewritten, or copied onto it: a rebase replaced it.
+    Replaced,
+}
+
+/// A local branch with an upstream, and how the two differ.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Upstream {
+    /// Index into [`Repo::refs`] of the local branch.
+    pub branch: usize,
+    /// The upstream's full name: `refs/remotes/origin/topic`, or `refs/heads/main` for a local
+    /// one.
+    pub name: String,
+    /// Index into [`Repo::refs`] of the upstream. `None` when it is gone: deleted on the remote
+    /// and pruned.
+    pub target: Option<usize>,
+    /// The commits on one side only, newest first (parents after their children).
+    pub commits: Vec<(CommitIx, Side)>,
+    /// The commit the branch was rebased from (the newest it replaced), while the upstream has
+    /// moved on past it. No ref points at it then, and the graph shows it anyway.
+    pub rebased_from: Option<CommitIx>,
+}
+
+impl Upstream {
+    /// The upstream's short name, as git prints it: `origin/topic`.
+    pub fn short_name(&self) -> &str {
+        self.name
+            .strip_prefix("refs/remotes/")
+            .or_else(|| self.name.strip_prefix("refs/heads/"))
+            .unwrap_or(&self.name)
+    }
+
+    /// True when the upstream no longer exists.
+    pub fn is_gone(&self) -> bool {
+        self.target.is_none()
+    }
+
+    /// git's ahead count: commits on the branch only.
+    pub fn ahead(&self) -> usize {
+        self.commits
+            .iter()
+            .filter(|&&(_, s)| s == Side::Ahead)
+            .count()
+    }
+
+    /// git's behind count: commits on the upstream only, whatever became of them.
+    pub fn behind(&self) -> usize {
+        self.commits.len() - self.ahead()
+    }
+
+    /// True when the branch was rebased (or otherwise rewritten) after it was pushed: it has
+    /// commits of its own, and the upstream has commits it replaced.
+    pub fn is_rebased(&self) -> bool {
+        self.ahead() > 0 && self.commits.iter().any(|&(_, s)| s == Side::Replaced)
+    }
+
+    /// True when a force push would lose commits of the upstream.
+    pub fn loses_commits(&self) -> bool {
+        self.commits.iter().any(|&(_, s)| s == Side::Lost)
+    }
+
+    /// The edges of `graph` that hold commits of [`Upstream::commits`], each with the sides
+    /// of the commits along it, child end first: the child's own commit, then the commits
+    /// collapsed into the edge, newest first. `None` for a commit on both sides.
+    pub fn edge_sides(&self, graph: &RevGraph, repo: &Repo) -> Vec<(usize, Vec<Option<Side>>)> {
+        if self.commits.is_empty() {
+            return Vec::new();
+        }
+        let sides: HashMap<CommitIx, Side> = self.commits.iter().copied().collect();
+        // Only edges that start at one of the commits, or that run into the node one of them
+        // is collapsed into, can hold any.
+        let parents: HashSet<u32> = self
+            .commits
+            .iter()
+            .filter_map(|&(c, _)| graph.represented_by(c))
+            .collect();
+        let mut out = Vec::new();
+        for (e, &edge) in graph.edges.iter().enumerate() {
+            let child = graph.nodes[edge.child as usize].commit;
+            if !sides.contains_key(&child) && !parents.contains(&edge.parent) {
+                continue;
+            }
+            let along: Vec<Option<Side>> = std::iter::once(child)
+                .chain(graph.collapsed_commits(repo, edge, usize::MAX))
+                .map(|c| sides.get(&c).copied())
+                .collect();
+            if along.iter().any(Option::is_some) {
+                out.push((e, along));
+            }
+        }
+        out
+    }
+}
+
+/// The upstream of every local branch that has one, by the branch's full name and the
+/// upstream's (from `for-each-ref`'s `%(upstream)`), classified against `repo`. A diverged
+/// branch also asks `git` for its reflog and for copies of the upstream's commits.
+pub fn load(git: &Git, repo: &Repo, configured: &[(String, String)]) -> Vec<Upstream> {
+    let index: HashMap<&str, usize> = repo
+        .refs
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.full_name.as_str(), i))
+        .collect();
+    let mut generations = None;
+    let mut out = Vec::new();
+    for (branch_name, name) in configured {
+        let Some(&branch) = index.get(branch_name.as_str()) else {
+            continue;
+        };
+        let target = index.get(name.as_str()).copied();
+        let mut upstream = Upstream {
+            branch,
+            name: name.clone(),
+            target,
+            commits: Vec::new(),
+            rebased_from: None,
+        };
+        if let Some(u) = target {
+            let (a, b) = (repo.refs[branch].target, repo.refs[u].target);
+            if a != b {
+                let generations = generations.get_or_insert_with(|| generations_of(repo));
+                let (ahead, behind) = difference(repo, generations, a, b);
+                classify(git, repo, &mut upstream, ahead, behind);
+            }
+        }
+        out.push(upstream);
+    }
+    out
+}
+
+/// Fills in `upstream`'s commits: `ahead` and `behind` as [`difference`] gives them.
+fn classify(
+    git: &Git,
+    repo: &Repo,
+    upstream: &mut Upstream,
+    ahead: Vec<CommitIx>,
+    behind: Vec<CommitIx>,
+) {
+    let commits = &mut upstream.commits;
+    commits.extend(ahead.iter().map(|&c| (c, Side::Ahead)));
+    if ahead.is_empty() || behind.is_empty() {
+        commits.extend(behind.iter().map(|&c| (c, Side::Behind)));
+        return;
+    }
+    let branch = repo.refs[upstream.branch].full_name.as_str();
+    let never = never_on_branch(git, branch, &upstream.name);
+    let copied = copied_onto_branch(git, branch, &upstream.name);
+    for c in behind {
+        let hex = repo.commit(c).oid.to_hex();
+        let lost = never.as_ref().is_none_or(|n| n.contains(&hex)) && !copied.contains(&hex);
+        commits.push((c, if lost { Side::Lost } else { Side::Replaced }));
+    }
+    let tip = upstream.target.map(|u| repo.refs[u].target);
+    upstream.rebased_from = upstream
+        .commits
+        .iter()
+        .find(|&&(_, s)| s == Side::Replaced)
+        .map(|&(c, _)| c)
+        .filter(|&c| Some(c) != tip);
+}
+
+/// The upstream's own commits that the branch never had, as its reflog remembers: those
+/// `push --force-if-includes` refuses to drop. `None` if git can't tell.
+fn never_on_branch(git: &Git, branch: &str, upstream: &str) -> Option<HashSet<String>> {
+    // No reflog (`core.logAllRefUpdates` off) means none.
+    let reflog = git
+        .query(&["reflog", "show", "--format=%H", branch, "--"])
+        .ok()?
+        .unwrap_or_default();
+    let mut input = format!("{upstream}\n^{branch}\n");
+    for oid in reflog.lines() {
+        input.push_str(&format!("^{oid}\n"));
+    }
+    // Entries whose commits were pruned are skipped.
+    let out = git
+        .run_with_input(&["rev-list", "--ignore-missing", "--stdin"], input)
+        .ok()?;
+    Some(out.lines().map(str::to_owned).collect())
+}
+
+/// The upstream's own commits with a patch-equivalent copy on the branch.
+fn copied_onto_branch(git: &Git, branch: &str, upstream: &str) -> HashSet<String> {
+    let range = format!("{branch}...{upstream}");
+    let out = git
+        .query(&["rev-list", "--right-only", "--cherry-mark", &range, "--"])
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    out.lines()
+        .filter_map(|l| l.strip_prefix('='))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Every commit's generation: one more than its highest parent's, 1 for a root. A commit's
+/// ancestors all have lower generations than it, whatever their dates say.
+fn generations_of(repo: &Repo) -> Vec<u32> {
+    let n = repo.commits.len();
+    let mut generation = vec![0u32; n];
+    let mut stack = Vec::new();
+    for start in 0..n {
+        if generation[start] != 0 {
+            continue;
+        }
+        stack.push((start, false));
+        while let Some((c, expanded)) = stack.pop() {
+            if generation[c] != 0 {
+                continue;
+            }
+            let parents = &repo.commits[c].parents;
+            if expanded {
+                let highest = parents.iter().map(|p| generation[p.ix()]).max();
+                generation[c] = highest.unwrap_or(0) + 1;
+            } else {
+                stack.push((c, true));
+                stack.extend(
+                    parents
+                        .iter()
+                        .filter(|p| generation[p.ix()] == 0)
+                        .map(|p| (p.ix(), false)),
+                );
+            }
+        }
+    }
+    generation
+}
+
+/// The commits reachable from `a` but not from `b`, and from `b` but not from `a`, newest
+/// first. Walks down from both by generation, as far as either side has commits of its own.
+fn difference(
+    repo: &Repo,
+    generation: &[u32],
+    a: CommitIx,
+    b: CommitIx,
+) -> (Vec<CommitIx>, Vec<CommitIx>) {
+    const A: u8 = 1;
+    const B: u8 = 2;
+    const BOTH: u8 = A | B;
+    let mut flags: HashMap<CommitIx, u8> = HashMap::new();
+    let mut queue = BinaryHeap::new();
+    // Queued commits that only one side reaches so far: the walk ends when there are none.
+    let mut one_sided = 0usize;
+    let key = |c: CommitIx| (generation[c.ix()], repo.commit(c).commit_time, c);
+    for (c, f) in [(a, A), (b, B)] {
+        let mark = flags.entry(c).or_insert(0);
+        if *mark == 0 {
+            queue.push(key(c));
+            one_sided += 1;
+        } else {
+            one_sided -= 1;
+        }
+        *mark |= f;
+    }
+    while one_sided > 0 {
+        let Some((_, _, c)) = queue.pop() else {
+            break;
+        };
+        let f = flags[&c];
+        if f != BOTH {
+            one_sided -= 1;
+        }
+        for &p in &repo.commit(c).parents {
+            let mark = flags.entry(p).or_insert(0);
+            let before = *mark;
+            if before | f == before {
+                continue;
+            }
+            *mark |= f;
+            // Generations only fall along parents, so `p` is still queued if it was reached.
+            if before == 0 {
+                queue.push(key(p));
+                if *mark != BOTH {
+                    one_sided += 1;
+                }
+            } else if *mark == BOTH {
+                one_sided -= 1;
+            }
+        }
+    }
+    let mut ahead = Vec::new();
+    let mut behind = Vec::new();
+    for (&c, &f) in &flags {
+        match f {
+            A => ahead.push(c),
+            B => behind.push(c),
+            _ => {}
+        }
+    }
+    let newest_first = |x: &CommitIx, y: &CommitIx| key(*y).cmp(&key(*x));
+    ahead.sort_by(newest_first);
+    behind.sort_by(newest_first);
+    (ahead, behind)
+}

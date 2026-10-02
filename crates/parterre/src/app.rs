@@ -468,6 +468,11 @@ impl ParterreApp {
         {
             app.compare_request(CompareRequest::Mark(Some(oid)));
         }
+        if let (Some(name), Some(repo)) = (app.automation.demo_select.clone(), app.repo.clone())
+            && let Some(oid) = demo_oid(&repo, &name, "--demo-select")
+        {
+            app.pending_select = vec![oid];
+        }
         if let (Some(spec), Some(repo)) = (app.automation.demo_compare.clone(), app.repo.clone()) {
             match spec.split_once("..") {
                 Some((a, "WORKING_TREE")) => {
@@ -1301,6 +1306,10 @@ impl ParterreApp {
                 ui.separator();
             }
             if let Some(scene) = &self.scene {
+                if self.settings.graph.show_upstreams {
+                    let selected = self.selection.current();
+                    crate::upstreams::status_ui(ui, scene, self.hovered, selected);
+                }
                 if self.selection.len() > 1 {
                     ui.label(format!("{} nodes selected ·", self.selection.len()));
                 }
@@ -1645,6 +1654,7 @@ impl ParterreApp {
             preview,
             selected_edge: self.selected_edge,
             search_hits: hits,
+            upstreams: self.settings.graph.show_upstreams,
         };
         let painter = ui.painter_at(canvas);
         render::paint_scene(
@@ -1810,6 +1820,7 @@ impl ParterreApp {
             && !self.pull_requests.needs_sign_in()
             && self.pull_requests.list().is_some();
         let worktrees_shown = self.settings.graph.show_worktrees;
+        let upstreams_shown = self.settings.graph.show_upstreams;
         egui::Popup::context_menu(&response)
             .style(menu::style)
             .show(|ui| {
@@ -1874,6 +1885,24 @@ impl ParterreApp {
                         if with_working_tree.clicked() {
                             action = Some(MenuAction::Compare(CompareRequest::WorkingTree(oid)));
                             ui.close();
+                        }
+                        // Each branch on the node against its upstream, from the upstream.
+                        let upstreams = match *group.as_slice() {
+                            [_] if upstreams_shown => crate::upstreams::compare_items(scene, node),
+                            _ => Vec::new(),
+                        };
+                        for (u, pair) in upstreams {
+                            let label = format!("Upstream ({})", u.short_name());
+                            let item = ui
+                                .add_enabled(pair.is_ok(), egui::Button::new(label))
+                                .on_disabled_hover_text(pair.err().unwrap_or_default());
+                            if item.clicked()
+                                && let Ok((up, branch)) = pair
+                            {
+                                action =
+                                    Some(MenuAction::Compare(CompareRequest::Compare(up, branch)));
+                                ui.close();
+                            }
                         }
                         menu::separator(ui);
                         let is_marked = marked.as_ref().is_some_and(|(m, _)| *m == oid);

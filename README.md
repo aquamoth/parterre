@@ -79,7 +79,7 @@ In the window:
 | `Ctrl+F`, then `Enter` / `F3` | Find branches, tags, hashes, subjects or authors |
 | `L`, double-click a node | Show log: the node's history, or with two nodes selected the commits between them (first..second) |
 | Click a pull request's number | Open the pull request on GitHub |
-| Right-click a node | Show log; compare with HEAD, two nodes, or the commit marked for comparison; open its pull requests; open its worktrees in the file system or a terminal; copy its hash, ref names or worktree folder's path; select its subtree; return it to the layout |
+| Right-click a node | Show log; compare with HEAD, two nodes, a branch's upstream, or the commit marked for comparison; open its pull requests; open its worktrees in the file system or a terminal; copy its hash, ref names or worktree folder's path; select its subtree; return it to the layout |
 | `R` | Return all nodes to the layout |
 | `Esc` | Clear the selection |
 | `F5` | Reload the repository (it also reloads by itself when branches, tags or HEAD change) |
@@ -113,6 +113,11 @@ parterre adds:
   out, even where hidden, and detached ones in cyan, with the folder's name in italics. A
   worktree whose folder is gone gets a crossed-out folder. Right-click one to open it in the
   file system or a terminal.
+- upstreams: hover or select a branch (or its upstream) and the commits between the two are
+  coloured: green ahead, blue behind, red lost to a force push, grey dashed replaced by a
+  rebase. A rebased branch has a dashed edge to its upstream. The status bar shows
+  `branch 3|2` (ahead|behind), the log's branch labels ↑3 ↓2, and *Compare → Upstream*
+  compares the two. On by default (*Settings → Advanced*).
 - light and dark themes
 - rearranging by hand: drag modes, multi-selection, undo
 
