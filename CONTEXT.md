@@ -69,6 +69,11 @@ Commits no other branch, remote branch, tag or worktree reaches, and uncommitted
 non-ignored files, whether staged, modified or untracked.
 _Avoid_: unpushed work, dirty worktree
 
+**Resetting a branch**:
+Moving a local branch to another commit. For the open worktree's branch, it also decides what
+happens to the changes in the commits moved away from, and to uncommitted changes.
+_Avoid_: moving a branch, force-updating
+
 **Adding a worktree**:
 Creating a new worktree in its own folder, with a branch or a detached HEAD checked out.
 _Avoid_: creating a worktree, new worktree
