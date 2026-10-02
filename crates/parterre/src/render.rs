@@ -32,6 +32,8 @@ pub struct Marks {
     pub search_hits: Vec<bool>,
     /// The node of the commit marked for comparison.
     pub marked: Option<usize>,
+    /// Show how branches differ from their upstreams (see [`crate::upstreams`]).
+    pub upstreams: bool,
 }
 
 impl Marks {
@@ -103,6 +105,9 @@ pub fn paint_scene(
     for e in emphasised {
         let stroke = Stroke::new(width * 1.6, palette.selection);
         paint_edge(painter, canvas, view, scene, settings, e, visible, stroke);
+    }
+    if marks.upstreams {
+        crate::upstreams::paint(painter, canvas, view, scene, palette, settings, marks);
     }
 
     let font = FontId::monospace(fixed(FONT_SIZE * zoom));

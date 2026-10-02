@@ -26,6 +26,7 @@ pub mod revgraph;
 pub mod route;
 pub mod text;
 pub mod text_size;
+pub mod upstream;
 pub mod watch;
 pub mod worktree_folder;
 

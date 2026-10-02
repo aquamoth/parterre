@@ -339,6 +339,17 @@ impl ParterreApp {
                 self.set_remember_moves(remember);
             }
             SettingsPage::Advanced => {
+                title(ui, "Upstreams");
+                group(ui, |rows| {
+                    rows.switch(
+                        "Ahead and behind",
+                        "Colour the commits between a branch and its upstream, link a rebased \
+                         branch to its upstream, and count ahead|behind in the status bar and \
+                         the log.",
+                        &mut s.graph.show_upstreams,
+                    );
+                });
+                ui.add_space(14.0);
                 title(ui, "Spacing");
                 let l = &mut s.layout;
                 group(ui, |rows| {

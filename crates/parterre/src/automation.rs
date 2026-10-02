@@ -39,6 +39,8 @@ pub struct Automation {
     pub demo_compare: Option<String>,
     /// Mark `<ref>` for comparison before the screenshot.
     pub demo_mark: Option<String>,
+    /// Select the node of `<ref>` before the screenshot.
+    pub demo_select: Option<String>,
     /// Something is still loading (a diff, a blame or its history): hold the screenshot.
     pub waiting: bool,
     /// Where the context menu is opened, once chosen.

@@ -95,6 +95,12 @@ pub struct Palette {
     pub search_hit: Color32,
     /// The commit marked for comparison. Not in TortoiseGit's graph, which has no mark.
     pub marked: Color32,
+    /// Commits between a branch and its upstream: ahead, behind, lost to a force push, and
+    /// replaced by a rebase. Not in TortoiseGit.
+    pub ahead: Color32,
+    pub behind: Color32,
+    pub lost: Color32,
+    pub replaced: Color32,
     /// Colours by branch name, first match first; they override the ref-kind colours.
     pub branch_colors: Vec<(BranchPatterns, Color32)>,
 }
@@ -141,6 +147,10 @@ impl Palette {
             selection: Color32::from_rgb(0, 120, 215),
             search_hit: Color32::from_rgb(255, 140, 0),
             marked: Color32::from_rgb(190, 30, 140),
+            ahead: Color32::from_rgb(20, 150, 50),
+            behind: Color32::from_rgb(20, 110, 230),
+            lost: Color32::from_rgb(215, 40, 30),
+            replaced: Color32::from_gray(150),
             branch_colors: Vec::new(),
         }
     }
@@ -168,6 +178,10 @@ impl Palette {
             selection: Color32::from_rgb(80, 170, 255),
             search_hit: Color32::from_rgb(255, 160, 40),
             marked: Color32::from_rgb(255, 105, 190),
+            ahead: Color32::from_rgb(90, 200, 110),
+            behind: Color32::from_rgb(100, 170, 255),
+            lost: Color32::from_rgb(255, 95, 85),
+            replaced: Color32::from_gray(140),
             branch_colors: Vec::new(),
         }
     }

@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::oid::Oid;
+use crate::upstream::Upstream;
 
 /// Index of a commit in [`Repo::commits`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -152,6 +153,8 @@ pub struct Repo {
     pub worktrees: Vec<Worktree>,
     /// The remote branch `origin/HEAD` points at (`refs/remotes/origin/main`), if any.
     pub default_branch: Option<String>,
+    /// The local branches that have an upstream, in ref order.
+    pub upstreams: Vec<Upstream>,
     by_oid: HashMap<Oid, CommitIx>,
 }
 
@@ -171,6 +174,7 @@ impl Repo {
             has_working_tree: true,
             worktrees: Vec::new(),
             default_branch: None,
+            upstreams: Vec::new(),
             by_oid,
         }
     }
@@ -255,6 +259,11 @@ impl Repo {
         on
     }
 
+    /// The upstream of the local branch `branch` (an index into [`Repo::refs`]), if it has one.
+    pub fn upstream_of(&self, branch: usize) -> Option<&Upstream> {
+        self.upstreams.iter().find(|u| u.branch == branch)
+    }
+
     /// The worktrees other than the open one that have the branch `full_name` checked out.
     pub fn worktrees_on<'a>(&'a self, full_name: &'a str) -> impl Iterator<Item = usize> + 'a {
         self.worktrees
@@ -326,7 +335,7 @@ impl Repo {
     }
 
     /// True if both snapshots have the same refs pointing at the same commits, the same HEAD,
-    /// the same default branch and the same worktrees. The commits are then the same too, as a
+    /// the same default branch, the same upstreams and the same worktrees. The commits are then the same too, as a
     /// snapshot holds exactly what its refs and worktrees reach.
     pub fn same_refs(&self, other: &Repo) -> bool {
         let refs = |repo: &Repo| -> Vec<(String, Oid, bool)> {
@@ -358,10 +367,17 @@ impl Repo {
                 })
                 .collect()
         };
+        let upstreams = |repo: &Repo| -> Vec<(String, String)> {
+            repo.upstreams
+                .iter()
+                .map(|u| (repo.refs[u.branch].full_name.clone(), u.name.clone()))
+                .collect()
+        };
         head(self) == head(other)
             && refs(self) == refs(other)
             && worktrees(self) == worktrees(other)
             && self.default_branch == other.default_branch
+            && upstreams(self) == upstreams(other)
     }
 
     /// Display name for the repository (directory name).

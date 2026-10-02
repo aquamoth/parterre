@@ -27,6 +27,9 @@ crates/parterre-core   GUI-free; everything testable lives here
   text.rs              URLs in commit messages, paths cut at the start, thousands separators
   text_size.rs         the text size's steps, and Ctrl+wheel and pinch turned into steps
   revgraph.rs          reduce the commit DAG to a revision graph (TortoiseGit's rules)
+  upstream.rs          local branches against their upstreams: ahead, behind, lost to a force
+                       push or replaced by a rebase (a counterpart by patch, or by author,
+                       author date and subject), and the edges that hold them
   pattern.rs           branch-name wildcards, for hiding and colouring branches
   forge.rs             open pull requests: the model, where each is shown (head commit and
                        base-branch refs), remotes and upstreams from git
@@ -76,6 +79,7 @@ crates/parterre        the binary (eframe/egui)
                        blame), and choosing a line or a row chooses the commit in both
   scene.rs             node contents and sizes + layout + physics net, hit testing
   render.rs            painting nodes, edges, arrows, overview
+  upstreams.rs         upstreams over the edges, the status bar's ahead|behind, ↑n ↓m counts
   export.rs            SVG export, and PNG and WebP export: render.rs painted in tiles by
                        an offscreen egui context, sized to stay within 100 megapixels
   raster.rs            software rasteriser for egui's meshes (for PNG and WebP, with no GPU
@@ -93,8 +97,8 @@ crates/parterre        the binary (eframe/egui)
   widgets.rs           icon buttons, segmented buttons, switches, text fields
   settings.rs          persisted settings and the Classic/Modern looks
   automation.rs        --screenshot / --demo-drag / --demo-menu / --demo-open / --demo-log /
-                       --demo-compare / --demo-mark / --demo-blame scripted runs (the log
-                       window's layout: --log-layout)
+                       --demo-compare / --demo-mark / --demo-select / --demo-blame scripted
+                       runs (the log window's layout: --log-layout)
 ```
 
 ## Data flow

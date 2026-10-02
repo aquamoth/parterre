@@ -312,7 +312,7 @@ impl Git {
         let git = Git::new(&root);
 
         let ref_format = format!(
-            "--format=%(refname){FIELD}%(objecttype){FIELD}%(objectname){FIELD}%(*objecttype){FIELD}%(*objectname){FIELD}%(symref)"
+            "--format=%(refname){FIELD}%(objecttype){FIELD}%(objectname){FIELD}%(*objecttype){FIELD}%(*objectname){FIELD}%(symref){FIELD}%(upstream)"
         );
         let (listing, worktrees) = std::thread::scope(|s| {
             // Listed alongside the refs, and before the walk, which starts from their HEADs
@@ -398,6 +398,11 @@ impl Git {
             }
         };
 
+        let configured: Vec<(String, String)> = raw_refs
+            .iter()
+            .filter(|r| r.full_name.starts_with("refs/heads/"))
+            .filter_map(|r| Some((r.full_name.clone(), r.upstream.clone()?)))
+            .collect();
         let mut refs: Vec<GitRef> = raw_refs
             .into_iter()
             .filter_map(|r| {
@@ -444,6 +449,7 @@ impl Git {
         repo.has_working_tree = has_working_tree;
         repo.worktrees = worktrees;
         repo.default_branch = default_branch;
+        repo.upstreams = crate::upstream::load(&git, &repo, &configured);
         Ok(repo)
     }
 
@@ -1016,6 +1022,8 @@ struct RawRef {
     /// peeling.
     commit: Option<Oid>,
     annotated: bool,
+    /// A local branch's upstream (`refs/remotes/origin/topic`), whether it exists or not.
+    upstream: Option<String>,
 }
 
 /// Parses `for-each-ref` output, and the branch `origin/HEAD` points at. Symbolic refs
@@ -1025,7 +1033,16 @@ fn parse_refs(out: &str) -> (Vec<RawRef>, Option<String>) {
     let mut default_branch = None;
     for line in out.lines() {
         let f: Vec<&str> = line.split(FIELD).collect();
-        let [full_name, obj_type, obj, peeled_type, peeled, symref] = f[..] else {
+        let [
+            full_name,
+            obj_type,
+            obj,
+            peeled_type,
+            peeled,
+            symref,
+            upstream,
+        ] = f[..]
+        else {
             continue;
         };
         if full_name == "refs/remotes/origin/HEAD" && !symref.is_empty() {
@@ -1046,6 +1063,7 @@ fn parse_refs(out: &str) -> (Vec<RawRef>, Option<String>) {
             full_name: full_name.to_owned(),
             commit,
             annotated,
+            upstream: (!upstream.is_empty()).then(|| upstream.to_owned()),
         });
     }
     (refs, default_branch)

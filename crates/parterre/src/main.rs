@@ -21,6 +21,7 @@ mod settings;
 mod system_theme;
 mod text_size;
 mod theme;
+mod upstreams;
 // Runs in build.rs; compiled here only for its tests.
 #[cfg(test)]
 mod version;
@@ -186,6 +187,10 @@ struct Cli {
     /// Mark REF (a ref or hash prefix) for comparison before taking the screenshot.
     #[arg(long, value_name = "REF", hide = true)]
     demo_mark: Option<String>,
+
+    /// Select the node of REF (a ref or hash prefix) before taking the screenshot.
+    #[arg(long, value_name = "REF", hide = true)]
+    demo_select: Option<String>,
 
     /// The diff window's form (for --demo-diff).
     #[arg(long, value_enum, hide = true)]
@@ -386,6 +391,7 @@ fn main() -> ExitCode {
     automation.demo_blame = cli.demo_blame.clone();
     automation.demo_compare = cli.demo_compare.clone();
     automation.demo_mark = cli.demo_mark.clone();
+    automation.demo_select = cli.demo_select.clone();
     automation.demo_menu = cli.demo_menu.map(|m| match m {
         DemoMenuArg::Node => automation::DemoMenu::Node,
         DemoMenuArg::Canvas => automation::DemoMenu::Canvas,
