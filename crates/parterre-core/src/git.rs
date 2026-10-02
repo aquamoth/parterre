@@ -320,7 +320,7 @@ impl Git {
             let worktrees = s.spawn(|| git.run(&["worktree", "list", "--porcelain"]));
             (git.run(&["for-each-ref", &ref_format]), worktrees.join())
         });
-        let mut raw_refs = parse_refs(&listing?);
+        let (mut raw_refs, default_branch) = parse_refs(&listing?);
         let raw_worktrees = match worktrees {
             Ok(Ok(out)) => parse_worktrees(&out),
             _ => Vec::new(),
@@ -443,6 +443,7 @@ impl Git {
         repo.abbrev_len = abbrev_len;
         repo.has_working_tree = has_working_tree;
         repo.worktrees = worktrees;
+        repo.default_branch = default_branch;
         Ok(repo)
     }
 
@@ -1017,15 +1018,19 @@ struct RawRef {
     annotated: bool,
 }
 
-/// Parses `for-each-ref` output. Symbolic refs (duplicates), notes, and refs to trees or
-/// blobs are skipped.
-fn parse_refs(out: &str) -> Vec<RawRef> {
+/// Parses `for-each-ref` output, and the branch `origin/HEAD` points at. Symbolic refs
+/// (duplicates), notes, and refs to trees or blobs are skipped.
+fn parse_refs(out: &str) -> (Vec<RawRef>, Option<String>) {
     let mut refs = Vec::new();
+    let mut default_branch = None;
     for line in out.lines() {
         let f: Vec<&str> = line.split(FIELD).collect();
         let [full_name, obj_type, obj, peeled_type, peeled, symref] = f[..] else {
             continue;
         };
+        if full_name == "refs/remotes/origin/HEAD" && !symref.is_empty() {
+            default_branch = Some(symref.to_owned());
+        }
         // e.g. refs/remotes/origin/HEAD -> origin/main: a duplicate label.
         if !symref.is_empty() || full_name.starts_with("refs/notes/") {
             continue;
@@ -1043,7 +1048,7 @@ fn parse_refs(out: &str) -> Vec<RawRef> {
             annotated,
         });
     }
-    refs
+    (refs, default_branch)
 }
 
 /// A worktree as listed by `git worktree list --porcelain`, before its commit is looked up.

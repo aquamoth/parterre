@@ -150,6 +150,8 @@ pub struct Repo {
     pub has_working_tree: bool,
     /// The worktrees, the main one first (empty if git can't list them).
     pub worktrees: Vec<Worktree>,
+    /// The remote branch `origin/HEAD` points at (`refs/remotes/origin/main`), if any.
+    pub default_branch: Option<String>,
     by_oid: HashMap<Oid, CommitIx>,
 }
 
@@ -168,6 +170,7 @@ impl Repo {
             abbrev_len: DEFAULT_ABBREV_LEN,
             has_working_tree: true,
             worktrees: Vec::new(),
+            default_branch: None,
             by_oid,
         }
     }
@@ -218,6 +221,25 @@ impl Repo {
             Head::Branch { target, .. } => *target,
             Head::Detached(c) => Some(*c),
         }
+    }
+
+    /// Where the graph's leftmost line may start, best first: the local branch named like the
+    /// default branch, the default branch itself, then the main worktree's HEAD. None of them
+    /// moves when the open worktree or its HEAD changes, so neither do the columns.
+    pub fn layout_anchors(&self) -> Vec<CommitIx> {
+        let branch = |full_name: &str| {
+            self.refs
+                .iter()
+                .find(|r| r.full_name == full_name)
+                .map(|r| r.target)
+        };
+        let default = self.default_branch.as_deref();
+        let local = default
+            .and_then(|d| d.strip_prefix("refs/remotes/origin/"))
+            .and_then(|name| branch(&format!("refs/heads/{name}")));
+        let remote = default.and_then(branch);
+        let main = self.worktrees.first().and_then(|w| w.head);
+        [local, remote, main].into_iter().flatten().collect()
     }
 
     /// For every commit, the indices into [`Repo::refs`] of the refs pointing at it, in
@@ -289,9 +311,23 @@ impl Repo {
             .collect()
     }
 
-    /// True if both snapshots have the same refs pointing at the same commits, the same HEAD
-    /// and the same worktrees. The commits are then the same too, as a snapshot holds exactly
-    /// what its refs and worktrees reach.
+    /// The text of a label: a ref's short name, or a worktree's folder name. While worktrees
+    /// are shown, the open worktree's detached HEAD is named after its folder too, as it is
+    /// when another worktree is open.
+    pub fn label_name(&self, label: Label) -> String {
+        match label {
+            Label::Ref {
+                index,
+                worktree: Some(k),
+            } if self.refs[index].kind == RefKind::DetachedHead => self.worktrees[k].name(),
+            Label::Ref { index, .. } => self.refs[index].name.clone(),
+            Label::Worktree(k) => self.worktrees[k].name(),
+        }
+    }
+
+    /// True if both snapshots have the same refs pointing at the same commits, the same HEAD,
+    /// the same default branch and the same worktrees. The commits are then the same too, as a
+    /// snapshot holds exactly what its refs and worktrees reach.
     pub fn same_refs(&self, other: &Repo) -> bool {
         let refs = |repo: &Repo| -> Vec<(String, Oid, bool)> {
             repo.refs
@@ -325,6 +361,7 @@ impl Repo {
         head(self) == head(other)
             && refs(self) == refs(other)
             && worktrees(self) == worktrees(other)
+            && self.default_branch == other.default_branch
     }
 
     /// Display name for the repository (directory name).

@@ -17,6 +17,11 @@ A line from a node to a parent node, standing for that parent link and any commi
 into it.
 _Avoid_: link, arrow
 
+**Default branch**:
+The branch `origin/HEAD` names as the repository's main line of work. The graph keeps it in
+the leftmost column, whichever worktree is open and whatever HEAD is.
+_Avoid_: trunk, main branch
+
 **Worktree**:
 One of the repository's checkouts that git knows about: the main one and each linked one, each
 with its own folder and its own HEAD. The one parterre opened is one of them.

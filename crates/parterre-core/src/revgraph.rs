@@ -208,6 +208,15 @@ impl RevGraph {
         self.node_of.get(commit.ix()).copied().flatten()
     }
 
+    /// The node the layout starts its leftmost line from: the first of
+    /// [`Repo::layout_anchors`] that is a node. Never HEAD's, so that going to another
+    /// worktree or switching branches leaves the columns where they are.
+    pub fn layout_anchor(&self, repo: &Repo) -> Option<u32> {
+        repo.layout_anchors()
+            .into_iter()
+            .find_map(|c| self.node_of(c))
+    }
+
     /// The node a commit is shown as: itself if it is a node, else the kept ancestor it was
     /// collapsed into. `None` if the commit is not visible, or if it collapses into an
     /// empty-tree root that is not shown (see the module docs).

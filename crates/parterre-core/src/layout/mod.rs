@@ -145,7 +145,7 @@ impl Default for LayoutOptions {
 }
 
 /// Graph to be laid out. Nodes are identified by their index.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LayoutInput {
     /// On-screen box size of every node (width, height), independent of direction.
     pub sizes: Vec<Point>,
@@ -153,7 +153,7 @@ pub struct LayoutInput {
     pub times: Vec<i64>,
     /// Edges from child (newer) to parent (older).
     pub edges: Vec<LayoutEdge>,
-    /// Nodes to place first (leftmost/topmost within their layers), e.g. HEAD's branch.
+    /// Nodes to place first (leftmost/topmost within their layers), e.g. the default branch.
     pub priority: Vec<u32>,
 }
 
