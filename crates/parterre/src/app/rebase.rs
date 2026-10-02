@@ -318,6 +318,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         git(p, &["init", "-q", "-b", "main"]);
+        // A rebase commits, and parterre's own git reads the identity from the repository,
+        // not from the harness's environment: CI has no global one.
+        git(p, &["config", "user.name", "Test"]);
+        git(p, &["config", "user.email", "test@example.com"]);
         commit(p, "file", "base\n", "base");
         git(p, &["branch", "up"]);
         commit(p, "fix", "fixed\n", "fix");
