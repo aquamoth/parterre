@@ -25,6 +25,7 @@ mod diff_window;
 mod file_table;
 mod log_window;
 mod pull_requests;
+mod reset;
 mod settings_window;
 mod toolbar;
 
@@ -880,15 +881,21 @@ impl ParterreApp {
     }
 
     /// Automation: opens the branch or worktree form (`--demo-open create-branch:REF` or
-    /// `add-worktree:REF`), or asks to delete a worktree (`delete-worktree:FOLDER`, its name),
-    /// once the branch information is in.
+    /// `add-worktree:REF`), asks to delete a worktree (`delete-worktree:FOLDER`, its name), or
+    /// opens the reset dialog (`reset:REF`, or `reset:REF:MODE`), once the branch information
+    /// is in.
     fn demo_dialog(&mut self, ctx: &egui::Context) {
         let Some((kind, name)) = self
             .automation
             .demo_open
             .as_deref()
             .and_then(|o| o.split_once(':'))
-            .filter(|(k, _)| matches!(*k, "create-branch" | "add-worktree" | "delete-worktree"))
+            .filter(|(k, _)| {
+                matches!(
+                    *k,
+                    "create-branch" | "add-worktree" | "delete-worktree" | "reset"
+                )
+            })
             .map(|(k, n)| (k.to_owned(), n.to_owned()))
         else {
             return;
@@ -904,6 +911,22 @@ impl ParterreApp {
                     path: w.path.clone(),
                 };
                 let request = branches::Request::Run(action);
+                self.branches.request(ctx, request, egui::ViewportId::ROOT);
+            }
+            return;
+        }
+        if kind == "reset" {
+            let (rev, mode) = match name.rsplit_once(':') {
+                Some((rev, mode)) => (
+                    rev,
+                    parterre_core::reset::Mode::ALL
+                        .into_iter()
+                        .find(|m| m.name().eq_ignore_ascii_case(mode)),
+                ),
+                None => (name.as_str(), None),
+            };
+            if let Some(target) = repo.resolve(rev).map(|c| repo.commit(c).oid) {
+                let request = branches::Request::Reset { target, mode };
                 self.branches.request(ctx, request, egui::ViewportId::ROOT);
             }
             return;
@@ -2591,6 +2614,10 @@ impl eframe::App for ParterreApp {
         self.blame_windows(&ctx);
         self.about_window(&ctx);
         self.branches.show(&ctx);
+        for (repo, spec) in std::mem::take(&mut self.branches.diff_requests) {
+            self.diffs
+                .open(repo, spec, &self.settings.diff_window, &ctx);
+        }
         if let Some((repo, commits, exact)) = self.branches.log_request.take() {
             if exact {
                 self.open_loss_log(repo, &commits);

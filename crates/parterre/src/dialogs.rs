@@ -13,7 +13,7 @@ use parterre_core::{Commit, glyphs::Glyph};
 use crate::{menu, widgets};
 
 /// Space around a dialog's content.
-const MARGIN: f32 = 20.0;
+pub const MARGIN: f32 = 20.0;
 
 /// What dialog windows share with parterre's others: the icon and the title bar's theme.
 #[derive(Clone, Debug)]
@@ -158,7 +158,8 @@ impl<'a> Dialog<'a> {
         // told here, winit would set the hints before its title bar exists and leave the bar
         // out of them; the compositor then holds the window to the hints, with the bar outside
         // its frame (above the screen, at the top) and the content cut short by its height.
-        if !wayland() {
+        // Embedded in a screenshot, a window that size is cut short by its title bar.
+        if !wayland() && !ctx.embed_viewports() {
             builder = builder
                 .with_min_inner_size(size)
                 .with_max_inner_size(size)

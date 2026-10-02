@@ -41,6 +41,22 @@ pub struct FileTable {
     pub widths: ColumnWidths,
 }
 
+/// A git-style status letter in the Status column: filled when staged, outlined when only on
+/// disk.
+#[derive(Clone, Copy, Debug)]
+pub struct Badge {
+    pub letter: char,
+    pub filled: bool,
+    pub color: Color32,
+}
+
+/// A row's Status column as badges, instead of its status's name, with their words on hover.
+#[derive(Clone, Debug, Default)]
+pub struct Badges {
+    pub badges: Vec<Badge>,
+    pub words: String,
+}
+
 /// Changed files chosen in the list, by path, for the list they belong to. Showing another
 /// list clears it.
 #[derive(Debug, Default)]
@@ -93,6 +109,37 @@ impl FileTable {
         name: &str,
         owner: Id,
         files: Option<&'f Listing>,
+        bar: impl FnOnce(&mut Ui),
+    ) -> TableAction<'f> {
+        let files = files.map(|l| l.as_deref().map_err(String::as_str));
+        self.table(ui, c, name, owner, files, None, bar)
+    }
+
+    /// [`FileTable::show`], with each file's Status column as `badges`, one per file listed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn show_badged<'f>(
+        &mut self,
+        ui: &mut Ui,
+        c: &Colors,
+        name: &str,
+        owner: Id,
+        files: &'f [ChangedFile],
+        badges: &[Badges],
+        bar: impl FnOnce(&mut Ui),
+    ) -> TableAction<'f> {
+        debug_assert_eq!(files.len(), badges.len());
+        self.table(ui, c, name, owner, Some(Ok(files)), Some(badges), bar)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn table<'f>(
+        &mut self,
+        ui: &mut Ui,
+        c: &Colors,
+        name: &str,
+        owner: Id,
+        files: Option<Result<&'f [ChangedFile], &str>>,
+        badges: Option<&[Badges]>,
         bar: impl FnOnce(&mut Ui),
     ) -> TableAction<'f> {
         if self.selection.owner != Some(owner) {
@@ -300,16 +347,20 @@ impl FileTable {
                         FileStatus::Renamed | FileStatus::Copied => c.renamed,
                         _ => text,
                     };
-                    put(
-                        cell(
-                            ui,
-                            file.status.name(),
-                            body.clone(),
-                            status_color,
-                            w[2] - 2.0 * CELL_PAD,
+                    let badged = badges.map(|b| &b[shown[row]]);
+                    match badged {
+                        Some(b) => paint_badges(ui, &b.badges, pos2(x[2] + CELL_PAD, y)),
+                        None => put(
+                            cell(
+                                ui,
+                                file.status.name(),
+                                body.clone(),
+                                status_color,
+                                w[2] - 2.0 * CELL_PAD,
+                            ),
+                            x[2] + CELL_PAD,
                         ),
-                        x[2] + CELL_PAD,
-                    );
+                    }
                     // Binary files have no line counts.
                     let count = |n: Option<u32>, color| {
                         let (s, color) = match n {
@@ -321,6 +372,17 @@ impl FileTable {
                     put_right(count(file.added, c.added), x[3] + w[3] - CELL_PAD);
                     put_right(count(file.removed, c.removed), x[4] + w[4] - CELL_PAD);
                     let path_rect = Rect::from_x_y_ranges(x[0]..=x[0] + w[0], rect.y_range());
+                    let status_rect = Rect::from_x_y_ranges(x[2]..=x[2] + w[2], rect.y_range());
+                    let response = match badged {
+                        Some(b)
+                            if response
+                                .hover_pos()
+                                .is_some_and(|p| status_rect.contains(p)) =>
+                        {
+                            response.on_hover_text(&b.words)
+                        }
+                        _ => response,
+                    };
                     let response =
                         if elided && response.hover_pos().is_some_and(|p| path_rect.contains(p)) {
                             response.on_hover_ui(|ui| {
@@ -417,6 +479,34 @@ impl FileTable {
             );
         }
         TableAction { open, blame }
+    }
+}
+
+/// Badges left to right from `at`, centred on its height.
+fn paint_badges(ui: &Ui, badges: &[Badge], at: egui::Pos2) {
+    const SIZE: f32 = 16.0;
+    for (i, badge) in badges.iter().enumerate() {
+        let left = at.x + i as f32 * (SIZE + 4.0);
+        let r = Rect::from_min_size(pos2(left, at.y - SIZE / 2.0), Vec2::splat(SIZE));
+        if badge.filled {
+            ui.painter().rect_filled(r, 3.0, badge.color);
+        } else {
+            ui.painter().rect_stroke(
+                r.shrink(0.5),
+                3.0,
+                Stroke::new(1.2, badge.color),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let fg = if badge.filled {
+            Color32::WHITE
+        } else {
+            badge.color
+        };
+        let g = ui
+            .painter()
+            .layout_no_wrap(badge.letter.to_string(), FontId::monospace(11.0), fg);
+        ui.painter().galley(r.center() - g.size() / 2.0, g, fg);
     }
 }
 

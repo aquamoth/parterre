@@ -73,6 +73,9 @@ pub struct Catalog {
     auto_setup_rebase: bool,
     roots: Vec<(String, Oid)>,
     heads: Vec<(PathBuf, Oid)>,
+    /// Every worktree's use of a branch: checked out, or being rebased or bisected there.
+    /// Unlike `occupied`, a branch checked out in two worktrees is in it twice.
+    uses: Vec<(String, PathBuf)>,
 }
 
 impl Catalog {
@@ -143,6 +146,7 @@ impl Catalog {
         locals.sort_by(|a, b| a.name.cmp(&b.name));
         remotes.sort_by(|a, b| a.name.cmp(&b.name));
         let mut occupied = HashMap::new();
+        let mut uses = Vec::new();
         // Unlike the viewer's compatibility fallback, safety checks propagate listing errors.
         let listing = match git.run(&["worktree", "list", "--porcelain", "-z"]) {
             Ok(listing) => listing,
@@ -231,6 +235,7 @@ impl Catalog {
                 .map(str::to_owned);
             if let Some(name) = &branch {
                 occupied.insert(name.clone(), path.clone());
+                uses.push((name.clone(), path.clone()));
             }
             if record.contains(&"bare") {
                 continue;
@@ -260,7 +265,7 @@ impl Catalog {
             });
         }
         for (place, admin) in &admins {
-            reservations(admin, place, &mut occupied)?;
+            reservations(admin, place, &mut occupied, &mut uses)?;
         }
         Ok(Self {
             locals,
@@ -276,7 +281,18 @@ impl Catalog {
             auto_setup_rebase,
             roots,
             heads,
+            uses,
         })
+    }
+
+    /// A worktree other than the open one that has branch `name` checked out, or is rebasing
+    /// or bisecting it. Git 2.34 moves such a branch without a word, leaving that worktree's
+    /// index stale, and `git reset` never checks other worktrees in any version.
+    pub fn in_use_elsewhere(&self, name: &str) -> Option<&Path> {
+        self.uses
+            .iter()
+            .find(|(n, p)| n == name && !crate::worktree_folder::same_path(p, &self.root))
+            .map(|(_, p)| p.as_path())
     }
 
     pub fn trackers(&self, upstream: &str) -> Vec<&str> {
@@ -395,6 +411,7 @@ fn reservations(
     dir: &Path,
     worktree: &Path,
     occupied: &mut HashMap<String, PathBuf>,
+    uses: &mut Vec<(String, PathBuf)>,
 ) -> Result<(), Error> {
     for name in [
         "rebase-merge/head-name",
@@ -407,6 +424,7 @@ fn reservations(
                 let name = text.trim().trim_start_matches("refs/heads/");
                 if !name.is_empty() && Oid::from_hex(name).is_none() {
                     occupied.insert(name.to_owned(), worktree.to_owned());
+                    uses.push((name.to_owned(), worktree.to_owned()));
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -433,11 +451,11 @@ fn valid_name(name: &str) -> bool {
             .all(|p| !p.is_empty() && !p.starts_with('.') && !p.ends_with(".lock"))
 }
 
-fn parse_oid(s: &str) -> Result<Oid, Error> {
+pub(crate) fn parse_oid(s: &str) -> Result<Oid, Error> {
     Oid::from_hex(s).ok_or_else(|| Error::Invalid("Unexpected Git commit id.".into()))
 }
 
-fn io_error(path: &Path, source: std::io::Error) -> Error {
+pub(crate) fn io_error(path: &Path, source: std::io::Error) -> Error {
     Error::Git(GitError::Read {
         path: path.to_owned(),
         source,
@@ -620,6 +638,8 @@ pub enum Action {
     DeleteWorktree {
         path: PathBuf,
     },
+    /// Moves the open worktree's branch, with what the user agreed to lose.
+    Reset(Box<crate::reset::Reset>),
 }
 
 impl Action {
@@ -637,6 +657,7 @@ impl Action {
             Self::Delete { name, .. } => format!("Delete branch {name}"),
             Self::AddWorktree(a) => format!("Add worktree {}", folder(&a.path)),
             Self::DeleteWorktree { path } => format!("Delete worktree {}", folder(path)),
+            Self::Reset(r) => format!("Reset {} to {}", r.branch, short(r.target)),
         }
     }
 }
@@ -828,6 +849,7 @@ impl Branches {
             Action::Detach(oid) => Ok(vec![words(&["switch", "--detach", &oid.to_hex()])]),
             Action::Switch(name) => Ok(vec![words(&["switch", "--no-guess", "--", name])]),
             Action::Delete { name, .. } => Ok(vec![words(&["branch", "-D", "--", name])]),
+            Action::Reset(r) => Ok(vec![crate::reset::command(r.mode, r.target)]),
         }
     }
 
@@ -893,6 +915,10 @@ impl Branches {
         if let Action::DeleteWorktree { path } = &action {
             return self.delete_worktree(&catalog, path, &action, approval, cancel, report);
         }
+        if let Action::Reset(reset) = &action {
+            crate::reset::execute(&catalog, reset, cancel, report)?;
+            return Ok(None);
+        }
         let mut commands = Self::commands(&catalog, &action)?;
         let switching = matches!(
             &action,
@@ -939,7 +965,7 @@ impl Branches {
                     Checkout::Detached => {}
                 }
             }
-            Action::DeleteWorktree { .. } => unreachable!("handled above"),
+            Action::DeleteWorktree { .. } | Action::Reset(_) => unreachable!("handled above"),
             Action::Switch(name) => {
                 if !catalog.locals.iter().any(|b| b.name == *name) {
                     return Err(Error::Invalid(
@@ -1319,7 +1345,7 @@ fn check_occupied(catalog: &Catalog, name: &str) -> Result<(), Error> {
 
 /// Commits reachable from `start` that nothing else will reach: no ref but `excluded_ref`, and
 /// no worktree's HEAD but the one at `leaving`.
-fn lost_commits(
+pub(crate) fn lost_commits(
     git: &Git,
     catalog: &Catalog,
     start: Oid,
@@ -1356,7 +1382,12 @@ fn lost_commits(
     Ok(commits)
 }
 
-fn run(git: &Git, args: Vec<String>, cancel: &Cancel, report: &mut Report) -> Result<bool, Error> {
+pub(crate) fn run(
+    git: &Git,
+    args: Vec<String>,
+    cancel: &Cancel,
+    report: &mut Report,
+) -> Result<bool, Error> {
     let mut state = cancel
         .0
         .lock()

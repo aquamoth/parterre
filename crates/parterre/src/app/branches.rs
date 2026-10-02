@@ -10,9 +10,12 @@ use parterre_core::branches::{
     Action, AddWorktree, Branches, Cancel, Catalog, Checkout, Create, CreateDraft, Outcome, Report,
     Warning, command_text,
 };
+use parterre_core::file_diff::FileDiffSpec;
+use parterre_core::reset::{Mode, Preview};
 use parterre_core::worktree_folder;
 use parterre_core::{Oid, RefKind, Repo};
 
+use super::reset::ResetDialog;
 use crate::{dialogs, menu, widgets};
 
 #[derive(Clone, Debug)]
@@ -29,6 +32,12 @@ pub enum Request {
     /// Make this worktree the open one. Nothing runs in git.
     GoTo(PathBuf),
     Run(Action),
+    /// The dialog for resetting the open worktree's branch to a commit, with a mode picked
+    /// rather than the default (for screenshots).
+    Reset {
+        target: Oid,
+        mode: Option<Mode>,
+    },
 }
 
 /// One target gets a direct named item; several get the existing app's submenu treatment.
@@ -243,6 +252,29 @@ fn worktree_section(
         .collect();
     target_menu(ui, "Delete worktree", &deletions, busy, &mut request);
     request
+}
+
+/// *Reset `<branch>` to here…*, for a log row: only the open worktree's branch, and only where
+/// there's a reset to offer.
+pub fn reset_item(
+    ui: &mut Ui,
+    commit: Oid,
+    catalog: Option<&Catalog>,
+    busy: bool,
+) -> Option<Request> {
+    let branch = parterre_core::reset::branch(catalog?, commit).ok()?;
+    menu::separator(ui);
+    let clicked = ui
+        .add_enabled(!busy, egui::Button::new(format!("Reset {branch} to here…")))
+        .on_disabled_hover_text(loading_reason(true))
+        .clicked();
+    if clicked {
+        ui.close();
+    }
+    clicked.then_some(Request::Reset {
+        target: commit,
+        mode: None,
+    })
 }
 
 /// A menu target: its name, what choosing it asks for, and why it's greyed out, if it is.
@@ -976,6 +1008,17 @@ struct Loss {
     show_files: bool,
 }
 
+/// A reset's preview, being read for the dialog.
+#[derive(Debug)]
+struct Previewing {
+    target: Oid,
+    opener: ViewportId,
+    /// Read again for the open dialog, after the repository changed.
+    refresh: bool,
+    mode: Option<Mode>,
+    rx: mpsc::Receiver<Result<Preview, String>>,
+}
+
 #[derive(Debug, Default)]
 pub struct Tool {
     repo: Option<Arc<Repo>>,
@@ -983,6 +1026,10 @@ pub struct Tool {
     loading: Option<mpsc::Receiver<Result<Catalog, String>>>,
     form: Option<Form>,
     warning: Option<Loss>,
+    reset: Option<ResetDialog>,
+    previewing: Option<Previewing>,
+    /// Diff windows asked for from a dialog.
+    pub diff_requests: Vec<(Arc<Repo>, FileDiffSpec)>,
     job: Option<Job>,
     notices: Vec<Notice>,
     next_notice: u64,
@@ -1009,7 +1056,15 @@ impl Tool {
             if different_path {
                 self.form = None;
                 self.warning = None;
+                self.reset = None;
+                self.previewing = None;
                 self.catalog = None;
+            } else if let Some(dialog) = &self.reset
+                && self.previewing.is_none()
+            {
+                // What the reset does may have changed with the repository.
+                let (target, opener) = (dialog.preview.target, dialog.opener);
+                self.preview(ctx, target, None, opener, true);
             }
             self.repo = repo.cloned();
             self.loading = repo.map(|r| {
@@ -1055,6 +1110,7 @@ impl Tool {
                 }
             }
         }
+        self.previewed(ctx);
         let completed = self.job.as_ref().and_then(|job| match job.rx.try_recv() {
             Ok(result) => Some(result),
             Err(mpsc::TryRecvError::Empty) => None,
@@ -1128,6 +1184,66 @@ impl Tool {
             }
             Request::GoTo(_) => unreachable!("handled above"),
             Request::Run(action) => self.run(ctx, repo.path.clone(), action, None, opener),
+            Request::Reset { target, mode } => self.preview(ctx, target, mode, opener, false),
+        }
+    }
+
+    /// Reads what a reset to `target` would do, for its dialog.
+    fn preview(
+        &mut self,
+        ctx: &egui::Context,
+        target: Oid,
+        mode: Option<Mode>,
+        opener: ViewportId,
+        refresh: bool,
+    ) {
+        let Some(path) = self.repo.as_ref().map(|r| r.path.clone()) else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Preview::load(&path, target).map_err(|e| e.to_string()));
+            ctx.request_repaint();
+        });
+        self.previewing = Some(Previewing {
+            target,
+            opener,
+            refresh,
+            mode,
+            rx,
+        });
+    }
+
+    /// Opens the reset dialog once its preview is read, or brings it up to date.
+    fn previewed(&mut self, ctx: &egui::Context) {
+        let Some(p) = &self.previewing else { return };
+        let result = match p.rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("The reset preview stopped unexpectedly.".into())
+            }
+        };
+        let p = self.previewing.take().unwrap();
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
+        match (result, &mut self.reset) {
+            (Ok(preview), Some(dialog)) if p.refresh => dialog.refresh(preview, repo),
+            // Closed meanwhile.
+            (Ok(_), None) if p.refresh => {}
+            (Ok(preview), dialog) => {
+                let mut opened = ResetDialog::new(preview, repo, p.opener, dialog.is_some());
+                opened.mode = p.mode.unwrap_or(opened.mode);
+                *dialog = Some(opened);
+            }
+            // Gone since: reset elsewhere, or the branch is no longer checked out.
+            (Err(_), _) if p.refresh => self.reset = None,
+            (Err(e), _) => {
+                let title = format!("Reset to {}", p.target.short(repo.abbrev_len.max(7)));
+                self.notice(ctx, repo.path.clone(), title, Report::default(), Some(e));
+            }
         }
     }
 
@@ -1208,8 +1324,35 @@ impl Tool {
                 dialogs::Answer::Open => self.form = Some(form),
             }
         }
+        self.reset_dialog(ctx);
         self.loss_dialog(ctx);
         self.notifications(ctx);
+    }
+
+    fn reset_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.reset.take() else {
+            return;
+        };
+        let asked = dialog.show(ctx, self.busy());
+        let repo = self.repo.clone();
+        if let (Some((commits, exact)), Some(repo)) = (asked.log, &repo) {
+            self.log_request = Some((repo.clone(), commits, exact));
+        }
+        if let Some(repo) = &repo {
+            self.diff_requests
+                .extend(asked.diffs.into_iter().map(|spec| (repo.clone(), spec)));
+        }
+        match asked.answer {
+            Some(dialogs::Answer::Primary) if !self.busy() => {
+                if let Some(repo) = &repo {
+                    let action = Action::Reset(Box::new(dialog.preview.reset(dialog.mode)));
+                    self.previewing = None;
+                    self.run(ctx, repo.path.clone(), action, None, dialog.opener);
+                }
+            }
+            Some(dialogs::Answer::Cancel) => self.previewing = None,
+            _ => self.reset = Some(dialog),
+        }
     }
 
     /// The confirmation or warning an operation came back with.

@@ -178,7 +178,7 @@ impl Git {
     }
 
     /// Runs git and returns stdout as bytes, failing on a non-zero exit status.
-    fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, GitError> {
+    pub(crate) fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, GitError> {
         let out = self.output(args)?;
         if !out.status.success() {
             return Err(GitError::Failed {

@@ -159,8 +159,8 @@ struct Cli {
 
     /// Open the menu, a toolbar popover (filter, zoom, drag), the settings (settings, or
     /// settings:PAGE), the branch or worktree form at a commit (create-branch:REF,
-    /// add-worktree:REF), or the question before deleting a worktree (delete-worktree:FOLDER)
-    /// before taking the screenshot.
+    /// add-worktree:REF), the question before deleting a worktree (delete-worktree:FOLDER), or
+    /// the reset dialog (reset:REF, or reset:REF:MODE) before taking the screenshot.
     #[arg(long, value_name = "WHAT", hide = true)]
     demo_open: Option<String>,
 
