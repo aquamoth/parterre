@@ -8,7 +8,8 @@
 //! lose commits.
 //!
 //! A worktree with a rebase in progress has an orange zigzag edge from its HEAD, the commits
-//! replayed so far, to the branch being rebased, still at its old commit. Both special edges
+//! replayed so far, to the branch being rebased, still at its old commit. One with a merge in
+//! progress has one from its HEAD to the commit being merged. Both special edges
 //! run between node centres, cut where they cross the boxes' edges, as TortoiseGit draws them,
 //! and bend around the other boxes where they can.
 
@@ -286,26 +287,34 @@ fn along(path: &[Pos2], step: f32) -> Vec<(Pos2, egui::Vec2)> {
     out
 }
 
-/// Paints, for each worktree with a rebase in progress, given as its HEAD and the branch it
-/// is rebasing (an index into [`Repo::refs`]), the orange zigzag between their nodes.
-pub fn paint_rebasing(
+/// Paints, for each worktree with a rebase or merge in progress (see [`Marks::rebasing`] and
+/// [`Marks::merging`]), the orange zigzag between its HEAD's node and the node of the branch
+/// being rebased or the commit being merged.
+pub fn paint_in_progress(
     painter: &Painter,
     canvas: Rect,
     view: &View,
     scene: &Scene,
     settings: &Settings,
     palette: &Palette,
-    rebasing: &[(CommitIx, usize)],
+    marks: &Marks,
 ) {
     let (repo, graph) = (&*scene.repo, &scene.graph);
+    let node = |c: CommitIx| graph.node_of(c).map(|n| n as usize);
+    let rebasing = marks
+        .rebasing
+        .iter()
+        .map(|&(head, r)| (node(head), node_of_ref(repo, graph, r)));
+    let merging = marks
+        .merging
+        .iter()
+        .map(|&(head, theirs)| (node(head), node(theirs)));
+    let pairs = rebasing.chain(merging);
     let zoom = view.fixed(view.zoom).max(0.5);
     let width = view.fixed((2.0 * view.zoom).max(1.0));
     let scale = view.to_screen(canvas, pos2(1.0, 0.0)).x - view.to_screen(canvas, Pos2::ZERO).x;
-    for &(head, r) in rebasing {
-        let (Some(h), Some(b)) = (
-            graph.node_of(head).map(|n| n as usize),
-            node_of_ref(repo, graph, r),
-        ) else {
+    for pair in pairs {
+        let (Some(h), Some(b)) = pair else {
             continue;
         };
         if h == b {

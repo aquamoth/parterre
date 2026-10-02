@@ -1,6 +1,7 @@
 //! Rebasing the open worktree's branch: the confirmation, which lists the commits being
 //! rebased as the log window does, greying those git leaves out, and the banner across the
-//! graph while the open worktree is stuck with an operation in progress.
+//! graph while the open worktree is stuck with an operation in progress, such as a rebase or
+//! a merge.
 
 use std::sync::Arc;
 
@@ -223,7 +224,14 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
     let stuck = catalog.stuck()?;
     let open = catalog.worktrees.iter().find(|w| w.open);
     let files = &catalog.conflicted;
+    let merging = open.and_then(|w| w.merging);
     let (mut text, hint) = match open.and_then(|w| w.rebasing.as_ref()) {
+        None if let Some(theirs) = merging => {
+            let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
+            // `MERGE_HEAD` is only a commit, and `git status` names none at all.
+            let theirs = theirs.short(repo.abbrev_len.max(7));
+            (format!("Merging {theirs} into {branch}"), FINISH)
+        }
         Some(r) => {
             let branch = r.branch.as_deref().unwrap_or("HEAD");
             // Git records only the commit, and `git status` names it the same way.
@@ -248,6 +256,9 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
     };
     if !files.is_empty() && stuck != Stuck::Conflicts {
         text.push_str(&format!(": {}", plural(files.len(), "conflicted file")));
+    } else if merging.is_some() {
+        // Stopped with no conflicts: a hook refused to commit it.
+        text.push_str(": not committed");
     }
     let (fill, color) = if ui.visuals().dark_mode {
         (
@@ -300,12 +311,11 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
 mod tests {
     use std::path::Path;
 
-    use eframe::egui::{self, Pos2, Rect};
-    use parterre_core::branches::{Catalog, Stuck};
-    use parterre_core::{Oid, Repo};
+    use parterre_core::Oid;
+    use parterre_core::branches::Stuck;
 
     use super::super::branches::{self, Request};
-    use super::super::tool_harness::{Harness, collect, git, read, write};
+    use super::super::tool_harness::{Harness, banner_texts, git, load, menu, read, write};
 
     fn commit(dir: &Path, path: &str, text: &str, message: &str) {
         write(dir, path, text);
@@ -422,60 +432,6 @@ mod tests {
         assert_eq!(commits, [feature]);
     }
 
-    /// The texts a menu shows, and what clicking `click` (if given) asks for.
-    fn menu(
-        f: impl Fn(&mut egui::Ui) -> Option<Request>,
-        click: Option<&str>,
-    ) -> (Vec<String>, Option<Request>) {
-        let ctx = egui::Context::default();
-        let frame = |events: Vec<egui::Event>, texts: &mut Vec<(String, Rect)>| {
-            let mut asked = None;
-            let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))),
-                events,
-                ..Default::default()
-            };
-            let mut output = ctx.run_ui(input, |ui| asked = f(ui));
-            output.textures_delta.clear();
-            texts.clear();
-            for clipped in &output.shapes {
-                collect(&clipped.shape, texts);
-            }
-            asked
-        };
-        let mut texts = Vec::new();
-        frame(Vec::new(), &mut texts);
-        let mut asked = None;
-        if let Some(text) = click {
-            let at = texts
-                .iter()
-                .find(|(t, _)| t == text)
-                .unwrap_or_else(|| panic!("no {text:?}: {texts:?}"))
-                .1
-                .center();
-            for pressed in [true, false] {
-                let events = vec![
-                    egui::Event::PointerMoved(at),
-                    egui::Event::PointerButton {
-                        pos: at,
-                        button: egui::PointerButton::Primary,
-                        pressed,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ];
-                asked = asked.or(frame(events, &mut texts));
-            }
-        }
-        (texts.into_iter().map(|(t, _)| t).collect(), asked)
-    }
-
-    fn load(dir: &Path) -> (Repo, Catalog) {
-        (
-            parterre_core::git::load_repo(dir).unwrap(),
-            Catalog::load(dir).unwrap(),
-        )
-    }
-
     fn rev(dir: &Path, r: &str) -> Oid {
         Oid::from_hex(&git(dir, &["rev-parse", r])).unwrap()
     }
@@ -514,21 +470,6 @@ mod tests {
             }
             other => panic!("expected a rebase: {other:?}"),
         }
-    }
-
-    /// The texts `banner` shows for the repository at `dir`.
-    fn banner_texts(dir: &Path) -> Vec<String> {
-        let (repo, catalog) = load(dir);
-        let ctx = egui::Context::default();
-        let mut texts = Vec::new();
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            super::banner(ui, &repo, &catalog);
-        });
-        output.textures_delta.clear();
-        for clipped in &output.shapes {
-            collect(&clipped.shape, &mut texts);
-        }
-        texts.into_iter().map(|(t, _)| t).collect()
     }
 
     /// An autostash that couldn't be put back leaves conflicted files, and no operation in
@@ -619,16 +560,7 @@ mod tests {
         };
         assert!(reset.1.is_none());
 
-        let ctx = egui::Context::default();
-        let mut texts = Vec::new();
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            super::banner(ui, &repo, &catalog);
-        });
-        output.textures_delta.clear();
-        for clipped in &output.shapes {
-            collect(&clipped.shape, &mut texts);
-        }
-        let texts: Vec<String> = texts.into_iter().map(|(t, _)| t).collect();
+        let texts = banner_texts(p);
         let short = up.short(repo.abbrev_len.max(7));
         // The fix is dropped and the merge flattened: feature, the first of two, conflicts.
         let expected = format!("Rebasing main onto {short} stopped at 1/2: 1 conflicted file");

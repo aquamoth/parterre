@@ -15,10 +15,12 @@ use parterre_core::reset::{Mode, Preview};
 use parterre_core::worktree_folder;
 use parterre_core::{Oid, RefKind, Repo};
 
+use super::merge::MergeDialog;
 use super::rebase::{RebaseDialog, stuck_color};
 use super::reset::ResetDialog;
 use crate::theme::Palette;
 use crate::{dialogs, menu, widgets};
+use parterre_core::merge;
 use parterre_core::rebase;
 use parterre_core::revgraph::GraphOptions;
 
@@ -46,6 +48,12 @@ pub enum Request {
     /// names by `target`: a branch's name, or the full hash.
     Rebase {
         onto: Oid,
+        target: String,
+    },
+    /// The dialog for merging `theirs` into the open worktree's branch, which the command
+    /// names by `target`: a branch's name, or the full hash.
+    Merge {
+        theirs: Oid,
         target: String,
     },
 }
@@ -204,6 +212,7 @@ fn branch_section(
         .collect();
     target_menu(ui, "Delete branch", &deletions, busy, &mut request);
     rebase_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
+    merge_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
     if let Some(reset) = reset_item(ui, commit, Some(catalog), busy) {
         request = Some(reset);
     }
@@ -264,6 +273,66 @@ fn rebase_targets(
     target_menu(
         ui,
         &format!("Rebase {branch} onto"),
+        &targets,
+        busy,
+        request,
+    );
+}
+
+/// *Merge X into main…* for each branch on the node and, last, the commit itself, when there's
+/// something to merge; greyed out while the open worktree is stuck. The log's rows have it
+/// too, through [`node_menu`].
+fn merge_targets(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    refs: &[&parterre_core::GitRef],
+    catalog: &Catalog,
+    busy: bool,
+    request: &mut Option<Request>,
+) {
+    let mut names: Vec<&str> = refs
+        .iter()
+        .filter(|r| !r.name.ends_with("/HEAD"))
+        .map(|r| r.name.as_str())
+        .filter(|name| catalog.current.as_deref() != Some(*name))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let stuck = catalog.stuck().map(|s| s.reason());
+    let branch = match &stuck {
+        Some(_) => stuck_branch(catalog),
+        None => match merge::offered(repo, catalog, commit) {
+            Some(branch) => branch.to_owned(),
+            None => return,
+        },
+    };
+    let mut targets: Vec<Target> = names
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_owned(),
+                Request::Merge {
+                    theirs: commit,
+                    target: (*name).to_owned(),
+                },
+                stuck.clone(),
+            )
+        })
+        .collect();
+    targets.push((
+        commit.short(repo.abbrev_len.max(7)),
+        Request::Merge {
+            theirs: commit,
+            target: commit.to_hex(),
+        },
+        stuck,
+    ));
+    let into = format!(" into {branch}…");
+    target_menu_named(
+        ui,
+        &format!("Merge into {branch}"),
+        |name| format!("Merge {name}{into}"),
         &targets,
         busy,
         request,
@@ -384,6 +453,25 @@ fn target_menu(
     busy: bool,
     request: &mut Option<Request>,
 ) {
+    target_menu_named(
+        ui,
+        verb,
+        |name| format!("{verb} {name}"),
+        targets,
+        busy,
+        request,
+    );
+}
+
+/// [`target_menu`], with a lone target's item labelled by `single`.
+fn target_menu_named(
+    ui: &mut Ui,
+    verb: &str,
+    single: impl Fn(&str) -> String,
+    targets: &[Target],
+    busy: bool,
+    request: &mut Option<Request>,
+) {
     let mut item = |ui: &mut Ui, label: String, value: &Request, blocked: &Option<String>| {
         let enabled = !busy && blocked.is_none();
         let response = ui.add_enabled(enabled, egui::Button::new(label));
@@ -404,7 +492,7 @@ fn target_menu(
         .filter(|r| targets.iter().all(|t| t.2.as_ref() == Some(r)));
     match targets {
         [] => {}
-        [(name, target, blocked)] => item(ui, format!("{verb} {name}"), target, blocked),
+        [(name, target, blocked)] => item(ui, single(name), target, blocked),
         [_, _, ..] if let Some(reason) = same => {
             ui.add_enabled(false, egui::Button::new(verb))
                 .on_disabled_hover_text(capitalized(&reason));
@@ -1144,6 +1232,14 @@ struct RebaseLoading {
     rx: mpsc::Receiver<Result<rebase::Preview, String>>,
 }
 
+/// A merge's preview, being read for its dialog.
+#[derive(Debug)]
+struct MergeLoading {
+    target: String,
+    opener: ViewportId,
+    rx: mpsc::Receiver<Result<merge::Preview, String>>,
+}
+
 #[derive(Debug, Default)]
 pub struct Tool {
     repo: Option<Arc<Repo>>,
@@ -1155,6 +1251,8 @@ pub struct Tool {
     previewing: Option<Previewing>,
     rebase: Option<RebaseDialog>,
     rebase_loading: Option<RebaseLoading>,
+    merge: Option<MergeDialog>,
+    merge_loading: Option<MergeLoading>,
     /// Diff windows asked for from a dialog.
     pub diff_requests: Vec<(Arc<Repo>, FileDiffSpec)>,
     job: Option<Job>,
@@ -1187,6 +1285,8 @@ impl Tool {
                 self.previewing = None;
                 self.rebase = None;
                 self.rebase_loading = None;
+                self.merge = None;
+                self.merge_loading = None;
                 self.catalog = None;
             } else if let Some(dialog) = &self.reset
                 && self.previewing.is_none()
@@ -1241,6 +1341,7 @@ impl Tool {
         }
         self.previewed(ctx);
         self.rebase_previewed(ctx);
+        self.merge_previewed(ctx);
         let completed = self.job.as_ref().and_then(|job| match job.rx.try_recv() {
             Ok(result) => Some(result),
             Err(mpsc::TryRecvError::Empty) => None,
@@ -1332,6 +1433,50 @@ impl Tool {
                     ctx.request_repaint();
                 });
                 self.rebase_loading = Some(RebaseLoading { target, opener, rx });
+            }
+            Request::Merge { theirs, target } => {
+                let path = repo.path.clone();
+                let (tx, rx) = mpsc::channel();
+                let ctx = ctx.clone();
+                let name = target.clone();
+                std::thread::spawn(move || {
+                    let preview = merge::Preview::load(&path, theirs, &name);
+                    let _ = tx.send(preview.map_err(|e| e.to_string()));
+                    ctx.request_repaint();
+                });
+                self.merge_loading = Some(MergeLoading { target, opener, rx });
+            }
+        }
+    }
+
+    /// Opens the merge's dialog once its preview is read.
+    fn merge_previewed(&mut self, ctx: &egui::Context) {
+        let Some(loading) = &self.merge_loading else {
+            return;
+        };
+        let result = match loading.rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("The merge preview stopped unexpectedly.".into())
+            }
+        };
+        let loading = self.merge_loading.take().unwrap();
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
+        match result {
+            Ok(preview) => {
+                self.merge = Some(MergeDialog::new(
+                    preview,
+                    repo,
+                    loading.target,
+                    loading.opener,
+                ));
+            }
+            Err(e) => {
+                let title = format!("Merge {}", loading.target);
+                self.notice(ctx, repo.path.clone(), title, Report::default(), Some(e));
             }
         }
     }
@@ -1508,6 +1653,7 @@ impl Tool {
         }
         self.reset_dialog(ctx);
         self.rebase_dialog(ctx, palette, options);
+        self.merge_dialog(ctx, palette, options);
         self.loss_dialog(ctx);
         self.notifications(ctx);
     }
@@ -1556,6 +1702,27 @@ impl Tool {
             }
             Some(dialogs::Answer::Cancel) => {}
             _ => self.rebase = Some(dialog),
+        }
+    }
+
+    fn merge_dialog(&mut self, ctx: &egui::Context, palette: &Palette, options: &GraphOptions) {
+        let Some(mut dialog) = self.merge.take() else {
+            return;
+        };
+        let asked = dialog.show(ctx, self.busy(), palette, options);
+        let repo = self.repo.clone();
+        if let (Some(oid), Some(repo)) = (asked.log, &repo) {
+            self.log_request = Some((repo.clone(), vec![oid], false));
+        }
+        match asked.answer {
+            Some(dialogs::Answer::Primary) if !self.busy() => {
+                if let Some(repo) = &repo {
+                    let action = Action::Merge(Box::new(dialog.merge()));
+                    self.run(ctx, repo.path.clone(), action, None, dialog.opener);
+                }
+            }
+            Some(dialogs::Answer::Cancel) => {}
+            _ => self.merge = Some(dialog),
         }
     }
 
