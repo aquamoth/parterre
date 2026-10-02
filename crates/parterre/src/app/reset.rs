@@ -391,6 +391,14 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
 
+    /// A file's text, with the line endings `core.autocrlf` gives it on checkout (Windows)
+    /// undone.
+    fn read(dir: &Path, path: &str) -> String {
+        std::fs::read_to_string(dir.join(path))
+            .unwrap()
+            .replace("\r\n", "\n")
+    }
+
     fn write(dir: &Path, path: &str, text: &str) {
         std::fs::write(dir.join(path), text).unwrap();
     }
@@ -616,10 +624,7 @@ mod tests {
         h.until("the notification", |h| {
             h.shows(&title) && !h.shows("Cancel")
         });
-        assert_eq!(
-            std::fs::read_to_string(h.path().join("a.txt")).unwrap(),
-            "one\n"
-        );
+        assert_eq!(read(h.path(), "a.txt"), "one\n");
     }
 
     #[test]
@@ -662,10 +667,7 @@ mod tests {
             h.frame();
         }
         assert_eq!(h.rev("HEAD"), tip);
-        assert_eq!(
-            std::fs::read_to_string(h.path().join("a.txt")).unwrap(),
-            "mine\n"
-        );
+        assert_eq!(read(h.path(), "a.txt"), "mine\n");
     }
 
     #[test]

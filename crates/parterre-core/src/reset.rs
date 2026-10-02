@@ -717,7 +717,7 @@ fn entries(git: &Git, root: &Path, h: &str, t: &str) -> Result<Vec<Entry>, Error
             to_target: None,
         });
         e.disk = Disk::Untracked;
-        e.to_target = overwritten(git, root, t, &path, e.target.is_some())?;
+        e.to_target = overwritten(git, root, t, &path, e.target.as_deref())?;
     }
     for e in map.values_mut() {
         if e.disk != Disk::Untracked {
@@ -783,13 +783,14 @@ fn in_the_way<'a>(
 }
 
 /// Lines added and removed when the target writes over an untracked file (`None` inside when
-/// either is binary), or `None` when it writes the same.
+/// either is binary), or `None` when it writes the same: the same once git has cleaned the file
+/// as it would on `git add`, so only its line endings differing (`core.autocrlf`) is no loss.
 fn overwritten(
     git: &Git,
     root: &Path,
     t: &str,
     path: &str,
-    in_target: bool,
+    target: Option<&str>,
 ) -> Result<Option<Option<(u32, u32)>>, Error> {
     let file = root.join(path);
     let now = match std::fs::read(&file) {
@@ -798,22 +799,21 @@ fn overwritten(
         Err(_) if !file.is_file() => return Ok(Some(None)),
         Err(e) => return Err(io_error(&file, e)),
     };
-    let after = if in_target {
-        git.run_bytes(&["cat-file", "blob", &format!("{t}:{path}")])?
-    } else {
-        Vec::new()
-    };
-    if now == after {
+    if let Some(target) = target
+        && git.run(&["hash-object", "--", path])?.trim() == target
+    {
         return Ok(None);
     }
+    let after = match target {
+        Some(_) => git.run_bytes(&["cat-file", "blob", &format!("{t}:{path}")])?,
+        None => Vec::new(),
+    };
     if now.contains(&0) || after.contains(&0) {
         return Ok(Some(None));
     }
-    let diff = FileDiff::new(
-        &String::from_utf8_lossy(&now),
-        &String::from_utf8_lossy(&after),
-        DiffOptions::default(),
-    );
+    // Lines that differ only in their endings aren't changes.
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+    let diff = FileDiff::new(&text(&now), &text(&after), DiffOptions::default());
     Ok(Some(Some((diff.added, diff.removed))))
 }
 

@@ -37,13 +37,17 @@ fn failed(out: Outcome) -> String {
     }
 }
 
+/// A file's text, with the line endings `core.autocrlf` gives it on checkout (Windows) undone.
 fn read(r: &TestRepo, path: &str) -> String {
-    std::fs::read_to_string(r.path().join(path)).unwrap()
+    std::fs::read_to_string(r.path().join(path))
+        .unwrap()
+        .replace("\r\n", "\n")
 }
 
 /// `git status --short` for the paths the preview lists, as `XY path` lines.
 fn real_status(r: &TestRepo, paths: &BTreeSet<String>) -> BTreeSet<String> {
-    // Not trimmed, as `TestRepo::git` has it: the first line may start with a space.
+    // Not trimmed, as `TestRepo::git` has it: the first line may start with a space. With the
+    // system's git config, as parterre's own git runs.
     let out = std::process::Command::new("git")
         .current_dir(r.path())
         .args([
@@ -228,7 +232,11 @@ fn hard_loses_every_uncommitted_change() {
     done(execute(&r, p.reset(Mode::Hard)));
     assert_eq!(read(&r, "lib.txt"), "lib\n");
     assert!(!r.path().join("new.txt").exists());
-    assert_eq!(r.git(&["status", "--porcelain"]), "");
+    // Asked as parterre asks, with the system's git config (`core.autocrlf` on Windows).
+    let everything = ["lib.txt", "new.txt", "a.txt", "notes.txt"]
+        .map(String::from)
+        .into();
+    assert_eq!(real_status(&r, &everything), BTreeSet::new());
 }
 
 /// An edit to lib.txt, which the commits left behind didn't touch, and an untracked file.
@@ -461,5 +469,28 @@ fn diffs_show_what_changes_on_disk_or_what_stays_uncommitted() {
     assert_eq!(
         spec.old.unwrap().rev,
         parterre_core::file_diff::Rev::Commit(p.target)
+    );
+}
+
+/// With `core.autocrlf`, an untracked file in the way that differs from the target's only in
+/// its line endings loses nothing when Hard writes over it.
+#[test]
+fn line_endings_alone_are_no_lost_work() {
+    let r = in_the_way();
+    r.git(&["config", "core.autocrlf", "true"]);
+    r.write("lib.txt", b"lib\r\none\r\n");
+    let p = preview(&r, "HEAD~1");
+    assert!(
+        p.lost_files(Mode::Hard).is_empty(),
+        "{:?}",
+        p.files(Mode::Hard)
+    );
+    r.write("lib.txt", b"lib\r\nmine\r\n");
+    let p = preview(&r, "HEAD~1");
+    assert_eq!(p.lost_files(Mode::Hard), ["lib.txt"]);
+    let hard = p.files(Mode::Hard);
+    assert_eq!(
+        hard.iter().find(|f| f.path == "lib.txt").unwrap().lines,
+        Some((1, 1))
     );
 }
