@@ -916,9 +916,6 @@ impl LogWindow {
                 }
                 let reset = super::branches::reset_item(ui, commit.oid, branches, branch_busy);
                 self.branch_requests.extend(reset);
-                let rebase =
-                    super::branches::rebase_item(ui, repo, commit.oid, branches, branch_busy);
-                self.branch_requests.extend(rebase);
             },
             // The details pane shows the whole message.
             None,

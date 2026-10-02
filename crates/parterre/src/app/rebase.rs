@@ -482,35 +482,34 @@ mod tests {
         let p = dir.path();
         git(p, &["branch", "behind", "main~1"]);
         let (repo, catalog) = load(p);
-        let node = |at: &str| {
+        let node = |at: &str, click: Option<&str>| {
             let (repo, catalog, commit) = (&repo, &catalog, rev(p, at));
             menu(
                 move |ui| branches::node_menu(ui, repo, commit, Some(catalog), false, false),
-                None,
-            )
-            .0
-        };
-        let row = |at: &str, click: Option<&str>| {
-            let (repo, catalog, commit) = (&repo, &catalog, rev(p, at));
-            menu(
-                move |ui| branches::rebase_item(ui, repo, commit, Some(catalog), false),
                 click,
             )
         };
-        assert!(node("up").contains(&"Rebase main onto up".to_owned()));
+        let short = |at: &str| rev(p, at).short(repo.abbrev_len.max(7));
+        // A branch and its commit: a submenu.
+        assert!(node("up", None).0.contains(&"Rebase main onto".to_owned()));
         // Already in main: nothing to do.
-        assert!(!node("behind").iter().any(|t| t.starts_with("Rebase")));
-        let short = rev(p, "up").short(repo.abbrev_len.max(7));
-        let (texts, asked) = row("up", Some(&format!("Rebase main onto {short}")));
-        assert_eq!(texts, [format!("Rebase main onto {short}")]);
+        assert!(
+            !node("behind", None)
+                .0
+                .iter()
+                .any(|t| t.starts_with("Rebase"))
+        );
+        // A commit with no branch on it (as the log's rows have it too): the commit alone.
+        let item = format!("Rebase main onto {}", short("up~1"));
+        let (texts, asked) = node("up~1", Some(&item));
+        assert!(texts.contains(&item), "{texts:?}");
         match asked {
             Some(Request::Rebase { onto, target }) => {
-                assert_eq!(onto, rev(p, "up"));
+                assert_eq!(onto, rev(p, "up~1"));
                 assert_eq!(target, onto.to_hex());
             }
             other => panic!("expected a rebase: {other:?}"),
         }
-        assert!(row("main~1", None).0.is_empty());
     }
 
     /// The texts `banner` shows for the repository at `dir`.

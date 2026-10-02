@@ -207,8 +207,9 @@ fn branch_section(
     request
 }
 
-/// *Rebase main onto X* for each branch on the node, when it would really rebase; greyed out
-/// while the open worktree is stuck.
+/// *Rebase main onto X* for each branch on the node and, last, the commit itself, when it
+/// would really rebase; greyed out while the open worktree is stuck. The log's rows have it
+/// too, through [`node_menu`].
 fn rebase_targets(
     ui: &mut Ui,
     repo: &Repo,
@@ -226,9 +227,6 @@ fn rebase_targets(
         .collect();
     names.sort_unstable();
     names.dedup();
-    if names.is_empty() {
-        return;
-    }
     let stuck = catalog.stuck().map(|s| s.reason());
     let branch = match &stuck {
         Some(_) => stuck_branch(catalog),
@@ -237,7 +235,7 @@ fn rebase_targets(
             None => return,
         },
     };
-    let targets: Vec<Target> = names
+    let mut targets: Vec<Target> = names
         .iter()
         .map(|name| {
             (
@@ -250,6 +248,16 @@ fn rebase_targets(
             )
         })
         .collect();
+    // The commit itself, last, as Switch to has it: for nodes with no branch on them, and
+    // for log rows.
+    targets.push((
+        commit.short(repo.abbrev_len.max(7)),
+        Request::Rebase {
+            onto: commit,
+            target: commit.to_hex(),
+        },
+        stuck,
+    ));
     target_menu(
         ui,
         &format!("Rebase {branch} onto"),
@@ -269,42 +277,6 @@ fn stuck_branch(catalog: &Catalog) -> String {
         .and_then(|r| r.branch.clone())
         .or_else(|| catalog.current.clone())
         .unwrap_or_else(|| "HEAD".into())
-}
-
-/// *Rebase main onto abc1234*, for a log row: only where it would really rebase; greyed out
-/// while the open worktree is stuck.
-pub fn rebase_item(
-    ui: &mut Ui,
-    repo: &Repo,
-    commit: Oid,
-    catalog: Option<&Catalog>,
-    busy: bool,
-) -> Option<Request> {
-    let catalog = catalog?;
-    let short = commit.short(repo.abbrev_len.max(7));
-    let stuck = catalog.stuck().map(|s| s.reason());
-    let branch = match &stuck {
-        Some(_) => stuck_branch(catalog),
-        None => rebase::offered(repo, catalog, commit)?.to_owned(),
-    };
-    let targets = [(
-        short,
-        Request::Rebase {
-            onto: commit,
-            target: commit.to_hex(),
-        },
-        stuck,
-    )];
-    let mut request = None;
-    menu::separator(ui);
-    target_menu(
-        ui,
-        &format!("Rebase {branch} onto"),
-        &targets,
-        busy,
-        &mut request,
-    );
-    request
 }
 
 /// *Add worktree here…*, and going to or deleting the other worktrees at the commit.
