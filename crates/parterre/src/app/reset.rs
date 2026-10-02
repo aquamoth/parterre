@@ -534,7 +534,8 @@ mod tests {
         }
     }
 
-    /// The log row's item: only for the open worktree's branch, and not where it is.
+    /// The item, in the node menu the graph and the log's rows share: only for the open
+    /// worktree's branch, and not where it is.
     #[test]
     fn the_menu_offers_a_reset_of_the_branch_checked_out_here() {
         let dir = repository();
@@ -555,6 +556,21 @@ mod tests {
         assert_eq!(item(rev("HEAD~1"), false), ["Reset main to here…"]);
         assert_eq!(item(rev("HEAD~1"), true), ["Reset main to here…"]);
         assert!(item(rev("HEAD"), false).is_empty());
+        let repo = parterre_core::git::load_repo(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut texts = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let base = rev("HEAD~1");
+            super::super::branches::node_menu(ui, &repo, base, Some(&catalog), false, false);
+        });
+        output.textures_delta.clear();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut texts);
+        }
+        assert!(
+            texts.iter().any(|(t, _)| t == "Reset main to here…"),
+            "the node menu has it: {texts:?}"
+        );
         git(dir.path(), &["switch", "-q", "--detach"]);
         let catalog = parterre_core::branches::Catalog::load(dir.path()).unwrap();
         let ctx = egui::Context::default();

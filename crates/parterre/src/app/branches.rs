@@ -204,6 +204,9 @@ fn branch_section(
         .collect();
     target_menu(ui, "Delete branch", &deletions, busy, &mut request);
     rebase_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
+    if let Some(reset) = reset_item(ui, commit, Some(catalog), busy) {
+        request = Some(reset);
+    }
     request
 }
 
@@ -342,8 +345,8 @@ fn worktree_section(
     request
 }
 
-/// *Reset `<branch>` to here…*, for a log row: only the open worktree's branch, and only where
-/// there's a reset to offer.
+/// *Reset `<branch>` to here…*: only the open worktree's branch, and only where there's a
+/// reset to offer. In the node menu, so the graph and the log's rows both have it.
 pub fn reset_item(
     ui: &mut Ui,
     commit: Oid,
@@ -352,13 +355,12 @@ pub fn reset_item(
 ) -> Option<Request> {
     // Greyed out, not hidden, while the worktree is stuck: it's only for now.
     if let Some(stuck) = catalog.and_then(Catalog::stuck) {
-        menu::separator(ui);
-        ui.add_enabled(false, egui::Button::new("Reset to here…"))
+        let label = format!("Reset {} to here…", stuck_branch(catalog?));
+        ui.add_enabled(false, egui::Button::new(label))
             .on_disabled_hover_text(stuck.reason());
         return None;
     }
     let branch = parterre_core::reset::branch(catalog?, commit).ok()?;
-    menu::separator(ui);
     let clicked = ui
         .add_enabled(!busy, egui::Button::new(format!("Reset {branch} to here…")))
         .on_disabled_hover_text(loading_reason(true))

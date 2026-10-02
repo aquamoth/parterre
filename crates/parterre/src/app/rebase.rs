@@ -610,7 +610,7 @@ mod tests {
             let catalog = &catalog;
             menu(
                 move |ui| branches::reset_item(ui, up, Some(catalog), false),
-                Some("Reset to here…"),
+                Some("Reset main to here…"),
             )
         };
         assert!(reset.1.is_none());
