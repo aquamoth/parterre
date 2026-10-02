@@ -182,10 +182,41 @@ fn a_rebase_stopped_on_a_conflict_is_an_operation_in_progress() {
     assert_eq!(w.in_progress, Some("a rebase"));
     // The branch being rebased still counts as checked out there.
     assert!(catalog.occupied.contains_key("side"));
-    // So the worktree can't be deleted until the rebase is done.
-    let error = failed(execute(&r, deletion(&r, "rebasing"), None));
-    assert!(error.contains("rebase is in progress"), "{error}");
+    let rebasing = w.rebasing.clone().expect("the stopped rebase");
+    assert_eq!(rebasing.branch.as_deref(), Some("side"));
+    assert_eq!(rebasing.onto, Some(oid(&r.git(&["rev-parse", "main"]))));
+    assert_eq!((rebasing.done, rebasing.total), (1, 1));
+}
+
+#[test]
+fn deleting_a_worktree_with_a_rebase_in_progress_warns_then_ends_it() {
+    let (mut r, others, _) = repository();
+    r.git(&["branch", "side"]);
+    r.write("file", b"main\n");
+    r.commit_all("main change");
+    let wt = worktree(&r, others.path(), "rebasing", &["side"]);
+    std::fs::write(wt.join("file"), "side\n").unwrap();
+    git_in(&wt, &["commit", "-qam", "side change"]);
+    let side = git_in(&wt, &["rev-parse", "HEAD"]);
+    let out = Command::new("git")
+        .current_dir(&wt)
+        .args(["rebase", "main"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    // The conflicted file is lost work, so it asks first.
+    let w = warning(execute(&r, deletion(&r, "rebasing"), None));
+    assert!(w.files.iter().any(|f| f == "file"), "{:?}", w.files);
     assert!(wt.join("file").exists());
+    done(execute(&r, deletion(&r, "rebasing"), Some(&w)));
+    assert!(!wt.exists());
+    // The rebase is gone with it, and the branch is where it was, free again.
+    assert_eq!(r.git(&["rev-parse", "side"]), side);
+    let catalog = Catalog::load(r.path()).unwrap();
+    assert!(!catalog.occupied.contains_key("side"));
+    assert!(catalog.worktrees.iter().all(|w| w.in_progress.is_none()));
 }
 
 // ---------------------------------------------------------------------------------------------

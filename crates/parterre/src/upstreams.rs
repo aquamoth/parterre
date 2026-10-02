@@ -6,6 +6,11 @@
 //! ahead, blue behind, red lost to a force push, grey dashed replaced by a rebase. A rebased
 //! branch always has a dashed edge to its upstream, red while hovered if a force push would
 //! lose commits.
+//!
+//! A worktree with a rebase in progress has an orange zigzag edge from its HEAD, the commits
+//! replayed so far, to the branch being rebased, still at its old commit. Both special edges
+//! run between node centres, cut where they cross the boxes' edges, as TortoiseGit draws them,
+//! and bend around the other boxes where they can.
 
 use std::collections::HashSet;
 
@@ -14,7 +19,7 @@ use eframe::egui::{
 };
 use parterre_core::glyphs;
 use parterre_core::upstream::{Side, Upstream};
-use parterre_core::{Repo, revgraph::RevGraph};
+use parterre_core::{CommitIx, Repo, revgraph::RevGraph};
 
 use crate::render::{Marks, edge_path};
 use crate::scene::Scene;
@@ -79,8 +84,15 @@ pub fn paint(
             };
             let node_box = |n: usize| view.rect_to_screen(canvas, scene.node_rect(n));
             let scale = to_screen(pos2(1.0, 0.0)).x - to_screen(Pos2::ZERO).x;
-            let style = settings.edge_style;
-            let path = dashed_route(node_box(b), node_box(t), scene, style, scale);
+            let others = boxes_in_view(scene, view, canvas, &[b, t]);
+            let path = route_around(
+                node_box(b),
+                node_box(t),
+                &others,
+                4.0,
+                settings.edge_style,
+                scale,
+            );
             let dash = 6.0 * zoom.max(0.5);
             painter.extend(Shape::dashed_line(
                 &path,
@@ -146,50 +158,180 @@ fn sub_path(path: &[Pos2], t0: f32, t1: f32) -> Vec<Pos2> {
     out
 }
 
-/// The dashed edge's route, from side to side across the flow (left and right when the
-/// newest commits are on top): the sides that face each other when the boxes are apart, else
-/// the same side of both, towards the upstream. Curved, or with straight segments, as the
-/// edges are. `scale` is screen pixels per world unit.
-fn dashed_route(a: Rect, b: Rect, scene: &Scene, style: EdgeStyle, scale: f32) -> Vec<Pos2> {
-    let f = scene.layout.direction.flow();
-    let across = vec2(f.y.abs(), f.x.abs());
-    let breadth = |r: Rect| (across.x * r.width() + across.y * r.height()) / 2.0;
-    let side = |p: Pos2| p.to_vec2().dot(across);
-    let gap = side(b.center()) - side(a.center());
-    let sign = if gap < 0.0 { -1.0 } else { 1.0 };
-    let apart = gap.abs() > breadth(a) + breadth(b);
-    let p0 = a.center() + across * (sign * breadth(a));
-    let (p3, c1, c2) = if apart {
-        let p3 = b.center() - across * (sign * breadth(b));
-        // Out sideways only briefly, so it heads for the other box rather than along the
-        // row of boxes it starts in.
-        let reach = ((side(p3) - side(p0)).abs() / 2.0).clamp(15.0 * scale, 40.0 * scale);
-        (
-            p3,
-            p0 + across * (sign * reach),
-            p3 - across * (sign * reach),
-        )
-    } else {
-        // Out of the same side of both, round the wider one.
-        let p3 = b.center() + across * (sign * breadth(b));
-        let far = (sign * side(p0)).max(sign * side(p3)) + 30.0 * scale;
-        let beyond = |p: Pos2| p + across * (sign * far - side(p));
-        (p3, beyond(p0), beyond(p3))
-    };
-    if style == EdgeStyle::Straight {
-        return vec![p0, c1, c2, p3];
-    }
-    (0..=32)
-        .map(|i| {
-            let t = i as f32 / 32.0;
-            let u = 1.0 - t;
-            (p0.to_vec2() * (u * u * u)
-                + c1.to_vec2() * (3.0 * u * u * t)
-                + c2.to_vec2() * (3.0 * u * t * t)
-                + p3.to_vec2() * (t * t * t))
-                .to_pos2()
-        })
+/// The other boxes in view, on screen, for a special edge to bend around.
+fn boxes_in_view(scene: &Scene, view: &View, canvas: Rect, ends: &[usize]) -> Vec<Rect> {
+    let near = canvas.expand(160.0);
+    (0..scene.graph.nodes.len())
+        .filter(|n| !ends.contains(n))
+        .map(|n| view.rect_to_screen(canvas, scene.node_rect(n)))
+        .filter(|r| near.intersects(*r))
         .collect()
+}
+
+/// A special edge's route, from the centre of box `a` to the centre of box `b`, cut where it
+/// leaves `a` and enters `b`, so it emerges wherever it crosses a box's edge. Of curves bowed
+/// more or less to either side of the straight line, it takes the one crossing the fewest of
+/// the `others` (each kept `margin` clear), then the shortest. Curved, or with straight
+/// segments, as the edges are. `scale` is screen pixels per world unit.
+fn route_around(
+    a: Rect,
+    b: Rect,
+    others: &[Rect],
+    margin: f32,
+    style: EdgeStyle,
+    scale: f32,
+) -> Vec<Pos2> {
+    let (p0, p3) = (a.center(), b.center());
+    let chord = p3 - p0;
+    let normal = if chord.length() > 0.0 {
+        chord.normalized().rot90()
+    } else {
+        vec2(0.0, 1.0)
+    };
+    let curve = |c1: Pos2, c2: Pos2| -> Vec<Pos2> {
+        if style == EdgeStyle::Straight {
+            return vec![p0, c1, c2, p3];
+        }
+        (0..=48)
+            .map(|i| {
+                let t = i as f32 / 48.0;
+                let u = 1.0 - t;
+                (p0.to_vec2() * (u * u * u)
+                    + c1.to_vec2() * (3.0 * u * u * t)
+                    + c2.to_vec2() * (3.0 * u * t * t)
+                    + p3.to_vec2() * (t * t * t))
+                    .to_pos2()
+            })
+            .collect()
+    };
+    let crossings = |path: &[Pos2]| {
+        let dense: Vec<Pos2> = along(path, 4.0).into_iter().map(|(p, _)| p).collect();
+        others
+            .iter()
+            .filter(|r| {
+                let r = r.expand(margin);
+                dense.iter().any(|p| r.contains(*p))
+            })
+            .count()
+    };
+    let length = |path: &[Pos2]| -> f32 { path.windows(2).map(|w| w[0].distance(w[1])).sum() };
+    let mut best: Option<(usize, f32, Vec<Pos2>)> = None;
+    for bow in [
+        0.0f32, -1.0, 1.0, -2.0, 2.0, -3.0, 3.0, -4.0, 4.0, -6.0, 6.0,
+    ] {
+        let lift = normal * (bow * 30.0 * scale);
+        let c1 = p0 + chord / 3.0 + lift;
+        let c2 = p0 + chord * (2.0 / 3.0) + lift;
+        let path = clip(&clip(&curve(c1, c2), a), b);
+        if path.len() < 2 {
+            continue;
+        }
+        let score = (crossings(&path), length(&path));
+        if best
+            .as_ref()
+            .is_none_or(|(n, l, _)| score.0 < *n || score.0 == *n && score.1 < *l)
+        {
+            best = Some((score.0, score.1, path));
+        }
+    }
+    best.map(|(_, _, path)| path).unwrap_or_default()
+}
+
+/// The part of a polyline outside `r`, which one of its ends is inside: cut where it crosses
+/// `r`'s edge. A polyline with neither end inside is returned as it is.
+fn clip(path: &[Pos2], r: Rect) -> Vec<Pos2> {
+    let from_end = !path.first().is_some_and(|p| r.contains(*p));
+    let mut path = path.to_vec();
+    if from_end {
+        path.reverse();
+    }
+    if path.first().is_some_and(|p| r.contains(*p)) {
+        let Some(k) = path.iter().position(|p| !r.contains(*p)) else {
+            return Vec::new();
+        };
+        // The edge is between the inside point k - 1 and the outside point k.
+        let (mut inside, mut outside) = (path[k - 1], path[k]);
+        for _ in 0..20 {
+            let mid = inside.lerp(outside, 0.5);
+            if r.contains(mid) {
+                inside = mid;
+            } else {
+                outside = mid;
+            }
+        }
+        path.splice(..k, [outside]);
+    }
+    if from_end {
+        path.reverse();
+    }
+    path
+}
+
+/// Points every `step` along a polyline, with the direction there.
+fn along(path: &[Pos2], step: f32) -> Vec<(Pos2, egui::Vec2)> {
+    let mut out = Vec::new();
+    let (mut next, mut at) = (0.0, 0.0);
+    for w in path.windows(2) {
+        let d = w[0].distance(w[1]);
+        if d <= 0.0 {
+            continue;
+        }
+        let dir = (w[1] - w[0]) / d;
+        while next <= at + d {
+            out.push((w[0] + dir * (next - at), dir));
+            next += step;
+        }
+        at += d;
+    }
+    out
+}
+
+/// Paints, for each worktree with a rebase in progress, given as its HEAD and the branch it
+/// is rebasing (an index into [`Repo::refs`]), the orange zigzag between their nodes.
+pub fn paint_rebasing(
+    painter: &Painter,
+    canvas: Rect,
+    view: &View,
+    scene: &Scene,
+    settings: &Settings,
+    palette: &Palette,
+    rebasing: &[(CommitIx, usize)],
+) {
+    let (repo, graph) = (&*scene.repo, &scene.graph);
+    let zoom = view.fixed(view.zoom).max(0.5);
+    let width = view.fixed((2.0 * view.zoom).max(1.0));
+    let scale = view.to_screen(canvas, pos2(1.0, 0.0)).x - view.to_screen(canvas, Pos2::ZERO).x;
+    for &(head, r) in rebasing {
+        let (Some(h), Some(b)) = (
+            graph.node_of(head).map(|n| n as usize),
+            node_of_ref(repo, graph, r),
+        ) else {
+            continue;
+        };
+        if h == b {
+            continue;
+        }
+        let node_box = |n: usize| view.rect_to_screen(canvas, scene.node_rect(n));
+        let amplitude = 3.0 * zoom;
+        let others = boxes_in_view(scene, view, canvas, &[h, b]);
+        let path = route_around(
+            node_box(h),
+            node_box(b),
+            &others,
+            amplitude + 3.0,
+            settings.edge_style,
+            scale,
+        );
+        let zigzag: Vec<Pos2> = along(&path, 4.0 * zoom)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (p, dir))| {
+                let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+                p + dir.rot90() * (amplitude * side)
+            })
+            .collect();
+        painter.add(Shape::line(zigzag, Stroke::new(width, palette.stuck)));
+    }
 }
 
 /// The upstream a node stands for, as an index into [`Repo::upstreams`]: of a branch on it,

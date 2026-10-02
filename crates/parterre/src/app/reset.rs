@@ -361,47 +361,11 @@ fn badges(o: &FileOutcome, c: &Colors, ui: &Ui) -> Badges {
 /// against real, disposable repositories: clicked by the text on screen, as a person would.
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use std::process::Command;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use eframe::egui;
+    use parterre_core::Oid;
 
-    use eframe::egui::{self, Event, Pos2, Rect};
-    use parterre_core::{Oid, Repo};
-
-    use super::super::branches::{Request, Tool};
-
-    fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
-            .current_dir(dir)
-            .args(args)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_owned()
-    }
-
-    /// A file's text, with the line endings `core.autocrlf` gives it on checkout (Windows)
-    /// undone, as `common::read_text` in parterre-core's tests (#182).
-    fn read(dir: &Path, path: &str) -> String {
-        std::fs::read_to_string(dir.join(path))
-            .unwrap()
-            .replace("\r\n", "\n")
-    }
-
-    fn write(dir: &Path, path: &str, text: &str) {
-        std::fs::write(dir.join(path), text).unwrap();
-    }
+    use super::super::branches::Request;
+    use super::super::tool_harness::{Harness, collect, git, read, write};
 
     /// main: base (a.txt, lib.txt) → tip (a.txt changed), the tip also on `pushed`.
     fn repository() -> tempfile::TempDir {
@@ -418,171 +382,11 @@ mod tests {
         dir
     }
 
-    struct Harness {
-        ctx: egui::Context,
-        tool: Tool,
-        repo: Arc<Repo>,
-        dir: tempfile::TempDir,
-        time: f64,
-        events: Vec<Event>,
-        /// The texts on screen in the last frame, and where.
-        texts: Vec<(String, Rect)>,
-    }
-
-    impl Harness {
-        fn new(dir: tempfile::TempDir) -> Harness {
-            let repo = Arc::new(parterre_core::git::load_repo(dir.path()).unwrap());
-            let mut h = Harness {
-                ctx: egui::Context::default(),
-                tool: Tool::default(),
-                repo,
-                dir,
-                time: 0.0,
-                events: Vec::new(),
-                texts: Vec::new(),
-            };
-            h.frame();
-            h
-        }
-
-        fn path(&self) -> &Path {
-            self.dir.path()
-        }
-
-        fn rev(&self, rev: &str) -> Oid {
-            Oid::from_hex(&git(self.path(), &["rev-parse", rev])).unwrap()
-        }
-
-        /// One frame; fails on any widget id clash egui reports.
-        fn frame(&mut self) {
-            self.time += 1.0 / 60.0;
-            let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1600.0, 1000.0))),
-                time: Some(self.time),
-                events: std::mem::take(&mut self.events),
-                ..Default::default()
-            };
-            let (tool, repo) = (&mut self.tool, &self.repo);
-            let mut output = self.ctx.run_ui(input, |ui| {
-                tool.update(ui.ctx(), Some(repo));
-                tool.show(ui.ctx());
-            });
-            output.textures_delta.clear();
-            self.texts.clear();
-            for clipped in &output.shapes {
-                collect(&clipped.shape, &mut self.texts);
-            }
-            let clashes: Vec<_> = self
-                .texts
-                .iter()
-                .filter(|(t, _)| t.contains("use of") || t.contains("is above this"))
-                .collect();
-            assert!(clashes.is_empty(), "egui reports id clashes: {clashes:?}");
-        }
-
-        /// Frames until `done`, or fails after a while.
-        fn until(&mut self, what: &str, done: impl Fn(&Harness) -> bool) {
-            let start = Instant::now();
-            while !done(self) {
-                assert!(start.elapsed() < Duration::from_secs(20), "never: {what}");
-                std::thread::sleep(Duration::from_millis(5));
-                self.frame();
-            }
-        }
-
-        fn shows(&self, text: &str) -> bool {
-            self.texts.iter().any(|(t, _)| t == text)
-        }
-
-        fn shows_part(&self, text: &str) -> bool {
-            self.texts.iter().any(|(t, _)| t.contains(text))
-        }
-
-        fn at(&self, text: &str) -> Pos2 {
-            self.texts
-                .iter()
-                .find(|(t, _)| t == text)
-                .unwrap_or_else(|| panic!("no {text:?} on screen: {:?}", self.texts))
-                .1
-                .center()
-        }
-
-        fn click_at(&mut self, at: Pos2, count: usize) {
-            for _ in 0..count {
-                for pressed in [true, false] {
-                    self.events.push(Event::PointerMoved(at));
-                    self.events.push(Event::PointerButton {
-                        pos: at,
-                        button: egui::PointerButton::Primary,
-                        pressed,
-                        modifiers: egui::Modifiers::NONE,
-                    });
-                    self.frame();
-                }
-            }
-            self.frame();
-        }
-
-        fn click(&mut self, text: &str) {
-            let at = self.at(text);
-            self.click_at(at, 1);
-        }
-
-        fn key(&mut self, key: egui::Key) {
-            for pressed in [true, false] {
-                self.events.push(Event::Key {
-                    key,
-                    physical_key: None,
-                    pressed,
-                    repeat: false,
-                    modifiers: egui::Modifiers::NONE,
-                });
-                self.frame();
-            }
-            self.frame();
-        }
-
-        /// Asks for the dialog, and waits for it.
-        fn open(&mut self, target: Oid) -> String {
-            let title = format!(
-                "Reset main to {}",
-                target.short(self.repo.abbrev_len.max(7))
-            );
-            let ctx = self.ctx.clone();
-            let request = Request::Reset { target, mode: None };
-            self.tool.request(&ctx, request, egui::ViewportId::ROOT);
-            self.until("the dialog opens", |h| h.shows(&title));
-            // Its first frames place and size it.
-            for _ in 0..5 {
-                self.frame();
-            }
-            title
-        }
-
-        /// The repository loaded again, as a reload after a change does.
-        fn reload(&mut self) {
-            self.repo = Arc::new(parterre_core::git::load_repo(self.path()).unwrap());
-            self.frame();
-        }
-    }
-
-    fn collect(shape: &egui::Shape, texts: &mut Vec<(String, Rect)>) {
-        match shape {
-            // Where its glyphs are: text wrapped after another starts its galley further left.
-            egui::Shape::Text(t) => {
-                let rect = t
-                    .galley
-                    .rows
-                    .iter()
-                    .filter(|r| !r.glyphs.is_empty())
-                    .map(|r| r.rect_without_leading_space())
-                    .reduce(|a, b| a.union(b))
-                    .unwrap_or(t.galley.rect);
-                texts.push((t.galley.text().to_owned(), rect.translate(t.pos.to_vec2())));
-            }
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, texts)),
-            _ => {}
-        }
+    /// Asks for the dialog, and waits for it.
+    fn open(h: &mut Harness, target: Oid) -> String {
+        let title = format!("Reset main to {}", target.short(h.repo.abbrev_len.max(7)));
+        h.ask(Request::Reset { target, mode: None }, &title);
+        title
     }
 
     #[test]
@@ -593,7 +397,7 @@ mod tests {
         write(dir.path(), "lib.txt", "W\n");
         let mut h = Harness::new(dir);
         let base = h.rev("HEAD~1");
-        h.open(base);
+        open(&mut h, base);
         // Mixed and Keep lose lib.txt's staged version: Soft is picked.
         assert!(h.shows("Reset"));
         for (mode, button) in [
@@ -618,7 +422,7 @@ mod tests {
     fn reset_runs_git_and_says_so() {
         let mut h = Harness::new(repository());
         let base = h.rev("HEAD~1");
-        let title = h.open(base);
+        let title = open(&mut h, base);
         h.click("Reset");
         h.until("the branch moves", |h| h.rev("HEAD") == base);
         h.until("the notification", |h| {
@@ -631,7 +435,7 @@ mod tests {
     fn enter_runs_a_reset_that_loses_nothing() {
         let mut h = Harness::new(repository());
         let base = h.rev("HEAD~1");
-        h.open(base);
+        open(&mut h, base);
         h.key(egui::Key::Enter);
         h.until("the branch moves", |h| h.rev("HEAD") == base);
     }
@@ -642,7 +446,7 @@ mod tests {
         git(dir.path(), &["branch", "-D", "pushed"]);
         let mut h = Harness::new(dir);
         let (tip, base) = (h.rev("HEAD"), h.rev("HEAD~1"));
-        let title = h.open(base);
+        let title = open(&mut h, base);
         assert!(h.shows("Reset anyway") && h.shows("Show in log"));
         h.key(egui::Key::Enter);
         assert!(!h.shows(&title));
@@ -658,7 +462,7 @@ mod tests {
         write(dir.path(), "a.txt", "mine\n");
         let mut h = Harness::new(dir);
         let (tip, base) = (h.rev("HEAD"), h.rev("HEAD~1"));
-        h.open(base);
+        open(&mut h, base);
         h.click("Keep");
         assert!(h.shows("git reset --keep refuses:"), "{:?}", h.texts);
         h.click("Reset");
@@ -674,7 +478,7 @@ mod tests {
     fn the_dialog_follows_the_repository() {
         let mut h = Harness::new(repository());
         let base = h.rev("HEAD~1");
-        h.open(base);
+        open(&mut h, base);
         assert!(h.shows("1 file"));
         write(h.path(), "lib.txt", "edited\n");
         h.reload();
@@ -689,8 +493,8 @@ mod tests {
     fn asking_again_keeps_one_dialog() {
         let mut h = Harness::new(repository());
         let base = h.rev("HEAD~1");
-        let title = h.open(base);
-        h.open(base);
+        let title = open(&mut h, base);
+        open(&mut h, base);
         assert_eq!(h.texts.iter().filter(|(t, _)| *t == title).count(), 1);
     }
 
@@ -700,7 +504,7 @@ mod tests {
         git(dir.path(), &["branch", "-D", "pushed"]);
         let mut h = Harness::new(dir);
         let (tip, base) = (h.rev("HEAD"), h.rev("HEAD~1"));
-        h.open(base);
+        open(&mut h, base);
         let at = h.at("a.txt");
         h.click_at(at, 2);
         let diffs = std::mem::take(&mut h.tool.diff_requests);
@@ -722,7 +526,7 @@ mod tests {
         git(p, &["switch", "-q", "main"]);
         let mut h = Harness::new(dir);
         let other = h.rev("other");
-        h.open(other);
+        open(&mut h, other);
         assert!(h.shows_part("on another line"), "{:?}", h.texts);
         assert!(h.shows("a.txt") && h.shows("other.txt"));
         for mode in ["Soft", "Mixed", "Keep", "Hard"] {
@@ -730,7 +534,8 @@ mod tests {
         }
     }
 
-    /// The log row's item: only for the open worktree's branch, and not where it is.
+    /// The item, in the node menu the graph and the log's rows share: only for the open
+    /// worktree's branch, and not where it is.
     #[test]
     fn the_menu_offers_a_reset_of_the_branch_checked_out_here() {
         let dir = repository();
@@ -751,6 +556,21 @@ mod tests {
         assert_eq!(item(rev("HEAD~1"), false), ["Reset main to here…"]);
         assert_eq!(item(rev("HEAD~1"), true), ["Reset main to here…"]);
         assert!(item(rev("HEAD"), false).is_empty());
+        let repo = parterre_core::git::load_repo(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut texts = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let base = rev("HEAD~1");
+            super::super::branches::node_menu(ui, &repo, base, Some(&catalog), false, false);
+        });
+        output.textures_delta.clear();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut texts);
+        }
+        assert!(
+            texts.iter().any(|(t, _)| t == "Reset main to here…"),
+            "the node menu has it: {texts:?}"
+        );
         git(dir.path(), &["switch", "-q", "--detach"]);
         let catalog = parterre_core::branches::Catalog::load(dir.path()).unwrap();
         let ctx = egui::Context::default();
