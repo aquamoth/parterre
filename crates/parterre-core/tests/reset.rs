@@ -37,11 +37,8 @@ fn failed(out: Outcome) -> String {
     }
 }
 
-/// A file's text, with the line endings `core.autocrlf` gives it on checkout (Windows) undone.
 fn read(r: &TestRepo, path: &str) -> String {
-    std::fs::read_to_string(r.path().join(path))
-        .unwrap()
-        .replace("\r\n", "\n")
+    common::read_text(&r.path().join(path))
 }
 
 /// `git status --short` for the paths the preview lists, as `XY path` lines.

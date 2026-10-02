@@ -9,6 +9,15 @@ use std::process::{Command, Stdio};
 use parterre_core::Repo;
 use tempfile::TempDir;
 
+/// A file's text, with the CRLF that `core.autocrlf` gives it on checkout undone: Git for
+/// Windows sets it in its system config, which parterre's git reads and [`TestRepo::git`]
+/// doesn't (#182). Compare files parterre checked out with this, never their bytes.
+pub fn read_text(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+        .replace("\r\n", "\n")
+}
+
 pub struct TestRepo {
     pub dir: TempDir,
     clock: u32,
