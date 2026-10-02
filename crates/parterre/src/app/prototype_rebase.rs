@@ -381,6 +381,7 @@ pub fn show(ctx: &egui::Context, tool: &mut Tool, palette: &Palette, options: &G
         let busy = state.running.is_some() || tool.busy();
         let title = format!("Rebase {} onto {}", confirm.branch, short_name(&confirm));
         let mut log = false;
+        let mut opened = None;
         let shown = dialogs::Dialog::new("prototype-rebase", &title)
             .width((ctx.content_rect().width() - 80.0).clamp(420.0, 780.0))
             .opener(confirm.opener)
@@ -395,7 +396,9 @@ pub fn show(ctx: &egui::Context, tool: &mut Tool, palette: &Palette, options: &G
                         );
                     }
                     ui.add_space(6.0);
-                    commits_table(ui, &mut confirm, palette, options);
+                    if let Some(oid) = commits_table(ui, &mut confirm, palette, options) {
+                        opened = Some(oid);
+                    }
                     if confirm.dirty {
                         ui.add_space(6.0);
                         ui.checkbox(&mut confirm.stash, "Stash changes")
@@ -418,6 +421,9 @@ pub fn show(ctx: &egui::Context, tool: &mut Tool, palette: &Palette, options: &G
         if log {
             tool.log_request = Some((confirm.repo.clone(), vec![confirm.onto], false));
         }
+        if let Some(oid) = opened {
+            tool.log_request = Some((confirm.repo.clone(), vec![oid], false));
+        }
         let answer = if std::mem::take(&mut state.autorun) {
             dialogs::Answer::Primary
         } else {
@@ -434,7 +440,13 @@ pub fn show(ctx: &egui::Context, tool: &mut Tool, palette: &Palette, options: &G
 }
 
 /// The commits being rebased, as the log window lists them; those git leaves out are greyed.
-fn commits_table(ui: &mut Ui, confirm: &mut Confirm, palette: &Palette, options: &GraphOptions) {
+/// Returns the commit double-clicked, to open in the log.
+fn commits_table(
+    ui: &mut Ui,
+    confirm: &mut Confirm,
+    palette: &Palette,
+    options: &GraphOptions,
+) -> Option<Oid> {
     let c = super::log_window::colors(ui);
     let table = CommitTable {
         id: egui::Id::new("prototype-rebase-commits"),
@@ -454,7 +466,7 @@ fn commits_table(ui: &mut Ui, confirm: &mut Confirm, palette: &Palette, options:
     };
     // A little more than the rows, for the spacing around the scroll area.
     let height = height + 12.0;
-    ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
+    let clicks = ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
         ui.set_min_height(height);
         ui.set_max_height(height);
         table.show(
@@ -481,8 +493,12 @@ fn commits_table(ui: &mut Ui, confirm: &mut Confirm, palette: &Palette, options:
             },
             |_, _, _| {},
             Some(&mut tip),
-        );
+        )
     });
+    clicks
+        .inner
+        .double_clicked
+        .map(|i| repo.commit(commits[i]).oid)
 }
 
 /// `origin/main`, or the short hash for a commit.
