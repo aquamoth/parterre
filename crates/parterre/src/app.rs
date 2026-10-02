@@ -2618,6 +2618,7 @@ impl eframe::App for ParterreApp {
         }
         // PROTOTYPE: rebasing (#184).
         prototype_rebase::banner(ui, self.repo.as_ref(), self.branches.catalog.as_deref());
+        crate::upstreams::stuck_line_bar(&ctx, self.repo.as_ref());
         if self.repo.is_some() {
             egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
         } else {

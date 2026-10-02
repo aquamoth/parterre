@@ -379,12 +379,129 @@ pub fn paint_rebasing(
         let node_box = |n: usize| view.rect_to_screen(canvas, scene.node_rect(n));
         let scale = to_screen(pos2(1.0, 0.0)).x - to_screen(Pos2::ZERO).x;
         let path = dashed_route(node_box(h), node_box(b), scene, settings.edge_style, scale);
-        let dash = 6.0 * zoom.max(0.5);
-        painter.extend(Shape::dashed_line(
-            &path,
-            Stroke::new(width, color),
-            dash,
-            dash * 0.7,
-        ));
+        stuck_line(painter, &path, color, width, zoom.max(0.5));
     }
+}
+
+/// PROTOTYPE: rebasing (#184). The looks to choose between for a rebasing worktree's edge.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StuckLine {
+    Dotted,
+    DashDot,
+    Crosses,
+    Zigzag,
+}
+
+impl StuckLine {
+    pub const ALL: [StuckLine; 4] = [Self::Dotted, Self::DashDot, Self::Crosses, Self::Zigzag];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dotted => "Dotted",
+            Self::DashDot => "Dash-dot",
+            Self::Crosses => "Crosses",
+            Self::Zigzag => "Zigzag",
+        }
+    }
+}
+
+thread_local! {
+    pub static STUCK_LINE: std::cell::Cell<StuckLine> = const { std::cell::Cell::new(StuckLine::Dotted) };
+}
+
+/// Points every `step` along a polyline, with the direction there.
+fn along(path: &[Pos2], step: f32) -> Vec<(Pos2, egui::Vec2)> {
+    let mut out = Vec::new();
+    let mut next = 0.0;
+    let mut at = 0.0;
+    for w in path.windows(2) {
+        let d = w[0].distance(w[1]);
+        if d <= 0.0 {
+            continue;
+        }
+        let dir = (w[1] - w[0]) / d;
+        while next <= at + d {
+            out.push((w[0] + dir * (next - at), dir));
+            next += step;
+        }
+        at += d;
+    }
+    out
+}
+
+fn stuck_line(painter: &Painter, path: &[Pos2], color: Color32, width: f32, zoom: f32) {
+    let stroke = Stroke::new(width, color);
+    match STUCK_LINE.get() {
+        StuckLine::Dotted => {
+            for (p, _) in along(path, 6.0 * zoom) {
+                painter.circle_filled(p, width * 1.1, color);
+            }
+        }
+        StuckLine::DashDot => painter.extend(Shape::dashed_line_with_offset(
+            path,
+            stroke,
+            &[10.0 * zoom, 1.5 * zoom],
+            &[3.5 * zoom, 3.5 * zoom],
+            0.0,
+        )),
+        StuckLine::Crosses => {
+            let arm = 3.0 * zoom;
+            for (p, dir) in along(path, 9.0 * zoom) {
+                let (a, b) = (dir + dir.rot90(), dir - dir.rot90());
+                let (a, b) = (a.normalized() * arm, b.normalized() * arm);
+                painter.line_segment([p - a, p + a], stroke);
+                painter.line_segment([p - b, p + b], stroke);
+            }
+        }
+        StuckLine::Zigzag => {
+            let amp = 3.0 * zoom;
+            let points: Vec<Pos2> = along(path, 4.0 * zoom)
+                .into_iter()
+                .enumerate()
+                .map(|(i, (p, dir))| {
+                    let side = match i % 2 {
+                        0 => 1.0,
+                        _ => -1.0,
+                    };
+                    p + dir.rot90() * (amp * side)
+                })
+                .collect();
+            painter.add(Shape::line(points, stroke));
+        }
+    }
+}
+
+/// PROTOTYPE: rebasing (#184). A switcher for the rebasing worktree's edge, bottom left, while
+/// a worktree has a rebase in progress.
+pub fn stuck_line_bar(ctx: &egui::Context, repo: Option<&std::sync::Arc<Repo>>) {
+    // For screenshots: PARTERRE_PROTOTYPE_LINE=dotted|dash-dot|crosses|zigzag.
+    if let Ok(name) = std::env::var("PARTERRE_PROTOTYPE_LINE")
+        && let Some(line) = StuckLine::ALL
+            .into_iter()
+            .find(|l| l.name().eq_ignore_ascii_case(&name))
+        && ctx.cumulative_frame_nr() < 3
+    {
+        STUCK_LINE.set(line);
+    }
+    let Some(repo) = repo else { return };
+    if rebasing(repo).is_empty() {
+        return;
+    }
+    egui::Area::new(egui::Id::new("prototype-stuck-line"))
+        .anchor(egui::Align2::LEFT_BOTTOM, vec2(12.0, -40.0))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.weak("PROTOTYPE: rebasing edge");
+                    let mut current = STUCK_LINE.get();
+                    for line in StuckLine::ALL {
+                        ui.selectable_value(&mut current, line, line.name());
+                    }
+                    if current != STUCK_LINE.get() {
+                        STUCK_LINE.set(current);
+                        ui.ctx().request_repaint();
+                    }
+                });
+            });
+        });
 }
