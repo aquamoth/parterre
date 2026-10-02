@@ -38,7 +38,7 @@ use parterre_core::log_graph::LogGraph;
 use parterre_core::log_layout::LogLayout;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{find_urls, thousands};
-use parterre_core::{Commit, CommitIx, GitRef, Label, Oid, Repo, Worktree};
+use parterre_core::{Commit, CommitIx, GitRef, Label, Oid, RefKind, Repo, Worktree};
 
 use super::commit_table::{CommitList, CommitTable, Row};
 use super::compare_window::CompareRequest;
@@ -1202,8 +1202,17 @@ pub(super) enum Badge<'a> {
 impl Badge<'_> {
     fn text(&self) -> String {
         match self {
+            Badge::Ref(r, Some(w)) if r.kind == RefKind::DetachedHead => w.name(),
             Badge::Ref(r, _) => r.name.clone(),
             Badge::Worktree(w) => w.name(),
+        }
+    }
+
+    /// A detached worktree's name, in italics as in the graph.
+    fn is_detached_worktree(&self) -> bool {
+        match self {
+            Badge::Ref(r, w) => r.kind == RefKind::DetachedHead && w.is_some(),
+            Badge::Worktree(_) => true,
         }
     }
 }
@@ -1274,7 +1283,7 @@ pub(super) fn badge(
         TextFormat {
             font_id: FontId::proportional(11.5),
             color,
-            italics: matches!(badge, Badge::Worktree(_)),
+            italics: badge.is_detached_worktree(),
             ..TextFormat::default()
         },
     );

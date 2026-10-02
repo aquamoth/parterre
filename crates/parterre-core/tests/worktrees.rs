@@ -198,3 +198,85 @@ fn worktree_changes_count_as_changed_refs() {
         "checked out"
     );
 }
+
+/// What the layout gets to see from the worktree in `folder`, with worktrees shown: the
+/// subject of the commit it starts from, and every node's subject and label names. The names
+/// are sorted, as the open worktree's go first.
+fn layout_view(folder: &Path) -> (Option<String>, Vec<(String, Vec<String>)>) {
+    let repo = load_repo(folder).expect("load");
+    let options = GraphOptions {
+        show_worktrees: true,
+        ..GraphOptions::default()
+    };
+    let g = revgraph::build(&repo, &options);
+    let anchor = g
+        .layout_anchor(&repo)
+        .map(|n| repo.commit(g.nodes[n as usize].commit).subject.clone());
+    let mut nodes: Vec<(String, Vec<String>)> = g
+        .nodes
+        .iter()
+        .map(|n| {
+            let labels = repo.labels(&n.refs, &n.worktrees, true);
+            let mut names: Vec<String> = labels.into_iter().map(|l| repo.label_name(l)).collect();
+            names.sort();
+            (repo.commit(n.commit).subject.clone(), names)
+        })
+        .collect();
+    nodes.sort();
+    (anchor, nodes)
+}
+
+#[test]
+fn every_worktree_sees_the_same_columns_and_labels() {
+    let (r, others) = with_worktrees();
+    let folders = [
+        r.path().to_owned(),
+        others.path().join("wt-topic"),
+        others.path().join("wt-detached"),
+    ];
+    let views = || -> Vec<_> { folders.iter().map(|f| layout_view(f)).collect() };
+    let same_from_everywhere = |expected: &str| {
+        let views = views();
+        assert_eq!(views[0].0.as_deref(), Some(expected), "{views:#?}");
+        assert!(views.iter().all(|v| *v == views[0]), "{views:#?}");
+    };
+    // Without origin/HEAD, the main worktree's HEAD. The detached worktree is called by its
+    // name when it is open too, not HEAD.
+    same_from_everywhere("B");
+    let (_, nodes) = &views()[2];
+    assert!(nodes.contains(&("detached-only".into(), vec!["wt-detached".into()])));
+
+    // The local branch named like the default branch, before the remote branch.
+    r.git(&["update-ref", "refs/remotes/origin/main", "main~1"]);
+    r.git(&["update-ref", "refs/remotes/origin/topic", "topic"]);
+    let set_head = |to: &str| r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", to]);
+    set_head("refs/remotes/origin/main");
+    same_from_everywhere("B");
+    assert_eq!(
+        load_repo(r.path()).expect("load").default_branch.as_deref(),
+        Some("refs/remotes/origin/main")
+    );
+    r.git(&["branch", "-q", "-m", "main", "trunk"]);
+    same_from_everywhere("A");
+    set_head("refs/remotes/origin/topic");
+    same_from_everywhere("topic-only");
+}
+
+#[test]
+fn moving_origin_head_counts_as_changed_refs() {
+    let (r, _others) = with_worktrees();
+    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    r.git(&["update-ref", "refs/remotes/origin/topic", "topic"]);
+    r.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ]);
+    let before = load_repo(r.path()).expect("load");
+    r.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/topic",
+    ]);
+    assert!(!before.same_refs(&load_repo(r.path()).expect("load")));
+}

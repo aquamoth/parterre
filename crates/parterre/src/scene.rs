@@ -55,6 +55,21 @@ pub struct Row {
     pub width: f32,
 }
 
+impl Row {
+    /// A detached worktree's name, in italics: it is no branch.
+    pub fn is_detached_worktree(&self) -> bool {
+        matches!(
+            self.kind,
+            RowKind::Worktree(_)
+                | RowKind::Ref {
+                    kind: RefKind::DetachedHead,
+                    worktree: Some(_),
+                    ..
+                }
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NodeVisual {
     pub rows: Vec<Row>,
@@ -144,7 +159,7 @@ impl Scene {
                         Label::Ref { index, worktree } => {
                             let r = &repo.refs[index];
                             Row {
-                                label: r.name.clone(),
+                                label: repo.label_name(label),
                                 kind: RowKind::Ref {
                                     kind: r.kind,
                                     head: r.is_head,
@@ -154,14 +169,15 @@ impl Scene {
                             }
                         }
                         Label::Worktree(index) => Row {
-                            label: repo.worktrees[index].name(),
+                            label: repo.label_name(label),
                             kind: RowKind::Worktree(checkout(index)),
                             width: 0.0,
                         },
                     })
                     .collect();
-                // Only refs stand in for the hash. Worktrees go above it, pull requests below.
-                if node.refs.is_empty() {
+                // Only refs stand in for the hash. Worktrees go above it, pull requests below,
+                // and the open worktree's detached HEAD is a worktree like any other.
+                if rows.iter().all(Row::is_detached_worktree) {
                     rows.push(Row {
                         label: repo.commit(node.commit).oid.short(repo.abbrev_len),
                         kind: RowKind::Hash,
@@ -196,7 +212,7 @@ impl Scene {
             .iter()
             .map(|v| Point::new(v.size.x, v.size.y))
             .collect();
-        let head = graph.nodes.iter().position(|n| n.is_head);
+        let anchor = graph.layout_anchor(repo);
         let input = LayoutInput {
             sizes: sizes.clone(),
             times: graph
@@ -213,7 +229,7 @@ impl Scene {
                     first_parent: e.first_parent,
                 })
                 .collect(),
-            priority: head.map(|h| vec![h as u32]).unwrap_or_default(),
+            priority: anchor.into_iter().collect(),
         };
         SceneInput {
             repo: Arc::clone(repo),
@@ -628,5 +644,92 @@ mod tests {
             ]
         );
         assert_eq!(input.visuals[2].rows.len(), 1);
+    }
+
+    #[test]
+    fn the_layout_is_the_same_whichever_worktree_is_open() {
+        let commit = |n: u8, parents: Vec<CommitIx>| parterre_core::Commit {
+            oid: Oid::from_hex(&format!("{n:02x}").repeat(20)).unwrap(),
+            parents,
+            truncated: false,
+            empty_tree: false,
+            author_name: String::new(),
+            author_email: String::new(),
+            author_time: 0,
+            author_date: String::new(),
+            commit_time: n.into(),
+            subject: String::new(),
+        };
+        let git_ref = |full_name: &str, target: u32, is_head: bool| {
+            let (kind, name) = parterre_core::git::classify_ref(full_name);
+            parterre_core::GitRef {
+                full_name: full_name.into(),
+                name,
+                kind,
+                target: CommitIx(target),
+                annotated: false,
+                is_head,
+            }
+        };
+        let worktree =
+            |path: &str, head: u32, branch: Option<&str>, open| parterre_core::Worktree {
+                path: path.into(),
+                head: Some(CommitIx(head)),
+                branch: branch.map(str::to_owned),
+                locked: false,
+                missing: false,
+                open,
+            };
+        // main (0) and a detached worktree (1), both on the root (2). The detached one is
+        // newer, so it would get the leftmost column whenever it is HEAD.
+        let open = |detached_open: bool| {
+            let mut refs = vec![git_ref("refs/heads/main", 0, !detached_open)];
+            let head = if detached_open {
+                refs.push(parterre_core::GitRef {
+                    kind: RefKind::DetachedHead,
+                    ..git_ref("HEAD", 1, true)
+                });
+                Head::Detached(CommitIx(1))
+            } else {
+                Head::Branch {
+                    name: "refs/heads/main".into(),
+                    target: Some(CommitIx(0)),
+                }
+            };
+            let commits = vec![
+                commit(1, vec![CommitIx(2)]),
+                commit(2, vec![CommitIx(2)]),
+                commit(0, Vec::new()),
+            ];
+            let mut repo = Repo::new("/src/main".into(), commits, refs, head);
+            repo.worktrees = vec![
+                worktree("/src/main", 0, Some("refs/heads/main"), !detached_open),
+                worktree("/src/wt-detached", 1, None, detached_open),
+            ];
+            Arc::new(repo)
+        };
+        let mut settings = Settings::default();
+        settings.graph.show_worktrees = true;
+        let prepare =
+            |repo: &Arc<Repo>| Scene::prepare(repo, &settings, None, &mut |s| s.len() as f32, 10.0);
+        let from_main = prepare(&open(false));
+        let from_detached = prepare(&open(true));
+        assert_eq!(from_main.input, from_detached.input);
+        // The main worktree's HEAD is the leftmost line, from both.
+        assert_eq!(from_main.input.priority, [0]);
+
+        // The open detached worktree is named after its folder, and red.
+        let row = &from_detached.visuals[1].rows[0];
+        assert_eq!(row.label, "wt-detached");
+        assert!(row.is_detached_worktree());
+        assert_eq!(from_detached.visuals[1].rows[1].kind, RowKind::Hash);
+        assert!(matches!(
+            row.kind,
+            RowKind::Ref {
+                kind: RefKind::DetachedHead,
+                head: true,
+                ..
+            }
+        ));
     }
 }

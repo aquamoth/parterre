@@ -184,7 +184,7 @@ pub fn to_svg(scene: &Scene, settings: &Settings, palette: &Palette) -> String {
                 },
             };
             // A detached worktree's name is in italics.
-            let style = if let RowKind::Worktree(_) = row.kind {
+            let style = if row.is_detached_worktree() {
                 r#" font-style="italic""#
             } else {
                 ""

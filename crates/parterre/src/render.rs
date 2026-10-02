@@ -147,7 +147,7 @@ pub fn paint_scene(
                 let format = TextFormat {
                     font_id: font.clone(),
                     color: text,
-                    italics: matches!(row.kind, RowKind::Worktree(_)),
+                    italics: row.is_detached_worktree(),
                     ..TextFormat::default()
                 };
                 let galley =
