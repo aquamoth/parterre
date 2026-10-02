@@ -12,6 +12,7 @@
 #   autostash  rebase.autoStash set here; putting lib.txt back conflicts, so it stays stashed
 #   behind    only behind origin/main: no Rebase offered (it would only fast-forward)
 #   stuck      already mid-rebase with a conflict: the banner, and what's greyed out
+# The branch rebased was pushed, then rebased onto origin/main: the upstreams' dashed edge.
 set -e
 root=$(realpath -m "${1:-/tmp/parterre-rebase}")
 rm -rf "$root"
@@ -70,6 +71,14 @@ c stuck.txt "stuck" "Stuck work"
 c lib.txt "lib stuck" "Stuck lib change"
 GIT_EDITOR=: git rebase -q origin/main >/dev/null 2>&1 || true
 back
+
+# A pushed branch rebased onto origin/main: the upstreams' dashed edge, across the graph.
+git branch -q rebased "$base"
+git switch -q rebased
+c rebased.txt "rebased" "Rebased work"
+git push -q -u origin rebased
+git rebase -q origin/main
+git switch -q main
 
 # main: the same typo fix (dropped), a feature, and a merged side branch (flattened).
 c typo.txt "fixed" "Fix typo"

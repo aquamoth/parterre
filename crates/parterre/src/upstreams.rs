@@ -80,7 +80,13 @@ pub fn paint(
             let node_box = |n: usize| view.rect_to_screen(canvas, scene.node_rect(n));
             let scale = to_screen(pos2(1.0, 0.0)).x - to_screen(Pos2::ZERO).x;
             let style = settings.edge_style;
-            let path = dashed_route(node_box(b), node_box(t), scene, style, scale);
+            // PROTOTYPE: rebasing (#184). Routed around other boxes, as the rebasing edge is.
+            let others: Vec<Rect> = (0..graph.nodes.len())
+                .filter(|&n| n != b && n != t)
+                .map(node_box)
+                .filter(|r| visible.expand(160.0).intersects(*r))
+                .collect();
+            let path = route_around(node_box(b), node_box(t), &others, 4.0, scene, style, scale);
             let dash = 6.0 * zoom.max(0.5);
             painter.extend(Shape::dashed_line(
                 &path,
@@ -144,52 +150,6 @@ fn sub_path(path: &[Pos2], t0: f32, t1: f32) -> Vec<Pos2> {
         at = e;
     }
     out
-}
-
-/// The dashed edge's route, from side to side across the flow (left and right when the
-/// newest commits are on top): the sides that face each other when the boxes are apart, else
-/// the same side of both, towards the upstream. Curved, or with straight segments, as the
-/// edges are. `scale` is screen pixels per world unit.
-fn dashed_route(a: Rect, b: Rect, scene: &Scene, style: EdgeStyle, scale: f32) -> Vec<Pos2> {
-    let f = scene.layout.direction.flow();
-    let across = vec2(f.y.abs(), f.x.abs());
-    let breadth = |r: Rect| (across.x * r.width() + across.y * r.height()) / 2.0;
-    let side = |p: Pos2| p.to_vec2().dot(across);
-    let gap = side(b.center()) - side(a.center());
-    let sign = if gap < 0.0 { -1.0 } else { 1.0 };
-    let apart = gap.abs() > breadth(a) + breadth(b);
-    let p0 = a.center() + across * (sign * breadth(a));
-    let (p3, c1, c2) = if apart {
-        let p3 = b.center() - across * (sign * breadth(b));
-        // Out sideways only briefly, so it heads for the other box rather than along the
-        // row of boxes it starts in.
-        let reach = ((side(p3) - side(p0)).abs() / 2.0).clamp(15.0 * scale, 40.0 * scale);
-        (
-            p3,
-            p0 + across * (sign * reach),
-            p3 - across * (sign * reach),
-        )
-    } else {
-        // Out of the same side of both, round the wider one.
-        let p3 = b.center() + across * (sign * breadth(b));
-        let far = (sign * side(p0)).max(sign * side(p3)) + 30.0 * scale;
-        let beyond = |p: Pos2| p + across * (sign * far - side(p));
-        (p3, beyond(p0), beyond(p3))
-    };
-    if style == EdgeStyle::Straight {
-        return vec![p0, c1, c2, p3];
-    }
-    (0..=32)
-        .map(|i| {
-            let t = i as f32 / 32.0;
-            let u = 1.0 - t;
-            (p0.to_vec2() * (u * u * u)
-                + c1.to_vec2() * (3.0 * u * u * t)
-                + c2.to_vec2() * (3.0 * u * t * t)
-                + p3.to_vec2() * (t * t * t))
-                .to_pos2()
-        })
-        .collect()
 }
 
 /// The upstream a node stands for, as an index into [`Repo::upstreams`]: of a branch on it,
