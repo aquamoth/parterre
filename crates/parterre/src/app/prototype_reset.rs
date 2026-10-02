@@ -684,17 +684,8 @@ fn dialog(
             );
             child.set_clip_rect(pane);
             if files_shown {
-                let opened = file_table(&mut child, facts, mode, table, &mut toggle);
+                let opened = file_table(&mut child, facts, mode, table);
                 diffs.extend(opened.into_iter().map(|spec| (facts.repo.clone(), spec)));
-            } else {
-                child.add_space(8.0);
-                child.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    toggle |= ui
-                        .small_button("›")
-                        .on_hover_text(format!("Show the {}", plural(facts.paths().len(), "file")))
-                        .clicked();
-                });
             }
             ui.add_space(GAP);
             let right = ui.vertical(|ui| {
@@ -754,8 +745,22 @@ fn dialog(
                 dialogs::command_box(ui, &[facts.command(mode)]);
                 let loses = facts.loses(mode);
                 let label = if loses { "Reset anyway" } else { "Reset" };
-                let answer =
-                    dialogs::actions(ui, label, facts.enabled(mode), loses, fresh && loses);
+                // Folding the files away, on the buttons' row, at its left.
+                let answer = ui
+                    .horizontal(|ui| {
+                        let fold = if files_shown { "Hide files" } else { "Show files" };
+                        // As tall as the row `actions` lays out, so it lines up with Cancel.
+                        toggle |= ui
+                            .allocate_ui_with_layout(
+                                vec2(0.0, 34.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| crate::widgets::text_button(ui, fold),
+                            )
+                            .inner
+                            .clicked();
+                        dialogs::actions(ui, label, facts.enabled(mode), loses, fresh && loses)
+                    })
+                    .inner;
                 // Enter runs a reset that loses nothing.
                 if answer == dialogs::Answer::Open
                     && !loses
@@ -794,7 +799,6 @@ fn file_table(
     facts: &Facts,
     mode: Mode,
     table: &mut super::file_table::FileTable,
-    toggle: &mut bool,
 ) -> Vec<FileDiffSpec> {
     use super::file_table::StatusIcon;
     use parterre_core::changed_files::{ChangedFile, FileStatus};
@@ -891,9 +895,7 @@ fn file_table(
         "prototype-reset",
         Id::new("prototype-reset-files"),
         Some(&listing),
-        |ui| {
-            *toggle |= ui.small_button("‹").on_hover_text("Hide the files").clicked();
-        },
+        |_| {},
     );
     let on_disk = |p: &str| facts.root.join(p).exists();
     let in_target = |p: &str| facts.target_files.contains(p);
