@@ -2637,7 +2637,11 @@ impl eframe::App for ParterreApp {
         self.about_window(&ctx);
         self.branches.show(&ctx);
         // PROTOTYPE: rebasing (#184).
-        prototype_rebase::show(&ctx, &mut self.branches);
+        let palette = crate::theme::Palette::new(
+            ctx.global_style().visuals.dark_mode,
+            &self.settings.branch_colors,
+        );
+        prototype_rebase::show(&ctx, &mut self.branches, &palette, &self.settings.graph);
         for (repo, spec) in std::mem::take(&mut self.branches.diff_requests) {
             self.diffs
                 .open(repo, spec, &self.settings.diff_window, &ctx);

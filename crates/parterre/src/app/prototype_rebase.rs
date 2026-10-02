@@ -9,11 +9,16 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, mpsc};
 
 use eframe::egui::{self, Color32, RichText, Ui, ViewportId};
+use parterre_core::CommitIx;
 use parterre_core::branches::{Catalog, Report, Step, command_text};
-use parterre_core::log::is_ancestor;
+use parterre_core::log::{LogOptions, LogQuery, is_ancestor};
+use parterre_core::log_graph::LogGraph;
+use parterre_core::revgraph::GraphOptions;
 use parterre_core::{Oid, RefKind, Repo};
 
 use super::branches::Tool;
+use super::commit_table::{CommitList, CommitTable, ROW, Row};
+use crate::theme::Palette;
 use crate::{dialogs, menu};
 
 /// The operation in progress that has stuck the open worktree, such as "a rebase".
@@ -111,9 +116,13 @@ struct Confirm {
     branch: String,
     onto: Oid,
     onto_name: String,
-    replays: usize,
-    drops: usize,
-    merges: usize,
+    /// The commits on the branch and not in `onto`, as the log lists them.
+    commits: Vec<CommitIx>,
+    graph: LogGraph,
+    refs: Vec<Vec<usize>>,
+    /// Why git leaves a listed commit out, for the greyed-out rows.
+    skipped: Vec<Option<&'static str>>,
+    list: CommitList,
     dirty: bool,
     /// `rebase.autoStash` is set.
     config_stash: bool,
@@ -133,7 +142,8 @@ impl Confirm {
         let root = catalog.root.clone();
         let branch = catalog.current.clone()?;
         let range = format!("{}...HEAD", onto.to_hex());
-        let marks = query(
+        // Commits whose change is already in `onto` (`=`): git drops them.
+        let dropped: std::collections::HashSet<Oid> = query(
             &root,
             &[
                 "rev-list",
@@ -142,20 +152,29 @@ impl Confirm {
                 "--no-merges",
                 &range,
             ],
-        );
-        let replays = marks.lines().filter(|l| l.starts_with('+')).count();
-        let drops = marks.lines().filter(|l| l.starts_with('=')).count();
-        let merges = query(
-            &root,
-            &[
-                "rev-list",
-                "--count",
-                "--merges",
-                &format!("{}..HEAD", onto.to_hex()),
-            ],
         )
-        .parse()
-        .unwrap_or(0);
+        .lines()
+        .filter_map(|l| l.strip_prefix('='))
+        .filter_map(Oid::from_hex)
+        .collect();
+        let (head, onto_ix) = (repo.lookup(&catalog.head?)?, repo.lookup(&onto)?);
+        let list = LogQuery::range(&repo, onto_ix, head).list(&repo, &LogOptions::default());
+        let skipped = list
+            .commits
+            .iter()
+            .map(|&c| {
+                let commit = repo.commit(c);
+                if commit.parents.len() > 1 {
+                    Some("A merge: the rebase flattens it")
+                } else if dropped.contains(&commit.oid) {
+                    Some("Already in the target: the rebase drops it")
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let graph = LogGraph::new(&list);
+        let refs = repo.refs_by_commit();
         let dirty = !query(&root, &["status", "--porcelain", "--untracked-files=no"]).is_empty();
         let config_stash = query(&root, &["config", "--bool", "rebase.autoStash"]) == "true";
         Some(Self {
@@ -164,9 +183,11 @@ impl Confirm {
             branch,
             onto,
             onto_name,
-            replays,
-            drops,
-            merges,
+            commits: list.commits,
+            graph,
+            refs,
+            skipped,
+            list: CommitList::default(),
             dirty,
             config_stash,
             stash: config_stash,
@@ -345,7 +366,7 @@ fn open(repo: &Arc<Repo>, catalog: &Catalog, onto: Oid, name: String, opener: Vi
 }
 
 /// The confirmation, and what a finished rebase reports. Call every frame.
-pub fn show(ctx: &egui::Context, tool: &mut Tool) {
+pub fn show(ctx: &egui::Context, tool: &mut Tool, palette: &Palette, options: &GraphOptions) {
     STATE.with_borrow_mut(|state| {
         if let Some(rx) = &state.running
             && let Ok(done) = rx.try_recv()
@@ -361,6 +382,7 @@ pub fn show(ctx: &egui::Context, tool: &mut Tool) {
         let title = format!("Rebase {} onto {}", confirm.branch, short_name(&confirm));
         let mut log = false;
         let shown = dialogs::Dialog::new("prototype-rebase", &title)
+            .width((ctx.content_rect().width() - 80.0).clamp(420.0, 780.0))
             .opener(confirm.opener)
             .raise(confirm.fresh)
             .show(ctx, |ui| {
@@ -372,18 +394,8 @@ pub fn show(ctx: &egui::Context, tool: &mut Tool) {
                             confirm.repo.abbrev_len,
                         );
                     }
-                    ui.add_space(4.0);
-                    ui.label(format!("Replays {}", plural(confirm.replays, "commit")));
-                    if confirm.drops > 0 {
-                        ui.label(format!(
-                            "Drops {} already in {}",
-                            confirm.drops,
-                            short_name(&confirm)
-                        ));
-                    }
-                    if confirm.merges > 0 {
-                        ui.label(format!("Flattens {}", plural(confirm.merges, "merge")));
-                    }
+                    ui.add_space(6.0);
+                    commits_table(ui, &mut confirm, palette, options);
                     if confirm.dirty {
                         ui.add_space(6.0);
                         ui.checkbox(&mut confirm.stash, "Stash changes")
@@ -418,6 +430,58 @@ pub fn show(ctx: &egui::Context, tool: &mut Tool) {
             dialogs::Answer::Open if !shown.should_close() => state.confirm = Some(confirm),
             _ => {}
         }
+    });
+}
+
+/// The commits being rebased, as the log window lists them; those git leaves out are greyed.
+fn commits_table(ui: &mut Ui, confirm: &mut Confirm, palette: &Palette, options: &GraphOptions) {
+    let c = super::log_window::colors(ui);
+    let table = CommitTable {
+        id: egui::Id::new("prototype-rebase-commits"),
+        rows: confirm.commits.len(),
+        graph: &confirm.graph,
+        abbrev_len: confirm.repo.abbrev_len,
+        palette,
+        pairs: false,
+    };
+    let height = super::log_window::HEADING + ROW * confirm.commits.len().clamp(1, 12) as f32;
+    let repo = &*confirm.repo;
+    let (commits, refs, skipped) = (&confirm.commits, &confirm.refs, &confirm.skipped);
+    let mut tip = |ui: &mut Ui, i: usize| {
+        if let Some(why) = skipped[i] {
+            ui.label(why);
+        }
+    };
+    // A little more than the rows, for the spacing around the scroll area.
+    let height = height + 12.0;
+    ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
+        ui.set_min_height(height);
+        ui.set_max_height(height);
+        table.show(
+            ui,
+            &c,
+            &mut confirm.list,
+            |i| {
+                let commit = repo.commit(commits[i]);
+                Row {
+                    hash: commit.oid.short(repo.abbrev_len),
+                    refs: super::log_window::badges(
+                        repo,
+                        &refs[commits[i].ix()],
+                        Some(commits[i]),
+                        options,
+                    ),
+                    subject: &commit.subject,
+                    author: &commit.author_name,
+                    author_email: &commit.author_email,
+                    date: &commit.author_date,
+                    greyed: skipped[i].is_some(),
+                    ..Row::default()
+                }
+            },
+            |_, _, _| {},
+            Some(&mut tip),
+        );
     });
 }
 
