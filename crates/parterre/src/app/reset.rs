@@ -392,7 +392,7 @@ mod tests {
     }
 
     /// A file's text, with the line endings `core.autocrlf` gives it on checkout (Windows)
-    /// undone.
+    /// undone, as `common::read_text` in parterre-core's tests (#182).
     fn read(dir: &Path, path: &str) -> String {
         std::fs::read_to_string(dir.join(path))
             .unwrap()

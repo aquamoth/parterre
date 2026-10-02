@@ -1,0 +1,5 @@
+# Git for Windows' system config sets this. parterre's git reads the system config and the test
+# helpers don't (GIT_CONFIG_NOSYSTEM), so files parterre checks out end in CRLF there. CI runs the
+# tests on Linux with this as the system config too (see CLAUDE.md), to catch that before Windows.
+[core]
+	autocrlf = true

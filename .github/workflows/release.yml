@@ -56,7 +56,7 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Test
         if: ${{ !matrix.cross }}
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Check version

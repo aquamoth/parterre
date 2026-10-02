@@ -88,7 +88,12 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         if: env.BUILD == 'true'
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
+      # Again with Git for Windows' line endings, which only its system config sets: parterre's
+      # git sees them and the test helpers don't (#182). Fails here, before Windows does.
+      - name: Test with core.autocrlf
+        if: env.BUILD == 'true' && runner.os == 'Linux'
+        run: GIT_CONFIG_SYSTEM="$GITHUB_WORKSPACE/.github/autocrlf.gitconfig" cargo test --workspace --no-fail-fast
       - name: Build release
         if: env.BUILD == 'true'
         run: cargo build --release
