@@ -306,3 +306,85 @@ pub fn paint_counts(painter: &Painter, at: Pos2, (ahead, behind): (usize, usize)
         x += w;
     }
 }
+
+// PROTOTYPE: rebasing (#184). A worktree with a rebase in progress has a dashed orange edge
+// from its HEAD (the commits replayed so far) to the branch being rebased, still at its old
+// commit.
+thread_local! {
+    static REBASING: std::cell::RefCell<Option<(usize, Vec<(parterre_core::CommitIx, usize)>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Every worktree's HEAD and the ref (an index into [`Repo::refs`]) it is rebasing, read once
+/// per loaded repository.
+fn rebasing(repo: &std::sync::Arc<Repo>) -> Vec<(parterre_core::CommitIx, usize)> {
+    let key = std::sync::Arc::as_ptr(repo) as usize;
+    REBASING.with_borrow_mut(|cache| {
+        if cache.as_ref().is_none_or(|(k, _)| *k != key) {
+            let found = repo
+                .worktrees
+                .iter()
+                .filter_map(|w| {
+                    let head = w.head?;
+                    let dir = ["rebase-merge", "rebase-apply"]
+                        .into_iter()
+                        .find_map(|name| {
+                            let out = std::process::Command::new("git")
+                                .arg("-C")
+                                .arg(&w.path)
+                                .args(["rev-parse", "--git-path", name])
+                                .output()
+                                .ok()?;
+                            let rel = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                            let path = w.path.join(rel);
+                            path.is_dir().then_some(path)
+                        })?;
+                    let name = std::fs::read_to_string(dir.join("head-name")).ok()?;
+                    let r = repo.refs.iter().position(|r| r.full_name == name.trim())?;
+                    Some((head, r))
+                })
+                .collect();
+            *cache = Some((key, found));
+        }
+        cache.as_ref().map(|(_, v)| v.clone()).unwrap_or_default()
+    })
+}
+
+pub fn paint_rebasing(
+    painter: &Painter,
+    canvas: Rect,
+    view: &View,
+    scene: &Scene,
+    settings: &Settings,
+) {
+    let (repo, graph) = (&*scene.repo, &scene.graph);
+    let to_screen = |p: Pos2| view.to_screen(canvas, p);
+    let zoom = view.fixed(view.zoom);
+    let width = view.fixed((2.0 * view.zoom).max(1.0));
+    let color = if painter.ctx().global_style().visuals.dark_mode {
+        Color32::from_rgb(240, 160, 60)
+    } else {
+        Color32::from_rgb(220, 130, 30)
+    };
+    for (head, r) in rebasing(&scene.repo) {
+        let (Some(h), Some(b)) = (
+            graph.node_of(head).map(|n| n as usize),
+            node_of_ref(repo, graph, r),
+        ) else {
+            continue;
+        };
+        if h == b {
+            continue;
+        }
+        let node_box = |n: usize| view.rect_to_screen(canvas, scene.node_rect(n));
+        let scale = to_screen(pos2(1.0, 0.0)).x - to_screen(Pos2::ZERO).x;
+        let path = dashed_route(node_box(h), node_box(b), scene, settings.edge_style, scale);
+        let dash = 6.0 * zoom.max(0.5);
+        painter.extend(Shape::dashed_line(
+            &path,
+            Stroke::new(width, color),
+            dash,
+            dash * 0.7,
+        ));
+    }
+}

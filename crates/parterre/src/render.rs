@@ -109,6 +109,8 @@ pub fn paint_scene(
     if marks.upstreams {
         crate::upstreams::paint(painter, canvas, view, scene, palette, settings, marks);
     }
+    // PROTOTYPE: rebasing (#184).
+    crate::upstreams::paint_rebasing(painter, canvas, view, scene, settings);
 
     let font = FontId::monospace(fixed(FONT_SIZE * zoom));
     let draw_text = FONT_SIZE * zoom >= MIN_TEXT_PX;

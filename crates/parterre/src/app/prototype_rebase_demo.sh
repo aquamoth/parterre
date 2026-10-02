@@ -66,6 +66,7 @@ back
 git worktree add -q -b behind ../demo.worktrees/behind "$base"
 
 wt stuck
+c stuck.txt "stuck" "Stuck work"
 c lib.txt "lib stuck" "Stuck lib change"
 GIT_EDITOR=: git rebase -q origin/main >/dev/null 2>&1 || true
 back
