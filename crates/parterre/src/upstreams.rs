@@ -358,23 +358,28 @@ pub fn paint_rebasing(
     }
 }
 
-/// PROTOTYPE: rebasing (#184). A route from box `a` to box `b` that crosses as few of the
-/// `others` as it can (each kept `margin` clear), then is as short as it can be: from either
-/// side of `a` to either side of `b`, bowed more or less along the flow.
+/// PROTOTYPE: rebasing (#184). A route from the centre of box `a` to the centre of box `b`,
+/// cut where it leaves `a` and enters `b` (as TortoiseGit draws them), so it emerges wherever
+/// it crosses the box's edge. Of curves bowed more or less to either side of the straight
+/// line, it takes the one crossing the fewest of the `others` (each kept `margin` clear), then
+/// the shortest.
 fn route_around(
     a: Rect,
     b: Rect,
     others: &[Rect],
     margin: f32,
-    scene: &Scene,
+    _scene: &Scene,
     style: EdgeStyle,
     scale: f32,
 ) -> Vec<Pos2> {
-    let f = scene.layout.direction.flow();
-    let flow = vec2(f.x, f.y);
-    let across = vec2(f.y.abs(), f.x.abs());
-    let breadth = |r: Rect| (across.x * r.width() + across.y * r.height()) / 2.0;
-    let curve = |p0: Pos2, c1: Pos2, c2: Pos2, p3: Pos2| -> Vec<Pos2> {
+    let (p0, p3) = (a.center(), b.center());
+    let chord = p3 - p0;
+    let normal = if chord.length() > 0.0 {
+        chord.normalized().rot90()
+    } else {
+        vec2(0.0, 1.0)
+    };
+    let curve = |c1: Pos2, c2: Pos2| -> Vec<Pos2> {
         if style == EdgeStyle::Straight {
             return vec![p0, c1, c2, p3];
         }
@@ -402,27 +407,60 @@ fn route_around(
     };
     let length = |path: &[Pos2]| -> f32 { path.windows(2).map(|w| w[0].distance(w[1])).sum() };
     let mut best: Option<(usize, f32, Vec<Pos2>)> = None;
-    for sa in [-1.0f32, 1.0] {
-        for sb in [-1.0f32, 1.0] {
-            let p0 = a.center() + across * (sa * breadth(a));
-            let p3 = b.center() + across * (sb * breadth(b));
-            let reach = 30.0 * scale;
-            for bow in [0.0f32, -1.0, 1.0, -2.0, 2.0, -3.0, 3.0, -5.0, 5.0] {
-                let lift = flow * (bow * 40.0 * scale);
-                let c1 = p0 + across * (sa * reach) + lift;
-                let c2 = p3 + across * (sb * reach) + lift;
-                let path = curve(p0, c1, c2, p3);
-                let score = (crossings(&path), length(&path));
-                if best
-                    .as_ref()
-                    .is_none_or(|(n, l, _)| score.0 < *n || score.0 == *n && score.1 < *l)
-                {
-                    best = Some((score.0, score.1, path));
-                }
-            }
+    for bow in [
+        0.0f32, -1.0, 1.0, -2.0, 2.0, -3.0, 3.0, -4.0, 4.0, -6.0, 6.0,
+    ] {
+        let lift = normal * (bow * 30.0 * scale);
+        let c1 = p0 + chord / 3.0 + lift;
+        let c2 = p0 + chord * (2.0 / 3.0) + lift;
+        let path = clip(&clip(&curve(c1, c2), a), b);
+        if path.len() < 2 {
+            continue;
+        }
+        let score = (crossings(&path), length(&path));
+        if best
+            .as_ref()
+            .is_none_or(|(n, l, _)| score.0 < *n || score.0 == *n && score.1 < *l)
+        {
+            best = Some((score.0, score.1, path));
         }
     }
     best.map(|(_, _, path)| path).unwrap_or_default()
+}
+
+/// The part of a polyline outside `r`, at the end that starts or ends inside it: cut at the
+/// point where it crosses `r`'s edge.
+fn clip(path: &[Pos2], r: Rect) -> Vec<Pos2> {
+    let mut path = path.to_vec();
+    let starts_inside = path.first().is_some_and(|p| r.contains(*p));
+    if !starts_inside {
+        path.reverse();
+    }
+    if !path.first().is_some_and(|p| r.contains(*p)) {
+        if !starts_inside {
+            path.reverse();
+        }
+        return path;
+    }
+    let Some(k) = path.iter().position(|p| !r.contains(*p)) else {
+        return Vec::new();
+    };
+    // The edge lies between the inside point k-1 and the outside point k.
+    let (mut lo, mut hi) = (path[k - 1], path[k]);
+    for _ in 0..20 {
+        let mid = lo.lerp(hi, 0.5);
+        if r.contains(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let mut out = vec![hi];
+    out.extend_from_slice(&path[k..]);
+    if !starts_inside {
+        out.reverse();
+    }
+    out
 }
 
 /// PROTOTYPE: rebasing (#184). The looks to choose between for a rebasing worktree's edge.
