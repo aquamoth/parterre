@@ -50,11 +50,10 @@ const ICON: f32 = 14.0;
 pub struct CommitList {
     /// The row clicked last, which the window shows the details of.
     pub selected: Option<usize>,
-    /// A second selected row, selected before `selected` (with Ctrl+ or Shift+click, in tables
-    /// that allow a pair).
-    pub other: Option<usize>,
-    /// Every selected row, in tables that select many ([`Select::Many`]); `selected` is where
-    /// a Shift+click selects from.
+    /// The row selected first, with a plain click, in tables that select many: where a
+    /// Shift+click selects from.
+    pub anchor: Option<usize>,
+    /// Every selected row, in tables that select many ([`Select::Many`]).
     pub many: BTreeSet<usize>,
     /// Scroll the selected row into view in the next frame (only if it is out of view).
     pub reveal: bool,
@@ -70,69 +69,79 @@ impl CommitList {
     /// Selects row `i` (or none), alone, and keeps it in view.
     pub fn select(&mut self, i: Option<usize>) {
         self.selected = i;
-        self.other = None;
+        self.anchor = i;
         self.many = i.into_iter().collect();
         self.reveal = true;
     }
 
-    /// The two selected rows, in the order they were selected.
+    /// Selects every one of `rows` rows, keeping the row clicked last and the anchor.
+    pub fn select_all(&mut self, rows: usize) {
+        self.many = (0..rows).collect();
+        self.anchor = self.anchor.or(self.selected).or((rows > 0).then_some(0));
+        self.selected = self.selected.or(self.anchor);
+    }
+
+    /// The row selected first and the row clicked last, when they're two selected rows.
     pub fn pair(&self) -> Option<(usize, usize)> {
-        Some((self.other?, self.selected?))
+        let (a, b) = (self.anchor?, self.selected?);
+        (a != b && self.many.contains(&a) && self.many.contains(&b)).then_some((a, b))
     }
 
     pub fn is_selected(&self, i: usize) -> bool {
-        self.selected == Some(i) || self.other == Some(i) || self.many.contains(&i)
+        self.selected == Some(i) || self.many.contains(&i)
     }
 
-    /// A click on row `i`. A plain click selects it alone. With `add` (Ctrl or Shift held) it
-    /// is selected besides the row selected before, making a pair; a third row takes the place
-    /// of the earlier of the two, and one of a pair clicked again leaves just the other. A
-    /// right-click (`secondary`) keeps the selection if it is on a selected row, so that its
-    /// menu can compare the pair.
-    pub fn click(&mut self, i: usize, add: bool, secondary: bool) {
-        if secondary {
-            if !self.is_selected(i) {
-                (self.selected, self.other) = (Some(i), None);
-            }
-            return;
+    /// A click on row `i`, which selects it alone. A right-click (`secondary`) on the selected
+    /// row keeps it.
+    pub fn click(&mut self, i: usize, secondary: bool) {
+        if !(secondary && self.is_selected(i)) {
+            self.selected = Some(i);
         }
-        match self.selected {
-            _ if !add => (self.selected, self.other) = (Some(i), None),
-            Some(s) if s == i => {
-                if let Some(o) = self.other.take() {
-                    self.selected = Some(o);
-                }
-            }
-            _ if self.other == Some(i) => self.other = None,
-            s => (self.other, self.selected) = (s, Some(i)),
-        }
+    }
+
+    fn select_row(&mut self, i: usize) {
+        self.many = BTreeSet::from([i]);
+        self.selected = Some(i);
+        self.anchor = Some(i);
     }
 
     /// A click on row `i` in a table that selects many. A plain click selects it alone; with
     /// `toggle` (Ctrl held) it is added, or taken out if it was in; with `range` (Shift held)
-    /// the rows from the one clicked before to it are selected. A right-click (`secondary`)
-    /// keeps the selection if it is on a selected row, for its menu.
+    /// the rows from the anchor to it are selected. The row clicked last is the one the
+    /// window shows the details of; the anchor stays where a plain click put it. A
+    /// right-click (`secondary`) keeps the selection if it is on a selected row, for its menu.
     pub fn click_many(&mut self, i: usize, toggle: bool, range: bool, secondary: bool) {
-        self.other = None;
+        // A row selected without a click, as a window opens with its first.
+        if self.many.is_empty()
+            && let Some(s) = self.selected
+        {
+            self.many.insert(s);
+            self.anchor = Some(s);
+        }
         if secondary && self.is_selected(i) {
             return;
         }
         if range && !secondary {
-            let from = self.selected.unwrap_or(i);
+            let from = self.anchor.or(self.selected).unwrap_or(i);
             self.many = (from.min(i)..=from.max(i)).collect();
-            self.selected = Some(from);
+            self.anchor = Some(from);
+            self.selected = Some(i);
         } else if toggle && !secondary {
             if self.many.remove(&i) {
+                // The details go back to the anchor, or another selected row.
+                if self.anchor == Some(i) {
+                    self.anchor = self.many.first().copied();
+                }
                 if self.selected == Some(i) {
-                    self.selected = None;
+                    self.selected = self.anchor;
                 }
             } else {
                 self.many.insert(i);
+                self.anchor = self.anchor.filter(|a| self.many.contains(a)).or(Some(i));
                 self.selected = Some(i);
             }
         } else {
-            self.many = BTreeSet::from([i]);
-            self.selected = Some(i);
+            self.select_row(i);
         }
     }
 
@@ -191,8 +200,6 @@ pub struct CommitTable<'a> {
 pub enum Select {
     #[default]
     One,
-    /// Ctrl+ and Shift+click select a second row ([`CommitList::other`]).
-    Pair,
     /// Ctrl+click adds rows and Shift+click a range ([`CommitList::many`]).
     Many,
 }
@@ -285,7 +292,6 @@ impl CommitTable<'_> {
         }
         let mut clicks = Clicks::default();
         let modifiers = ui.input(|i| i.modifiers);
-        let add = self.select == Select::Pair && (modifiers.command || modifiers.shift);
         let output = area.show_rows(ui, ROW, self.rows, |ui, range| {
             let graph = self.graph.rows(range.clone());
             for (i, graph) in range.zip(&graph) {
@@ -426,7 +432,7 @@ impl CommitTable<'_> {
                     if self.select == Select::Many {
                         list.click_many(i, modifiers.command, modifiers.shift, secondary);
                     } else {
-                        list.click(i, add, secondary);
+                        list.click(i, secondary);
                     }
                 }
                 if response.double_clicked() && !over_icon {
@@ -617,67 +623,15 @@ fn paint_graph(
 mod tests {
     use super::*;
 
-    fn list(selected: Option<usize>, other: Option<usize>) -> CommitList {
-        CommitList {
-            selected,
-            other,
-            ..CommitList::default()
-        }
-    }
-
-    fn after(
-        mut l: CommitList,
-        i: usize,
-        add: bool,
-        secondary: bool,
-    ) -> (Option<usize>, Option<usize>) {
-        l.click(i, add, secondary);
-        (l.selected, l.other)
-    }
-
     #[test]
-    fn a_plain_click_selects_one_row() {
-        assert_eq!(
-            after(list(Some(1), Some(4)), 2, false, false),
-            (Some(2), None)
-        );
-        assert_eq!(after(list(None, None), 2, false, false), (Some(2), None));
-    }
-
-    #[test]
-    fn an_added_click_makes_a_pair_in_the_order_selected() {
-        let mut l = list(Some(1), None);
-        l.click(5, true, false);
-        assert_eq!(l.pair(), Some((1, 5)));
-        // A third row takes the place of the earlier.
-        l.click(3, true, false);
-        assert_eq!(l.pair(), Some((5, 3)));
-        assert_eq!(after(list(None, None), 2, true, false), (Some(2), None));
-    }
-
-    #[test]
-    fn an_added_click_on_one_of_a_pair_leaves_the_other() {
-        assert_eq!(
-            after(list(Some(5), Some(1)), 5, true, false),
-            (Some(1), None)
-        );
-        assert_eq!(
-            after(list(Some(5), Some(1)), 1, true, false),
-            (Some(5), None)
-        );
-        assert_eq!(after(list(Some(5), None), 5, true, false), (Some(5), None));
-    }
-
-    #[test]
-    fn a_right_click_keeps_the_pair_it_is_on() {
-        assert_eq!(
-            after(list(Some(5), Some(1)), 1, false, true),
-            (Some(5), Some(1))
-        );
-        assert_eq!(
-            after(list(Some(5), Some(1)), 2, false, true),
-            (Some(2), None)
-        );
+    fn a_click_selects_one_row_and_a_right_click_keeps_it() {
+        let mut l = CommitList::default();
+        l.click(2, false);
+        assert_eq!(l.selected, Some(2));
+        l.click(2, true);
+        assert_eq!(l.selected, Some(2));
+        l.click(4, true);
+        assert_eq!(l.selected, Some(4));
     }
 
     fn many(l: &CommitList) -> Vec<usize> {
@@ -691,15 +645,15 @@ mod tests {
         assert_eq!(many(&l), [2]);
         l.click_many(5, true, false, false);
         assert_eq!(many(&l), [2, 5]);
-        // From the row clicked last.
-        l.click_many(3, false, true, false);
-        assert_eq!(many(&l), [3, 4, 5]);
-        l.click_many(4, true, false, false);
-        assert_eq!(many(&l), [3, 5]);
-        assert!(!l.is_selected(4));
+        // From the row selected first, with a plain click.
+        l.click_many(4, false, true, false);
+        assert_eq!(many(&l), [2, 3, 4]);
+        l.click_many(3, true, false, false);
+        assert_eq!(many(&l), [2, 4]);
+        assert!(!l.is_selected(3));
         // A right-click keeps a selection it is on, and replaces one it isn't.
-        l.click_many(3, false, false, true);
-        assert_eq!(many(&l), [3, 5]);
+        l.click_many(4, false, false, true);
+        assert_eq!(many(&l), [2, 4]);
         l.click_many(0, false, false, true);
         assert_eq!(many(&l), [0]);
         l.click_many(1, false, false, false);
@@ -707,9 +661,39 @@ mod tests {
     }
 
     #[test]
+    fn the_pair_is_the_row_selected_first_and_the_one_clicked_last() {
+        let mut l = CommitList::default();
+        l.click_many(1, false, false, false);
+        assert_eq!(l.pair(), None);
+        l.click_many(5, true, false, false);
+        assert_eq!(l.pair(), Some((1, 5)));
+        l.click_many(3, true, false, false);
+        assert_eq!(l.pair(), Some((1, 3)));
+        l.click_many(6, false, true, false);
+        assert_eq!((l.pair(), l.selected), (Some((1, 6)), Some(6)));
+        // Taking out the first: the next selected row is first.
+        l.click_many(1, true, false, false);
+        assert_eq!(l.pair(), Some((2, 6)));
+    }
+
+    #[test]
+    fn a_row_selected_without_a_click_is_where_adding_starts() {
+        let mut l = CommitList {
+            selected: Some(0),
+            ..CommitList::default()
+        };
+        l.click_many(3, true, false, false);
+        assert_eq!((many(&l), l.pair()), (vec![0, 3], Some((0, 3))));
+    }
+
+    #[test]
     fn selecting_by_key_leaves_one_row() {
-        let mut l = list(Some(5), Some(1));
+        let mut l = CommitList::default();
+        l.click_many(1, false, false, false);
+        l.click_many(4, false, true, false);
         l.select(Some(6));
-        assert_eq!((l.selected, l.other), (Some(6), None));
+        assert_eq!((many(&l), l.selected, l.pair()), (vec![6], Some(6), None));
+        l.select_all(8);
+        assert_eq!((many(&l).len(), l.selected), (8, Some(6)));
     }
 }

@@ -37,7 +37,8 @@ pub struct Marks {
     /// Each worktree with a rebase in progress: its HEAD, and the branch it is rebasing (an
     /// index into [`parterre_core::Repo::refs`]).
     pub rebasing: Vec<(parterre_core::CommitIx, usize)>,
-    /// Each worktree with a merge in progress: its HEAD, and the commit being merged.
+    /// Each worktree with a merge or a cherry-pick in progress: its HEAD, and the commit being
+    /// merged or picked.
     pub merging: Vec<(parterre_core::CommitIx, parterre_core::CommitIx)>,
 }
 

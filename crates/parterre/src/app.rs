@@ -18,6 +18,7 @@ use parterre_core::{Oid, Repo};
 mod auto_reload;
 mod blame_window;
 mod branches;
+mod cherry_pick;
 mod column_borders;
 mod commit_table;
 mod compare_window;
@@ -988,8 +989,9 @@ impl ParterreApp {
 
     /// Automation: opens the branch or worktree form (`create-branch:REF`, `add-worktree:REF`),
     /// asks to delete a worktree (`delete-worktree:FOLDER`, its name), or opens the reset
-    /// dialog (`reset:REF`, or `reset:REF:MODE`), the rebase's (`rebase:REF`) or the merge
-    /// dialog (`merge:REF`), once the branch information is in.
+    /// dialog (`reset:REF`, or `reset:REF:MODE`), the rebase's (`rebase:REF`), the merge
+    /// dialog (`merge:REF`) or the cherry-pick's (`cherry-pick:REF`, the commits of REF the
+    /// current branch lacks), once the branch information is in.
     fn open_branch_dialog(
         &mut self,
         ctx: &egui::Context,
@@ -1028,6 +1030,10 @@ impl ParterreApp {
                     into: name.to_owned(),
                 }
             }
+            "cherry-pick" => branches::Request::CherryPick {
+                picks: parterre_core::cherry_pick::Picks::Lacking(oid(name)?),
+                name: Some(name.to_owned()),
+            },
             "rebase" => branches::Request::Rebase {
                 onto: oid(name)?,
                 target: name.to_owned(),
@@ -2656,7 +2662,8 @@ fn rebasing_marks(
         .collect()
 }
 
-/// Each worktree with a merge in progress: its HEAD, and the commit being merged.
+/// Each worktree with a merge or a cherry-pick in progress: its HEAD, and the commit being
+/// merged or picked.
 fn merging_marks(
     repo: &Repo,
     catalog: Option<&parterre_core::branches::Catalog>,
@@ -2667,7 +2674,10 @@ fn merging_marks(
     catalog
         .worktrees
         .iter()
-        .filter_map(|w| Some((repo.lookup(&w.head?)?, repo.lookup(&w.merging?)?)))
+        .filter_map(|w| {
+            let theirs = w.merging.or(w.picking.as_ref().map(|p| p.commit))?;
+            Some((repo.lookup(&w.head?)?, repo.lookup(&theirs)?))
+        })
         .collect()
 }
 

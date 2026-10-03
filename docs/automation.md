@@ -33,8 +33,8 @@ worktree. Then it saves one PNG for each of these into `/tmp/shots`, in about 15
 - the log, compare, diff and blame windows
 - the question before resetting all settings, and the one asking what of a settings file to
   import
-- the dialogs for creating a branch, adding or deleting a worktree, reset, rebase and merge
-  (into the current branch, and of the current branch into another)
+- the dialogs for creating a branch, adding or deleting a worktree, reset, rebase, merge
+  (into the current branch, and of the current branch into another) and cherry-pick
 
 Menus are cropped to the menus, and dialogs to the dialog. Use it to check a change everywhere
 at a glance, or to pick before and after pictures for a pull request.
@@ -139,6 +139,7 @@ takes a branch, a tag or a hash prefix. A name that doesn't exist fails the run.
 | `reset:REF[:MODE]` | The reset dialog, optionally with a mode (`soft`, `mixed`, `keep`, `hard`) chosen |
 | `rebase:REF`, `merge:REF` | The rebase onto a commit, or the merge of one, into the current branch |
 | `merge-into:BRANCH` | The merge of the current branch into local branch BRANCH, as a pull request merges |
+| `cherry-pick:REF` | The cherry-pick of the commits of REF the current branch lacks, as the graph's menu offers it |
 
 Everything else is done as a person would do it:
 

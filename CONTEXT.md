@@ -95,6 +95,13 @@ worktree's branch into another, also rebase and fast-forward, or a semi-linear m
 rebase the open worktree's branch onto the other first.
 _Avoid_: merge strategy (git's name for the algorithm that combines the changes), merge type
 
+**Cherry-picking**:
+Copying commits onto the open worktree's branch as new commits, oldest first, as if applied
+one at a time: either the commits chosen in the log, which need not be adjacent, or, from the
+graph, every commit of a node the branch lacks. Merges, and commits whose change is already
+there, are left out. It can stop on a conflict, leaving an operation in progress.
+_Avoid_: copying commits, porting, backporting
+
 **Adding a worktree**:
 Creating a new worktree in its own folder, with a branch or a detached HEAD checked out.
 _Avoid_: creating a worktree, new worktree
