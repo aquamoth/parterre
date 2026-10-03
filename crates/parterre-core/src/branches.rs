@@ -43,6 +43,8 @@ pub struct Worktree {
     pub in_progress: Option<&'static str>,
     /// The rebase stopped there, when the operation in progress is one.
     pub rebasing: Option<Rebasing>,
+    /// The commit being merged there (`MERGE_HEAD`), when the operation in progress is a merge.
+    pub merging: Option<Oid>,
 }
 
 /// Why the open worktree is stuck.
@@ -322,6 +324,10 @@ impl Catalog {
                 None => None,
             };
             let rebasing = admin.as_deref().and_then(rebasing);
+            let merging = admin.as_deref().and_then(|a| {
+                let text = std::fs::read_to_string(a.join("MERGE_HEAD")).ok()?;
+                Oid::from_hex(text.lines().next()?.trim())
+            });
             worktrees.push(Worktree {
                 main: path == main_place,
                 open: crate::worktree_folder::same_path(&path, &root),
@@ -332,6 +338,7 @@ impl Catalog {
                 locked,
                 in_progress,
                 rebasing,
+                merging,
             });
         }
         for (place, admin) in &admins {
@@ -740,6 +747,8 @@ pub enum Action {
     Reset(Box<crate::reset::Reset>),
     /// Replays the open worktree's branch onto another commit.
     Rebase(Box<crate::rebase::Rebase>),
+    /// Merges another commit into the open worktree's branch.
+    Merge(Box<crate::merge::Merge>),
 }
 
 impl Action {
@@ -763,6 +772,7 @@ impl Action {
                 r.branch,
                 crate::rebase::short_target(r)
             ),
+            Self::Merge(m) => format!("Merge {} into {}", crate::merge::short_target(m), m.branch),
         }
     }
 }
@@ -964,6 +974,7 @@ impl Branches {
             Action::Delete { name, .. } => Ok(vec![words(&["branch", "-D", "--", name])]),
             Action::Reset(r) => Ok(vec![crate::reset::command(r.mode, r.target)]),
             Action::Rebase(r) => Ok(vec![crate::rebase::command(r)]),
+            Action::Merge(m) => Ok(vec![crate::merge::command(m)]),
         }
     }
 
@@ -1037,6 +1048,10 @@ impl Branches {
             crate::rebase::execute(&catalog, rebase, cancel, report)?;
             return Ok(None);
         }
+        if let Action::Merge(merge) = &action {
+            crate::merge::execute(&catalog, merge, cancel, report)?;
+            return Ok(None);
+        }
         let mut commands = Self::commands(&catalog, &action)?;
         let switching = matches!(
             &action,
@@ -1083,7 +1098,10 @@ impl Branches {
                     Checkout::Detached => {}
                 }
             }
-            Action::DeleteWorktree { .. } | Action::Reset(_) | Action::Rebase(_) => {
+            Action::DeleteWorktree { .. }
+            | Action::Reset(_)
+            | Action::Rebase(_)
+            | Action::Merge(_) => {
                 unreachable!("handled above")
             }
             Action::Switch(name) => {

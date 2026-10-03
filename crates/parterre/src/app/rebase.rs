@@ -1,6 +1,7 @@
 //! Rebasing the open worktree's branch: the confirmation, which lists the commits being
 //! rebased as the log window does, greying those git leaves out, and the banner across the
-//! graph while the open worktree is stuck with an operation in progress.
+//! graph while the open worktree is stuck with an operation in progress, such as a rebase or
+//! a merge.
 
 use std::sync::Arc;
 
@@ -12,16 +13,17 @@ use parterre_core::rebase::{self, Preview};
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::{CommitIx, Oid, Repo};
 
-use super::commit_table::{CommitList, CommitTable, ROW, Row};
-use super::log_window::{self, HEADING};
+use super::commit_table::{CommitList, CommitTable, Row};
+use super::log_window;
+use super::merge::list_height;
 use crate::dialogs;
 use crate::theme::Palette;
 
 /// What the banner says to do about an operation in progress.
 const FINISH: &str = "Finish or abort it with git, or go to another worktree.";
 
-/// The commits listed before the table scrolls.
-const MAX_ROWS: usize = 12;
+/// The commits listed at least, however small the window: the table scrolls.
+const MIN_ROWS: usize = 3;
 
 /// The colour of a worktree stuck with an operation in progress, as its zigzag edge in the
 /// graph is drawn.
@@ -117,31 +119,36 @@ impl RebaseDialog {
             .width(width)
             .opener(self.opener)
             .raise(self.fresh)
+            .resizable()
             .show(ctx, |ui| {
-                dialogs::fields(ui, |ui| {
-                    if let Some(ix) = self.repo.lookup(&self.preview.onto)
-                        && dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len)
-                    {
-                        asked.log = Some(self.preview.onto);
+                // Only the commits scroll: everything else stays in view.
+                let grow = Id::new("rebase-commits-rest");
+                if let Some(ix) = self.repo.lookup(&self.preview.onto)
+                    && dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len)
+                {
+                    asked.log = Some(self.preview.onto);
+                }
+                let n = self.commits.len();
+                let min = list_height(n.min(MIN_ROWS));
+                let height = dialogs::growing(ui, grow, list_height(n), min);
+                if let Some(oid) = self.commits_table(ui, palette, options, height) {
+                    asked.log = Some(oid);
+                }
+                let after = ui.cursor().top();
+                if self.preview.dirty {
+                    ui.checkbox(&mut self.stash, "Stash changes").on_hover_text(
+                        "Set your uncommitted changes aside first, and put them back \
+                         afterwards (git rebase --autostash).",
+                    );
+                    if let Some(why) = self.preview.blocked(self.stash) {
+                        ui.colored_label(ui.visuals().error_fg_color, why);
                     }
-                    ui.add_space(6.0);
-                    if let Some(oid) = self.commits_table(ui, palette, options) {
-                        asked.log = Some(oid);
-                    }
-                    if self.preview.dirty {
-                        ui.add_space(6.0);
-                        ui.checkbox(&mut self.stash, "Stash changes").on_hover_text(
-                            "Set your uncommitted changes aside first, and put them back \
-                             afterwards (git rebase --autostash).",
-                        );
-                        if let Some(why) = self.preview.blocked(self.stash) {
-                            ui.colored_label(ui.visuals().error_fg_color, why);
-                        }
-                    }
-                });
+                }
                 dialogs::command_box(ui, &[command_text(&rebase::command(&self.rebase()))]);
                 let enabled = self.preview.blocked(self.stash).is_none() && !busy;
-                dialogs::actions(ui, "Rebase", enabled, false, false)
+                let answer = dialogs::actions(ui, "Rebase", enabled, false, false);
+                dialogs::grown(ui, grow, after, height, min);
+                answer
             });
         self.fresh = false;
         asked.answer = Some(if shown.should_close() {
@@ -152,13 +159,14 @@ impl RebaseDialog {
         asked
     }
 
-    /// The commits being rebased, as the log window lists them; those git leaves out are
-    /// greyed, with the reason on hover. Returns the commit double-clicked.
+    /// The commits being rebased, as the log window lists them, `height` tall; those git leaves
+    /// out are greyed, with the reason on hover. Returns the commit double-clicked.
     fn commits_table(
         &mut self,
         ui: &mut Ui,
         palette: &Palette,
         options: &GraphOptions,
+        height: f32,
     ) -> Option<Oid> {
         let c = log_window::colors(ui);
         let table = CommitTable {
@@ -169,8 +177,6 @@ impl RebaseDialog {
             palette,
             pairs: false,
         };
-        // A little more than the rows, for the spacing around the scroll area.
-        let height = HEADING + ROW * self.commits.len().clamp(1, MAX_ROWS) as f32 + 12.0;
         let (repo, commits, preview) = (&*self.repo, &self.commits, &self.preview);
         let refs = &self.refs;
         let mut tip = |ui: &mut Ui, i: usize| {
@@ -223,7 +229,14 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
     let stuck = catalog.stuck()?;
     let open = catalog.worktrees.iter().find(|w| w.open);
     let files = &catalog.conflicted;
+    let merging = open.and_then(|w| w.merging);
     let (mut text, hint) = match open.and_then(|w| w.rebasing.as_ref()) {
+        None if let Some(theirs) = merging => {
+            let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
+            // `MERGE_HEAD` is only a commit, and `git status` names none at all.
+            let theirs = theirs.short(repo.abbrev_len.max(7));
+            (format!("Merging {theirs} into {branch}"), FINISH)
+        }
         Some(r) => {
             let branch = r.branch.as_deref().unwrap_or("HEAD");
             // Git records only the commit, and `git status` names it the same way.
@@ -248,6 +261,9 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
     };
     if !files.is_empty() && stuck != Stuck::Conflicts {
         text.push_str(&format!(": {}", plural(files.len(), "conflicted file")));
+    } else if merging.is_some() {
+        // Stopped with no conflicts: a hook refused to commit it.
+        text.push_str(": not committed");
     }
     let (fill, color) = if ui.visuals().dark_mode {
         (
@@ -300,12 +316,11 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
 mod tests {
     use std::path::Path;
 
-    use eframe::egui::{self, Pos2, Rect};
-    use parterre_core::branches::{Catalog, Stuck};
-    use parterre_core::{Oid, Repo};
+    use parterre_core::Oid;
+    use parterre_core::branches::Stuck;
 
     use super::super::branches::{self, Request};
-    use super::super::tool_harness::{Harness, collect, git, read, write};
+    use super::super::tool_harness::{Harness, banner_texts, git, load, menu, read, write};
 
     fn commit(dir: &Path, path: &str, text: &str, message: &str) {
         write(dir, path, text);
@@ -422,60 +437,6 @@ mod tests {
         assert_eq!(commits, [feature]);
     }
 
-    /// The texts a menu shows, and what clicking `click` (if given) asks for.
-    fn menu(
-        f: impl Fn(&mut egui::Ui) -> Option<Request>,
-        click: Option<&str>,
-    ) -> (Vec<String>, Option<Request>) {
-        let ctx = egui::Context::default();
-        let frame = |events: Vec<egui::Event>, texts: &mut Vec<(String, Rect)>| {
-            let mut asked = None;
-            let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))),
-                events,
-                ..Default::default()
-            };
-            let mut output = ctx.run_ui(input, |ui| asked = f(ui));
-            output.textures_delta.clear();
-            texts.clear();
-            for clipped in &output.shapes {
-                collect(&clipped.shape, texts);
-            }
-            asked
-        };
-        let mut texts = Vec::new();
-        frame(Vec::new(), &mut texts);
-        let mut asked = None;
-        if let Some(text) = click {
-            let at = texts
-                .iter()
-                .find(|(t, _)| t == text)
-                .unwrap_or_else(|| panic!("no {text:?}: {texts:?}"))
-                .1
-                .center();
-            for pressed in [true, false] {
-                let events = vec![
-                    egui::Event::PointerMoved(at),
-                    egui::Event::PointerButton {
-                        pos: at,
-                        button: egui::PointerButton::Primary,
-                        pressed,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ];
-                asked = asked.or(frame(events, &mut texts));
-            }
-        }
-        (texts.into_iter().map(|(t, _)| t).collect(), asked)
-    }
-
-    fn load(dir: &Path) -> (Repo, Catalog) {
-        (
-            parterre_core::git::load_repo(dir).unwrap(),
-            Catalog::load(dir).unwrap(),
-        )
-    }
-
     fn rev(dir: &Path, r: &str) -> Oid {
         Oid::from_hex(&git(dir, &["rev-parse", r])).unwrap()
     }
@@ -514,21 +475,6 @@ mod tests {
             }
             other => panic!("expected a rebase: {other:?}"),
         }
-    }
-
-    /// The texts `banner` shows for the repository at `dir`.
-    fn banner_texts(dir: &Path) -> Vec<String> {
-        let (repo, catalog) = load(dir);
-        let ctx = egui::Context::default();
-        let mut texts = Vec::new();
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            super::banner(ui, &repo, &catalog);
-        });
-        output.textures_delta.clear();
-        for clipped in &output.shapes {
-            collect(&clipped.shape, &mut texts);
-        }
-        texts.into_iter().map(|(t, _)| t).collect()
     }
 
     /// An autostash that couldn't be put back leaves conflicted files, and no operation in
@@ -619,16 +565,7 @@ mod tests {
         };
         assert!(reset.1.is_none());
 
-        let ctx = egui::Context::default();
-        let mut texts = Vec::new();
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            super::banner(ui, &repo, &catalog);
-        });
-        output.textures_delta.clear();
-        for clipped in &output.shapes {
-            collect(&clipped.shape, &mut texts);
-        }
-        let texts: Vec<String> = texts.into_iter().map(|(t, _)| t).collect();
+        let texts = banner_texts(p);
         let short = up.short(repo.abbrev_len.max(7));
         // The fix is dropped and the merge flattened: feature, the first of two, conflicts.
         let expected = format!("Rebasing main onto {short} stopped at 1/2: 1 conflicted file");

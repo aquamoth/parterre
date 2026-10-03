@@ -8,9 +8,10 @@
 //! lose commits.
 //!
 //! A worktree with a rebase in progress has an orange zigzag edge from its HEAD, the commits
-//! replayed so far, to the branch being rebased, still at its old commit. Both special edges
-//! run between node centres, cut where they cross the boxes' edges, as TortoiseGit draws them,
-//! and bend around the other boxes where they can.
+//! replayed so far, to the branch being rebased, still at its old commit. One with a merge in
+//! progress has an orange dashed arrow from its HEAD to the commit being merged. These special
+//! edges run between node centres, cut where they cross the boxes' edges, as TortoiseGit draws
+//! them, and bend around the other boxes where they can.
 
 use std::collections::HashSet;
 
@@ -21,9 +22,9 @@ use parterre_core::glyphs;
 use parterre_core::upstream::{Side, Upstream};
 use parterre_core::{CommitIx, Repo, revgraph::RevGraph};
 
-use crate::render::{Marks, edge_path};
+use crate::render::{ARROW_LEN, Marks, arrowhead_points, edge_path};
 use crate::scene::Scene;
-use crate::settings::{EdgeStyle, Settings};
+use crate::settings::{Arrows, EdgeStyle, Settings};
 use crate::theme::Palette;
 use crate::view::View;
 
@@ -286,26 +287,35 @@ fn along(path: &[Pos2], step: f32) -> Vec<(Pos2, egui::Vec2)> {
     out
 }
 
-/// Paints, for each worktree with a rebase in progress, given as its HEAD and the branch it
-/// is rebasing (an index into [`Repo::refs`]), the orange zigzag between their nodes.
-pub fn paint_rebasing(
+/// Paints, for each worktree with a rebase in progress (see [`Marks::rebasing`]), an orange
+/// zigzag between its HEAD's node and the branch being rebased; and for each with a merge in
+/// progress (see [`Marks::merging`]), an orange dashed arrow from its HEAD's node to the commit
+/// being merged: the edge the merge would add, with its arrowhead where the graph's arrows go.
+pub fn paint_in_progress(
     painter: &Painter,
     canvas: Rect,
     view: &View,
     scene: &Scene,
     settings: &Settings,
     palette: &Palette,
-    rebasing: &[(CommitIx, usize)],
+    marks: &Marks,
 ) {
     let (repo, graph) = (&*scene.repo, &scene.graph);
+    let node = |c: CommitIx| graph.node_of(c).map(|n| n as usize);
+    let rebasing = marks
+        .rebasing
+        .iter()
+        .map(|&(head, r)| (node(head), node_of_ref(repo, graph, r), false));
+    let merging = marks
+        .merging
+        .iter()
+        .map(|&(head, theirs)| (node(head), node(theirs), true));
     let zoom = view.fixed(view.zoom).max(0.5);
     let width = view.fixed((2.0 * view.zoom).max(1.0));
     let scale = view.to_screen(canvas, pos2(1.0, 0.0)).x - view.to_screen(canvas, Pos2::ZERO).x;
-    for &(head, r) in rebasing {
-        let (Some(h), Some(b)) = (
-            graph.node_of(head).map(|n| n as usize),
-            node_of_ref(repo, graph, r),
-        ) else {
+    let stroke = Stroke::new(width, palette.stuck);
+    for (h, b, merge) in rebasing.chain(merging) {
+        let (Some(h), Some(b)) = (h, b) else {
             continue;
         };
         if h == b {
@@ -322,6 +332,25 @@ pub fn paint_rebasing(
             settings.edge_style,
             scale,
         );
+        if merge {
+            let dash = 6.0 * zoom;
+            painter.extend(Shape::dashed_line(&path, stroke, dash, dash * 0.7));
+            // Always an arrow, even with the graph's turned off: it says which way the merge
+            // goes.
+            let arrows = match settings.arrows {
+                Arrows::None => Arrows::ToParent,
+                arrows => arrows,
+            };
+            let len = view.fixed(ARROW_LEN * view.zoom.max(0.4));
+            for tri in arrowhead_points(&path, arrows, len).into_iter().flatten() {
+                painter.add(Shape::convex_polygon(
+                    tri.to_vec(),
+                    palette.stuck,
+                    Stroke::NONE,
+                ));
+            }
+            continue;
+        }
         let zigzag: Vec<Pos2> = along(&path, 4.0 * zoom)
             .into_iter()
             .enumerate()
@@ -330,7 +359,7 @@ pub fn paint_rebasing(
                 p + dir.rot90() * (amplitude * side)
             })
             .collect();
-        painter.add(Shape::line(zigzag, Stroke::new(width, palette.stuck)));
+        painter.add(Shape::line(zigzag, stroke));
     }
 }
 

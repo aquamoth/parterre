@@ -80,6 +80,17 @@ whose change is already there are left out, and merges are flattened. It can sto
 conflict, leaving an operation in progress.
 _Avoid_: moving a branch, updating a branch
 
+**Merging a branch**:
+Taking another branch's or commit's commits into the open worktree's branch, by a merge
+method. It can stop on a conflict, or when a hook refuses to commit, leaving an operation in
+progress.
+_Avoid_: pulling in, integrating
+
+**Merge method**:
+How a merge takes the other commits in: a fast-forward, which moves the branch up to them, or
+a merge commit, which joins them in even where a fast-forward would do.
+_Avoid_: merge strategy (git's name for the algorithm that combines the changes), merge type
+
 **Adding a worktree**:
 Creating a new worktree in its own folder, with a branch or a detached HEAD checked out.
 _Avoid_: creating a worktree, new worktree

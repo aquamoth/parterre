@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Event, Pos2, Rect};
+use parterre_core::branches::Catalog;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::{Oid, Repo};
 
@@ -170,6 +171,13 @@ impl Harness {
         self.frame();
     }
 
+    /// Types `text` where the keyboard focus is.
+    pub fn type_text(&mut self, text: &str) {
+        self.events.push(Event::Text(text.to_owned()));
+        self.frame();
+        self.frame();
+    }
+
     /// Asks the tool for `request` and waits for `title` to show.
     pub fn ask(&mut self, request: Request, title: &str) {
         let ctx = self.ctx.clone();
@@ -205,4 +213,73 @@ pub fn collect(shape: &egui::Shape, texts: &mut Vec<(String, Rect)>) {
         egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, texts)),
         _ => {}
     }
+}
+
+/// The texts a menu shows, and what clicking `click` (if given) asks for.
+pub fn menu(
+    f: impl Fn(&mut egui::Ui) -> Option<Request>,
+    click: Option<&str>,
+) -> (Vec<String>, Option<Request>) {
+    let ctx = egui::Context::default();
+    let frame = |events: Vec<egui::Event>, texts: &mut Vec<(String, Rect)>| {
+        let mut asked = None;
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| asked = f(ui));
+        output.textures_delta.clear();
+        texts.clear();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, texts);
+        }
+        asked
+    };
+    let mut texts = Vec::new();
+    frame(Vec::new(), &mut texts);
+    let mut asked = None;
+    if let Some(text) = click {
+        let at = texts
+            .iter()
+            .find(|(t, _)| t == text)
+            .unwrap_or_else(|| panic!("no {text:?}: {texts:?}"))
+            .1
+            .center();
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            asked = asked.or(frame(events, &mut texts));
+        }
+    }
+    (texts.into_iter().map(|(t, _)| t).collect(), asked)
+}
+
+pub fn load(dir: &Path) -> (Repo, Catalog) {
+    (
+        parterre_core::git::load_repo(dir).unwrap(),
+        Catalog::load(dir).unwrap(),
+    )
+}
+
+/// The texts `banner` shows for the repository at `dir`.
+pub fn banner_texts(dir: &Path) -> Vec<String> {
+    let (repo, catalog) = load(dir);
+    let ctx = egui::Context::default();
+    let mut texts = Vec::new();
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        super::rebase::banner(ui, &repo, &catalog);
+    });
+    output.textures_delta.clear();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut texts);
+    }
+    texts.into_iter().map(|(t, _)| t).collect()
 }

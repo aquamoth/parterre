@@ -17,6 +17,7 @@ pub mod layout;
 pub mod log;
 pub mod log_graph;
 pub mod log_layout;
+pub mod merge;
 pub mod oid;
 pub mod pattern;
 pub mod physics;

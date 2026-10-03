@@ -204,7 +204,11 @@ impl CommitTable<'_> {
         }
 
         ui.spacing_mut().item_spacing.y = 0.0;
-        let mut area = ScrollArea::vertical().id_salt(self.id).auto_shrink(false);
+        // As short as one row, not egui's default: a dialog's list of one commit is that tall.
+        let mut area = ScrollArea::vertical()
+            .id_salt(self.id)
+            .auto_shrink(false)
+            .min_scrolled_height(ROW);
         if list.reveal
             && let Some(sel) = list.selected
         {

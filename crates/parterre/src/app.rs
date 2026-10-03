@@ -24,6 +24,7 @@ mod compare_window;
 mod diff_window;
 mod file_table;
 mod log_window;
+mod merge;
 mod pull_requests;
 mod rebase;
 mod reset;
@@ -885,8 +886,8 @@ impl ParterreApp {
 
     /// Automation: opens the branch or worktree form (`--demo-open create-branch:REF` or
     /// `add-worktree:REF`), asks to delete a worktree (`delete-worktree:FOLDER`, its name), or
-    /// opens the reset dialog (`reset:REF`, or `reset:REF:MODE`), once the branch information
-    /// is in.
+    /// opens the reset dialog (`reset:REF`, or `reset:REF:MODE`), the rebase's confirmation
+    /// (`rebase:REF`) or the merge dialog (`merge:REF`), once the branch information is in.
     fn demo_dialog(&mut self, ctx: &egui::Context) {
         let Some((kind, name)) = self
             .automation
@@ -896,7 +897,12 @@ impl ParterreApp {
             .filter(|(k, _)| {
                 matches!(
                     *k,
-                    "create-branch" | "add-worktree" | "delete-worktree" | "reset" | "rebase"
+                    "create-branch"
+                        | "add-worktree"
+                        | "delete-worktree"
+                        | "reset"
+                        | "rebase"
+                        | "merge"
                 )
             })
             .map(|(k, n)| (k.to_owned(), n.to_owned()))
@@ -914,6 +920,16 @@ impl ParterreApp {
                     path: w.path.clone(),
                 };
                 let request = branches::Request::Run(action);
+                self.branches.request(ctx, request, egui::ViewportId::ROOT);
+            }
+            return;
+        }
+        if kind == "merge" {
+            if let Some(theirs) = repo.resolve(&name).map(|c| repo.commit(c).oid) {
+                let request = branches::Request::Merge {
+                    theirs,
+                    target: name,
+                };
                 self.branches.request(ctx, request, egui::ViewportId::ROOT);
             }
             return;
@@ -1689,6 +1705,7 @@ impl ParterreApp {
             search_hits: hits,
             upstreams: self.settings.graph.show_upstreams,
             rebasing: rebasing_marks(&scene.repo, self.branches.catalog.as_deref()),
+            merging: merging_marks(&scene.repo, self.branches.catalog.as_deref()),
         };
         let painter = ui.painter_at(canvas);
         render::paint_scene(
@@ -2551,6 +2568,21 @@ fn rebasing_marks(
             let r = repo.refs.iter().position(|r| r.full_name == full)?;
             Some((head, r))
         })
+        .collect()
+}
+
+/// Each worktree with a merge in progress: its HEAD, and the commit being merged.
+fn merging_marks(
+    repo: &Repo,
+    catalog: Option<&parterre_core::branches::Catalog>,
+) -> Vec<(parterre_core::CommitIx, parterre_core::CommitIx)> {
+    let Some(catalog) = catalog else {
+        return Vec::new();
+    };
+    catalog
+        .worktrees
+        .iter()
+        .filter_map(|w| Some((repo.lookup(&w.head?)?, repo.lookup(&w.merging?)?)))
         .collect()
 }
 

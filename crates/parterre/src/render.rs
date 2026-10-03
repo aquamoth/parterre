@@ -37,6 +37,8 @@ pub struct Marks {
     /// Each worktree with a rebase in progress: its HEAD, and the branch it is rebasing (an
     /// index into [`parterre_core::Repo::refs`]).
     pub rebasing: Vec<(parterre_core::CommitIx, usize)>,
+    /// Each worktree with a merge in progress: its HEAD, and the commit being merged.
+    pub merging: Vec<(parterre_core::CommitIx, parterre_core::CommitIx)>,
 }
 
 impl Marks {
@@ -112,15 +114,7 @@ pub fn paint_scene(
     if marks.upstreams {
         crate::upstreams::paint(painter, canvas, view, scene, palette, settings, marks);
     }
-    crate::upstreams::paint_rebasing(
-        painter,
-        canvas,
-        view,
-        scene,
-        settings,
-        palette,
-        &marks.rebasing,
-    );
+    crate::upstreams::paint_in_progress(painter, canvas, view, scene, settings, palette, marks);
 
     let font = FontId::monospace(fixed(FONT_SIZE * zoom));
     let draw_text = FONT_SIZE * zoom >= MIN_TEXT_PX;
