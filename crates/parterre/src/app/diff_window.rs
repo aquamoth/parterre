@@ -2108,36 +2108,29 @@ impl ParterreApp {
     }
 
     /// Opens the diff of `path` in the commit `rev` (a ref or hash prefix) against its first
-    /// parent, for `--demo-diff`.
-    pub(super) fn open_demo_diff(&mut self, spec: &str, ctx: &egui::Context) {
-        let Some(repo) = self.repo.clone() else {
-            return;
-        };
-        let Some((rev, path)) = spec.split_once(':') else {
-            eprintln!("--demo-diff: expected <commit>:<path>");
-            return;
-        };
-        let Some(ix) = repo.resolve(rev) else {
-            eprintln!("--demo-diff: no commit named {rev}");
-            return;
-        };
+    /// parent, for a script's `open diff:REV:PATH`.
+    pub(super) fn open_named_diff(
+        &mut self,
+        repo: &Arc<Repo>,
+        spec: &str,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        let (rev, path) = spec.split_once(':').ok_or("expected COMMIT:PATH")?;
+        let ix = repo
+            .resolve(rev)
+            .ok_or_else(|| format!("no commit named {rev}"))?;
         let commit = repo.commit(ix);
         let git = parterre_core::git::Git::new(&repo.path);
-        let files = match git.changed_files(&commit.oid) {
-            Ok(files) => files,
-            Err(e) => {
-                eprintln!("--demo-diff: {e}");
-                return;
-            }
-        };
-        let Some(file) = files.iter().find(|f| f.path == path) else {
-            eprintln!("--demo-diff: {path} is not among the files {rev} changed");
-            return;
-        };
+        let files = git.changed_files(&commit.oid).map_err(|e| e.to_string())?;
+        let file = files
+            .iter()
+            .find(|f| f.path == path)
+            .ok_or_else(|| format!("{path} is not among the files {rev} changed"))?;
         let parent = commit.parents.first().map(|&p| repo.commit(p).oid);
         let spec = FileDiffSpec::of_commit(commit.oid, parent, file);
         self.diffs
             .open(repo.clone(), spec, &self.settings.diff_window, ctx);
+        Ok(())
     }
 }
 

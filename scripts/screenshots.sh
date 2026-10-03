@@ -4,7 +4,7 @@
 #
 # Uses target/debug/parterre (egui shows widget id clashes only in debug builds), or $PARTERRE.
 # It runs itself under xvfb-run, so that no real pointer hovers anything. Extra arguments for every run, such
-# as `--theme dark` or `--text-size 1.5`, go in $PARTERRE_ARGS. See docs/screenshots.md.
+# as `--theme dark` or `--text-size 1.5`, go in $PARTERRE_ARGS. See docs/automation.md.
 set -euo pipefail
 out=$(realpath -m "${1:-/tmp/parterre-screenshots}")
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -53,6 +53,7 @@ shot() {
 
 shot main full ""
 shot main-fit full "" --fit
+shot main-drag full $'drag node:feature/search 250,60\nhover canvas\nwait 1.5'
 shot search full $'key Ctrl+F\ntype "login"'
 
 shot menu popup "click toolbar:menu"
@@ -77,10 +78,10 @@ shot shortcuts window "open shortcuts"
 shot legend window "open legend"
 shot about window "open about"
 
-shot log window 'wait-for "Describe reports"' --demo-log v0.1.0..feature/reports
-shot compare window 'wait-for "README"' --demo-compare v0.3.0..feature/reports
-shot diff window 'wait-for "Reports are exported as PDF."' --demo-diff feature/reports:README
-shot blame window 'wait-for "Reports are exported as PDF."' --demo-blame feature/reports:README:3
+shot log window $'open log:v0.1.0..feature/reports\nwait-for "Describe reports"'
+shot compare window $'open compare:v0.3.0..feature/reports\nwait-for "README"'
+shot diff window $'open diff:feature/reports:README\nwait-for "Reports are exported as PDF."'
+shot blame window $'open blame:feature/reports:README:3\nwait-for "Reports are exported as PDF."'
 
 shot create-branch window $'open create-branch:v0.3.0\nwait-for "Create branch"'
 shot add-worktree window $'open add-worktree:v0.3.0\nwait-for "Add a worktree"'

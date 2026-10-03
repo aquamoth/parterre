@@ -1,5 +1,5 @@
 //! Workflow scripts (`--script`): what a person would do in the window, one step per line, for
-//! screenshots and recordings of any window, dialog or menu. See `docs/screenshots.md`.
+//! screenshots and recordings of any window, dialog or menu. See `docs/automation.md`.
 //!
 //! ```text
 //! # Create a branch from the context menu of v0.2.0.
@@ -63,7 +63,7 @@ pub enum Step {
     Scroll(Vec2),
     Key(Modifiers, Key),
     Type(String),
-    /// Open what `--demo-open` opens, or `about`, `shortcuts` or `legend`.
+    /// Open a window or dialog directly, e.g. `about` or `log:main`; see `docs/automation.md`.
     Open(String),
     Screenshot(PathBuf, Crop),
 }

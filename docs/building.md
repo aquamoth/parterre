@@ -216,17 +216,10 @@ Should build with `cargo build --release`. Not yet tried.
 cargo run --release -- ~/repo --screenshot out.png --window-size 1400x900 [--fit] [--theme dark]
 ```
 
-This renders a few frames, saves the window to `out.png`, and exits. `--demo-drag DX,DY` drags
-the centre node first, to show the physics. `--demo-menu node` (or `canvas`) right-clicks the
-centre node (or `--demo-node NAME`, or empty canvas) and hovers the second item, to show the
-context menu. `--demo-open menu` (or `filter`, `zoom`, `drag`, `settings`, `settings:advanced`
-and the other pages) opens the ☰ menu, a toolbar popover or the settings. `--demo-log REF` (or
-`FIRST..SECOND`) opens the log window, and `--log-layout a` (to `d`, or `stacked`,
-`side-by-side`, `details-below`, `files-right`) picks its layout. Screenshot runs ignore the
-saved settings and don't save any. Without `--theme` the theme follows the desktop.
-
-For any other window, dialog or menu, for a whole set at once, and for recordings, see
-[screenshots and recordings](screenshots.md).
+This saves the window to `out.png` once the graph is in, and exits. `--script` drives the
+window first: open any window, dialog or menu, click and type, and take more screenshots.
+`--record` makes a GIF or a video. `scripts/screenshots.sh` takes every window, dialog and menu
+at once. All of it is described in [automation](automation.md).
 
 ## Icon
 
