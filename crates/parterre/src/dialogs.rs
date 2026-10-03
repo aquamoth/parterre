@@ -185,11 +185,14 @@ impl<'a> Dialog<'a> {
         // out of them; the compositor then holds the window to the hints, with the bar outside
         // its frame (above the screen, at the top) and the content cut short by its height.
         // Embedded in a screenshot, a window that size is cut short by its title bar.
+        let min = vec2(MIN_WIDTH.min(size.x), 200.0);
         if self.resizable {
-            // Its content raises the height as it learns what it needs (see `growing`).
-            builder = builder
-                .with_min_inner_size(vec2(MIN_WIDTH.min(size.x), 200.0))
-                .with_resizable(true);
+            // Its content raises the height as it learns what it needs (see `growing`). On
+            // Wayland, the least size too is told once the window exists, as below.
+            builder = builder.with_resizable(true);
+            if !wayland() {
+                builder = builder.with_min_inner_size(min);
+            }
         } else if !wayland() && !ctx.embed_viewports() {
             builder = builder
                 .with_min_inner_size(size)
@@ -228,8 +231,12 @@ impl<'a> Dialog<'a> {
                     let now = ui.input(|i| i.time);
                     if self.resizable && window.hinted.is_none() {
                         if wayland() {
-                            ui.ctx()
-                                .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                            for command in [
+                                egui::ViewportCommand::InnerSize(size),
+                                egui::ViewportCommand::MinInnerSize(min),
+                            ] {
+                                ui.ctx().send_viewport_cmd(command);
+                            }
                         }
                         window.hinted = Some(size);
                         window.resized = now;
