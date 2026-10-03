@@ -1,0 +1,20 @@
+# #190 end to end: arrange by hand, then merge origin/main into the open branch.
+hover 600,500
+scroll 0,520
+wait 0.5
+drag node:merge 222,-30
+drag node:t3code/identify-next-tool 222,-30
+drag node:rebase 53,-16
+drag node:93effe6 46,-15
+drag node:origin/crlf-tests -76,-16
+drag node:prototype/rebase -75,-5
+drag node:reset-branch -76,-4
+drag node:research/moving-branch-pointer 198,-80
+wait 1.5
+screenshot /tmp/p190/e2e-OUT-before.png
+open merge:origin/main
+wait-for "Merge commit"
+click "Merge commit"
+click "Merge"
+wait 3
+screenshot /tmp/p190/e2e-OUT-after.png
