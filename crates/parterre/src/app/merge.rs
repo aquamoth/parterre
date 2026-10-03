@@ -8,7 +8,7 @@ use eframe::egui::{self, Id, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::command_text;
 use parterre_core::log::{LogOptions, LogQuery};
 use parterre_core::log_graph::LogGraph;
-use parterre_core::merge::{self, Method, Preview, Rebased};
+use parterre_core::merge::{self, Method, Preview};
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::{CommitIx, Oid, Repo};
 
@@ -35,8 +35,6 @@ pub struct MergeDialog {
     /// What the command names the target by: a branch's name, or the full hash.
     target: String,
     pub method: Method,
-    /// PROTOTYPE (#188): what a rebase method rebases.
-    pub rebased: Rebased,
     pub message: String,
     pub stash: bool,
     /// The window it was asked from.
@@ -79,7 +77,6 @@ impl MergeDialog {
         };
         MergeDialog {
             method: preview.default_method(),
-            rebased: preview.default_rebased(Method::RebaseFastForward),
             message: preview.message.clone(),
             stash: preview.auto_stash,
             refs: repo.refs_by_commit(),
@@ -95,13 +92,8 @@ impl MergeDialog {
     }
 
     pub fn merge(&self) -> merge::Merge {
-        self.preview.merge(
-            self.target.clone(),
-            self.method,
-            self.rebased,
-            self.stash,
-            &self.message,
-        )
+        self.preview
+            .merge(self.target.clone(), self.method, self.stash, &self.message)
     }
 
     /// The target as the dialog names it: a branch, or a short hash.
@@ -110,13 +102,8 @@ impl MergeDialog {
     }
 
     fn blocked(&self) -> Option<String> {
-        self.preview.blocked(
-            self.method,
-            self.rebased,
-            self.stash,
-            &self.message,
-            &self.name(),
-        )
+        self.preview
+            .blocked(self.method, self.stash, &self.message, &self.name())
     }
 
     /// `busy` while another Git operation runs.
@@ -152,9 +139,6 @@ impl MergeDialog {
                 }
                 let after = ui.cursor().top();
                 self.methods(ui, &name);
-                if self.method.rebases() {
-                    self.prototype_rebased(ui, &name);
-                }
                 ui.add_enabled_ui(self.method.commits(), |ui| {
                     ui.label("Message");
                     ui.add(
@@ -166,11 +150,17 @@ impl MergeDialog {
                 })
                 .response
                 .on_disabled_hover_text("A fast-forward makes no commit");
-                if self.preview.dirty && !self.method.rebases() {
-                    ui.checkbox(&mut self.stash, "Stash changes").on_hover_text(
-                        "Set your uncommitted changes aside first, and put them back \
-                         afterwards (git merge --autostash).",
-                    );
+                if self.preview.stashable(self.method) {
+                    let how = if self.preview.outgoing.is_some() {
+                        "git rebase --autostash"
+                    } else {
+                        "git merge --autostash"
+                    };
+                    ui.checkbox(&mut self.stash, "Stash changes")
+                        .on_hover_text(format!(
+                            "Set your uncommitted changes aside first, and put them back \
+                         afterwards ({how})."
+                        ));
                 }
                 if let Some(why) = self.blocked() {
                     ui.colored_label(ui.visuals().error_fg_color, why);
@@ -197,7 +187,7 @@ impl MergeDialog {
     /// The merge methods, each with what it does; those that make no sense here are greyed
     /// out, with why on hover.
     fn methods(&mut self, ui: &mut Ui, name: &str) {
-        for m in Method::ALL {
+        for &m in self.preview.methods() {
             let unavailable = self.preview.unavailable(m, name);
             ui.add_enabled_ui(unavailable.is_none(), |ui| {
                 ui.horizontal_top(|ui| {
@@ -223,68 +213,12 @@ impl MergeDialog {
                     );
                     if radio.clicked() || help.clicked() {
                         self.method = m;
-                        // PROTOTYPE (#188): semi-linear can't pick onto the branch.
-                        if self.preview.unrebasable(m, self.rebased, name).is_some() {
-                            self.rebased = self.preview.default_rebased(m);
-                        }
                     }
                 })
             })
             .response
             .on_disabled_hover_text(unavailable.unwrap_or_default());
         }
-    }
-
-    /// PROTOTYPE (#188): what the rebase method rebases, the question being prototyped.
-    fn prototype_rebased(&mut self, ui: &mut Ui, name: &str) {
-        let accent = egui::Color32::from_rgb(200, 120, 255);
-        ui.indent("prototype-rebased", |ui| {
-            ui.label(
-                RichText::new("PROTOTYPE · What's rebased")
-                    .small()
-                    .color(accent),
-            );
-            for r in Rebased::ALL {
-                let unavailable = self.preview.unrebasable(self.method, r, name);
-                ui.add_enabled_ui(unavailable.is_none(), |ui| {
-                    ui.horizontal_top(|ui| {
-                        let radio = ui
-                            .allocate_ui_with_layout(
-                                vec2(METHOD_NAME + 40.0, 18.0),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    ui.set_min_width(METHOD_NAME + 40.0);
-                                    ui.radio(self.rebased == r, r.name(name))
-                                },
-                            )
-                            .inner;
-                        let help = ui.add(
-                            egui::Label::new(
-                                RichText::new(r.help(&self.preview.branch, name))
-                                    .small()
-                                    .weak(),
-                            )
-                            .wrap()
-                            .sense(egui::Sense::click()),
-                        );
-                        if radio.clicked() || help.clicked() {
-                            self.rebased = r;
-                        }
-                    })
-                })
-                .response
-                .on_disabled_hover_text(unavailable.unwrap_or_default());
-            }
-            let (replays, merges) = (self.preview.replays, self.preview.merges);
-            let mut facts = format!("Replays {replays}");
-            if merges > 0 {
-                facts.push_str(&format!(
-                    ", flattens {merges} merge{}",
-                    if merges == 1 { "" } else { "s" }
-                ));
-            }
-            ui.label(RichText::new(facts).small().color(accent));
-        });
     }
 
     /// The commits coming in, as the log window lists them, `height` tall. Returns the one
@@ -616,7 +550,7 @@ mod tests {
             !node("behind", None)
                 .0
                 .iter()
-                .any(|t| t.starts_with("Merge"))
+                .any(|t| t.starts_with("Merge") && !t.starts_with("Merge main into"))
         );
         // A commit with no branch on it (as the log's rows have it too): the commit alone.
         let short = rev(p, "up~1").short(repo.abbrev_len.max(7));

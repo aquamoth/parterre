@@ -6,7 +6,7 @@ mod common;
 use common::TestRepo;
 use parterre_core::Oid;
 use parterre_core::branches::{Action, Branches, Cancel, Catalog, Outcome, Report, Stuck};
-use parterre_core::merge::{self, Method, Preview, Rebased};
+use parterre_core::merge::{self, Method, Preview};
 
 fn oid(s: &str) -> Oid {
     Oid::from_hex(s).unwrap()
@@ -46,13 +46,7 @@ fn offered(r: &TestRepo, theirs: &str) -> Option<String> {
 
 /// The merge `p` would run with git's message, by `method`, without stashing.
 fn plain(p: &Preview, target: &str, method: Method) -> merge::Merge {
-    p.merge(
-        target.into(),
-        method,
-        Rebased::Copy,
-        false,
-        &p.message.clone(),
-    )
+    p.merge(target.into(), method, false, &p.message.clone())
 }
 
 /// `main` with a commit of its own, and `up` with one, from a shared base: they diverged.
@@ -147,11 +141,11 @@ fn diverged_branches_cant_fast_forward() {
         Some("main has commits up doesn't")
     );
     assert!(
-        p.blocked(Method::FastForward, Rebased::Copy, false, &p.message, "up")
+        p.blocked(Method::FastForward, false, &p.message, "up")
             .is_some()
     );
     assert_eq!(
-        p.blocked(Method::MergeCommit, Rebased::Copy, false, &p.message, "up"),
+        p.blocked(Method::MergeCommit, false, &p.message, "up"),
         None
     );
     let mine = rev(&r, "main");
@@ -214,25 +208,19 @@ fn the_message_is_what_the_user_wrote() {
     let r = diverged();
     let p = preview(&r, "up");
     assert_eq!(
-        p.blocked(Method::MergeCommit, Rebased::Copy, false, "  \n", "up")
+        p.blocked(Method::MergeCommit, false, "  \n", "up")
             .as_deref(),
         Some("Enter a message for the merge commit.")
     );
     // A fast-forward makes no commit.
     assert_eq!(
-        behind_preview().blocked(Method::FastForward, Rebased::Copy, false, "", "up"),
+        behind_preview().blocked(Method::FastForward, false, "", "up"),
         None
     );
     let message = "Bring in up\n\n#123 and its fix";
     done(execute(
         &r,
-        p.merge(
-            "up".into(),
-            Method::MergeCommit,
-            Rebased::Copy,
-            false,
-            message,
-        ),
+        p.merge("up".into(), Method::MergeCommit, false, message),
     ));
     assert_eq!(r.git(&["log", "-1", "--format=%B"]), message);
 }
@@ -337,22 +325,13 @@ fn uncommitted_changes_need_the_stash_for_a_merge_commit() {
     assert!(p.dirty);
     assert!(!p.auto_stash);
     assert_eq!(
-        p.blocked(Method::MergeCommit, Rebased::Copy, false, &p.message, "up")
+        p.blocked(Method::MergeCommit, false, &p.message, "up")
             .as_deref(),
         Some("Commit or stash your changes first.")
     );
-    assert_eq!(
-        p.blocked(Method::MergeCommit, Rebased::Copy, true, &p.message, "up"),
-        None
-    );
+    assert_eq!(p.blocked(Method::MergeCommit, true, &p.message, "up"), None);
 
-    let stashed = p.merge(
-        "up".into(),
-        Method::MergeCommit,
-        Rebased::Copy,
-        true,
-        &p.message,
-    );
+    let stashed = p.merge("up".into(), Method::MergeCommit, true, &p.message);
     assert_eq!(
         merge::command(&stashed),
         [
@@ -377,10 +356,7 @@ fn a_fast_forward_carries_uncommitted_changes_or_git_refuses() {
     r.write("base", b"edited\n");
     let p = preview(&r, "up");
     assert!(p.dirty);
-    assert_eq!(
-        p.blocked(Method::FastForward, Rebased::Copy, false, "", "up"),
-        None
-    );
+    assert_eq!(p.blocked(Method::FastForward, false, "", "up"), None);
     done(execute(&r, plain(&p, "up", Method::FastForward)));
     assert_eq!(rev(&r, "main"), rev(&r, "up"));
     assert_eq!(common::read_text(&r.path().join("base")), "edited\n");
@@ -421,13 +397,7 @@ fn a_stopped_merge_keeps_the_stashed_changes_aside() {
     let p = preview(&r, "up");
     let report = done(execute(
         &r,
-        p.merge(
-            "up".into(),
-            Method::MergeCommit,
-            Rebased::Copy,
-            true,
-            &p.message,
-        ),
+        p.merge("up".into(), Method::MergeCommit, true, &p.message),
     ));
     let attention = report.attention.expect("an orange notice");
     assert_eq!(attention.title, "Merge stopped on conflicts in 1 file");
@@ -461,13 +431,7 @@ fn changes_the_autostash_cant_put_back_stay_in_the_stash() {
     let p = preview(&r, "up");
     let report = done(execute(
         &r,
-        p.merge(
-            "up".into(),
-            Method::MergeCommit,
-            Rebased::Copy,
-            true,
-            &p.message,
-        ),
+        p.merge("up".into(), Method::MergeCommit, true, &p.message),
     ));
     let attention = report.attention.expect("an orange notice");
     assert_eq!(attention.title, "Merged up into main");
@@ -490,9 +454,7 @@ fn merge_auto_stash_ticks_the_box_and_unticking_says_no_autostash() {
     r.write("mine", b"edited\n");
     let p = preview(&r, "up");
     assert!(p.auto_stash);
-    let command = |stash| {
-        merge::command(&p.merge("up".into(), Method::FastForward, Rebased::Copy, stash, ""))
-    };
+    let command = |stash| merge::command(&p.merge("up".into(), Method::FastForward, stash, ""));
     assert_eq!(command(true), ["merge", "--ff-only", "up"]);
     assert_eq!(
         command(false),

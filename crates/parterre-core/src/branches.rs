@@ -772,7 +772,14 @@ impl Action {
                 r.branch,
                 crate::rebase::short_target(r)
             ),
-            Self::Merge(m) => format!("Merge {} into {}", crate::merge::short_target(m), m.branch),
+            Self::Merge(m) => format!(
+                "Merge {} into {}",
+                m.outgoing
+                    .as_ref()
+                    .map(|o| o.source.clone())
+                    .unwrap_or_else(|| crate::merge::short_target(m)),
+                m.branch
+            ),
         }
     }
 }

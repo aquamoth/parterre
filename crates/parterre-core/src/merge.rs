@@ -4,7 +4,7 @@
 //! because a hook refused to commit it, leaves the worktree with an operation in progress,
 //! finished with git for now.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::branches::{Attention, Cancel, Catalog, Error, Report, Stuck, run};
 use crate::git::Git;
@@ -18,9 +18,10 @@ pub enum Method {
     FastForward,
     /// Joins the other in with a merge commit, even where a fast-forward would do: `--no-ff`.
     MergeCommit,
-    /// PROTOTYPE (#188): replays the other's commits on top of the branch, then fast-forwards.
+    /// PROTOTYPE (#188): rebases the open worktree's branch onto the other, then fast-forwards
+    /// the other up to it. Only merging the open worktree's branch into another.
     RebaseFastForward,
-    /// PROTOTYPE (#188): replays the other's commits on top of the branch, then `--no-ff`.
+    /// PROTOTYPE (#188): the same rebase, then `--no-ff` into the other.
     SemiLinear,
 }
 
@@ -43,12 +44,14 @@ impl Method {
 
     pub fn flag(self) -> &'static str {
         match self {
-            Method::FastForward | Method::RebaseFastForward => "--ff-only",
-            Method::MergeCommit | Method::SemiLinear => "--no-ff",
+            Method::FastForward => "--ff-only",
+            Method::MergeCommit => "--no-ff",
+            Method::RebaseFastForward => "rebase, then --ff-only",
+            Method::SemiLinear => "rebase, then --no-ff",
         }
     }
 
-    /// PROTOTYPE (#188): it rebases first.
+    /// It rebases first.
     pub fn rebases(self) -> bool {
         matches!(self, Method::RebaseFastForward | Method::SemiLinear)
     }
@@ -67,53 +70,29 @@ impl Method {
                 "Replays {target}'s commits on top of {branch}, then moves {branch} up to them."
             ),
             Method::SemiLinear => format!(
-                "Replays {target}'s commits on top of {branch}, then joins them with a merge commit."
+                "Replays {target}'s commits on top of {branch}, then joins them with a merge \
+                 commit."
             ),
         }
     }
 }
 
-/// PROTOTYPE (#188), the question being prototyped: what a rebase method rebases.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Rebased {
-    /// The branch itself, as GitLab does: `git rebase main x`, which checks `x` out here, then
-    /// `git switch main` and the merge. `x` ends up merged, and moved.
-    Itself,
-    /// A copy on a detached HEAD, as GitHub's "Rebase and merge" does: `git rebase main <x's
-    /// hash>`, then `git switch main` and the merge of the copy. `x` stays where it was,
-    /// looking unmerged.
-    Copy,
-    /// A copy made on `main` itself: `git cherry-pick` of the commits the rebase would replay.
-    /// Rebase and fast-forward only: a merge commit needs the copies on a side line.
-    Picked,
+/// PROTOTYPE (#188): merging the open worktree's branch into another, as a pull request does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outgoing {
+    /// The open worktree's branch, merged in.
+    pub source: String,
+    /// The worktree the branch merged into is checked out in, if any; the merge runs there.
+    pub worktree: Option<PathBuf>,
+    /// That worktree has uncommitted changes to tracked files.
+    pub worktree_dirty: bool,
 }
 
-impl Rebased {
-    pub const ALL: [Rebased; 3] = [Rebased::Itself, Rebased::Copy, Rebased::Picked];
-
-    pub fn name(self, target: &str) -> String {
-        match self {
-            Rebased::Itself => format!("{target} itself"),
-            Rebased::Copy => "A copy".into(),
-            Rebased::Picked => "A copy, picked onto it".into(),
-        }
-    }
-
-    pub fn help(self, branch: &str, target: &str) -> String {
-        match self {
-            Rebased::Itself => format!(
-                "Checks out {target} here, rebases it, then switches back to {branch}. \
-                 {target} moves, and ends up merged."
-            ),
-            Rebased::Copy => format!(
-                "Rebases a detached copy of {target}, then switches back to {branch}. \
-                 {target} stays where it was, and looks unmerged."
-            ),
-            Rebased::Picked => format!(
-                "Cherry-picks {target}'s commits onto {branch}. {branch} stays checked out; \
-                 {target} stays where it was, and looks unmerged."
-            ),
-        }
+impl Outgoing {
+    /// The steps after the rebase run in the open worktree: switching to the branch, merging
+    /// and switching back. Only a merge commit into a branch checked out nowhere.
+    fn switches(&self, method: Method) -> bool {
+        self.worktree.is_none() && method.commits()
     }
 }
 
@@ -128,8 +107,6 @@ pub struct Merge {
     /// What the command names it by: a branch's name, or the full hash.
     pub target: String,
     pub method: Method,
-    /// PROTOTYPE (#188): what a rebase method rebases.
-    pub rebased: Rebased,
     /// The merge commit's message; unused by a fast-forward.
     pub message: String,
     /// `--autostash` (`Some(true)`) or `--no-autostash` (`Some(false)`), where it differs from
@@ -137,50 +114,71 @@ pub struct Merge {
     pub autostash: Option<bool>,
     /// `merge.log` is set: `--no-log`, since the message already has what it would add.
     pub no_log: bool,
+    /// PROTOTYPE (#188): merging the open worktree's branch into `branch`.
+    pub outgoing: Option<Outgoing>,
 }
 
-/// The commands a merge runs, in order. PROTOTYPE (#188): a rebase method's three.
-pub fn commands(merge: &Merge) -> Vec<Vec<String>> {
-    let words = |w: &[&str]| w.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
-    if !merge.method.rebases() {
-        return vec![command(merge)];
-    }
-    let branch = merge.branch.as_str();
-    match merge.rebased {
-        Rebased::Itself => vec![
-            words(&["rebase", branch, &merge.target]),
-            words(&["switch", branch]),
-            command(merge),
-        ],
-        Rebased::Copy => vec![
-            words(&["rebase", branch, &merge.theirs.to_hex()]),
-            words(&["switch", branch]),
-            // The copy: where HEAD was before the switch.
-            merge_command(merge, "HEAD@{1}"),
-        ],
-        Rebased::Picked => vec![words(&[
-            "cherry-pick",
-            "--cherry-pick",
-            "--right-only",
-            "--no-merges",
-            &format!("{branch}...{}", merge.target),
-        ])],
-    }
-}
-
-/// The merge command.
+/// The command a merge into the open worktree's branch runs.
 pub fn command(merge: &Merge) -> Vec<String> {
-    merge_command(merge, &merge.target)
+    let mut args = vec!["merge".to_owned(), merge.method.flag().to_owned()];
+    stash_flag(merge, &mut args);
+    merge_args(merge, &mut args);
+    args
 }
 
-/// The merge command, of `target`.
-fn merge_command(merge: &Merge, target: &str) -> Vec<String> {
-    let mut args = vec!["merge".to_owned(), merge.method.flag().to_owned()];
+fn stash_flag(merge: &Merge, args: &mut Vec<String>) {
     match merge.autostash {
         Some(true) => args.push("--autostash".into()),
         Some(false) => args.push("--no-autostash".into()),
         None => {}
     }
+}
+
+/// PROTOTYPE (#188): the commands a merge runs, in order. Merging the open worktree's branch
+/// into another: the rebase, if any, here; then the merge in the other's worktree, or, with
+/// none, a fast-forward of the ref, or switching here to merge and back.
+pub fn commands(merge: &Merge) -> Vec<Vec<String>> {
+    let Some(out) = &merge.outgoing else {
+        return vec![command(merge)];
+    };
+    let words = |w: &[&str]| w.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+    let (source, into) = (out.source.as_str(), merge.branch.as_str());
+    let mut steps = Vec::new();
+    if merge.method.rebases() {
+        let mut rebase = words(&["rebase"]);
+        stash_flag(merge, &mut rebase);
+        rebase.push(into.to_owned());
+        steps.push(rebase);
+    }
+    let flag = if merge.method.commits() {
+        "--no-ff"
+    } else {
+        "--ff-only"
+    };
+    let merging = |prefix: Vec<String>| {
+        let mut args = prefix;
+        args.extend(words(&["merge", flag]));
+        if !merge.method.rebases() && out.worktree.is_none() {
+            stash_flag(merge, &mut args);
+        }
+        merge_args(merge, &mut args);
+        args.pop();
+        args.push(source.to_owned());
+        args
+    };
+    match &out.worktree {
+        Some(w) => steps.push(merging(vec!["-C".into(), w.to_string_lossy().into_owned()])),
+        None if merge.method.commits() => {
+            steps.push(words(&["switch", into]));
+            steps.push(merging(Vec::new()));
+            steps.push(words(&["switch", source]));
+        }
+        None => steps.push(words(&["fetch", ".", &format!("{source}:{into}")])),
+    }
+    steps
+}
+
+fn merge_args(merge: &Merge, args: &mut Vec<String>) {
     if merge.method.commits() {
         if merge.no_log {
             args.push("--no-log".into());
@@ -188,8 +186,7 @@ fn merge_command(merge: &Merge, target: &str) -> Vec<String> {
         args.push("-m".into());
         args.push(merge.message.clone());
     }
-    args.push(target.to_owned());
-    args
+    args.push(merge.target.clone());
 }
 
 /// The branch a merge of `theirs` would go into, when parterre offers one: the open worktree's
@@ -223,23 +220,12 @@ pub struct Preview {
     /// The merge commit's message as git would write it.
     pub message: String,
     /// PROTOTYPE (#188): the commits a rebase would replay: not merges, nor already in the
-    /// branch.
+    /// branch merged into.
     pub replays: usize,
-    /// PROTOTYPE (#188): merges in `branch..theirs`, which a rebase flattens.
+    /// PROTOTYPE (#188): merges a rebase would flatten.
     pub merges: usize,
-    /// PROTOTYPE (#188): what the target is, for which ways of rebasing it can take.
-    pub kind: Kind,
-}
-
-/// PROTOTYPE (#188): what's merged.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Kind {
-    /// A local branch, and the worktree that has it checked out, if another does.
-    Local {
-        elsewhere: Option<std::path::PathBuf>,
-    },
-    Remote,
-    Commit,
+    /// PROTOTYPE (#188): merging the open worktree's branch into `branch`.
+    pub outgoing: Option<Outgoing>,
 }
 
 impl Preview {
@@ -289,33 +275,6 @@ impl Preview {
         };
         let line = format!("{}\t\t{what}\n", theirs.to_hex());
         let message = git.run_with_input(&["fmt-merge-msg"], line)?;
-        let count = |args: &[&str]| -> Result<usize, Error> {
-            Ok(git.run(args)?.trim().parse().unwrap_or(0))
-        };
-        let range = format!("{}...{}", head.to_hex(), theirs.to_hex());
-        let replays = count(&[
-            "rev-list",
-            "--count",
-            "--cherry-pick",
-            "--right-only",
-            "--no-merges",
-            &range,
-        ])?;
-        let merges = count(&[
-            "rev-list",
-            "--count",
-            "--merges",
-            &format!("{}..{}", head.to_hex(), theirs.to_hex()),
-        ])?;
-        let kind = if catalog.locals.iter().any(|b| b.name == target) {
-            Kind::Local {
-                elsewhere: catalog.in_use_elsewhere(target).map(Path::to_path_buf),
-            }
-        } else if catalog.remotes.iter().any(|b| b.name == target) {
-            Kind::Remote
-        } else {
-            Kind::Commit
-        };
         Ok(Preview {
             branch,
             head,
@@ -326,10 +285,117 @@ impl Preview {
             no_ff: config("merge.ff").as_deref() == Some("false"),
             log: truthy(&config("merge.log")),
             message: strip_comments(&message),
+            replays: 0,
+            merges: 0,
+            outgoing: None,
+        })
+    }
+
+    /// PROTOTYPE (#188): the merge of the open worktree's branch into local branch `into`.
+    pub fn load_outgoing(path: &Path, into: &str) -> Result<Preview, Error> {
+        let catalog = Catalog::load(path)?;
+        if let Some(stuck) = catalog.stuck() {
+            return Err(Error::Invalid(format!("{}.", stuck.reason())));
+        }
+        let (Some(source), Some(theirs)) = (catalog.current.clone(), catalog.head) else {
+            return Err(Error::Invalid(
+                "There's no branch checked out to merge.".into(),
+            ));
+        };
+        let Some(head) = catalog
+            .locals
+            .iter()
+            .find(|b| b.name == into)
+            .map(|b| b.tip)
+        else {
+            return Err(Error::Invalid(format!("{into} is not a local branch.")));
+        };
+        let git = Git::new(&catalog.root);
+        let (h, t) = (head.to_hex(), theirs.to_hex());
+        let fast_forward = git
+            .query(&["merge-base", "--is-ancestor", &h, &t])?
+            .is_some();
+        let dirty_in = |dir: &Path| -> Result<bool, Error> {
+            Ok(!Git::new(dir)
+                .run(&["status", "--porcelain", "--untracked-files=no"])?
+                .trim()
+                .is_empty())
+        };
+        let dirty = dirty_in(&catalog.root)?;
+        let worktree = catalog
+            .worktrees
+            .iter()
+            .find(|w| w.branch.as_deref() == Some(into))
+            .map(|w| w.path.clone());
+        let worktree_dirty = match &worktree {
+            Some(w) => dirty_in(w)?,
+            None => false,
+        };
+        let config = |key: &str| {
+            git.query(&["config", "--get", key])
+                .ok()
+                .flatten()
+                .map(|v| v.trim().to_ascii_lowercase())
+        };
+        let truthy = |v: &Option<String>| {
+            v.as_deref()
+                .is_some_and(|v| !matches!(v, "false" | "no" | "off" | "0" | ""))
+        };
+        let line = format!("{t}\t\tbranch '{source}' of .\n");
+        let message = git.run_with_input(&["fmt-merge-msg", "--into-name", into], line)?;
+        let count = |args: &[&str]| -> Result<usize, Error> {
+            Ok(git.run(args)?.trim().parse().unwrap_or(0))
+        };
+        let replays = count(&[
+            "rev-list",
+            "--count",
+            "--cherry-pick",
+            "--right-only",
+            "--no-merges",
+            &format!("{h}...{t}"),
+        ])?;
+        let merges = count(&["rev-list", "--count", "--merges", &format!("{h}..{t}")])?;
+        Ok(Preview {
+            branch: into.to_owned(),
+            head,
+            theirs,
+            fast_forward,
+            dirty,
+            // The rebase's, which is what stashes here.
+            auto_stash: truthy(&config("rebase.autoStash")),
+            no_ff: config("merge.ff").as_deref() == Some("false"),
+            log: truthy(&config("merge.log")),
+            message: strip_comments(&message),
             replays,
             merges,
-            kind,
+            outgoing: Some(Outgoing {
+                source,
+                worktree,
+                worktree_dirty,
+            }),
         })
+    }
+
+    /// The methods offered: the rebase methods only merging the open worktree's branch into
+    /// another.
+    pub fn methods(&self) -> &'static [Method] {
+        if self.outgoing.is_some() {
+            &Method::ALL
+        } else {
+            &Method::ALL[..2]
+        }
+    }
+
+    /// Whether *Stash changes* applies to `method`: it changes the open worktree, and can put
+    /// the changes back there.
+    pub fn stashable(&self, method: Method) -> bool {
+        if !self.dirty {
+            return false;
+        }
+        match &self.outgoing {
+            None => true,
+            Some(out) => method.rebases() && !out.switches(method),
+        }
     }
 
     /// The method picked to begin with: a fast-forward where one would do, unless `merge.ff`
@@ -359,37 +425,10 @@ impl Preview {
         None
     }
 
-    /// PROTOTYPE (#188): why `target` can't be rebased that way by `method`.
-    pub fn unrebasable(&self, method: Method, rebased: Rebased, target: &str) -> Option<String> {
-        match (rebased, &self.kind) {
-            (Rebased::Itself, Kind::Local { elsewhere: Some(p) }) => Some(format!(
-                "{target} is checked out in {}",
-                p.file_name().unwrap_or(p.as_os_str()).to_string_lossy()
-            )),
-            (Rebased::Itself, Kind::Remote) => {
-                Some(format!("{target} is a remote-tracking branch"))
-            }
-            (Rebased::Itself, Kind::Commit) => Some(format!("{target} is a commit, not a branch")),
-            (Rebased::Picked, _) if method == Method::SemiLinear => {
-                Some("A merge commit needs the copies on a side line".into())
-            }
-            _ => None,
-        }
-    }
-
-    /// PROTOTYPE (#188): the way to rebase picked to begin with, for `method`.
-    pub fn default_rebased(&self, method: Method) -> Rebased {
-        Rebased::ALL
-            .into_iter()
-            .find(|r| self.unrebasable(method, *r, "").is_none())
-            .unwrap_or(Rebased::Copy)
-    }
-
     /// Why the merge can't start as chosen.
     pub fn blocked(
         &self,
         method: Method,
-        rebased: Rebased,
         stash: bool,
         message: &str,
         target: &str,
@@ -397,38 +436,42 @@ impl Preview {
         if let Some(why) = self.unavailable(method, target) {
             return Some(format!("{why}."));
         }
-        if method.rebases() {
-            if let Some(why) = self.unrebasable(method, rebased, target) {
-                return Some(format!("{why}."));
-            }
-            // `--autostash` would put them back on what was rebased, not here.
-            if self.dirty {
+        if let Some(out) = &self.outgoing {
+            let here = method.rebases() || out.switches(method);
+            if self.dirty && here && !(stash && self.stashable(method)) {
                 return Some("Commit or stash your changes first.".into());
             }
+            if out.worktree_dirty && method.commits() {
+                return Some(format!(
+                    "{}'s worktree has uncommitted changes.",
+                    self.branch
+                ));
+            }
+            return (method.commits() && message.trim().is_empty())
+                .then(|| "Enter a message for the merge commit.".into());
         }
         if method == Method::FastForward {
             // It carries the changes along, or git refuses without losing any.
             return None;
         }
-        if self.dirty && !stash && !method.rebases() {
+        if self.dirty && !stash {
             // `git merge --abort` can't always put them back.
             return Some("Commit or stash your changes first.".into());
         }
-        (method.commits() && message.trim().is_empty())
+        message
+            .trim()
+            .is_empty()
             .then(|| "Enter a message for the merge commit.".into())
     }
 
     /// The merge, with the target named by `target`, by `method`, with the changes stashed or
     /// not.
-    pub fn merge(
-        &self,
-        target: String,
-        method: Method,
-        rebased: Rebased,
-        stash: bool,
-        message: &str,
-    ) -> Merge {
-        let autostash = match (self.dirty && !method.rebases(), stash, self.auto_stash) {
+    pub fn merge(&self, target: String, method: Method, stash: bool, message: &str) -> Merge {
+        let stashing = match &self.outgoing {
+            None => self.dirty,
+            Some(_) => self.stashable(method),
+        };
+        let autostash = match (stashing, stash, self.auto_stash) {
             (true, true, false) => Some(true),
             (true, false, true) => Some(false),
             _ => None,
@@ -439,10 +482,10 @@ impl Preview {
             theirs: self.theirs,
             target,
             method,
-            rebased,
             message: message.to_owned(),
             autostash,
             no_log: self.log,
+            outgoing: self.outgoing.clone(),
         }
     }
 }
@@ -470,6 +513,9 @@ pub(crate) fn execute(
     cancel: &Cancel,
     report: &mut Report,
 ) -> Result<(), Error> {
+    if merge.outgoing.is_some() {
+        return execute_outgoing(catalog, merge, cancel, report);
+    }
     if catalog.current.as_deref() != Some(merge.branch.as_str()) || catalog.head != Some(merge.head)
     {
         return Err(Error::Invalid(format!(
@@ -487,9 +533,6 @@ pub(crate) fn execute(
             .unwrap_or(0)
     };
     let before = stashes();
-    if merge.method.rebases() {
-        return execute_rebasing(&git, merge, cancel, report);
-    }
     let ok = run(&git, command(merge), cancel, report)?;
     let after = Catalog::load(&catalog.root)?;
     if let Some(Stuck::InProgress(_)) = after.stuck() {
@@ -538,58 +581,76 @@ pub(crate) fn execute(
     Ok(())
 }
 
-/// PROTOTYPE (#188): a rebase method's commands, one after the other, stopping at the first
-/// that doesn't finish. A stop says what's left to do.
-fn execute_rebasing(
-    git: &Git,
+/// PROTOTYPE (#188): merges the open worktree's branch into another, one step after the other,
+/// if neither moved. A stop says where, and what's left to do.
+fn execute_outgoing(
+    catalog: &Catalog,
     merge: &Merge,
     cancel: &Cancel,
     report: &mut Report,
 ) -> Result<(), Error> {
-    let name = short_target(merge);
-    let branch = &merge.branch;
+    let out = merge.outgoing.as_ref().unwrap();
+    let (source, into) = (&out.source, &merge.branch);
+    let tip = catalog
+        .locals
+        .iter()
+        .find(|b| b.name == *into)
+        .map(|b| b.tip);
+    if catalog.current.as_deref() != Some(source.as_str())
+        || catalog.head != Some(merge.theirs)
+        || tip != Some(merge.head)
+    {
+        return Err(Error::Invalid(format!(
+            "{source} or {into} moved, or {source} is no longer checked out here. Reload and \
+             try again."
+        )));
+    }
+    if let Some(stuck) = catalog.stuck() {
+        return Err(Error::Invalid(format!("{}.", stuck.reason())));
+    }
+    let git = Git::new(&catalog.root);
     for (i, args) in commands(merge).into_iter().enumerate() {
-        let picking = args[0] == "cherry-pick";
+        let elsewhere = (args[0] == "-C").then(|| PathBuf::from(&args[1]));
         let rebasing = args[0] == "rebase";
-        if run(git, args, cancel, report)? {
+        let switching_back = i > 0 && args[0] == "switch" && args[1] == *source;
+        if run(&git, args, cancel, report)? {
             continue;
         }
-        let after = Catalog::load(git.dir())?;
-        let n = after.conflicted.len();
+        let dir = elsewhere.clone().unwrap_or_else(|| catalog.root.clone());
+        let after = Catalog::load(&dir)?;
         let Some(Stuck::InProgress(_)) = after.stuck() else {
             let output = report.steps.last().unwrap().output.clone();
-            return Err(Error::Failed(if i == 0 {
-                output
+            return Err(Error::Failed(if merge.method.rebases() && !rebasing {
+                format!("{source} was rebased onto {into}, but {into} didn't move. {output}")
+            } else if switching_back {
+                format!("Merged {source} into {into}, but couldn't switch back. {output}")
             } else {
-                format!("Stopped after the rebase, with {branch} not merged yet. {output}")
+                output
             }));
         };
-        let what = if picking {
-            "Cherry-pick"
-        } else if rebasing {
-            "Rebase"
-        } else {
-            "Merge"
-        };
-        let title = if n == 0 {
-            format!("{what} stopped")
+        let n = after.conflicted.len();
+        let what = if rebasing { "Rebase" } else { "Merge" };
+        let mut title = if n == 0 {
+            format!("{what} not committed")
         } else {
             format!("{what} stopped on conflicts in {}", plural(n, "file"))
         };
-        let message = match (merge.rebased, rebasing) {
-            (Rebased::Itself, true) => format!(
-                "{name} is checked out here, part rebased. Finish or abort it with git; \
-                 then switch to {branch} and merge {name}."
-            ),
-            (Rebased::Copy, true) => format!(
-                "The copy of {name} is on a detached HEAD here, part rebased. Finish or abort \
-                 it with git; then switch to {branch} and merge the copy before it's lost."
-            ),
-            (Rebased::Picked, _) => format!(
-                "{branch} has the commits picked so far. Finish or abort it with git, or go to \
-                 another worktree."
-            ),
-            _ => "Finish or abort it with git, or go to another worktree.".into(),
+        let message = if rebasing {
+            format!(
+                "Finish or abort it with git; then merge {source} into {into} again, now \
+                 without conflicts."
+            )
+        } else if let Some(w) = &elsewhere {
+            title.push_str(&format!(
+                " in {}",
+                w.file_name().unwrap_or(w.as_os_str()).to_string_lossy()
+            ));
+            format!("{into} is checked out there. Go to that worktree to finish or abort it.")
+        } else {
+            format!(
+                "This worktree is on {into} now. Finish or abort the merge with git, then \
+                 switch back to {source}."
+            )
         };
         report.attention = Some(Attention { title, message });
         return Ok(());
