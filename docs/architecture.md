@@ -202,7 +202,9 @@ crates/parterre        the binary (eframe/egui)
 - **tree-sitter for syntax colour**: a grammar crate per language, each compiling its parser
   (C) in its build script, and the grammars' own highlight queries mapped onto a dozen kinds
   in `parterre-core::highlight`. Chosen over syntect in #205 and #208 for speed and precision,
-  with binary size not a constraint.
+  with binary size not a constraint. Each file is highlighted in a child process (`parterre
+  --highlight LANG`), killed when the window closes or after ten seconds, so a grammar's
+  abort or runaway parse on an odd file costs the colours, not the window.
 - **Own layout instead of a graph-layout crate**: git-specific needs (first-parent weighting,
   TortoiseGit parity, layer splitting, bundling, anytime network simplex) and full control
   over performance. 15k nodes lay out in about 200 ms.

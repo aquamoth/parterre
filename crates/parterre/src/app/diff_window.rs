@@ -36,8 +36,9 @@ use parterre_core::file_diff::{
     fold_lines,
 };
 use parterre_core::find;
+use parterre_core::git::Cancel;
 use parterre_core::glyphs;
-use parterre_core::highlight::{self, Spans};
+use parterre_core::highlight::{self, Engine, Spans};
 use parterre_core::text::word_at;
 use parterre_core::{Oid, Repo};
 
@@ -66,9 +67,18 @@ pub struct DiffWindows {
     windows: Vec<DiffWindow>,
     /// How many were opened, to give each its own viewport id.
     opened: u64,
+    /// How files are coloured by syntax (#209).
+    engine: Engine,
 }
 
 impl DiffWindows {
+    pub fn new(engine: Engine) -> DiffWindows {
+        DiffWindows {
+            engine,
+            ..DiffWindows::default()
+        }
+    }
+
     /// Opens a diff window for `spec`, or brings the one already showing it to the front.
     pub fn open(
         &mut self,
@@ -92,14 +102,14 @@ impl DiffWindows {
         if let Some(w) = self.windows.iter_mut().find(|w| w.spec == spec) {
             // Files on disk may have changed since: load them again, in the same window.
             if spec.reads_working_tree() {
-                *w = DiffWindow::new(w.id, repo, spec, settings, ctx);
+                *w = DiffWindow::new(w.id, repo, spec, settings, &self.engine, ctx);
             }
             w.goto = line.or(w.goto);
             w.focus = true;
             return;
         }
         self.opened += 1;
-        let mut w = DiffWindow::new(self.opened, repo, spec, settings, ctx);
+        let mut w = DiffWindow::new(self.opened, repo, spec, settings, &self.engine, ctx);
         w.goto = line;
         self.windows.push(w);
     }
@@ -124,23 +134,35 @@ struct Ready {
     diff: FileDiff,
     notes: Vec<Note>,
     options: DiffOptions,
-    /// The syntax spans of every line of the old and the new version (#209), when the
-    /// file's language is known. They don't depend on the options, so they stay.
+    /// The syntax spans of every line of the old and the new version (#209), on the display
+    /// text, when the file's language is known. They don't depend on the options, so they
+    /// stay.
     syntax: Option<[Vec<Spans>; 2]>,
 }
 
 impl Ready {
-    fn new(loaded: LoadedDiff, options: DiffOptions) -> Ready {
+    fn new(loaded: LoadedDiff, options: DiffOptions, engine: &Engine, cancel: &Cancel) -> Ready {
         let diff = match &loaded.content {
             Content::Text { old, new, .. } => FileDiff::new(old, new, options),
             _ => FileDiff::default(),
         };
         let notes = diff.notes(&loaded, options.whitespace);
+        // Both versions coloured, their spans moved onto the display text once.
         let syntax = match (&loaded.content, highlight::language_of(loaded.spec.path())) {
-            (Content::Text { old, new, .. }, Some(language)) => Some([
-                highlight::highlight(language, old),
-                highlight::highlight(language, new),
-            ]),
+            (Content::Text { old, new, .. }, Some(language)) => {
+                let moved = |lines: &[DiffLine], raw: Vec<Spans>| -> Vec<Spans> {
+                    lines
+                        .iter()
+                        .map(|l| {
+                            let spans = raw.get(l.no as usize - 1).map_or(&[][..], Vec::as_slice);
+                            syntax::moved(&l.raw, spans)
+                        })
+                        .collect()
+                };
+                let old_spans = engine.highlight(language, old, cancel);
+                let new_spans = engine.highlight(language, new, cancel);
+                Some([moved(&diff.old, old_spans), moved(&diff.new, new_spans)])
+            }
             _ => None,
         };
         Ready {
@@ -310,6 +332,14 @@ struct DiffWindow {
     /// The first row drawn last frame, where finding starts from, and the scroll offset.
     top: usize,
     offset: f32,
+    /// Stops the syntax colouring's child process when the window closes.
+    cancel: Cancel,
+}
+
+impl Drop for DiffWindow {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 impl DiffWindow {
@@ -318,6 +348,7 @@ impl DiffWindow {
         repo: Arc<Repo>,
         spec: FileDiffSpec,
         settings: &DiffWindowSettings,
+        engine: &Engine,
         ctx: &egui::Context,
     ) -> DiffWindow {
         let options = DiffOptions {
@@ -327,16 +358,18 @@ impl DiffWindow {
         let (tx, rx) = mpsc::channel();
         let git = parterre_core::git::Git::new(&repo.path);
         let job = spec.clone();
+        let cancel = Cancel::new();
+        let (engine, stop) = (engine.clone(), cancel.clone());
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let result = git
                 .load_file_diff(&job)
-                .map(|loaded| Ready::new(loaded, options))
+                .map(|loaded| Ready::new(loaded, options, &engine, &stop))
                 .map_err(|e| e.to_string());
             let _ = tx.send(result);
             ctx.request_repaint();
         });
-        DiffWindow::new_loading(id, repo, spec, settings, rx)
+        DiffWindow::new_loading(id, repo, spec, settings, rx, cancel)
     }
 
     /// A window waiting for `rx` to bring its diff.
@@ -346,6 +379,7 @@ impl DiffWindow {
         spec: FileDiffSpec,
         settings: &DiffWindowSettings,
         rx: mpsc::Receiver<Result<Ready, String>>,
+        cancel: Cancel,
     ) -> DiffWindow {
         let [w, h] = settings.size;
         DiffWindow {
@@ -354,6 +388,7 @@ impl DiffWindow {
             spec,
             size: vec2(w, h),
             load: Load::Loading(rx),
+            cancel,
             form: settings.form,
             options: DiffOptions {
                 words: settings.words,
@@ -1730,8 +1765,8 @@ fn paint_line(
     let mut job = LayoutJob::default();
     // The syntax colours, with the changed words' background over them.
     let dark = ui.visuals().dark_mode;
-    let spans = highlights.map_or_else(Vec::new, |s| syntax::in_text(&line.raw, &line.text, s));
-    for (piece, kind, changed) in syntax::sections(&line.text, &line.spans, &spans) {
+    let spans = highlights.map_or(&[][..], Vec::as_slice);
+    for (piece, kind, changed) in syntax::sections(&line.text, &line.spans, spans) {
         let background = if changed { word } else { Color32::TRANSPARENT };
         let format = syntax::text_format(kind, g.font.clone(), dark, c.text, background);
         job.append(&line.text[piece], 0.0, format);
@@ -2211,9 +2246,10 @@ mod tests {
             },
         ));
         let (_, rx) = mpsc::channel();
-        let mut w = DiffWindow::new_loading(1, repo, spec, settings, rx);
+        let mut w = DiffWindow::new_loading(1, repo, spec, settings, rx, Cancel::new());
         let options = w.options;
-        w.load = Load::Ready(Box::new(Ready::new(loaded, options)));
+        let ready = Ready::new(loaded, options, &Engine::InProcess, &Cancel::new());
+        w.load = Load::Ready(Box::new(ready));
         w
     }
 

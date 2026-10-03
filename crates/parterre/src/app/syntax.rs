@@ -4,7 +4,7 @@
 
 use eframe::egui::text::TextFormat;
 use eframe::egui::{Color32, FontId, Stroke};
-use parterre_core::file_diff::display_column;
+use parterre_core::file_diff::display;
 use parterre_core::highlight::{Kind, Spans};
 use std::ops::Range;
 
@@ -70,43 +70,55 @@ pub fn text_format(
 }
 
 /// The spans of a line moved from byte offsets of its `raw` form to byte offsets of its
-/// display `text` (tabs expanded, no ending).
-pub fn in_text(raw: &str, text: &str, spans: &Spans) -> Spans {
-    let byte_at = |col: usize| text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
-    spans
-        .iter()
-        .map(|(r, k)| {
-            let start = byte_at(display_column(raw, r.start));
-            let end = byte_at(display_column(raw, r.end));
-            (start..end, *k)
-        })
+/// display text (tabs expanded, no ending), as [`display`] moves the changed words. Once per
+/// line when a file is loaded, not when it is drawn.
+pub fn moved(raw: &str, spans: &[(Range<usize>, Kind)]) -> Spans {
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    let ranges: Vec<Range<usize>> = spans.iter().map(|(r, _)| r.clone()).collect();
+    let (_, ranges) = display(raw, &ranges);
+    ranges
+        .into_iter()
+        .zip(spans)
+        .map(|(r, (_, k))| (r, *k))
         .filter(|(r, _)| r.start < r.end)
         .collect()
 }
 
-/// `text` cut where either its syntax (`spans`, byte ranges of `text`) or its changed
-/// `words` change: each piece with its kind, and whether it is inside a changed word.
+/// `text` cut where either its syntax (`spans`) or its changed `words` change, both byte
+/// ranges of `text` in order and not overlapping: each piece with its kind, and whether it
+/// is inside a changed word. One pass over the boundaries.
 pub fn sections(
     text: &str,
     words: &[Range<usize>],
     spans: &[(Range<usize>, Kind)],
 ) -> Vec<(Range<usize>, Option<Kind>, bool)> {
-    let mut cuts = vec![0, text.len()];
+    let mut cuts = Vec::with_capacity(2 * (words.len() + spans.len()) + 2);
+    cuts.push(0);
+    cuts.push(text.len());
     cuts.extend(words.iter().flat_map(|r| [r.start, r.end]));
     cuts.extend(spans.iter().flat_map(|(r, _)| [r.start, r.end]));
     cuts.retain(|&c| c <= text.len());
     cuts.sort_unstable();
     cuts.dedup();
+    let (mut si, mut wi) = (0, 0);
     cuts.windows(2)
         .map(|w| {
             let piece = w[0]..w[1];
+            while si < spans.len() && spans[si].0.end <= piece.start {
+                si += 1;
+            }
             let kind = spans
-                .iter()
-                .find(|(r, _)| r.start <= piece.start && piece.end <= r.end)
+                .get(si)
+                .filter(|(r, _)| r.start <= piece.start && piece.end <= r.end)
                 .map(|(_, k)| *k);
+            while wi < words.len() && words[wi].end <= piece.start {
+                wi += 1;
+            }
             let changed = words
-                .iter()
-                .any(|r| r.start <= piece.start && piece.end <= r.end);
+                .get(wi)
+                .is_some_and(|r| r.start <= piece.start && piece.end <= r.end);
             (piece, kind, changed)
         })
         .collect()
@@ -134,11 +146,28 @@ mod tests {
     }
 
     #[test]
+    fn sections_follow_many_spans_in_one_pass() {
+        // A long line of many tokens: every piece lands on its own span.
+        let text = "a ".repeat(5000);
+        let spans: Vec<_> = (0..5000)
+            .map(|i| (2 * i..2 * i + 1, Kind::Variable))
+            .collect();
+        let got = sections(&text, &[], &spans);
+        assert_eq!(got.len(), 10000);
+        assert!(
+            got.iter()
+                .step_by(2)
+                .all(|(_, k, _)| *k == Some(Kind::Variable))
+        );
+        assert!(got.iter().skip(1).step_by(2).all(|(_, k, _)| k.is_none()));
+    }
+
+    #[test]
     fn spans_follow_tab_expansion() {
         let raw = "\tif x";
-        let (text, _) = parterre_core::file_diff::display(raw, &[]);
+        let (text, _) = display(raw, &[]);
         let spans = vec![(1..3, Kind::Keyword)];
-        let moved = in_text(raw, &text, &spans);
+        let moved = moved(raw, &spans);
         assert_eq!(&text[moved[0].0.clone()], "if");
     }
 }

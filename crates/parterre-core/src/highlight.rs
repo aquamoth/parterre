@@ -12,11 +12,17 @@
 //! `text.title`, …), each in its own dialect; [`engine::NAMES`] maps those names onto the
 //! dozen kinds here.
 
+use crate::git::Cancel;
+use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// What a span of text is, for colouring. Deliberately coarse: a dozen kinds that every
 /// grammar's captures map onto.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Kind {
     Comment,
     /// A string literal, quotes included.
@@ -108,6 +114,39 @@ impl Language {
         Language::Yaml,
     ];
 
+    /// The name the child process and the injection queries know a language by.
+    pub fn id(self) -> &'static str {
+        match self {
+            Language::Bash => "bash",
+            Language::C => "c",
+            Language::Cpp => "cpp",
+            Language::CSharp => "c_sharp",
+            Language::Css => "css",
+            Language::Dockerfile => "dockerfile",
+            Language::Go => "go",
+            Language::Html => "html",
+            Language::Java => "java",
+            Language::JavaScript => "javascript",
+            Language::Jsx => "jsx",
+            Language::Json => "json",
+            Language::Makefile => "make",
+            Language::Markdown => "markdown",
+            Language::Proto => "proto",
+            Language::Python => "python",
+            Language::Rust => "rust",
+            Language::Sql => "sql",
+            Language::Toml => "toml",
+            Language::TypeScript => "typescript",
+            Language::Tsx => "tsx",
+            Language::Xml => "xml",
+            Language::Yaml => "yaml",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Language> {
+        Language::ALL.into_iter().find(|l| l.id() == id)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Language::Bash => "Shell",
@@ -138,8 +177,12 @@ impl Language {
 }
 
 /// Files above this size are left plain: parsing is fast, but the tree of a huge generated
-/// file costs memory, and nobody reads one for its colours.
-pub const MAX_BYTES: usize = 8 * 1024 * 1024;
+/// file costs hundreds of megabytes, and nobody reads one for its colours.
+pub const MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Highlighting a file takes at most this long; then its child process is killed and the
+/// file stays plain. Error recovery in a grammar can go super-linear on odd input.
+pub const BUDGET: Duration = Duration::from_secs(10);
 
 /// The language of a file, from its path: by file name first (`Dockerfile`, `Makefile`,
 /// `Cargo.lock`), then by extension. `None` for a file the engine can't colour, or when the
@@ -213,6 +256,132 @@ pub fn highlight(language: Language, text: &str) -> Vec<Spans> {
         let _ = (language, text);
         Vec::new()
     }
+}
+
+/// Where highlighting runs. The grammars are C, and one of them aborting on a file it can't
+/// take (deeply nested YAML or Markdown overrun their scanners' state buffer today, and the
+/// runtime's assertion then aborts the process) or parsing for minutes must not take the
+/// window with it. So the app runs them in a child process: itself, as
+/// `parterre --highlight LANG`, the text on stdin and the spans on stdout, killed when the
+/// window closes or [`BUDGET`] runs out. In this process is for that child, and for tests.
+#[derive(Clone, Debug, Default)]
+pub enum Engine {
+    #[default]
+    InProcess,
+    Child(PathBuf),
+}
+
+impl Engine {
+    /// [`highlight`], run as the engine says. Empty when the child failed, was killed, or
+    /// `cancel` stopped it.
+    pub fn highlight(&self, language: Language, text: &str, cancel: &Cancel) -> Vec<Spans> {
+        match self {
+            Engine::InProcess => highlight(language, text),
+            Engine::Child(exe) => in_child(exe, language, text, cancel, BUDGET).unwrap_or_default(),
+        }
+    }
+}
+
+/// Runs `exe --highlight LANG` on `text`, killing it once `cancel` says so or `budget` is
+/// spent. `None` when the child could not be run, failed, or was killed.
+pub fn in_child(
+    exe: &Path,
+    language: Language,
+    text: &str,
+    cancel: &Cancel,
+    budget: Duration,
+) -> Option<Vec<Spans>> {
+    if text.len() > MAX_BYTES || cancel.is_cancelled() {
+        return None;
+    }
+    let mut cmd = Command::new(exe);
+    cmd.arg("--highlight")
+        .arg(language.id())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        // A GUI-subsystem app on Windows; without this the child would flash a console.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let mut stdin = child.stdin.take()?;
+    let mut stdout = child.stdout.take()?;
+    let start = Instant::now();
+    let mut out = Vec::new();
+    let finished = std::thread::scope(|s| {
+        // The text goes in from a thread of its own, so a full pipe can't deadlock against
+        // the output; the watchdog kills the child when told to or when time is up.
+        s.spawn(move || {
+            let _ = stdin.write_all(text.as_bytes());
+        });
+        let watchdog = s.spawn(move || watch(child, cancel, start, budget));
+        let read = stdout.read_to_end(&mut out).is_ok();
+        read && watchdog.join().unwrap_or(false)
+    });
+    if !finished {
+        return None;
+    }
+    decode(&out)
+}
+
+/// Waits for `child`, killing it once cancelled or over budget. True if it exited well.
+fn watch(mut child: Child, cancel: &Cancel, start: Instant, budget: Duration) -> bool {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if cancel.is_cancelled() || start.elapsed() > budget {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The child's side of [`Engine::Child`]: highlights stdin as the language `id` names and
+/// writes the spans to stdout. The exit code: 0, or 2 for an unknown language or unreadable
+/// input.
+pub fn serve(id: &str) -> u8 {
+    let Some(language) = Language::from_id(id) else {
+        return 2;
+    };
+    let mut text = String::new();
+    if std::io::stdin().read_to_string(&mut text).is_err() {
+        return 2;
+    }
+    let spans = highlight(language, &text);
+    let out = std::io::stdout().lock();
+    if serde_json::to_writer(out, &compact(&spans)).is_err() {
+        return 2;
+    }
+    0
+}
+
+/// The spans as the child writes them: a line's `(start, end, kind)` triples.
+type Compact = Vec<Vec<(usize, usize, Kind)>>;
+
+fn compact(spans: &[Spans]) -> Compact {
+    spans
+        .iter()
+        .map(|line| line.iter().map(|(r, k)| (r.start, r.end, *k)).collect())
+        .collect()
+}
+
+fn decode(bytes: &[u8]) -> Option<Vec<Spans>> {
+    let compact: Compact = serde_json::from_slice(bytes).ok()?;
+    Some(
+        compact
+            .into_iter()
+            .map(|line| line.into_iter().map(|(a, b, k)| (a..b, k)).collect())
+            .collect(),
+    )
 }
 
 #[cfg(feature = "syntax")]
@@ -996,6 +1165,22 @@ mod tests {
         assert_eq!(language_of("app.tsx"), Some(Language::Tsx));
         assert_eq!(language_of("notes.txt"), None);
         assert_eq!(language_of("LICENSE"), None);
+    }
+
+    #[test]
+    fn ids_name_every_language_once() {
+        for language in Language::ALL {
+            assert_eq!(Language::from_id(language.id()), Some(language));
+        }
+        assert_eq!(Language::from_id("cobol"), None);
+    }
+
+    #[test]
+    fn the_wire_format_round_trips() {
+        let spans = highlight(Language::Rust, "fn main() {}\n// c\n");
+        let bytes = serde_json::to_vec(&compact(&spans)).unwrap();
+        assert_eq!(decode(&bytes), Some(spans));
+        assert_eq!(decode(b"nonsense"), None);
     }
 
     #[test]

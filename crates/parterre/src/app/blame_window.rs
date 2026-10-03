@@ -53,7 +53,7 @@ use parterre_core::file_history::{FileHistory, FileLog, HistoryRow, Source};
 use parterre_core::find;
 use parterre_core::git::{Cancel, CommitDetails, Git};
 use parterre_core::glyphs;
-use parterre_core::highlight::{self, Spans};
+use parterre_core::highlight::{self, Engine, Spans};
 use parterre_core::log_graph::LogGraph;
 use parterre_core::repo::cmp_refs_for_display;
 use parterre_core::revgraph::GraphOptions;
@@ -108,9 +108,18 @@ pub struct BlameWindows {
     /// How many were opened, to give each its own viewport id.
     opened: u64,
     requests: Vec<BlameRequest>,
+    /// How files are coloured by syntax (#209).
+    engine: Engine,
 }
 
 impl BlameWindows {
+    pub fn new(engine: Engine) -> BlameWindows {
+        BlameWindows {
+            engine,
+            ..BlameWindows::default()
+        }
+    }
+
     /// Opens a blame window for `spec`, or brings the one already showing it to the front
     /// (reloaded, if it reads the working tree). `line` (from 0) is chosen and scrolled to.
     pub fn open(
@@ -131,7 +140,7 @@ impl BlameWindows {
             return;
         }
         self.opened += 1;
-        let mut w = BlameWindow::new(self.opened, repo, spec, settings);
+        let mut w = BlameWindow::new(self.opened, repo, spec, settings, &self.engine);
         w.pending_line = line;
         w.load(ctx);
         self.windows.push(w);
@@ -168,15 +177,23 @@ struct Ready {
     /// Per origin: the commit is in the snapshot, so the log can show it.
     in_repo: Vec<bool>,
     commits: usize,
-    /// The syntax spans of every line (#209), when the file's language is known.
+    /// The syntax spans of every line (#209), on the display text, when the file's language
+    /// is known.
     syntax: Option<Vec<Spans>>,
 }
 
 impl Ready {
-    fn new(blame: Blame, repo: &Repo, path: &str) -> Ready {
+    fn new(blame: Blame, repo: &Repo, path: &str, engine: &Engine, cancel: &Cancel) -> Ready {
+        // The spans of every line, moved onto the display text once.
         let syntax = highlight::language_of(path).map(|language| {
             let text: Vec<&str> = blame.lines.iter().map(|l| l.raw.as_str()).collect();
-            highlight::highlight(language, &text.join("\n"))
+            let raw = engine.highlight(language, &text.join("\n"), cancel);
+            blame
+                .lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| syntax::moved(&l.raw, raw.get(i).map_or(&[][..], Vec::as_slice)))
+                .collect::<Vec<Spans>>()
         });
         let ages = blame.ages();
         let (dates, in_repo) = blame
@@ -405,8 +422,10 @@ struct BlameWindow {
     load: Load,
     /// The history pane's rows, listed alongside the blame.
     listing: Listing,
-    /// Stops the listing (when the window closes or blames again).
+    /// Stops the listing and the syntax colouring (when the window closes or blames again).
     cancel: Cancel,
+    /// How the file is coloured by syntax (#209).
+    engine: Engine,
     /// The history pane's selected row and scroll position.
     list: CommitList,
     /// The whole messages of the history pane's commits, fetched from git the first time a
@@ -455,6 +474,7 @@ impl BlameWindow {
         repo: Arc<Repo>,
         spec: BlameSpec,
         settings: &BlameWindowSettings,
+        engine: &Engine,
     ) -> BlameWindow {
         let [w, h] = settings.size;
         let options = BlameOptions {
@@ -462,6 +482,7 @@ impl BlameWindow {
             moves: settings.moves,
         };
         BlameWindow {
+            engine: engine.clone(),
             id,
             repo,
             spec,
@@ -496,14 +517,18 @@ impl BlameWindow {
     /// Blames `spec` with the current options, and lists the file's history, on worker
     /// threads. A listing still running is stopped.
     fn load(&mut self, ctx: &egui::Context) {
+        // A new handle for this load; the one before stops its listing and colouring.
+        self.cancel.cancel();
+        self.cancel = Cancel::new();
         let (tx, rx) = mpsc::channel();
         let git = Git::new(&self.repo.path);
         let (spec, options, repo) = (self.spec.clone(), self.options, self.repo.clone());
+        let (engine, cancel) = (self.engine.clone(), self.cancel.clone());
         let repaint = ctx.clone();
         std::thread::spawn(move || {
             let result = git
                 .blame(&spec, options)
-                .map(|blame| Ready::new(blame, &repo, &spec.path))
+                .map(|blame| Ready::new(blame, &repo, &spec.path, &engine, &cancel))
                 .map_err(|e| e.to_string());
             let _ = tx.send(result);
             repaint.request_repaint();
@@ -512,8 +537,6 @@ impl BlameWindow {
         self.load = Load::Loading(rx);
         self.dragging = false;
 
-        self.cancel.cancel();
-        self.cancel = Cancel::new();
         let (tx, rx) = mpsc::channel();
         let (git, spec, cancel) = (
             Git::new(&self.repo.path),
@@ -1447,9 +1470,8 @@ impl BlameWindow {
                 let g = match spans.and_then(|s| s.get(i)) {
                     Some(spans) if !spans.is_empty() => {
                         let dark = ui.visuals().dark_mode;
-                        let spans = syntax::in_text(&line.raw, &line.text, spans);
                         let mut job = LayoutJob::default();
-                        for (piece, kind, _) in syntax::sections(&line.text, &[], &spans) {
+                        for (piece, kind, _) in syntax::sections(&line.text, &[], spans) {
                             let format = syntax::text_format(
                                 kind,
                                 font.clone(),
@@ -2524,8 +2546,14 @@ mod tests {
             path: "a.txt".into(),
         };
         let settings = BlameWindowSettings::default();
-        let mut w = BlameWindow::new(1, repo.clone(), spec, &settings);
-        w.load = Load::Ready(Box::new(Ready::new(sample(), &repo, "")));
+        let mut w = BlameWindow::new(1, repo.clone(), spec, &settings, &Engine::InProcess);
+        w.load = Load::Ready(Box::new(Ready::new(
+            sample(),
+            &repo,
+            "",
+            &Engine::InProcess,
+            &Cancel::new(),
+        )));
         w
     }
 
@@ -2909,6 +2937,7 @@ mod tests {
             windows: vec![w],
             opened: 1,
             requests: Vec::new(),
+            engine: Engine::InProcess,
         };
         let settings = BlameWindowSettings::default();
         windows.open(repo, spec, Some(2), &settings, &ctx);
@@ -2971,7 +3000,13 @@ mod tests {
                 commits,
             })
         };
-        w.loaded(Ready::new(sample(), &repo, ""));
+        w.loaded(Ready::new(
+            sample(),
+            &repo,
+            "",
+            &Engine::InProcess,
+            &Cancel::new(),
+        ));
         w.listing = log(vec![logged(B, 200, &[GONE]), logged(GONE, 150, &[A])]);
         w.settle();
         // Listed, though it owns no lines.
@@ -2985,7 +3020,13 @@ mod tests {
         ]
         .concat();
         w.selection = Some(Selection::lines(1, 3));
-        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo, ""));
+        w.loaded(Ready::new(
+            Blame::parse(out.as_bytes()).unwrap(),
+            &repo,
+            "",
+            &Engine::InProcess,
+            &Cancel::new(),
+        ));
         w.listing = log(vec![logged(A, 100, &[])]);
         w.settle();
         assert_eq!(w.chosen, None);
@@ -3024,7 +3065,13 @@ mod tests {
             })
             .collect();
         let repo = w.repo.clone();
-        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo, ""));
+        w.loaded(Ready::new(
+            Blame::parse(out.as_bytes()).unwrap(),
+            &repo,
+            "",
+            &Engine::InProcess,
+            &Cancel::new(),
+        ));
         frame(&ctx, &mut w, Vec::new());
         w.choose_commit(Some(Oid::from_hex(B).unwrap()));
         assert_eq!(span(&w), Some((250, 250)));
@@ -3179,7 +3226,13 @@ mod tests {
             history_height: 150.0,
             ..BlameWindowSettings::default()
         };
-        let w = BlameWindow::new(2, window().repo.clone(), window().spec.clone(), &settings);
+        let w = BlameWindow::new(
+            2,
+            window().repo.clone(),
+            window().spec.clone(),
+            &settings,
+            &Engine::InProcess,
+        );
         assert!(!w.show_history);
         assert_eq!(w.history_height, 150.0);
 
@@ -3390,7 +3443,13 @@ mod tests {
             })
             .collect();
         let repo = w.repo.clone();
-        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo, ""));
+        w.loaded(Ready::new(
+            Blame::parse(out.as_bytes()).unwrap(),
+            &repo,
+            "",
+            &Engine::InProcess,
+            &Cancel::new(),
+        ));
         frame(&ctx, &mut w, Vec::new());
         // Scrolled so that line 100 is at the top.
         let row_h = Metrics::new(&ctx, 300, w.repo.abbrev_len).row_h;
@@ -3496,7 +3555,13 @@ mod tests {
         w.show_history = false;
         let out: String = (1..=300).map(|i| entry(A, i, i, 100, "", "a")).collect();
         let repo = w.repo.clone();
-        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo, ""));
+        w.loaded(Ready::new(
+            Blame::parse(out.as_bytes()).unwrap(),
+            &repo,
+            "",
+            &Engine::InProcess,
+            &Cancel::new(),
+        ));
         w
     }
 
