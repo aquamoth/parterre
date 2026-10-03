@@ -104,6 +104,55 @@ fn pull_requests_label_their_heads_in_the_graph() {
     assert!(labelled.contains(&("C".to_owned(), vec![])));
 }
 
+#[test]
+fn canned_pull_requests_are_on_their_heads_on_origin() {
+    let mut r = TestRepo::new();
+    r.commit("A");
+    let pushed = r.commit("B");
+    r.git(&["remote", "add", "origin", "git@github.com:o/r.git"]);
+    r.git(&["update-ref", "refs/remotes/origin/main", &pushed]);
+    r.git(&["update-ref", "refs/remotes/origin/topic", &pushed]);
+    let git = Git::new(r.path());
+
+    let json = r#"[{"number": 7, "title": "Seven", "author": "someone", "draft": true,
+                    "head": "topic", "base": "main"}]"#;
+    let prs = github::load_canned(&git, json).unwrap();
+    assert_eq!(
+        prs.list,
+        [PullRequest {
+            number: 7,
+            title: "Seven".into(),
+            author: "someone".into(),
+            draft: true,
+            head: parterre_core::Oid::from_hex(&pushed).unwrap(),
+            head_branch: "topic".into(),
+            head_repo: Some("o/r".into()),
+            base_branch: "main".into(),
+            base_repo: "o/r".into(),
+            url: "https://github.com/o/r/pull/7".into(),
+        }]
+    );
+    assert_eq!(
+        prs.remotes,
+        [Remote {
+            name: "origin".into(),
+            repo: "o/r".into(),
+        }]
+    );
+
+    let missing = r#"[{"number": 8, "title": "Eight", "head": "gone", "base": "main"}]"#;
+    let error = github::load_canned(&git, missing).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "pull requests file: origin has no branch gone"
+    );
+    let error = github::load_canned(&git, r#"[{"number": 9}]"#).unwrap_err();
+    assert!(
+        error.to_string().starts_with("pull requests file: "),
+        "{error}"
+    );
+}
+
 /// Asks GitHub for parterre's open pull requests from its `main`, signed in as `gh` is.
 /// Needs the network and a signed-in `gh`, so only on request:
 /// `cargo test -p parterre-core --features github --test forge -- --ignored`.

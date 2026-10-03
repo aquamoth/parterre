@@ -108,6 +108,12 @@ struct Cli {
     #[arg(long)]
     pull_requests: bool,
 
+    /// Show the pull requests in FILE instead of asking GitHub, for screenshots and demos:
+    /// a JSON array of {"number", "title", "author", "draft", "head", "base"}, head and base
+    /// being branches of origin (see docs/automation.md). Implies --pull-requests.
+    #[arg(long, value_name = "FILE", hide = true)]
+    pull_requests_from: Option<PathBuf>,
+
     /// Show the other worktrees, even if turned off in the settings.
     #[arg(long)]
     worktrees: bool,
@@ -279,6 +285,16 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let canned_pull_requests = match &cli.pull_requests_from {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(json) => Some(json),
+            Err(e) => {
+                eprintln!("parterre: could not read {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
     let scripted = cli.screenshot.is_some() || script.is_some();
     // Why the repository named on the command line didn't open, when the window says so.
     let mut open_error = None;
@@ -342,6 +358,7 @@ fn main() -> ExitCode {
     let mut automation = Automation::default();
     automation.fit = cli.fit;
     automation.zoom = cli.zoom;
+    automation.pull_requests = canned_pull_requests;
     // `--screenshot` alone is a script of one step.
     if script.is_some() || cli.screenshot.is_some() {
         let mut runner = automation::Runner::new(script.unwrap_or_default());
@@ -428,7 +445,7 @@ fn apply_cli(cli: &Cli, s: &mut settings::Settings) {
     if cli.no_tags {
         s.graph.show_tags = false;
     }
-    if cli.pull_requests {
+    if cli.pull_requests || cli.pull_requests_from.is_some() {
         s.graph.show_pull_requests = true;
     }
     if cli.worktrees {

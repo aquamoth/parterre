@@ -24,6 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{ForgeError, PullRequest, PullRequests, Remote};
 use crate::git::Git;
+use crate::oid::Oid;
 
 /// GitHub's GraphQL endpoint. Tokens are only ever sent here.
 #[cfg_attr(not(feature = "github"), allow(dead_code))]
@@ -117,6 +118,77 @@ pub fn origin(git: &Git) -> Option<GithubRepo> {
 /// request if no branch of `origin` has been fetched, otherwise one per 100 of them, signed in
 /// with `gh`'s token. Run it on a worker thread.
 pub fn load(git: &Git) -> Result<PullRequests, ForgeError> {
+    pull_requests(git, |origin| {
+        let branches = remote_branches(git, "origin")?;
+        if branches.is_empty() {
+            return Ok(Found {
+                name: origin.full_name(),
+                list: Vec::new(),
+                pause_until: None,
+            });
+        }
+        with_api(|api| open_pull_requests(api, origin, &branches))
+    })
+}
+
+/// Pull requests from `json` instead of GitHub, for screenshots and demos without the network
+/// (`--pull-requests-from`): an array of `{"number", "title", "author", "draft", "head",
+/// "base"}`, where `head` and `base` are branches of `origin`, which must still point at
+/// GitHub. Each one is on the commit `origin/<head>` is at.
+pub fn load_canned(git: &Git, json: &str) -> Result<PullRequests, ForgeError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Canned {
+        number: u64,
+        title: String,
+        #[serde(default)]
+        author: String,
+        #[serde(default)]
+        draft: bool,
+        head: String,
+        base: String,
+    }
+    let canned: Vec<Canned> =
+        serde_json::from_str(json).map_err(|e| ForgeError::Canned(e.to_string()))?;
+    pull_requests(git, |origin| {
+        let name = origin.full_name();
+        let list = canned
+            .into_iter()
+            .map(|pr| {
+                let tip = format!("refs/remotes/origin/{}^{{commit}}", pr.head);
+                let head = git
+                    .query(&["rev-parse", "--verify", "--quiet", &tip])?
+                    .and_then(|hex| Oid::from_hex(&hex))
+                    .ok_or_else(|| {
+                        ForgeError::Canned(format!("origin has no branch {}", pr.head))
+                    })?;
+                Ok(PullRequest {
+                    url: format!("{WEB}{name}/pull/{}", pr.number),
+                    number: pr.number,
+                    title: pr.title,
+                    author: pr.author,
+                    draft: pr.draft,
+                    head,
+                    head_branch: pr.head,
+                    head_repo: Some(name.clone()),
+                    base_branch: pr.base,
+                    base_repo: name.clone(),
+                })
+            })
+            .collect::<Result<_, ForgeError>>()?;
+        Ok(Found {
+            name,
+            list,
+            pause_until: None,
+        })
+    })
+}
+
+/// The pull requests `find` finds for `origin`, with the remotes and upstreams that place them.
+fn pull_requests(
+    git: &Git,
+    find: impl FnOnce(&GithubRepo) -> Result<Found, ForgeError>,
+) -> Result<PullRequests, ForgeError> {
     let urls = super::remote_urls(git)?;
     let origin = urls
         .iter()
@@ -124,16 +196,7 @@ pub fn load(git: &Git) -> Result<PullRequests, ForgeError> {
         .and_then(|(_, url)| GithubRepo::from_url(url))
         .ok_or(ForgeError::NoForge)?;
     let upstreams = super::upstreams(git)?;
-    let branches = remote_branches(git, "origin")?;
-    let found = if branches.is_empty() {
-        Found {
-            name: origin.full_name(),
-            list: Vec::new(),
-            pause_until: None,
-        }
-    } else {
-        with_api(|api| open_pull_requests(api, &origin, &branches))?
-    };
+    let found = find(&origin)?;
     if let Some(until) = found.pause_until {
         pause(until);
     }

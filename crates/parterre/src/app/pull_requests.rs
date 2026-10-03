@@ -79,9 +79,25 @@ pub struct PullRequestLoader {
     force: bool,
     /// The user asked for pull requests: say how it went.
     asked: bool,
+    /// Pull requests to show instead of asking GitHub (`--pull-requests-from`), as JSON.
+    canned: Option<Arc<str>>,
 }
 
 impl PullRequestLoader {
+    /// A loader that shows the pull requests in `json` instead of asking GitHub
+    /// ([`github::load_canned`]).
+    pub fn canned(json: &str) -> PullRequestLoader {
+        PullRequestLoader {
+            canned: Some(json.into()),
+            ..PullRequestLoader::default()
+        }
+    }
+
+    /// The pull requests come from a file, not from GitHub.
+    pub fn is_canned(&self) -> bool {
+        self.canned.is_some()
+    }
+
     /// Follows the repository shown (`None` for none).
     pub fn follow(&mut self, path: Option<&Path>) {
         if self.path.as_deref() == path {
@@ -197,8 +213,13 @@ impl PullRequestLoader {
         let (tx, rx) = std::sync::mpsc::channel();
         let git = Git::new(&path);
         let ctx = ctx.clone();
+        let canned = self.canned.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(github::load(&git));
+            let loaded = match canned {
+                Some(json) => github::load_canned(&git, &json),
+                None => github::load(&git),
+            };
+            let _ = tx.send(loaded);
             ctx.request_repaint();
         });
         self.job = Some(Job {
