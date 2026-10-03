@@ -1514,6 +1514,17 @@ pub(crate) fn run(
     cancel: &Cancel,
     report: &mut Report,
 ) -> Result<bool, Error> {
+    run_with(git, args, &[], cancel, report)
+}
+
+/// [`run`], with `env` set for git.
+pub(crate) fn run_with(
+    git: &Git,
+    args: Vec<String>,
+    env: &[(&str, &str)],
+    cancel: &Cancel,
+    report: &mut Report,
+) -> Result<bool, Error> {
     let mut state = cancel
         .0
         .lock()
@@ -1523,6 +1534,7 @@ pub(crate) fn run(
     }
     let mut child = git
         .operation_command(&args)
+        .envs(env.iter().copied())
         .spawn()
         .map_err(GitError::Spawn)?;
     state.1 = Some(child.id());

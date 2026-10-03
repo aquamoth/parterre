@@ -12,7 +12,7 @@ use parterre_core::merge::{self, Method, Preview};
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::{CommitIx, Oid, Repo};
 
-use super::commit_table::{CommitList, CommitTable, ROW, Row};
+use super::commit_table::{CommitList, CommitTable, ROW, Row, Select};
 use super::log_window::{self, HEADING};
 use crate::dialogs;
 use crate::theme::Palette;
@@ -238,7 +238,8 @@ impl MergeDialog {
             graph: &self.graph,
             abbrev_len: self.repo.abbrev_len,
             palette,
-            pairs: false,
+            select: Select::One,
+            icons: false,
         };
         let (repo, commits, refs) = (&*self.repo, &self.commits, &self.refs);
         let list = &mut self.list;

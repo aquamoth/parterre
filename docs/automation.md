@@ -87,6 +87,7 @@ printf 'open about\nscreenshot about.png window\n' | parterre ~/repo --script -
 | Step | Does |
 | --- | --- |
 | `click T`, `double-click T`, `right-click T` | Moves the pointer to target `T` and clicks |
+| `ctrl-click T`, `shift-click T` | Clicks with Ctrl (⌘ on macOS) or Shift held |
 | `hover T` | Moves the pointer there and rests it, e.g. to open a submenu or a tooltip |
 | `drag T DX,DY` | Presses on `T`, moves by DX,DY points and lets go |
 | `scroll DX,DY` | Turns the wheel where the pointer is |

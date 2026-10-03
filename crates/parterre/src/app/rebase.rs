@@ -1,19 +1,21 @@
 //! Rebasing the open worktree's branch: the confirmation, which lists the commits being
-//! rebased as the log window does, greying those git leaves out, and the banner across the
-//! graph while the open worktree is stuck with an operation in progress, such as a rebase or
-//! a merge.
+//! rebased as the log window does, greying those git leaves out, with what to do with each
+//! (pick, squash or drop: for a selection of them at once, or for one by clicking its icon),
+//! and the banner across the graph while the open worktree is stuck with an operation in
+//! progress, such as a rebase or a merge.
 
 use std::sync::Arc;
 
 use eframe::egui::{self, Color32, Id, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::{Catalog, Stuck, command_text};
+use parterre_core::glyphs;
 use parterre_core::log::{LogOptions, LogQuery};
 use parterre_core::log_graph::LogGraph;
-use parterre_core::rebase::{self, Preview};
+use parterre_core::rebase::{self, Preview, Todo};
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::{CommitIx, Oid, Repo};
 
-use super::commit_table::{CommitList, CommitTable, Row};
+use super::commit_table::{CommitList, CommitTable, Row, Select};
 use super::log_window;
 use super::merge::list_height;
 use crate::dialogs;
@@ -33,6 +35,23 @@ pub fn stuck_color(ui: &Ui) -> Color32 {
     } else {
         Color32::from_rgb(170, 90, 0)
     }
+}
+
+/// The icon of a todo command, and its colour.
+fn todo_icon(ui: &Ui, todo: Todo) -> (glyphs::Glyph, Color32) {
+    match todo {
+        Todo::Pick => (glyphs::PICK, ui.visuals().text_color()),
+        Todo::Squash => (glyphs::SQUASH, crate::widgets::tones(ui).accent),
+        Todo::Drop => (glyphs::DROP, ui.visuals().error_fg_color),
+    }
+}
+
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 fn plural(n: usize, what: &str) -> String {
@@ -135,14 +154,15 @@ impl RebaseDialog {
                     asked.log = Some(oid);
                 }
                 let after = ui.cursor().top();
+                self.todo_buttons(ui);
                 if self.preview.dirty {
                     ui.checkbox(&mut self.stash, "Stash changes").on_hover_text(
                         "Set your uncommitted changes aside first, and put them back \
                          afterwards (git rebase --autostash).",
                     );
-                    if let Some(why) = self.preview.blocked(self.stash) {
-                        ui.colored_label(ui.visuals().error_fg_color, why);
-                    }
+                }
+                if let Some(why) = self.preview.blocked(self.stash) {
+                    ui.colored_label(ui.visuals().error_fg_color, why);
                 }
                 dialogs::command_box(ui, &[command_text(&rebase::command(&self.rebase()))]);
                 let enabled = self.preview.blocked(self.stash).is_none() && !busy;
@@ -159,8 +179,111 @@ impl RebaseDialog {
         asked
     }
 
-    /// The commits being rebased, as the log window lists them, `height` tall; those git leaves
-    /// out are greyed, with the reason on hover. Returns the commit double-clicked.
+    /// The selected commits that git replays.
+    fn selected(&self) -> Vec<Oid> {
+        self.list
+            .many
+            .iter()
+            .map(|&i| self.repo.commit(self.commits[i]).oid)
+            .filter(|&oid| self.preview.todo(oid).is_some())
+            .collect()
+    }
+
+    /// Has the rebase do `todo` with the selected commits.
+    fn set_todo(&mut self, todo: Todo) {
+        for oid in self.selected() {
+            self.preview.set_todo(oid, todo);
+        }
+    }
+
+    /// What the selected commits share, if anything.
+    fn selected_todo(&self) -> Option<Todo> {
+        let mut todos = self
+            .selected()
+            .into_iter()
+            .filter_map(|o| self.preview.todo(o));
+        let first = todos.next()?;
+        todos.all(|t| t == first).then_some(first)
+    }
+
+    /// Has the rebase do the next thing with `commit`: pick, squash, drop, and pick again.
+    /// Squash is passed over where it can't be.
+    fn cycle(&mut self, commit: Oid) {
+        let next = match self.preview.todo(commit) {
+            Some(Todo::Pick) if self.preview.can_squash(&[commit]) => Todo::Squash,
+            Some(Todo::Pick | Todo::Squash) => Todo::Drop,
+            Some(Todo::Drop) => Todo::Pick,
+            None => return,
+        };
+        self.preview.set_todo(commit, next);
+    }
+
+    /// Whether the selected commits can be squashed: each has a commit kept before it.
+    fn squashable(&self) -> bool {
+        self.preview.can_squash(&self.selected())
+    }
+
+    /// Pick, Squash and Drop for the selected commits, also by their keys (git's abbreviations
+    /// in the todo list), and Ctrl+A to select them all. Squash only where it can.
+    fn todo_buttons(&mut self, ui: &mut Ui) {
+        let mut chosen = None;
+        ui.input_mut(|i| {
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::A) {
+                self.list.many = (0..self.commits.len()).collect();
+            }
+            for (todo, key) in [
+                (Todo::Pick, egui::Key::P),
+                (Todo::Squash, egui::Key::S),
+                (Todo::Drop, egui::Key::D),
+            ] {
+                if i.consume_key(egui::Modifiers::NONE, key) {
+                    chosen = Some(todo);
+                }
+            }
+        });
+        let any = !self.selected().is_empty();
+        let squashable = self.squashable();
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(any, |ui| {
+                for todo in Todo::ALL {
+                    let (tip, disabled) = match todo {
+                        Todo::Pick => ("Replay it as it is (p)", None),
+                        Todo::Squash => (
+                            "Meld it into the commit before it (s)",
+                            Some("Nothing kept before it to squash into"),
+                        ),
+                        Todo::Drop => ("Leave it out (d)", None),
+                    };
+                    let enabled = todo != Todo::Squash || squashable;
+                    let (glyph, color) = todo_icon(ui, todo);
+                    let label = capitalized(todo.word());
+                    let button = ui
+                        .add_enabled_ui(enabled, |ui| {
+                            crate::widgets::icon_text_button(ui, glyph, color, &label)
+                        })
+                        .inner
+                        .on_hover_text(tip)
+                        .on_disabled_hover_text(match disabled {
+                            Some(why) if any => why,
+                            _ => "Select commits first: Ctrl+ or Shift+click",
+                        });
+                    if button.clicked() {
+                        chosen = Some(todo);
+                    }
+                }
+            });
+        });
+        if let Some(todo) = chosen
+            && (todo != Todo::Squash || squashable)
+        {
+            self.set_todo(todo);
+        }
+    }
+
+    /// The commits being rebased, as the log window lists them, `height` tall, with what the
+    /// rebase does with each; those git leaves out are greyed, with the reason on hover, as are
+    /// those dropped. Returns the commit double-clicked.
     fn commits_table(
         &mut self,
         ui: &mut Ui,
@@ -175,10 +298,15 @@ impl RebaseDialog {
             graph: &self.graph,
             abbrev_len: self.repo.abbrev_len,
             palette,
-            pairs: false,
+            select: Select::Many,
+            icons: true,
         };
         let (repo, commits, preview) = (&*self.repo, &self.commits, &self.preview);
         let refs = &self.refs;
+        let shared = self.selected_todo();
+        let squashable = self.squashable();
+        let icons = Todo::ALL.map(|t| todo_icon(ui, t));
+        let mut chosen = None;
         let mut tip = |ui: &mut Ui, i: usize| {
             if let Some(skipped) = preview.skipped(repo.commit(commits[i]).oid) {
                 ui.label(skipped.reason());
@@ -207,15 +335,41 @@ impl RebaseDialog {
                             author: &commit.author_name,
                             author_email: &commit.author_email,
                             date: &commit.author_date,
-                            greyed: preview.skipped(commit.oid).is_some(),
+                            icon: preview.todo(commit.oid).map(|t| {
+                                let (glyph, color) = icons[t as usize];
+                                (glyph, color, t.word())
+                            }),
+                            greyed: preview.skipped(commit.oid).is_some()
+                                || preview.todo(commit.oid) == Some(Todo::Drop),
                             ..Row::default()
                         }
                     },
-                    |_, _, _| {},
+                    |ui, i, _| {
+                        let replayed = preview.todo(repo.commit(commits[i]).oid).is_some();
+                        ui.add_enabled_ui(replayed, |ui| {
+                            for (todo, key) in Todo::ALL.into_iter().zip(["P", "S", "D"]) {
+                                let mark = crate::menu::Mark::Radio(shared == Some(todo));
+                                let label = capitalized(todo.word());
+                                let enabled = todo != Todo::Squash || squashable;
+                                let item = ui.add_enabled_ui(enabled, |ui| {
+                                    crate::menu::item(ui, &label, key, mark)
+                                });
+                                if item.inner.clicked() {
+                                    chosen = Some(todo);
+                                }
+                            }
+                        });
+                    },
                     Some(&mut tip),
                 )
             })
             .inner;
+        if let Some(todo) = chosen {
+            self.set_todo(todo);
+        }
+        if let Some(i) = clicks.icon {
+            self.cycle(self.repo.commit(self.commits[i]).oid);
+        }
         clicks
             .double_clicked
             .map(|i| self.repo.commit(self.commits[i]).oid)
@@ -316,6 +470,7 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
 mod tests {
     use std::path::Path;
 
+    use eframe::egui;
     use parterre_core::Oid;
     use parterre_core::branches::Stuck;
 
@@ -424,6 +579,114 @@ mod tests {
             h.shows("Rebase stopped on conflicts in 1 file")
         });
         assert!(h.shows("Finish or abort it with git, or go to another worktree."));
+    }
+
+    /// The commits' subjects in `range`, newest first, and the full message of the newest.
+    fn log(dir: &Path, range: &str) -> (Vec<String>, String) {
+        let subjects = git(dir, &["log", "--format=%s", range]);
+        let message = git(dir, &["log", "-1", "--format=%B", range]);
+        (subjects.lines().map(str::to_owned).collect(), message)
+    }
+
+    /// Rebases, and waits for the branch to have `n` commits of its own.
+    fn rebase(h: &mut Harness, n: usize) {
+        h.click("Rebase");
+        h.until("the branch is rebased", |h| {
+            git(h.path(), &["rev-list", "--count", "up..main"]) == n.to_string()
+        });
+    }
+
+    #[test]
+    fn a_commit_squashed_by_its_key_makes_it_interactive() {
+        let mut h = Harness::new(repository());
+        open(&mut h);
+        h.click("Git command");
+        assert!(h.shows("git rebase up"), "{:?}", h.texts);
+        // Git replays feature and side work: the fix is already in up, the merge flattened.
+        h.click("side work");
+        h.key(egui::Key::S);
+        assert!(h.shows("git rebase --interactive up"), "{:?}", h.texts);
+        // Dropping feature and picking it again: side work melds into it once more.
+        h.click("feature");
+        h.key(egui::Key::D);
+        h.key(egui::Key::P);
+        rebase(&mut h, 1);
+        let (subjects, message) = log(h.path(), "up..main");
+        assert_eq!(subjects, ["feature"]);
+        assert_eq!(message, "feature\n\nside work");
+    }
+
+    #[test]
+    fn a_squash_into_a_dropped_commit_is_a_pick() {
+        let mut h = Harness::new(repository());
+        open(&mut h);
+        h.click("side work");
+        h.click("Squash");
+        h.click("feature");
+        h.click("Drop");
+        rebase(&mut h, 1);
+        let (subjects, message) = log(h.path(), "up..main");
+        assert_eq!(subjects, ["side work"]);
+        assert_eq!(message, "side work");
+    }
+
+    #[test]
+    fn many_commits_are_dropped_at_once() {
+        let mut h = Harness::new(repository());
+        open(&mut h);
+        // A range from the merge to the fix: Drop changes only those git replays.
+        h.click("Merge side");
+        h.click_with("fix", egui::Modifiers::SHIFT);
+        h.click("Drop");
+        // Ctrl+click takes feature out of the selection; Pick puts side work back.
+        h.click_with("feature", egui::Modifiers::COMMAND);
+        h.click("Pick");
+        rebase(&mut h, 1);
+        assert_eq!(log(h.path(), "up..main").0, ["side work"]);
+    }
+
+    #[test]
+    fn squash_is_greyed_out_with_nothing_kept_before_it() {
+        let mut h = Harness::new(repository());
+        open(&mut h);
+        h.click("Git command");
+        // feature is the first commit replayed; with side work too, the same.
+        h.click("feature");
+        h.click("Squash");
+        h.key(egui::Key::S);
+        h.click_with("side work", egui::Modifiers::COMMAND);
+        h.click("Squash");
+        assert!(h.shows("git rebase up"), "{:?}", h.texts);
+        assert!(!h.shows_part("Cannot squash"));
+        // side work alone has feature before it.
+        h.click("side work");
+        h.click("Squash");
+        assert!(h.shows("git rebase --interactive up"), "{:?}", h.texts);
+    }
+
+    #[test]
+    fn clicking_an_icon_cycles_its_commit_alone() {
+        let mut h = Harness::new(repository());
+        open(&mut h);
+        h.click("Git command");
+        // The icon column starts where the dialog's content does, as the line above the list.
+        let left = h.texts.iter().find(|(t, _)| t == "at").unwrap().1.left();
+        let icon = |h: &Harness, subject: &str| egui::pos2(left + 12.0, h.at(subject).y);
+        // feature, first: pick, then drop (it can't be squashed), then pick again.
+        let at = icon(&h, "feature");
+        h.click_at(at, 1);
+        assert!(h.shows("git rebase --interactive up"), "{:?}", h.texts);
+        h.click_at(at, 1);
+        assert!(h.shows("git rebase up"), "{:?}", h.texts);
+        // side work, clicked twice quickly: squash and drop, and no double click opens the log.
+        let at = icon(&h, "side work");
+        h.click_at(at, 2);
+        assert!(h.tool.log_request.is_none());
+        // Then pick, and squash.
+        h.click_at(at, 1);
+        h.click_at(at, 1);
+        rebase(&mut h, 1);
+        assert_eq!(log(h.path(), "up..main").1, "feature\n\nside work");
     }
 
     #[test]

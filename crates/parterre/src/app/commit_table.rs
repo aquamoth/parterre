@@ -4,6 +4,7 @@
 //! row shows ([`Row`]) and what its menu offers; the table keeps the selection in view. The
 //! columns can be resized by dragging the borders between their headings.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use eframe::egui::{
@@ -11,6 +12,7 @@ use eframe::egui::{
     vec2,
 };
 use parterre_core::columns::{ColumnWidths, Layout};
+use parterre_core::glyphs::Glyph;
 use parterre_core::log::Found;
 use parterre_core::log_graph::{GraphRow, LogGraph};
 
@@ -39,6 +41,9 @@ const NARROW_DATE_WIDTH: f32 = 118.0;
 /// and no less than this.
 const SUBJECT: usize = 2;
 const SUBJECT_MIN: f32 = 80.0;
+/// Width of the icon column before the graph, in tables that have one, and of its icons.
+const ICON_COLUMN: f32 = 24.0;
+const ICON: f32 = 14.0;
 
 /// The selected row of a commit table and its scroll position.
 #[derive(Debug, Default)]
@@ -48,6 +53,9 @@ pub struct CommitList {
     /// A second selected row, selected before `selected` (with Ctrl+ or Shift+click, in tables
     /// that allow a pair).
     pub other: Option<usize>,
+    /// Every selected row, in tables that select many ([`Select::Many`]); `selected` is where
+    /// a Shift+click selects from.
+    pub many: BTreeSet<usize>,
     /// Scroll the selected row into view in the next frame (only if it is out of view).
     pub reveal: bool,
     /// The scroll offset and the height of the rows in the last frame, for keeping the
@@ -63,6 +71,7 @@ impl CommitList {
     pub fn select(&mut self, i: Option<usize>) {
         self.selected = i;
         self.other = None;
+        self.many = i.into_iter().collect();
         self.reveal = true;
     }
 
@@ -72,7 +81,7 @@ impl CommitList {
     }
 
     pub fn is_selected(&self, i: usize) -> bool {
-        self.selected == Some(i) || self.other == Some(i)
+        self.selected == Some(i) || self.other == Some(i) || self.many.contains(&i)
     }
 
     /// A click on row `i`. A plain click selects it alone. With `add` (Ctrl or Shift held) it
@@ -99,6 +108,34 @@ impl CommitList {
         }
     }
 
+    /// A click on row `i` in a table that selects many. A plain click selects it alone; with
+    /// `toggle` (Ctrl held) it is added, or taken out if it was in; with `range` (Shift held)
+    /// the rows from the one clicked before to it are selected. A right-click (`secondary`)
+    /// keeps the selection if it is on a selected row, for its menu.
+    pub fn click_many(&mut self, i: usize, toggle: bool, range: bool, secondary: bool) {
+        self.other = None;
+        if secondary && self.is_selected(i) {
+            return;
+        }
+        if range && !secondary {
+            let from = self.selected.unwrap_or(i);
+            self.many = (from.min(i)..=from.max(i)).collect();
+            self.selected = Some(from);
+        } else if toggle && !secondary {
+            if self.many.remove(&i) {
+                if self.selected == Some(i) {
+                    self.selected = None;
+                }
+            } else {
+                self.many.insert(i);
+                self.selected = Some(i);
+            }
+        } else {
+            self.many = BTreeSet::from([i]);
+            self.selected = Some(i);
+        }
+    }
+
     /// The rows a page up or down moves: those in view, less one.
     pub fn page(&self) -> usize {
         ((self.height / ROW).floor() as usize)
@@ -110,6 +147,8 @@ impl CommitList {
 /// What a row shows.
 #[derive(Default)]
 pub struct Row<'a> {
+    /// In the icon column, in this colour, named on hover.
+    pub icon: Option<(Glyph, Color32, &'a str)>,
     /// The short hash; empty for a row that isn't a commit.
     pub hash: String,
     /// Behind the hash (the blame's age shading).
@@ -142,8 +181,20 @@ pub struct CommitTable<'a> {
     pub graph: &'a LogGraph,
     pub abbrev_len: usize,
     pub palette: &'a Palette,
+    pub select: Select,
+    /// An icon column before the graph ([`Row::icon`]).
+    pub icons: bool,
+}
+
+/// How many rows a table selects.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Select {
+    #[default]
+    One,
     /// Ctrl+ and Shift+click select a second row ([`CommitList::other`]).
-    pub pairs: bool,
+    Pair,
+    /// Ctrl+click adds rows and Shift+click a range ([`CommitList::many`]).
+    Many,
 }
 
 /// Fills the tooltip over row `i`'s subject.
@@ -155,6 +206,9 @@ pub struct Clicks {
     /// A click with either button (see [`CommitList::click`]).
     pub clicked: Option<usize>,
     pub double_clicked: Option<usize>,
+    /// A click on a row's icon ([`Row::icon`]), which neither selects the row nor, clicked
+    /// again quickly, double-clicks it.
+    pub icon: Option<usize>,
 }
 
 fn columns(layout: &Layout) -> Columns<'_> {
@@ -183,9 +237,11 @@ impl CommitTable<'_> {
         if self.graph.lanes == 0 {
             list.widths.reset(0, SUBJECT);
         }
+        let gutter = self.gutter();
         let defaults = self.default_widths(ui, c, &list.widths);
         let layout = |widths: &ColumnWidths, rect: Rect| {
-            widths.layout(&defaults, SUBJECT, SUBJECT_MIN, rect.left(), rect.width())
+            let (left, width) = (rect.left() + gutter, rect.width() - gutter);
+            widths.layout(&defaults, SUBJECT, SUBJECT_MIN, left, width)
         };
         let weak = ui.visuals().weak_text_color();
         let text = ui.visuals().text_color();
@@ -228,7 +284,8 @@ impl CommitTable<'_> {
             }
         }
         let mut clicks = Clicks::default();
-        let add = self.pairs && ui.input(|i| i.modifiers.command || i.modifiers.shift);
+        let modifiers = ui.input(|i| i.modifiers);
+        let add = self.select == Select::Pair && (modifiers.command || modifiers.shift);
         let output = area.show_rows(ui, ROW, self.rows, |ui, range| {
             let graph = self.graph.rows(range.clone());
             for (i, graph) in range.zip(&graph) {
@@ -266,8 +323,19 @@ impl CommitTable<'_> {
                 let w: [f32; 4] = std::array::from_fn(|k| cols.w[k + 1]);
                 let y = rect.center().y;
                 let painter = ui.painter();
-                let graph_rect = Rect::from_min_size(rect.min, vec2(cols.w[0], ROW));
+                let graph_rect =
+                    Rect::from_min_size(pos2(cols.x[0], rect.top()), vec2(cols.w[0], ROW));
                 paint_graph(painter, graph_rect, graph, c, bg);
+                if let Some((glyph, color, _)) = r.icon {
+                    let color = if r.greyed {
+                        color.gamma_multiply(0.6)
+                    } else {
+                        color
+                    };
+                    let at = pos2(rect.left() + gutter / 2.0, y);
+                    let icon = Rect::from_center_size(at, vec2(ICON, ICON));
+                    widgets::paint_glyph(painter, icon, glyph, color);
+                }
                 let put = |g: Arc<Galley>, x: f32, color| {
                     painter.galley(pos2(x, y - g.size().y / 2.0), g, color);
                 };
@@ -335,18 +403,33 @@ impl CommitTable<'_> {
                     && response.hover_pos().is_some_and(|p| author.contains(p));
                 let subject = Rect::from_x_y_ranges(x[1]..=x[1] + w[1], rect.y_range());
                 let over_subject = response.hover_pos().is_some_and(|p| subject.contains(p));
+                let icon =
+                    Rect::from_x_y_ranges(rect.left()..=rect.left() + gutter, rect.y_range());
+                let over_icon =
+                    r.icon.is_some() && response.hover_pos().is_some_and(|p| icon.contains(p));
+                if over_icon {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
                 let response = match &mut subject_tip {
+                    _ if over_icon => response.on_hover_text(r.icon.map_or("", |i| i.2)),
                     _ if over_author => {
                         response.on_hover_text(format!("{} <{}>", r.author, r.author_email))
                     }
                     Some(tip) if over_subject => response.on_hover_ui(|ui| tip(ui, i)),
                     _ => response,
                 };
-                if response.clicked() || response.secondary_clicked() {
+                if over_icon && response.clicked() {
+                    clicks.icon = Some(i);
+                } else if response.clicked() || response.secondary_clicked() {
                     clicks.clicked = Some(i);
-                    list.click(i, add, response.secondary_clicked());
+                    let secondary = response.secondary_clicked();
+                    if self.select == Select::Many {
+                        list.click_many(i, modifiers.command, modifiers.shift, secondary);
+                    } else {
+                        list.click(i, add, secondary);
+                    }
                 }
-                if response.double_clicked() {
+                if response.double_clicked() && !over_icon {
                     clicks.double_clicked = Some(i);
                 }
                 egui::Popup::context_menu(&response)
@@ -362,6 +445,11 @@ impl CommitTable<'_> {
         list.scroll = output.state.offset.y;
         list.height = output.inner_rect.height();
         clicks
+    }
+
+    /// The width of the icon column.
+    fn gutter(&self) -> f32 {
+        if self.icons { ICON_COLUMN } else { 0.0 }
     }
 
     /// The columns' widths in the width available, as the layout has them before the user
@@ -384,7 +472,7 @@ impl CommitTable<'_> {
         } else {
             let lanes = self.graph.lanes.min(GRAPH_MAX_LANES) as f32 * GRAPH_LANE;
             let others = widths.get(1, hash) + widths.get(3, author) + widths.get(4, date);
-            let room = ui.available_width() - others - GRAPH_SUBJECT_ROOM;
+            let room = ui.available_width() - self.gutter() - others - GRAPH_SUBJECT_ROOM;
             lanes.min(room.max(3.0 * GRAPH_LANE)) + 2.0 * GRAPH_PAD
         };
         [graph, hash, 0.0, author, date]
@@ -417,7 +505,7 @@ fn headings(ui: &Ui, head: Rect, cols: &Layout) {
     if title.size().x + 2.0 * GRAPH_PAD <= cols.w[0] {
         ui.painter().galley(
             pos2(
-                head.left() + GRAPH_PAD,
+                cols.x[0] + GRAPH_PAD,
                 head.center().y - title.size().y / 2.0,
             ),
             title,
@@ -590,6 +678,32 @@ mod tests {
             after(list(Some(5), Some(1)), 2, false, true),
             (Some(2), None)
         );
+    }
+
+    fn many(l: &CommitList) -> Vec<usize> {
+        l.many.iter().copied().collect()
+    }
+
+    #[test]
+    fn many_rows_are_added_toggled_and_ranged() {
+        let mut l = CommitList::default();
+        l.click_many(2, false, false, false);
+        assert_eq!(many(&l), [2]);
+        l.click_many(5, true, false, false);
+        assert_eq!(many(&l), [2, 5]);
+        // From the row clicked last.
+        l.click_many(3, false, true, false);
+        assert_eq!(many(&l), [3, 4, 5]);
+        l.click_many(4, true, false, false);
+        assert_eq!(many(&l), [3, 5]);
+        assert!(!l.is_selected(4));
+        // A right-click keeps a selection it is on, and replaces one it isn't.
+        l.click_many(3, false, false, true);
+        assert_eq!(many(&l), [3, 5]);
+        l.click_many(0, false, false, true);
+        assert_eq!(many(&l), [0]);
+        l.click_many(1, false, false, false);
+        assert_eq!(many(&l), [1]);
     }
 
     #[test]

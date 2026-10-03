@@ -55,6 +55,8 @@ pub enum Step {
         target: Target,
         button: Button,
         count: u32,
+        /// Held while clicking (`ctrl-click`, `shift-click`).
+        modifiers: Modifiers,
     },
     Hover(Target),
     /// Press on the target, move by this much and let go.
@@ -145,11 +147,12 @@ fn step(words: &[String]) -> Result<Step, String> {
             ))
         }
     };
-    let click = |button, count| -> Result<Step, String> {
+    let click = |button, count, modifiers| -> Result<Step, String> {
         Ok(Step::Click {
             target: target(args.first().ok_or("missing target")?)?,
             button,
             count,
+            modifiers,
         })
     };
     let step = match command {
@@ -164,15 +167,23 @@ fn step(words: &[String]) -> Result<Step, String> {
         }
         "click" => {
             count(1)?;
-            click(Button::Primary, 1)?
+            click(Button::Primary, 1, Modifiers::NONE)?
+        }
+        "ctrl-click" => {
+            count(1)?;
+            click(Button::Primary, 1, Modifiers::COMMAND)?
+        }
+        "shift-click" => {
+            count(1)?;
+            click(Button::Primary, 1, Modifiers::SHIFT)?
         }
         "double-click" => {
             count(1)?;
-            click(Button::Primary, 2)?
+            click(Button::Primary, 2, Modifiers::NONE)?
         }
         "right-click" => {
             count(1)?;
-            click(Button::Secondary, 1)?
+            click(Button::Secondary, 1, Modifiers::NONE)?
         }
         "hover" => {
             count(1)?;
@@ -303,6 +314,7 @@ mod tests {
                 target: Target::Node("v0.2.0".into()),
                 button: Button::Secondary,
                 count: 1,
+                modifiers: Modifiers::NONE,
             }
         );
         assert_eq!(
@@ -311,6 +323,16 @@ mod tests {
                 target: Target::Text("Create branch…".into()),
                 button: Button::Primary,
                 count: 1,
+                modifiers: Modifiers::NONE,
+            }
+        );
+        assert_eq!(
+            one("shift-click \"fix\""),
+            Step::Click {
+                target: Target::Text("fix".into()),
+                button: Button::Primary,
+                count: 1,
+                modifiers: Modifiers::SHIFT,
             }
         );
     }

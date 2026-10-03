@@ -53,6 +53,8 @@ pub struct Harness {
     pub dir: tempfile::TempDir,
     pub time: f64,
     pub events: Vec<Event>,
+    /// The modifier keys held.
+    pub modifiers: egui::Modifiers,
     /// The texts on screen in the last frame, and where.
     pub texts: Vec<(String, Rect)>,
 }
@@ -67,6 +69,7 @@ impl Harness {
             dir,
             time: 0.0,
             events: Vec::new(),
+            modifiers: egui::Modifiers::NONE,
             texts: Vec::new(),
         };
         h.frame();
@@ -144,11 +147,21 @@ impl Harness {
                     pos: at,
                     button: egui::PointerButton::Primary,
                     pressed,
-                    modifiers: egui::Modifiers::NONE,
+                    modifiers: self.modifiers,
                 });
                 self.frame();
             }
         }
+        self.frame();
+    }
+
+    /// A click on `text` with `modifiers` held.
+    pub fn click_with(&mut self, text: &str, modifiers: egui::Modifiers) {
+        self.modifiers = modifiers;
+        self.events.push(Event::ModifiersChanged(modifiers));
+        self.click(text);
+        self.modifiers = egui::Modifiers::NONE;
+        self.events.push(Event::ModifiersChanged(self.modifiers));
         self.frame();
     }
 
@@ -164,7 +177,7 @@ impl Harness {
                 physical_key: None,
                 pressed,
                 repeat: false,
-                modifiers: egui::Modifiers::NONE,
+                modifiers: self.modifiers,
             });
             self.frame();
         }

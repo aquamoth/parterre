@@ -456,11 +456,20 @@ impl Runner {
         match line.step {
             Step::Wait(seconds) => self.hold = (seconds * 60.0).round().max(0.0) as u32,
             Step::WaitFor(_) => {}
-            Step::Click { button, count, .. } => {
+            Step::Click {
+                button,
+                count,
+                modifiers,
+                ..
+            } => {
                 let at = target.unwrap_or_default();
                 self.glide(at, false);
                 // A moment over it, to show its hover.
                 self.queue.extend(empty(12));
+                if !modifiers.is_none() {
+                    self.queue
+                        .push_back(vec![Event::ModifiersChanged(modifiers)]);
+                }
                 let button = match button {
                     script::Button::Primary => egui::PointerButton::Primary,
                     script::Button::Secondary => egui::PointerButton::Secondary,
@@ -471,9 +480,13 @@ impl Runner {
                             pos: at,
                             button,
                             pressed,
-                            modifiers: egui::Modifiers::NONE,
+                            modifiers,
                         }]);
                     }
+                }
+                if !modifiers.is_none() {
+                    self.queue
+                        .push_back(vec![Event::ModifiersChanged(egui::Modifiers::NONE)]);
                 }
                 self.queue.extend(empty(12));
             }

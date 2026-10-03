@@ -58,7 +58,7 @@ use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{line_number, thousands, word_at};
 use parterre_core::{CommitIx, Oid, Repo};
 
-use super::commit_table::{CommitList, CommitTable, ROW, Row};
+use super::commit_table::{CommitList, CommitTable, ROW, Row, Select};
 use super::diff_window::{
     Colors, OVERVIEW, SCROLLBAR, colors, hscrollbar, message, overview_background, overview_scale,
     overview_scroll, overview_view, reveal,
@@ -1738,7 +1738,8 @@ impl BlameWindow {
             graph: history.map_or(&no_graph, |h| &h.graph),
             abbrev_len: self.repo.abbrev_len,
             palette: &env.palette,
-            pairs: false,
+            select: Select::One,
+            icons: false,
         };
         let (repo, spec) = (&*self.repo, &self.spec);
         let details = &mut self.details;
