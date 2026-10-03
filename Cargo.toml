@@ -34,7 +34,7 @@ eframe = { version = "0.36", default-features = false, features = [
 # Native folder picker: Windows' own dialog, macOS's NSOpenPanel, and on Linux the XDG desktop
 # portal (falling back to zenity), so no GTK is linked.
 rfd = "0.17"
-image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["gif", "png", "webp"] }
 tempfile = "3"
 # HTTPS for GitHub's API (open pull requests), behind parterre-core's `github` feature: rustls
 # with ring, checking certificates against the operating system's trust store (so it works

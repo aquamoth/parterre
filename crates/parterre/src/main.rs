@@ -15,8 +15,10 @@ mod frame_pacing;
 mod icon;
 mod menu;
 mod raster;
+mod record;
 mod render;
 mod scene;
+mod script;
 mod settings;
 mod system_theme;
 mod text_size;
@@ -129,6 +131,16 @@ struct Cli {
     /// Render the window to a PNG file and exit (for testing and documentation).
     #[arg(long, value_name = "FILE")]
     screenshot: Option<PathBuf>,
+
+    /// Run a workflow script (FILE, or - for standard input): click, type and take screenshots
+    /// of any window, dialog or menu, one step per line (see docs/screenshots.md), then exit.
+    #[arg(long, value_name = "FILE")]
+    script: Option<PathBuf>,
+
+    /// Record the window to FILE: a .gif, a .mp4, .webm, .mkv or .mov (made by ffmpeg), or a
+    /// folder of PNG frames. Without --script, until the window is closed.
+    #[arg(long, value_name = "FILE")]
+    record: Option<PathBuf>,
 
     /// Start with the whole graph in view instead of at HEAD.
     #[arg(long)]
@@ -316,6 +328,21 @@ fn main() -> ExitCode {
     console::attach_parent();
     let mut cli = Cli::parse();
     cli.path = cli.path.take().map(repair_quoted_root);
+    let script = match cli.script.as_deref().map(read_script).transpose() {
+        Ok(script) => script,
+        Err(e) => {
+            eprintln!("parterre: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let record = match cli.record.as_deref().map(record::Format::of).transpose() {
+        Ok(format) => cli.record.clone().zip(format),
+        Err(e) => {
+            eprintln!("parterre: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let scripted = cli.screenshot.is_some() || script.is_some();
     // Why the repository named on the command line didn't open, when the window says so.
     let mut open_error = None;
     let repo = match &cli.path {
@@ -324,11 +351,7 @@ fn main() -> ExitCode {
             // In a terminal or a scripted run, say why and stop. Started from Explorer's menu, a
             // desktop entry or a shortcut there is no one to read stderr, so the window opens
             // and shows it.
-            Err(e)
-                if cli.export.is_some()
-                    || cli.screenshot.is_some()
-                    || std::io::stderr().is_terminal() =>
-            {
+            Err(e) if cli.export.is_some() || scripted || std::io::stderr().is_terminal() => {
                 eprintln!("parterre: {e}");
                 return ExitCode::FAILURE;
             }
@@ -358,9 +381,9 @@ fn main() -> ExitCode {
         };
     }
 
-    // A screenshot run exits by itself and reports where it saved; an interactive window must
-    // not be tied to the terminal it was started from.
-    if cli.screenshot.is_none() {
+    // A screenshot run exits by itself and reports where it saved, as a recording does; an
+    // interactive window must not be tied to the terminal it was started from.
+    if !scripted && record.is_none() {
         console::detach();
     }
 
@@ -385,6 +408,15 @@ fn main() -> ExitCode {
         cli.demo_drag.map(|(x, y)| egui::vec2(x, y)),
         cli.zoom,
     );
+    if let Some(lines) = script {
+        let mut runner = automation::Runner::new(lines);
+        // Taken once the script has run.
+        if let Some(path) = automation.screenshot.take() {
+            runner.push_screenshot(path);
+        }
+        automation.script = Some(runner);
+    }
+    automation.record = record.map(|(path, format)| record::Recorder::new(path, format));
     automation.demo_node = cli.demo_node.clone();
     automation.demo_open = cli.demo_open.clone();
     automation.demo_log = cli.demo_log.clone();
@@ -409,12 +441,24 @@ fn main() -> ExitCode {
         }),
     );
     match result {
+        Ok(()) if automation::failed() => ExitCode::FAILURE,
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("parterre: {e}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// The steps of a workflow script, from a file or (`-`) standard input.
+fn read_script(path: &std::path::Path) -> Result<Vec<script::Line>, String> {
+    let text = if path.as_os_str() == "-" {
+        std::io::read_to_string(std::io::stdin())
+    } else {
+        std::fs::read_to_string(path)
+    }
+    .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    script::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Applies command-line options on top of the stored settings.

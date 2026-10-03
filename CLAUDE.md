@@ -20,3 +20,6 @@ Commands (Rust from `~/.cargo/bin`):
 - `cargo run --release -p parterre-core --example stats -- <repo>` – graph sizes and timings.
 - `cargo run --release -- <repo> --screenshot out.png` – render one frame to a PNG (for checking
   visuals without a human).
+- `scripts/screenshots.sh /tmp/shots` – every window, dialog and menu of a demo repo as PNGs.
+  `--script FILE` drives the window (click by on-screen text, type, crop screenshots to a dialog
+  or menu) and `--record out.gif|out.mp4` records it, for PR previews; see `docs/screenshots.md`.

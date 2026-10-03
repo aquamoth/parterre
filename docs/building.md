@@ -225,6 +225,9 @@ and the other pages) opens the ☰ menu, a toolbar popover or the settings. `--d
 `side-by-side`, `details-below`, `files-right`) picks its layout. Screenshot runs ignore the
 saved settings and don't save any. Without `--theme` the theme follows the desktop.
 
+For any other window, dialog or menu, for a whole set at once, and for recordings, see
+[screenshots and recordings](screenshots.md).
+
 ## Icon
 
 `crates/parterre-core/src/icon.rs` draws the app icon in code. The window icon is rasterised
