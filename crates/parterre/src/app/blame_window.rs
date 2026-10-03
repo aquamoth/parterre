@@ -40,6 +40,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
 
+use super::syntax;
 use eframe::egui::text::{CCursor, LayoutJob, TextFormat};
 use eframe::egui::{
     self, Color32, FontId, Id, Key, Modifiers, PopupCloseBehavior, Rect, RectAlign, RichText,
@@ -52,6 +53,7 @@ use parterre_core::file_history::{FileHistory, FileLog, HistoryRow, Source};
 use parterre_core::find;
 use parterre_core::git::{Cancel, CommitDetails, Git};
 use parterre_core::glyphs;
+use parterre_core::highlight::{self, Spans};
 use parterre_core::log_graph::LogGraph;
 use parterre_core::repo::cmp_refs_for_display;
 use parterre_core::revgraph::GraphOptions;
@@ -166,10 +168,16 @@ struct Ready {
     /// Per origin: the commit is in the snapshot, so the log can show it.
     in_repo: Vec<bool>,
     commits: usize,
+    /// The syntax spans of every line (#209), when the file's language is known.
+    syntax: Option<Vec<Spans>>,
 }
 
 impl Ready {
-    fn new(blame: Blame, repo: &Repo) -> Ready {
+    fn new(blame: Blame, repo: &Repo, path: &str) -> Ready {
+        let syntax = highlight::language_of(path).map(|language| {
+            let text: Vec<&str> = blame.lines.iter().map(|l| l.raw.as_str()).collect();
+            highlight::highlight(language, &text.join("\n"))
+        });
         let ages = blame.ages();
         let (dates, in_repo) = blame
             .origins
@@ -186,6 +194,7 @@ impl Ready {
             ages,
             dates,
             in_repo,
+            syntax,
         }
     }
 }
@@ -494,7 +503,7 @@ impl BlameWindow {
         std::thread::spawn(move || {
             let result = git
                 .blame(&spec, options)
-                .map(|blame| Ready::new(blame, &repo))
+                .map(|blame| Ready::new(blame, &repo, &spec.path))
                 .map_err(|e| e.to_string());
             let _ = tx.send(result);
             repaint.request_repaint();
@@ -1429,7 +1438,26 @@ impl BlameWindow {
                 );
                 let clip = Rect::from_x_y_ranges(text_x..=rect.right(), rect.y_range())
                     .intersect(ui.clip_rect());
-                let g = painter.layout_no_wrap(line.text.clone(), font.clone(), c.text);
+                // The line in its syntax colours, when it has any.
+                let g = match ready.syntax.as_ref().and_then(|s| s.get(i)) {
+                    Some(spans) if !spans.is_empty() => {
+                        let dark = ui.visuals().dark_mode;
+                        let spans = syntax::in_text(&line.raw, &line.text, spans);
+                        let mut job = LayoutJob::default();
+                        for (piece, kind, _) in syntax::sections(&line.text, &[], &spans) {
+                            let format = syntax::text_format(
+                                kind,
+                                font.clone(),
+                                dark,
+                                c.text,
+                                Color32::TRANSPARENT,
+                            );
+                            job.append(&line.text[piece], 0.0, format);
+                        }
+                        painter.layout_job(job)
+                    }
+                    _ => painter.layout_no_wrap(line.text.clone(), font.clone(), c.text),
+                };
                 let at = pos2(text_x - hoff, y - g.size().y / 2.0);
                 let text = painter.with_clip_rect(clip);
                 let x = |col| at.x + g.pos_from_cursor(CCursor::new(col)).min.x;
@@ -2487,7 +2515,7 @@ mod tests {
         };
         let settings = BlameWindowSettings::default();
         let mut w = BlameWindow::new(1, repo.clone(), spec, &settings);
-        w.load = Load::Ready(Box::new(Ready::new(sample(), &repo)));
+        w.load = Load::Ready(Box::new(Ready::new(sample(), &repo, "")));
         w
     }
 
@@ -2933,7 +2961,7 @@ mod tests {
                 commits,
             })
         };
-        w.loaded(Ready::new(sample(), &repo));
+        w.loaded(Ready::new(sample(), &repo, ""));
         w.listing = log(vec![logged(B, 200, &[GONE]), logged(GONE, 150, &[A])]);
         w.settle();
         // Listed, though it owns no lines.
@@ -2947,7 +2975,7 @@ mod tests {
         ]
         .concat();
         w.selection = Some(Selection::lines(1, 3));
-        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo));
+        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo, ""));
         w.listing = log(vec![logged(A, 100, &[])]);
         w.settle();
         assert_eq!(w.chosen, None);
@@ -2986,7 +3014,7 @@ mod tests {
             })
             .collect();
         let repo = w.repo.clone();
-        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo));
+        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo, ""));
         frame(&ctx, &mut w, Vec::new());
         w.choose_commit(Some(Oid::from_hex(B).unwrap()));
         assert_eq!(span(&w), Some((250, 250)));
@@ -3318,7 +3346,7 @@ mod tests {
             })
             .collect();
         let repo = w.repo.clone();
-        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo));
+        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo, ""));
         frame(&ctx, &mut w, Vec::new());
         // Scrolled so that line 100 is at the top.
         let row_h = Metrics::new(&ctx, 300, w.repo.abbrev_len).row_h;
@@ -3424,7 +3452,7 @@ mod tests {
         w.show_history = false;
         let out: String = (1..=300).map(|i| entry(A, i, i, 100, "", "a")).collect();
         let repo = w.repo.clone();
-        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo));
+        w.loaded(Ready::new(Blame::parse(out.as_bytes()).unwrap(), &repo, ""));
         w
     }
 

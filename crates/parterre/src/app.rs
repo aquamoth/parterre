@@ -29,6 +29,7 @@ mod pull_requests;
 mod rebase;
 mod reset;
 mod settings_window;
+mod syntax;
 #[cfg(test)]
 mod tool_harness;
 mod toolbar;

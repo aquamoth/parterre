@@ -22,6 +22,7 @@
 
 use std::sync::{Arc, mpsc};
 
+use super::syntax;
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
     self, Color32, CornerRadius, FontId, Key, Modifiers, Rect, RichText, ScrollArea, Sense, Stroke,
@@ -36,6 +37,7 @@ use parterre_core::file_diff::{
 };
 use parterre_core::find;
 use parterre_core::glyphs;
+use parterre_core::highlight::{self, Spans};
 use parterre_core::text::word_at;
 use parterre_core::{Oid, Repo};
 
@@ -122,6 +124,9 @@ struct Ready {
     diff: FileDiff,
     notes: Vec<Note>,
     options: DiffOptions,
+    /// The syntax spans of every line of the old and the new version (#209), when the
+    /// file's language is known. They don't depend on the options, so they stay.
+    syntax: Option<[Vec<Spans>; 2]>,
 }
 
 impl Ready {
@@ -131,12 +136,31 @@ impl Ready {
             _ => FileDiff::default(),
         };
         let notes = diff.notes(&loaded, options.whitespace);
+        let syntax = match (&loaded.content, highlight::language_of(loaded.spec.path())) {
+            (Content::Text { old, new, .. }, Some(language)) => Some([
+                highlight::highlight(language, old),
+                highlight::highlight(language, new),
+            ]),
+            _ => None,
+        };
         Ready {
             loaded,
             diff,
             notes,
             options,
+            syntax,
         }
+    }
+
+    /// The diff again, with other options. The syntax spans stay.
+    fn rediff(&mut self, options: DiffOptions) {
+        let diff = match &self.loaded.content {
+            Content::Text { old, new, .. } => FileDiff::new(old, new, options),
+            _ => FileDiff::default(),
+        };
+        self.notes = diff.notes(&self.loaded, options.whitespace);
+        self.diff = diff;
+        self.options = options;
     }
 }
 
@@ -395,8 +419,7 @@ impl DiffWindow {
         if let Load::Ready(ready) = &mut self.load
             && ready.options != self.options
         {
-            let loaded = ready.loaded.clone();
-            **ready = Ready::new(loaded, self.options);
+            ready.rediff(self.options);
             // The rows change with the options; the selection was made on the old ones.
             self.selection = None;
             self.dirty = true;
@@ -1037,6 +1060,7 @@ impl DiffWindow {
             return;
         };
         let diff = &ready.diff;
+        let syntax = &ready.syntax;
         let font = FontId::monospace(FONT_SIZE);
         let row_h = ui.fonts_mut(|f| f.row_height(&font)).ceil() + 3.0;
         let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
@@ -1185,7 +1209,11 @@ impl DiffWindow {
                                 query,
                                 current: current_at(r, column == Column::Old),
                             };
-                            let at = paint_line(ui, half, line, numbers, &geometry, &marks, c);
+                            let highlights =
+                                line.and_then(|l| spans_of(syntax, l, column == Column::Old));
+                            let at = paint_line(
+                                ui, half, line, numbers, &geometry, &marks, highlights, c,
+                            );
                             (column, half, gutter, at)
                         })
                         .collect();
@@ -1212,7 +1240,8 @@ impl DiffWindow {
                         query,
                         current: current_at(r, row.new.is_none()),
                     };
-                    let at = paint_line(ui, rect, line, numbers, &geometry, &marks, c);
+                    let highlights = line.and_then(|l| spans_of(syntax, l, row.new.is_none()));
+                    let at = paint_line(ui, rect, line, numbers, &geometry, &marks, highlights, c);
                     // The version is settled below, when a press starts choosing.
                     vec![(Column::New, rect, 2.0 * gutter, at)]
                 };
@@ -1616,8 +1645,18 @@ struct Marks<'a> {
     current: Option<std::ops::Range<usize>>,
 }
 
+/// The syntax spans of a line, from those of its version (`old` or new).
+fn spans_of<'a>(
+    syntax: &'a Option<[Vec<Spans>; 2]>,
+    line: &DiffLine,
+    old: bool,
+) -> Option<&'a Spans> {
+    syntax.as_ref()?[usize::from(!old)].get(line.no as usize - 1)
+}
+
 /// Paints one line (or a filler, for `None`) into `rect`: line numbers, marker, text, and
 /// what is marked in it. Returns where the text went.
+#[allow(clippy::too_many_arguments)]
 fn paint_line(
     ui: &Ui,
     rect: Rect,
@@ -1625,6 +1664,7 @@ fn paint_line(
     numbers: Numbers,
     g: &Geometry,
     marks: &Marks,
+    highlights: Option<&Spans>,
     c: &Colors,
 ) -> Option<TextAt> {
     let (sel, whole) = match marks.chosen.clone() {
@@ -1678,26 +1718,13 @@ fn paint_line(
     }
     x += MARKER;
     let mut job = LayoutJob::default();
-    let format = |background: Color32| TextFormat {
-        font_id: g.font.clone(),
-        color: c.text,
-        background,
-        ..Default::default()
-    };
-    let mut at = 0;
-    for span in &line.spans {
-        if span.start > at {
-            job.append(
-                &line.text[at..span.start],
-                0.0,
-                format(Color32::TRANSPARENT),
-            );
-        }
-        job.append(&line.text[span.clone()], 0.0, format(word));
-        at = span.end;
-    }
-    if at < line.text.len() {
-        job.append(&line.text[at..], 0.0, format(Color32::TRANSPARENT));
+    // The syntax colours, with the changed words' background over them.
+    let dark = ui.visuals().dark_mode;
+    let spans = highlights.map_or_else(Vec::new, |s| syntax::in_text(&line.raw, &line.text, s));
+    for (piece, kind, changed) in syntax::sections(&line.text, &line.spans, &spans) {
+        let background = if changed { word } else { Color32::TRANSPARENT };
+        let format = syntax::text_format(kind, g.font.clone(), dark, c.text, background);
+        job.append(&line.text[piece], 0.0, format);
     }
     let galley = painter.layout_job(job);
     let clip = Rect::from_min_max(pos2(x, rect.top()), rect.max).intersect(ui.clip_rect());
