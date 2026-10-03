@@ -1,11 +1,11 @@
 # parterre
 
-A standalone, fast, native re-creation of TortoiseGit's **Revision Graph**: a compact,
-tree-like picture of how the branches and tags of a git repository relate, in a resizable window
-that runs on Linux and Windows. On top of the TortoiseGit look you can rearrange the graph by
-hand.
+Every branch, worktree and pull request of a git repository in one picture, and the git
+operations to act on them. A fast, native revision graph for Linux, Windows and macOS,
+inspired by TortoiseGit's **Revision Graph**: it shows how your branches, tags, remotes,
+worktrees and open GitHub pull requests relate, and lets you rearrange the graph by hand.
 
-![parterre showing a demo repository](https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/demo.png)
+![parterre showing a repository with branches, tags, worktrees and pull requests](https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/hero-light.png)
 
 ```sh
 cargo install --locked parterre    # build from source
@@ -13,12 +13,12 @@ cargo binstall parterre            # or download the release binary
 parterre [PATH]                    # show the repository containing PATH (default: .)
 ```
 
-parterre needs `git` on `PATH` at runtime; it reads the repository with `git log` and
-`git for-each-ref` and never writes to it. `cargo install` installs only the binary, without a
-desktop entry or icon; installers and packages are on the
-[releases page](https://github.com/aquamoth/parterre/releases).
+parterre needs `git` on `PATH` at runtime; everything it reads and changes, it does with git.
+`cargo install` installs only the binary, without a desktop entry or icon; installers and
+packages are on the [releases page](https://github.com/aquamoth/parterre/releases).
 
-Usage, keys and options are in the [README on GitHub](https://github.com/aquamoth/parterre#readme).
+Features are in the [README on GitHub](https://github.com/aquamoth/parterre#readme), and usage,
+keys and options in the [user guide](https://github.com/aquamoth/parterre/blob/main/docs/usage.md).
 
 ## License
 

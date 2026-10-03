@@ -1,224 +1,192 @@
 # parterre
 
-A standalone, fast, native Git viewer, inspired by TortoiseGit's **Revision Graph**: a compact,
-tree-like picture of how the branches and tags of a git repository relate, in a resizable window
-that runs on Linux and Windows (and should run on macOS).
+[![Latest release](https://img.shields.io/github/v/release/aquamoth/parterre?include_prereleases&sort=semver)](https://github.com/aquamoth/parterre/releases)
+[![crates.io](https://img.shields.io/crates/v/parterre)](https://crates.io/crates/parterre)
+[![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue)](LICENSE)
 
-A parterre is a formal garden laid out in patterns, designed above all to be seen from the upper
-floors of the house. This parterre gives you that view of a repository: every branch at once,
-from above.
+**Every branch, worktree and pull request of a git repository in one picture, and the git
+operations to act on them.**
 
-You can rearrange the Revision Graph by hand to build a better understanding of the repository. 
-Drag a node and the rest of the graph gives way a little: neighbours follow along their edges 
-and nodes in the way move aside, like weak magnets. Other drag modes move only the selected nodes, 
-or a whole subtree. Edges at moved nodes are routed afresh through the gaps between nodes, 
-so they lose bends they no longer need and go around nodes that are now in the way.
+parterre is a fast, native revision graph for Linux, Windows and macOS, inspired by
+TortoiseGit's *Revision Graph*. It leaves out the commits in between and shows how your branches,
+tags, remotes, worktrees and open pull requests relate.
 
-![parterre showing a demo repository](docs/images/demo.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
+  <img alt="parterre showing a repository with local and remote branches, tags, three worktrees and four open pull requests; the pointer rests on pull request #146, whose tooltip names its title, author and branches" src="docs/images/hero-light.png">
+</picture>
 
-_(Image displays the graph with local branches in green, remote branches in orange, 
-tags in yellow, and the current branch in red.)_
+A parterre is a formal garden laid out in patterns, made to be seen from the upper floors of
+the house. This one gives you that view of a repository: every branch at once, from above.
 
-## Installing
+## Worktrees, all of them, in one window
 
-Download the archive for your system from the
-[releases page](https://github.com/aquamoth/parterre/releases) and put `parterre` on your
-`PATH`. On Windows the `.msi` next to it does that for you, and adds a Start menu entry and
-*Revision Graph* to Explorer's context menu for folders; it installs for the
-current user without asking for admin rights. On Linux the `.deb` (Debian, Ubuntu) and `.rpm`
-(Fedora, openSUSE) do the same, with git, a menu entry and *Revision Graph* in the context menu
-of Nautilus, Dolphin and Nemo:
+Running several agents or tasks at once, each in a worktree of its own? parterre shows every
+worktree of the repository in the same graph, with its folder on the commit it has checked out.
+Detached worktrees, such as one for reviewing a pull request, show in cyan.
+
+- **Go to** a worktree to make it the one parterre works in. The layout and your open windows
+  stay, since it is the same history.
+- **Add** a worktree at any commit, on a new branch that can track a remote one, and
+  **delete** one you are done with.
+- **Open** a worktree's folder in your file manager or a terminal, straight from the graph.
+- **Merge, rebase, cherry-pick, reset and revert** the open worktree's branch from the graph
+  and the log. Each dialog shows what will change and the git command it runs, and can stash
+  your uncommitted changes first and put them back after. A rebase lets you pick, squash or
+  drop each commit. To merge your branch into `main` as a pull request would, choose
+  fast-forward, merge commit, rebase and fast-forward, or semi-linear.
+- A worktree stopped in a rebase, merge or cherry-pick shows it in the graph, and a banner
+  says what is stopped there and which files conflict.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/worktrees-dark.png">
+  <img alt="The context menu of a branch checked out in another worktree: create, switch, rebase, merge, cherry-pick and reset; add, go to and delete worktrees; open the worktree in the file system or a terminal" src="docs/images/worktrees-light.png">
+</picture>
+
+Turn worktrees on with the folder button in the toolbar.
+
+## Pull requests on the commits they propose
+
+When `origin` is on GitHub and the [GitHub CLI](https://cli.github.com) is signed in
+(`gh auth login`), parterre labels each open pull request on its branch's commit. Drafts are
+greyed out. Hover a label for the title, author and branches, and click it to open the pull
+request in your browser. The node's menu opens it too.
+
+parterre asks GitHub only about the branches you have fetched, at most once a minute per
+repository, and keeps well inside your hourly API budget. Nothing is sent without signing in,
+and apart from this, parterre doesn't use the network.
+
+## Upstreams, ahead and behind, and rebases
+
+Hover or select a branch, and the commits between it and its upstream light up: green
+ahead, blue behind, red where a force push would lose commits, and grey dashed where a rebase
+replaced them. The status bar shows `fix/cart-rounding 5|2` (ahead|behind), and the log
+`↑5 ↓2`.
+
+A branch that was rebased since it was pushed gets a **dashed arrow to its upstream**. A
+worktree in the middle of a rebase gets an **orange zigzag** from where it has got to back to
+the branch being rebased.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/rebase-dark.png">
+  <img alt="fix/cart-rounding, rebased onto main but not pushed, is selected: a dashed arrow runs to origin/fix/cart-rounding, its new commits are green and the replaced ones grey dashed. On the left, an orange zigzag joins feature/checkout-redesign to its worktree, which is stopped part-way through a rebase" src="docs/images/rebase-light.png">
+</picture>
+
+## Arrange it your way
+
+Drag a node and the graph gives way, as if held by weak magnets: neighbours follow along their
+edges and nodes in the way move aside. Edges find new routes through the gaps. You can also
+move only the selected nodes, or a whole subtree, undo with `Ctrl+Z`, and press `R` to put
+everything back. Turn on *Remember moved nodes* (*Settings → Dragging*) to keep your
+arrangement for each repository.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/drag-dark.gif">
+  <img alt="Dragging nodes: the graph gives way, a subtree moves as one, and R returns everything to the layout" src="docs/images/drag-light.gif">
+</picture>
+
+## History, diffs and blame
+
+Double-click a node for its **log**, or select two for the commits between them. From there,
+open a file's **diff**, side by side or unified, with changed words marked. Or **blame** it,
+with the history of the file below and each line shaded by age. You can also **compare** any
+two commits, or a commit with your working tree.
+
+<table>
+  <tr>
+    <td width="33%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/log-dark.png">
+        <img alt="The log window: a branch's history with a graph column, branch labels with ahead and behind counts, the selected commit's details and changed files" src="docs/images/log-light.png">
+      </picture>
+    </td>
+    <td width="33%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/diff-dark.png">
+        <img alt="The diff window, side by side, with the changed words marked" src="docs/images/diff-light.png">
+      </picture>
+    </td>
+    <td width="33%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/blame-dark.png">
+        <img alt="The blame window: each line's commit, author and date, shaded by age, over the file's history" src="docs/images/blame-light.png">
+      </picture>
+    </td>
+  </tr>
+</table>
+
+## Install
+
+Download parterre for your system from the
+[releases page](https://github.com/aquamoth/parterre/releases):
+
+| System | Package | Adds |
+|---|---|---|
+| Windows | `.msi` | Start menu entry, *Revision Graph* in Explorer's folder menu; no admin rights needed |
+| Debian, Ubuntu | `.deb` | menu entry, *Revision Graph* in Nautilus, Dolphin and Nemo |
+| Fedora, openSUSE | `.rpm` | the same |
+| Linux, macOS, Windows | `.tar.gz` / `.zip` | just the program: put `parterre` on your `PATH` |
 
 ```sh
-sudo apt install ./parterre_*_amd64.deb   # or: sudo dnf install ./parterre-*.x86_64.rpm
+sudo apt install ./parterre_*_amd64.deb      # or: sudo dnf install ./parterre-*.x86_64.rpm
 ```
 
-The Linux build needs glibc 2.35 or newer (Debian 12, Ubuntu 22.04 and later). With a
-Rust toolchain you can also install it from crates.io:
+With a Rust toolchain:
 
 ```sh
-cargo install --locked parterre    # build from source; installs only the binary
-cargo binstall parterre            # or download the release binary with cargo-binstall
+cargo binstall parterre            # the release binary, with cargo-binstall
+cargo install --locked parterre    # or build it from source
 ```
 
-parterre also needs `git`. More channels are on their way; see
-[docs/distribution.md](docs/distribution.md).
+parterre runs the `git` you already have, which must be on your `PATH`. The `.deb` and `.rpm`
+install it if needed; on Windows, install [Git for Windows](https://git-scm.com/download/win)
+first. The Linux build needs glibc 2.35 or newer (Debian 12, Ubuntu 22.04 and
+later).
 
-## Usage
+## Quick start
 
 ```sh
-parterre [PATH]                    # open the repository containing PATH (default: the
-                                   # current directory's, or none: the window asks for one)
-parterre --mode branches           # also show every fork point and merge
-parterre --mode all --no-remotes   # every commit, local branches and tags only
-parterre --look classic            # straight, unbundled edges like TortoiseGit
-parterre --hide 'pipeline/*,release/*'        # leave out build and release branches
-parterre --branch-color 'feature/*=#9b59b6'   # colour branches by name (repeatable)
-parterre --pull-requests           # show GitHub pull requests even if turned off in settings
-parterre --worktrees               # show worktrees even if turned off in settings
-parterre --export graph.svg        # write an SVG without opening a window
-parterre --export graph.png --zoom 2   # or a PNG (or .webp), here at 200%
-parterre --help                    # all options
+cd ~/src/my-project
+parterre                           # the repository you are in
+parterre ~/src/other --worktrees   # another one, with its worktrees shown
 ```
-
-In the window:
 
 | Do | To |
 |---|---|
-| Drag a node | Move it, with the rest of the selection it belongs to. In *Adapt*, the graph gives way and keeps children above their parents. |
-| `1` / `2` / `3` | Drag mode *Adapt* (the graph gives way) / *Free* (nothing else moves) / *Subtree* (take along everything that grows out of it) |
-| Click, `Ctrl`+click, `Shift`+click a node | Select it / toggle it / add it to the selection |
-| `Shift`+drag the background | Select the nodes in a rectangle |
-| Hover / click an edge | List the commits collapsed into it / keep it highlighted while you look around |
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo a move |
-| Drag the background, wheel, Shift+wheel | Pan |
-| Ctrl+wheel, pinch, `+` `-` `0` | Zoom |
-| Ctrl+wheel, pinch anywhere but over the graph | Text size of every window (also *Settings → Appearance*, and `Ctrl`+`+` `-` `0` in the log, compare, diff, blame and settings windows). The graph keeps its own zoom. |
-| `F`, double-click the background | Fit the whole graph |
-| `Home` / `H` | Go to HEAD |
-| `Ctrl+F`, then `Enter` / `F3` | Find branches, tags, hashes, subjects or authors |
-| `L`, double-click a node | Show log: the node's history, or with two nodes selected the commits between them (first..second) |
-| Click a pull request's number | Open the pull request on GitHub |
-| Right-click a node | Show log; compare with HEAD, two nodes, a branch's upstream, or the commit marked for comparison; open its pull requests; open its worktrees in the file system or a terminal; copy its hash, ref names or worktree folder's path; select its subtree; return it to the layout |
-| `R` | Return all nodes to the layout |
-| `Esc` | Clear the selection |
-| `F5` | Reload the repository (it also reloads by itself when branches, tags or HEAD change) |
-| `Ctrl+O` / `Ctrl+W` | Open / close a folder; the ☰ menu also lists the recent ones |
+| Double-click a node, or `L` | Show its log |
+| Right-click a node | Compare, branch, merge, rebase, worktrees, open, copy |
+| Drag a node; `1` `2` `3` | Move it; the graph gives way / only the selection / the whole subtree |
+| `F`, `Home` | Fit the whole graph, go to HEAD |
+| `Ctrl+F` | Find branches, tags, hashes, subjects or authors |
+| `F5` | Reload (parterre also reloads by itself when refs change) |
 | `Ctrl+,` | Settings |
 
-The toolbar holds what you use every day, the ☰ menu has all of that and more, and
-*Settings* (`Ctrl+,`) the rest; the graph shows every change while the settings stay open.
-TortoiseGit's options are all there:
-- show branchings and merges
-- local or remote branches
-- tags, and "show all tags"
-- arrows pointing towards merges
-- zoom, the overview map and export
-
-parterre adds:
-- four directions and three vertical placements
-- edge bundling, row splitting and curved edges
-- first-parent-only view, and stash or other refs
-- hiding branches by wildcard, e.g. `pipeline/*` (the toolbar's filter options, or *Settings → Filters*). A hidden branch
-  still shows where the history of a shown branch contains it, so only leaves vanish.
-- colours by branch name, e.g. `feature/*` purple (*Settings → Branch colours*)
-- open pull requests on GitHub, as labels on the commits they propose, when `origin` is on
-  GitHub and [`gh`](https://cli.github.com) is signed in (`gh auth login`). Click one to open
-  it in the browser; the toolbar's pull-request button hides them, and if they can't be
-  shown, turning them on there says why. A pull request shows once
-  its branch has been fetched and its base branch is shown. parterre asks GitHub about the
-  fetched branches only, at most once a minute per repository, and never without signing in.
-- worktrees (off by default; the toolbar's folder button), marked with a folder
-  and first on their commits, in the graph and in the log: the branches they have checked
-  out, even where hidden, and detached ones in cyan, with the folder's name in italics. A
-  worktree whose folder is gone gets a crossed-out folder. Right-click one to open it in the
-  file system or a terminal.
-- upstreams: hover or select a branch (or its upstream) and the commits between the two are
-  coloured: green ahead, blue behind, red lost to a force push, grey dashed replaced by a
-  rebase. A rebased branch has a dashed edge to its upstream. The status bar shows
-  `branch 3|2` (ahead|behind), the log's branch labels ↑3 ↓2, and *Compare → Upstream*
-  compares the two. On by default (*Settings → Advanced*).
-- light and dark themes
-- rearranging by hand: drag modes, multi-selection, undo
-- filters kept for each repository, shared by its worktrees
-- settings exported to a file and imported on another computer or by a team, from parterre's
-  own or a repository's filters, and reset to the defaults (*Settings → Manage*). The files are
-  versioned JSON: older and newer versions of parterre read all they know of them.
-
-*Show log* opens a window listing a node's history, or the commits between two selected
-nodes, like TortoiseGit's log: the selected commit's message and the files it changed, which
-you can sort and filter. In it, the arrow keys move through the commits, `F5` reloads and
-`Esc` closes it. Four layouts arrange its panes: stacked as in TortoiseGit, side by side,
-details and files below, or files on the right. Pick one in the window's header or in
-*Settings → Appearance*; the dividers between the panes are remembered for each layout.
-
-Double-click a changed file, or select some (`Ctrl`+click, `Shift`+click) and press `Enter`, to
-see its **file diff** in a window of its own; several can be open at once. The diff is
-side by side or unified (`Ctrl+D`), with changed words marked, unchanged stretches folded
-(click a fold to open it), an overview of the changes on the right, and long lines that
-scroll sideways. `Ctrl+Down` / `Ctrl+Up` (or `F7` / `Shift+F7`) move between changes. The
-toolbar also picks how changed words are found and whether whitespace counts. Drag over the
-old or the new text (double-click for a word, `Shift`+click to extend, `Ctrl+A` for all) or
-click line numbers for whole lines, then `Ctrl+C` copies it as it is in the file, tabs kept.
-In the unified form you choose in one version: the one of the line you start on (a removed
-line, or the old numbers, for the old version; `Ctrl` on an unchanged line for the old one
-too), shown by its line number lighting up on the row under the pointer. Lines of the other
-version are left out. Files go through git's textconv filters, as `git show` does; binary files
-and submodules say what changed instead.
-
-**Comparing two commits** lists the files they differ in, in a window with the same table;
-double-click one for its diff. Right-click a node for *Compare* › *HEAD*, *Working tree*
-(your uncommitted changes, staged or not; `F5` lists them again), or with two nodes selected
-*Selected revisions*. To compare commits far apart, *Mark for comparison* one (from
-the node menu or by right-clicking a row in the log) and pick *Compare with marked* on the
-other, from any log. A range log's *Compare files* compares its two ends. The window's
-*Since common ancestor* shows only what the right-hand side changed since the two forked, as
-a pull request does; *Swap sides* turns the comparison round.
-
-**Blame** shows which commit last changed each line of a file: right-click a changed file in
-the log or compare window and pick *Blame*, or click *Blame* in a diff window's toolbar (it
-opens at the change in view). A gutter names each line's commit, author and date, shaded from
-plain (oldest) to amber (newest). Click a line to highlight every line of its commit; the
-strip on the right marks them in the whole file (click it to go there), and the bar at the
-bottom describes the commit under the pointer. Right-click a line to *Blame previous revision*
-(the file as it was before that commit, in a new window, at that line), *Show changes* (that
-commit's diff of the file, at the line), *Show log* from the commit, or copy its hash. Drag or
-`Shift`+click to choose lines, `Ctrl+C` to copy them. The toolbar says whether whitespace
-changes and moved or copied lines count (`git blame -w`, `-M`, `-C`). Blaming the working tree
-marks the lines you haven't committed; `F5` blames again.
-
-Below the text, the **history pane** lists the commits that changed the file up to the blamed
-revision, like the log: graph, hash (in its lines' shade), subject, author, date. Commits from
-before a rename say the path the file had there; commits none of whose lines remain are greyed
-out; *Working tree changes* sits on top when the file differs from `HEAD`. Clicking a line
-selects its commit's row, and clicking a row highlights its commit's lines (the text stays
-put; the strip shows where they are). `Up` and `Down` step through the rows. Right-click a row
-to *Blame this revision*, *Show changes* (also a double-click), *Show log* or copy its hash.
-Drag the divider to resize the pane, or hide it with *History* in the toolbar.
-
-Colours follow TortoiseGit:
-
-| Label | Colour |
-|---|---|
-| Current branch | red |
-| Local branches | green |
-| Remote branches | light orange |
-| Tags | yellow |
-| Commits without refs | pale lavender, showing an 8-digit hash |
-
-Colours chosen per branch name replace these, except for the current branch.
-
-parterre needs `git` on `PATH` at runtime; it reads the repository with `git log` and
-`git for-each-ref` and never writes to it. Apart from GitHub's API while pull requests are
-shown, it doesn't use the network.
-
-## Building
-
-Requires a stable Rust toolchain (install with [rustup](https://rustup.rs)).
+A few command-line options:
 
 ```sh
-cargo build --release          # binary: target/release/parterre
-cargo test --workspace         # unit + integration tests (need git on PATH)
-cargo clippy --workspace --all-targets
+parterre --mode branches           # also show every fork point and merge
+parterre --hide 'pipeline/*'       # leave out build branches
+parterre --branch-color 'feature/*=#9b59b6'   # colour branches by name
+parterre --export graph.svg        # write the graph as SVG (or .png, .webp), no window
+parterre --help                    # all of them
 ```
 
-On Linux the window uses Wayland or X11 through `winit`; no extra development packages are
-needed to build. See [docs/building.md](docs/building.md) for Windows and macOS notes, and
-[docs/releasing.md](docs/releasing.md) for how releases and version numbers work.
+The rest is in the [user guide](docs/usage.md): every key and mouse action, the views and
+filters, the log, diff, blame and compare windows, and settings you can share with your team.
 
-## Layout of the repository
+## More
 
-| Path | What |
-|---|---|
-| `crates/parterre-core` | GUI-free core: git loading, revision-graph reduction, layered layout, drag physics |
-| `crates/parterre` | The `parterre` binary: egui/eframe window, rendering, interaction |
-| `docs/research/` | Notes on how TortoiseGit's revision graph works, with source links |
-| `docs/architecture.md` | How the pieces fit together |
-| `docs/distribution.md` | Where parterre is published, under which names, and why |
-| `packaging/` | The icon, the Windows installer, Chocolatey, the Linux packages and desktop files, a draft Flatpak |
+- [docs/usage.md](docs/usage.md): the user guide.
+- [docs/automation.md](docs/automation.md): drive parterre from scripts, for screenshots,
+  recordings and checks without a human. All the images above were made that way.
+- [docs/building.md](docs/building.md): build it yourself (`cargo build --release`).
+- [docs/architecture.md](docs/architecture.md): how it works. `crates/parterre-core` holds
+  the git loading, graph reduction, layout and physics, free of any GUI; `crates/parterre` is
+  the egui window.
+- [docs/research/](docs/research/): how TortoiseGit's revision graph works, with source links.
 
-Open questions, planned work and bugs are tracked in
-[GitHub issues](https://github.com/aquamoth/parterre/issues).
+Ideas, questions and bugs are welcome in [GitHub issues](https://github.com/aquamoth/parterre/issues).
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before writing code for a pull request.
 
 ## License
 
@@ -226,12 +194,3 @@ parterre is free software under the [GNU General Public License, version 3](LICE
 two additional terms in [NOTICE](NOTICE): works based on parterre keep its copyright notice and
 say that they are based on it, and modified versions are marked as modified. You may use, share
 and modify parterre at home and at work.
-
-Release builds come with `THIRD-PARTY-NOTICES.html`, the licenses of the Rust crates they
-contain. To generate it yourself, install [cargo-about](https://github.com/EmbarkStudios/cargo-about)
-and run `cargo about generate -c packaging/about.toml packaging/about.hbs -o THIRD-PARTY-NOTICES.html`.
-
-## Contributing
-
-Bug reports and ideas are welcome as issues. Read [CONTRIBUTING.md](CONTRIBUTING.md) before
-writing code for a pull request.
