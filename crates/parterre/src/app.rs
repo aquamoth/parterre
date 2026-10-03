@@ -475,7 +475,10 @@ impl ParterreApp {
             marked: None,
             moves,
             watcher: None,
-            pull_requests: pull_requests::PullRequestLoader::default(),
+            pull_requests: match &automation.pull_requests {
+                Some(json) => pull_requests::PullRequestLoader::canned(json),
+                None => pull_requests::PullRequestLoader::default(),
+            },
             pull_requests_setting,
             pull_requests_error: None,
             refresh_pull_requests: false,
@@ -1175,6 +1178,11 @@ impl ParterreApp {
                 }
                 // Lay out again, with them.
                 self.requested = None;
+            }
+            // A file of pull requests given for a screenshot: a mistake in it fails the run.
+            Some(pull_requests::Loaded::Failed { error, .. }) if loader.is_canned() => {
+                eprintln!("parterre: {error}");
+                crate::automation::fail();
             }
             // Only the user's own request gets an answer: loads parterre makes by itself fail
             // quietly, and the button's tooltip says why.

@@ -187,12 +187,31 @@ runs start from the defaults otherwise.
 | `--mode`, `--direction`, `--look`, `--max-row-width` | What the graph shows and how it is laid out |
 | `--current-branch`, `--filter`, `--hide`, `--branch-color` | Which branches show, and their colours |
 | `--no-remotes`, `--no-tags`, `--pull-requests`, `--worktrees` | Which refs show |
+| `--pull-requests-from FILE` | Pull requests from a file instead of GitHub, see [below](#pull-requests-without-github) |
 | `--drag-mode adapt\|free\|subtree` | What moves with a dragged node |
 | `--log-layout a\|b\|c\|d` | The log window's layout: `stacked`, `side-by-side`, `details-below`, `files-right` |
 | `--diff-form side\|unified`, `--diff-words`, `--diff-whitespace`, `--diff-unfolded` | The diff window's settings |
 
 `parterre --help` lists the common ones. The window settings at the bottom are hidden there,
 being of use mainly for automation.
+
+## Pull requests without GitHub
+
+`--pull-requests-from FILE` shows the pull requests in FILE instead of asking GitHub, so
+pictures of them need no network, no signed-in `gh` and no pull requests on GitHub. It turns
+pull requests on. FILE is a JSON array:
+
+```json
+[
+  {"number": 146, "title": "Checkout redesign", "author": "mira", "head": "feature/checkout-redesign", "base": "main"},
+  {"number": 139, "title": "Dark mode", "author": "sam", "draft": true, "head": "feature/dark-mode", "base": "main"}
+]
+```
+
+`head` and `base` are branches of `origin`, and each pull request is shown on the commit
+`origin/<head>` is at. `origin` must still point at GitHub (`git remote set-url origin
+https://github.com/owner/name.git` after fetching will do); that is where clicking a pull
+request goes. A mistake in the file, or a `head` that `origin` has no branch for, fails the run.
 
 ## Running without a display
 
