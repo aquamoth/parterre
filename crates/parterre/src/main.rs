@@ -20,6 +20,7 @@ mod render;
 mod scene;
 mod script;
 mod settings;
+mod settings_file;
 mod system_theme;
 mod text_size;
 mod theme;

@@ -30,6 +30,7 @@ eframe.workspace = true
 image.workspace = true
 rfd.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 
 # Only to turn on a feature of eframe's winit: on Wayland desktops that leave the title bar to
 # the app (GNOME), draw an Adwaita-style one with the window title, instead of a plain grey bar.

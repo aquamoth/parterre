@@ -1,5 +1,6 @@
 //! User-adjustable settings, persisted between runs by eframe.
 
+use parterre_core::Repo;
 use parterre_core::blame::Moves;
 use parterre_core::file_diff::{Whitespace, WordMode};
 use parterre_core::layout::LayoutOptions;
@@ -78,6 +79,50 @@ pub fn load_moves(storage: &dyn eframe::Storage) -> RememberedMoves {
             (repo, nodes)
         })
         .collect()
+}
+
+/// The settings of one repository: what the Filter popover sets. Every other setting is
+/// parterre's, the same in every repository.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RepoSettings {
+    pub current_branch_only: bool,
+    pub first_parent_only: bool,
+    pub ref_filter: String,
+    pub hide_branches: String,
+}
+
+impl RepoSettings {
+    /// The repository settings among `graph`, which holds those of the repository shown.
+    pub fn of(graph: &GraphOptions) -> RepoSettings {
+        RepoSettings {
+            current_branch_only: graph.current_branch_only,
+            first_parent_only: graph.first_parent_only,
+            ref_filter: graph.ref_filter.clone(),
+            hide_branches: graph.hide_branches.clone(),
+        }
+    }
+
+    pub fn apply(&self, graph: &mut GraphOptions) {
+        graph.current_branch_only = self.current_branch_only;
+        graph.first_parent_only = self.first_parent_only;
+        graph.ref_filter.clone_from(&self.ref_filter);
+        graph.hide_branches.clone_from(&self.hide_branches);
+    }
+
+    /// Which repository `repo` is, for its settings: its main worktree, so that every worktree
+    /// of a repository has the same.
+    pub fn key(repo: &Repo) -> String {
+        let main = repo.worktrees.first().map_or(&repo.path, |main| &main.path);
+        main.display().to_string()
+    }
+
+    /// The name of the repository `key` is, for showing.
+    pub fn name(key: &str) -> String {
+        let path = std::path::Path::new(key);
+        path.file_name()
+            .map_or_else(|| key.to_owned(), |n| n.to_string_lossy().into_owned())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +350,15 @@ impl Default for DiffWindowSettings {
             whitespace: Whitespace::default(),
             fold: true,
         }
+    }
+}
+
+impl Settings {
+    /// Puts back in reach what settings edited by hand or saved by another version may put out
+    /// of it: a divider, the text size.
+    pub fn sanitize(&mut self) {
+        self.log_window.dividers = self.log_window.dividers.clamped();
+        self.text_size = parterre_core::text_size::sanitize(self.text_size);
     }
 }
 

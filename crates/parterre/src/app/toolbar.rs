@@ -229,7 +229,8 @@ impl ParterreApp {
 
     fn filter_popover(&mut self, ui: &mut Ui) {
         ui.set_width(270.0);
-        ui.weak("Filter");
+        ui.weak("Filter")
+            .on_hover_text("Each repository keeps its own filters.");
         let g = &mut self.settings.graph;
         popover_row(ui, "Current branch only", "Only HEAD's history.", |ui| {
             widgets::switch(ui, &mut g.current_branch_only);

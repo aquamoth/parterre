@@ -120,6 +120,10 @@ parterre adds:
   compares the two. On by default (*Settings → Advanced*).
 - light and dark themes
 - rearranging by hand: drag modes, multi-selection, undo
+- filters kept for each repository, shared by its worktrees
+- settings exported to a file and imported on another computer or by a team, from parterre's
+  own or a repository's filters, and reset to the defaults (*Settings → Manage*). The files are
+  versioned JSON: older and newer versions of parterre read all they know of them.
 
 *Show log* opens a window listing a node's history, or the commits between two selected
 nodes, like TortoiseGit's log: the selected commit's message and the files it changed, which

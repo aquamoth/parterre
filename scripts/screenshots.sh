@@ -72,9 +72,10 @@ for sub in Compare Open Copy; do
 done
 shot context-canvas popup "right-click canvas"
 
-for page in appearance branchcolours graph filters dragging advanced; do
+for page in appearance branchcolours graph filters dragging advanced manage; do
     shot "settings-$page" window "open settings:$page"
 done
+shot reset-settings window $'open settings:manage\nclick "Reset…"'
 shot shortcuts window "open shortcuts"
 shot legend window "open legend"
 shot about window "open about"
