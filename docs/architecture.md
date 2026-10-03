@@ -98,7 +98,9 @@ crates/parterre        the binary (eframe/egui)
   settings.rs          persisted settings and the Classic/Modern looks
   automation.rs        --screenshot / --demo-drag / --demo-menu / --demo-open / --demo-log /
                        --demo-compare / --demo-mark / --demo-select / --demo-blame scripted
-                       runs (the log window's layout: --log-layout)
+                       runs (the log window's layout: --log-layout), and running --script
+  script.rs            workflow scripts (--script): click, type, screenshot, … one step a line
+  record.rs            --record: the window as a GIF, a video through ffmpeg, or PNG frames
 ```
 
 ## Data flow

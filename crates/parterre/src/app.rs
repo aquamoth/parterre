@@ -33,7 +33,7 @@ mod settings_window;
 mod tool_harness;
 mod toolbar;
 
-pub use toolbar::popup_id;
+pub use toolbar::{popup_id, toolbar_button_id};
 
 use settings_window::SettingsPage;
 
@@ -371,8 +371,14 @@ impl ParterreApp {
             recent.add(&repo.path);
         }
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        // One screenshot shows everything: the settings in the main window.
-        cc.egui_ctx.set_embed_viewports(automation.is_active());
+        // One screenshot shows everything: the settings in the main window. So does a
+        // recording.
+        cc.egui_ctx
+            .set_embed_viewports(automation.is_active() || automation.record.is_some());
+        if automation.script.is_some() {
+            cc.egui_ctx
+                .add_plugin(crate::automation::TextCollector(automation.texts.clone()));
+        }
         cc.egui_ctx.add_plugin(crate::dialogs::ModalLock::default());
         let demo_settings = automation
             .demo_open
@@ -970,6 +976,25 @@ impl ParterreApp {
             }
         };
         self.branches.request(ctx, request, egui::ViewportId::ROOT);
+    }
+
+    /// Automation: opens what a script's `open` step names: a toolbar popup (`menu`, `filter`,
+    /// `zoom`, `drag`), the settings (`settings`, or `settings:PAGE`), `about`, `shortcuts`,
+    /// `legend`, or a dialog as `--demo-open` names it.
+    fn open_named(&mut self, ctx: &egui::Context, what: String) {
+        match what.as_str() {
+            "menu" | "filter" | "zoom" | "drag" => egui::Popup::open_id(ctx, popup_id(&what)),
+            "about" => self.show_about = true,
+            "shortcuts" => self.show_shortcuts = true,
+            "legend" => self.show_legend = true,
+            _ => match what.strip_prefix("settings") {
+                Some(page) => {
+                    let page = SettingsPage::named(page.trim_start_matches(':'));
+                    self.open_settings(page.unwrap_or(self.settings_page));
+                }
+                None => self.automation.demo_open = Some(what),
+            },
+        }
     }
 
     /// Makes another worktree of the same repository the open one. It's the same history, so
@@ -2644,6 +2669,9 @@ impl eframe::App for ParterreApp {
         }
         if let Some(path) = self.branches.go_to.take() {
             self.go_to_worktree(&path);
+        }
+        if let Some(what) = self.automation.open.take() {
+            self.open_named(&ctx, what);
         }
         self.demo_dialog(&ctx);
         self.update_pull_requests(&ctx);

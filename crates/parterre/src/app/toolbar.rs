@@ -51,13 +51,18 @@ const DRAG_ID: &str = "drag-popover";
 /// The popup of the button with `id`, for opening it from elsewhere (the screenshot
 /// automation).
 pub fn popup_id(name: &str) -> Id {
+    toolbar_button_id(name).with("popup")
+}
+
+/// The toolbar button that opens `menu`, `filter`, `zoom` or `drag`, for a script to click.
+pub fn toolbar_button_id(name: &str) -> Id {
     let id = match name {
         "menu" => MENU_ID,
         "filter" => FILTER_ID,
         "zoom" => ZOOM_ID,
         _ => DRAG_ID,
     };
-    Id::new(id).with("popup")
+    Id::new(id)
 }
 
 impl ParterreApp {
