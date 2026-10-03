@@ -437,9 +437,6 @@ impl ParterreApp {
                 self.open_settings(SettingsPage::Filters);
             }
         });
-        if menu::item(ui, "Find", "Ctrl+F", Mark::None).clicked() {
-            self.search.request_focus = true;
-        }
         menu::submenu(ui, "Zoom", |ui| {
             if menu::item(ui, "Zoom in", "+", Mark::None).clicked() {
                 self.zoom_by(1.0 / 0.8);
