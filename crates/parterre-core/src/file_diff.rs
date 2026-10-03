@@ -812,9 +812,24 @@ pub fn display_column(raw: &str, offset: usize) -> usize {
 /// The display form of a raw line, and its spans moved along: the line ending dropped and tabs
 /// expanded to multiples of [`TAB_WIDTH`].
 pub fn display(raw: &str, spans: &[Range<usize>]) -> (String, Vec<Range<usize>>) {
+    let (text, map) = display_map(raw);
+    let end = map.len() - 1;
+    let spans = spans
+        .iter()
+        .filter_map(|r| {
+            let s = map[r.start.min(end)];
+            let e = map[r.end.min(end)];
+            (e > s).then_some(s..e)
+        })
+        .collect();
+    (text, spans)
+}
+
+/// The display form of a raw line, and where each byte of the line (its ending dropped)
+/// lands in it, plus the end: what [`display`] moves spans by.
+pub fn display_map(raw: &str) -> (String, Vec<usize>) {
     let body = without_ending(raw);
     let mut text = String::with_capacity(body.len());
-    // Where each byte of `body` lands in `text`, plus the end.
     let mut map = Vec::with_capacity(body.len() + 1);
     let mut col = 0;
     for c in body.chars() {
@@ -831,15 +846,7 @@ pub fn display(raw: &str, spans: &[Range<usize>]) -> (String, Vec<Range<usize>>)
         }
     }
     map.push(text.len());
-    let spans = spans
-        .iter()
-        .filter_map(|r| {
-            let s = map[r.start.min(body.len())];
-            let e = map[r.end.min(body.len())];
-            (e > s).then_some(s..e)
-        })
-        .collect();
-    (text, spans)
+    (text, map)
 }
 
 /// A row of a form as the window shows it: a line row, or a fold standing for hidden rows.

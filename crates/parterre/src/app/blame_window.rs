@@ -422,8 +422,11 @@ struct BlameWindow {
     load: Load,
     /// The history pane's rows, listed alongside the blame.
     listing: Listing,
-    /// Stops the listing and the syntax colouring (when the window closes or blames again).
+    /// Stops the listing (when the window closes or blames again).
     cancel: Cancel,
+    /// Stops the syntax colouring's child process likewise; its own handle, since a handle
+    /// holds one child at a time and the listing's git command has this one.
+    colour: Cancel,
     /// How the file is coloured by syntax (#209).
     engine: Engine,
     /// The history pane's selected row and scroll position.
@@ -490,6 +493,7 @@ impl BlameWindow {
             load: Load::Failed(String::new()),
             listing: Listing::Failed(String::new()),
             cancel: Cancel::new(),
+            colour: Cancel::new(),
             list: CommitList::default(),
             details: Details::default(),
             show_history: settings.show_history,
@@ -517,13 +521,15 @@ impl BlameWindow {
     /// Blames `spec` with the current options, and lists the file's history, on worker
     /// threads. A listing still running is stopped.
     fn load(&mut self, ctx: &egui::Context) {
-        // A new handle for this load; the one before stops its listing and colouring.
+        // New handles for this load; the ones before stop their listing and colouring.
         self.cancel.cancel();
         self.cancel = Cancel::new();
+        self.colour.cancel();
+        self.colour = Cancel::new();
         let (tx, rx) = mpsc::channel();
         let git = Git::new(&self.repo.path);
         let (spec, options, repo) = (self.spec.clone(), self.options, self.repo.clone());
-        let (engine, cancel) = (self.engine.clone(), self.cancel.clone());
+        let (engine, cancel) = (self.engine.clone(), self.colour.clone());
         let repaint = ctx.clone();
         std::thread::spawn(move || {
             let result = git
@@ -2036,9 +2042,11 @@ impl BlameWindow {
 }
 
 impl Drop for BlameWindow {
-    /// Stops the listing when the window closes (and with it the repository).
+    /// Stops the listing and the colouring when the window closes (and with it the
+    /// repository).
     fn drop(&mut self) {
         self.cancel.cancel();
+        self.colour.cancel();
     }
 }
 

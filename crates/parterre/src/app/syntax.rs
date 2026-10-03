@@ -4,7 +4,7 @@
 
 use eframe::egui::text::TextFormat;
 use eframe::egui::{Color32, FontId, Stroke};
-use parterre_core::file_diff::display;
+use parterre_core::file_diff::display_map;
 use parterre_core::highlight::{Kind, Spans};
 use std::ops::Range;
 
@@ -70,19 +70,21 @@ pub fn text_format(
 }
 
 /// The spans of a line moved from byte offsets of its `raw` form to byte offsets of its
-/// display text (tabs expanded, no ending), as [`display`] moves the changed words. Once per
-/// line when a file is loaded, not when it is drawn.
+/// display text (tabs expanded, no ending), as `file_diff::display` moves the changed
+/// words; one that lands empty (a lone carriage return) is dropped. Once per line when a
+/// file is loaded, not when it is drawn.
 pub fn moved(raw: &str, spans: &[(Range<usize>, Kind)]) -> Spans {
     if spans.is_empty() {
         return Vec::new();
     }
-    let ranges: Vec<Range<usize>> = spans.iter().map(|(r, _)| r.clone()).collect();
-    let (_, ranges) = display(raw, &ranges);
-    ranges
-        .into_iter()
-        .zip(spans)
-        .map(|(r, (_, k))| (r, *k))
-        .filter(|(r, _)| r.start < r.end)
+    let (_, map) = display_map(raw);
+    let end = map.len() - 1;
+    spans
+        .iter()
+        .filter_map(|(r, k)| {
+            let (s, e) = (map[r.start.min(end)], map[r.end.min(end)]);
+            (e > s).then_some((s..e, *k))
+        })
         .collect()
 }
 
@@ -165,9 +167,20 @@ mod tests {
     #[test]
     fn spans_follow_tab_expansion() {
         let raw = "\tif x";
-        let (text, _) = display(raw, &[]);
+        let (text, _) = display_map(raw);
         let spans = vec![(1..3, Kind::Keyword)];
         let moved = moved(raw, &spans);
         assert_eq!(&text[moved[0].0.clone()], "if");
+    }
+
+    #[test]
+    fn a_span_that_lands_empty_takes_no_other_spans_kind() {
+        let raw = "if\r";
+        let spans = vec![
+            (0..0, Kind::Comment),
+            (0..2, Kind::Keyword),
+            (2..3, Kind::Comment),
+        ];
+        assert_eq!(moved(raw, &spans), vec![(0..2, Kind::Keyword)]);
     }
 }

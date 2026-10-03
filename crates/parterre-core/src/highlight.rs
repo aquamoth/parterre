@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// What a span of text is, for colouring. Deliberately coarse: a dozen kinds that every
@@ -263,12 +263,14 @@ pub fn highlight(language: Language, text: &str) -> Vec<Spans> {
 /// runtime's assertion then aborts the process) or parsing for minutes must not take the
 /// window with it. So the app runs them in a child process: itself, as
 /// `parterre --highlight LANG`, the text on stdin and the spans on stdout, killed when the
-/// window closes or [`BUDGET`] runs out. In this process is for that child, and for tests.
+/// window closes or [`BUDGET`] runs out. In this process is for that child, and for tests;
+/// off is for an app that doesn't know its own program.
 #[derive(Clone, Debug, Default)]
 pub enum Engine {
     #[default]
     InProcess,
     Child(PathBuf),
+    Off,
 }
 
 impl Engine {
@@ -278,12 +280,15 @@ impl Engine {
         match self {
             Engine::InProcess => highlight(language, text),
             Engine::Child(exe) => in_child(exe, language, text, cancel, BUDGET).unwrap_or_default(),
+            Engine::Off => Vec::new(),
         }
     }
 }
 
 /// Runs `exe --highlight LANG` on `text`, killing it once `cancel` says so or `budget` is
-/// spent. `None` when the child could not be run, failed, or was killed.
+/// spent. `None` when the child could not be run, failed, or was killed. The child is held
+/// by `cancel` while it runs, as git's commands are, so cancelling kills it at once, and a
+/// window's drop (the app's exit too) leaves none behind.
 pub fn in_child(
     exe: &Path,
     language: Language,
@@ -310,15 +315,24 @@ pub fn in_child(
     let mut child = cmd.spawn().ok()?;
     let mut stdin = child.stdin.take()?;
     let mut stdout = child.stdout.take()?;
+    {
+        let mut running = cancel.lock();
+        if running.cancelled {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        running.child = Some(child);
+    }
     let start = Instant::now();
     let mut out = Vec::new();
     let finished = std::thread::scope(|s| {
         // The text goes in from a thread of its own, so a full pipe can't deadlock against
-        // the output; the watchdog kills the child when told to or when time is up.
+        // the output; the watchdog reaps the child, or kills it when time is up.
         s.spawn(move || {
             let _ = stdin.write_all(text.as_bytes());
         });
-        let watchdog = s.spawn(move || watch(child, cancel, start, budget));
+        let watchdog = s.spawn(move || watch(cancel, start, budget));
         let read = stdout.read_to_end(&mut out).is_ok();
         read && watchdog.join().unwrap_or(false)
     });
@@ -328,18 +342,31 @@ pub fn in_child(
     decode(&out)
 }
 
-/// Waits for `child`, killing it once cancelled or over budget. True if it exited well.
-fn watch(mut child: Child, cancel: &Cancel, start: Instant, budget: Duration) -> bool {
+/// Waits for the child `cancel` holds, killing it once over budget; `cancel` itself kills
+/// it when cancelled. True if it exited well.
+fn watch(cancel: &Cancel, start: Instant, budget: Duration) -> bool {
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) => {}
-            Err(_) => return false,
-        }
-        if cancel.is_cancelled() || start.elapsed() > budget {
-            let _ = child.kill();
-            let _ = child.wait();
-            return false;
+        {
+            let mut running = cancel.lock();
+            let waited = match running.child.as_mut() {
+                // Taken, killed and waited for by `cancel()`.
+                None => return false,
+                Some(child) => child.try_wait(),
+            };
+            match waited {
+                Ok(Some(status)) => {
+                    running.child = None;
+                    return status.success();
+                }
+                Ok(None) if start.elapsed() <= budget => {}
+                _ => {
+                    if let Some(mut child) = running.child.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    return false;
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(10));
     }

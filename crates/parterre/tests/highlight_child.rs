@@ -24,16 +24,41 @@ fn the_child_highlights_like_the_process() {
 
 #[test]
 fn a_grammar_that_aborts_costs_only_the_colours() {
-    // tree-sitter-yaml's scanner overruns the runtime's serialization buffer at this depth,
-    // and the runtime's assertion aborts the process: the child's, not ours.
-    let text = "- ".repeat(254) + "x\n";
+    // tree-sitter-yaml 0.7.2's scanner overruns the runtime's serialization buffer at this
+    // depth, and the runtime's assertion aborts the process: the child's, not ours. Once
+    // upstream bounds its buffer the child will answer instead; this process lives on either
+    // way.
+    let text = "- ".repeat(254)
+        + "x
+";
     let cancel = Cancel::new();
+    let answer = in_child(&exe(), Language::Yaml, &text, &cancel, BUDGET);
+    assert!(
+        answer.as_ref().is_none_or(|spans| spans.len() == 1),
+        "{answer:?}"
+    );
+}
+
+#[test]
+fn cancelling_from_another_thread_kills_the_child_at_once() {
+    let text = "[".repeat(1 << 20);
+    let cancel = Cancel::new();
+    let stop = cancel.clone();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        stop.cancel();
+    });
+    let start = std::time::Instant::now();
     assert_eq!(
-        in_child(&exe(), Language::Yaml, &text, &cancel, BUDGET),
+        in_child(&exe(), Language::Json, &text, &cancel, BUDGET),
         None
     );
-    let plain = Engine::Child(exe()).highlight(Language::Yaml, &text, &cancel);
-    assert!(plain.is_empty());
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    canceller.join().unwrap();
 }
 
 #[test]
