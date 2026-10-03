@@ -215,6 +215,9 @@ impl Automation {
             }
             Action::Done => {
                 self.report_frame_times();
+                if let Some(scene) = scene {
+                    report_tidiness(scene);
+                }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Action::Failed(message) => {
@@ -618,6 +621,16 @@ fn emptiest_spot(scene: &Scene, view: &View, canvas: Rect) -> Pos2 {
         .map(|(u, v)| area.lerp_inside(vec2(u, v)))
         .max_by(|&a, &b| nearest(a).total_cmp(&nearest(b)))
         .unwrap_or(area.center())
+}
+
+/// How tidy the graph is, for checking a change to the layout or the physics: printed when the
+/// run ends (see [`parterre_core::physics::Tidiness`]).
+fn report_tidiness(scene: &Scene) {
+    let t = scene.net.tidiness();
+    eprintln!(
+        "graph: {} overlapping boxes, {} edges through boxes, {} doubling back, {} detours",
+        t.overlaps, t.edges_through_boxes, t.edges_doubling_back, t.edges_detouring
+    );
 }
 
 #[cfg(test)]

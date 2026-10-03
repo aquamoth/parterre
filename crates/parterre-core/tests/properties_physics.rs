@@ -8,7 +8,7 @@
 use parterre_core::layout::{
     self, Direction, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking,
 };
-use parterre_core::physics::{DragModel, FLOW_GAP, Net, NetParams};
+use parterre_core::physics::{DragModel, FLOW_GAP, Net, NetParams, RestPlace};
 
 struct Rng(u64);
 impl Rng {
@@ -242,5 +242,61 @@ fn physics_keeps_children_above_parents() {
                  has {have} along the flow, needs {needed}"
             );
         }
+    }
+}
+
+/// Putting moved nodes back into a layout they no longer fit (as after a reload that changed
+/// the graph) leaves no boxes overlapping: one node moved by hand lands on another, and a few
+/// others rest a little away from the layout.
+#[test]
+fn physics_restores_without_overlaps() {
+    let mut rng = Rng(env_or("PHYSICS_SEED", 1990));
+    for iter in 0..env_or("PHYSICS_ITERS", 120) as usize {
+        let n = 2 + rng.below(60) as usize;
+        let inp = input(&mut rng, n);
+        let opts = LayoutOptions {
+            concentrate_edges: iter % 2 == 0,
+            ranking: Ranking::ALL[iter % 3],
+            direction: Direction::ALL[iter % 4],
+            ..LayoutOptions::default()
+        };
+        let l = layout::layout(&inp, &opts);
+        let mut net = Net::new(&l, &inp.sizes);
+        let (moved, onto) = (rng.below(n as u64) as usize, rng.below(n as u64) as usize);
+        let nudge = Point::new(rng.f() * 30.0 - 15.0, rng.f() * 10.0 - 5.0);
+        let to = |a: usize, b: usize| {
+            Point::new(l.nodes[b].x - l.nodes[a].x, l.nodes[b].y - l.nodes[a].y)
+        };
+        let mut saved = vec![RestPlace {
+            node: moved,
+            offset: Point::new(to(moved, onto).x + nudge.x, to(moved, onto).y + nudge.y),
+            moved: true,
+            beside: None,
+        }];
+        for _ in 0..rng.below(4) {
+            let node = rng.below(n as u64) as usize;
+            if node != moved {
+                let offset = Point::new(rng.f() * 80.0 - 40.0, rng.f() * 20.0 - 10.0);
+                saved.push(RestPlace {
+                    node,
+                    offset,
+                    moved: false,
+                    beside: None,
+                });
+            }
+        }
+        net.restore(saved, &NetParams::default());
+        assert!(!net.is_awake(), "iter {iter}: settles at once");
+        for i in 0..n {
+            let p = net.node_pos(i);
+            assert!(p.x.is_finite() && p.y.is_finite(), "iter {iter}: node {i}");
+        }
+        let moved_to = net.node_pos(moved);
+        let wanted = Point::new(l.nodes[onto].x + nudge.x, l.nodes[onto].y + nudge.y);
+        assert!(
+            (moved_to.x - wanted.x).abs() < 0.01 && (moved_to.y - wanted.y).abs() < 0.01,
+            "iter {iter}: the node moved by hand stays"
+        );
+        assert_eq!(net.tidiness().overlaps, 0, "iter {iter}: n={n}");
     }
 }

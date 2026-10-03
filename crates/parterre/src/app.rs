@@ -50,6 +50,7 @@ use crate::text_size;
 use crate::theme::{Palette, ThemeChoice};
 use crate::view::View;
 use compare_window::CompareRequest;
+use parterre_core::physics::RestPlace;
 
 /// What a file dialog is picking for.
 #[derive(Clone, Copy, Debug)]
@@ -219,12 +220,28 @@ impl Details {
 #[derive(Debug)]
 struct LayoutJob {
     rx: std::sync::mpsc::Receiver<Scene>,
+    /// The options it was laid out with.
+    key: (GraphOptions, LayoutOptions),
+    /// Where the nodes of the scene on screen rested when it started, to put back.
+    carried: Option<Carried>,
     /// Commit near the view centre and its screen position, to keep the view steady.
     anchor: Option<(Oid, Pos2)>,
     selected_commits: Vec<Oid>,
     /// Child and parent commit of the selected edge.
     selected_edge: Option<(Oid, Oid)>,
 }
+
+/// Where a node rests, by commit, carried over a relayout (see
+/// [`parterre_core::physics::RestPlace`]).
+#[derive(Clone, Debug, PartialEq)]
+struct CarriedPlace {
+    offset: (f32, f32),
+    by_hand: bool,
+    /// The first parent's commit, and how far from it the node rests.
+    beside: Option<(String, (f32, f32))>,
+}
+
+type Carried = std::collections::HashMap<String, CarriedPlace>;
 
 #[derive(Debug, Default)]
 struct Search {
@@ -251,8 +268,9 @@ pub struct ParterreApp {
     /// False for automated runs, so they don't overwrite the user's settings.
     persist: bool,
     scene: Option<Scene>,
-    /// Options of the most recently requested layout.
+    /// Options of the most recently requested layout, and of the scene on screen.
     requested: Option<(GraphOptions, LayoutOptions)>,
+    scene_key: Option<(GraphOptions, LayoutOptions)>,
     job: Option<LayoutJob>,
     view: View,
     /// The view at the start of the frame, before any panning or zooming.
@@ -301,9 +319,6 @@ pub struct ParterreApp {
     marked: Option<(Oid, String)>,
     /// Dragged nodes of every repository, kept when `remember_moves` is on.
     moves: RememberedMoves,
-    /// Moved nodes to put back in the next scene: after a reload, when `remember_moves` is
-    /// off.
-    carried_moves: Option<std::collections::HashMap<String, (f32, f32, bool)>>,
     /// Reloads when the refs change, if `settings.auto_reload` is on.
     watcher: Option<auto_reload::Watcher>,
     /// Open pull requests from GitHub, while they are shown.
@@ -396,6 +411,7 @@ impl ParterreApp {
             persist,
             scene: None,
             requested: None,
+            scene_key: None,
             job: None,
             view: View::default(),
             view_before: View::default(),
@@ -429,7 +445,6 @@ impl ParterreApp {
             focus_compare: false,
             marked: None,
             moves,
-            carried_moves: None,
             watcher: None,
             pull_requests: pull_requests::PullRequestLoader::default(),
             pull_requests_setting,
@@ -452,7 +467,14 @@ impl ParterreApp {
         let Some(repo) = &self.repo else { return };
         let key = (self.settings.graph.clone(), self.settings.layout.clone());
         if self.requested.as_ref() != Some(&key) {
-            self.requested = Some(key);
+            self.requested = Some(key.clone());
+            // Moved nodes go along to a newer snapshot of the same graph, and to any relayout
+            // if they are to be remembered.
+            let carried = if self.settings.remember_moves || self.scene_key.as_ref() == Some(&key) {
+                self.carried_places()
+            } else {
+                None
+            };
             let font = FontId::monospace(FONT_SIZE);
             let text_height = ctx.fonts_mut(|f| f.row_height(&font));
             let input = ctx.fonts_mut(|f| {
@@ -474,6 +496,8 @@ impl ParterreApp {
             let pending = std::mem::take(&mut self.pending_select);
             self.job = Some(LayoutJob {
                 rx,
+                key,
+                carried,
                 anchor: self.view_anchor(),
                 selected_commits: if pending.is_empty() {
                     self.selected_commits()
@@ -490,6 +514,7 @@ impl ParterreApp {
         };
         let job = self.job.take().expect("job exists");
         self.scene = Some(scene);
+        self.scene_key = Some(job.key);
         self.hovered = None;
         self.hovered_edge = None;
         self.context_node = None;
@@ -504,7 +529,7 @@ impl ParterreApp {
         self.selection.extend(selected);
         self.selected_edge = job.selected_edge.and_then(|(c, p)| self.edge_for(&c, &p));
         self.update_search();
-        self.restore_moves();
+        self.restore_moves(job.carried);
         if let (Some((oid, screen)), Some(scene)) = (job.anchor, &self.scene)
             && let Some(node) = self.node_for(&oid)
             && self.canvas.is_positive()
@@ -536,51 +561,85 @@ impl ParterreApp {
         Some(self.repo.as_ref()?.path.display().to_string())
     }
 
-    /// Puts remembered nodes, or those carried over a reload, back where they were in a
-    /// freshly laid-out scene.
-    fn restore_moves(&mut self) {
-        let carried = self.carried_moves.take();
-        let moves = if self.settings.remember_moves {
-            self.repo_key()
-                .and_then(|key| self.moves.get(&key).cloned())
-        } else {
-            carried
-        };
-        let Some(moves) = moves else { return };
-        let Some(scene) = &mut self.scene else { return };
-        let saved: Vec<_> = moves
-            .iter()
-            .filter_map(|(hex, &(dx, dy, by_hand))| {
-                let node = Oid::from_hex(hex)
-                    .and_then(|oid| scene.repo.lookup(&oid))
-                    .and_then(|c| scene.graph.node_of(c))?;
-                Some((
-                    node as usize,
-                    parterre_core::layout::Point::new(dx, dy),
+    /// Puts the nodes carried over from the scene before back where they were in a freshly
+    /// laid-out scene, and the remembered ones that scene didn't show.
+    fn restore_moves(&mut self, carried: Option<Carried>) {
+        let remembered = || {
+            let moves = self.moves.get(&self.repo_key()?)?;
+            let places = moves.iter().map(|(hex, &(dx, dy, by_hand))| {
+                let place = CarriedPlace {
+                    offset: (dx, dy),
                     by_hand,
-                ))
+                    beside: None,
+                };
+                (hex.clone(), place)
+            });
+            Some(places.collect::<Carried>())
+        };
+        let remembered = self.settings.remember_moves.then(remembered).flatten();
+        let places = match (carried, remembered) {
+            (Some(carried), Some(mut remembered)) => {
+                remembered.extend(carried);
+                remembered
+            }
+            (carried, remembered) => {
+                let Some(places) = carried.or(remembered) else {
+                    return;
+                };
+                places
+            }
+        };
+        let Some(scene) = &mut self.scene else { return };
+        let node_of = |hex: &str| {
+            Oid::from_hex(hex)
+                .and_then(|oid| scene.repo.lookup(&oid))
+                .and_then(|c| scene.graph.node_of(c))
+                .map(|n| n as usize)
+        };
+        let point = |(x, y): (f32, f32)| parterre_core::layout::Point::new(x, y);
+        let saved: Vec<RestPlace> = places
+            .iter()
+            .filter_map(|(hex, place)| {
+                Some(RestPlace {
+                    node: node_of(hex)?,
+                    offset: point(place.offset),
+                    moved: place.by_hand,
+                    beside: place
+                        .beside
+                        .as_ref()
+                        .and_then(|(parent, apart)| Some((node_of(parent)?, point(*apart)))),
+                })
             })
             .collect();
-        scene.net.restore(saved);
+        scene.net.restore(saved, &self.settings.net);
     }
 
-    /// Where the current scene's moved nodes rest, by commit (see
-    /// [`parterre_core::physics::Net::rest_offsets`]).
-    fn rest_offsets(&self) -> Option<std::collections::HashMap<String, (f32, f32, bool)>> {
+    /// Where the current scene's nodes rest, by commit (see
+    /// [`parterre_core::physics::Net::rest_places`]).
+    fn carried_places(&self) -> Option<Carried> {
         let scene = self.scene.as_ref()?;
-        let offsets = scene
-            .net
-            .rest_offsets()
-            .map(|(node, d, by_hand)| {
-                (
-                    scene
-                        .repo
-                        .commit(scene.graph.nodes[node].commit)
-                        .oid
-                        .to_hex(),
-                    (d.x, d.y, by_hand),
-                )
-            })
+        let hex = |node: usize| {
+            let commit = scene.graph.nodes[node].commit;
+            scene.repo.commit(commit).oid.to_hex()
+        };
+        let places = scene.net.rest_places().map(|p| {
+            let place = CarriedPlace {
+                offset: (p.offset.x, p.offset.y),
+                by_hand: p.moved,
+                beside: p.beside.map(|(parent, d)| (hex(parent), (d.x, d.y))),
+            };
+            (hex(p.node), place)
+        });
+        Some(places.collect())
+    }
+
+    /// Where the current scene's moved nodes rest, by commit, as remembered (see
+    /// [`parterre_core::physics::Net::rest_places`]).
+    fn rest_offsets(&self) -> Option<std::collections::HashMap<String, (f32, f32, bool)>> {
+        let places = self.carried_places()?;
+        let offsets = places
+            .into_iter()
+            .map(|(hex, p)| (hex, (p.offset.0, p.offset.1, p.by_hand)))
             .collect();
         Some(offsets)
     }
@@ -985,9 +1044,6 @@ impl ParterreApp {
     /// over by commit id.
     fn install_reloaded(&mut self, repo: Repo, status: &str) {
         self.pending_select = self.selected_commits();
-        if !self.settings.remember_moves {
-            self.carried_moves = self.rest_offsets();
-        }
         let repo = Arc::new(repo);
         self.pull_requests.refs_changed();
         self.log.reload(&repo);
