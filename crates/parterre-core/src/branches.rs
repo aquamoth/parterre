@@ -47,6 +47,9 @@ pub struct Worktree {
     pub merging: Option<Oid>,
     /// The cherry-pick stopped there, when the operation in progress is one.
     pub picking: Option<Picking>,
+    /// The commit being reverted there (`REVERT_HEAD`), when the operation in progress is a
+    /// revert.
+    pub reverting: Option<Oid>,
 }
 
 /// Why the open worktree is stuck.
@@ -203,6 +206,9 @@ pub struct Catalog {
     pub root: PathBuf,
     /// The open worktree's conflicted (unmerged) files.
     pub conflicted: Vec<String>,
+    /// The stash entry parterre set the open worktree's changes aside in before the revert in
+    /// progress there, such as `stash@{0}`.
+    pub stashed_for_revert: Option<String>,
     auto_setup_rebase: bool,
     roots: Vec<(String, Oid)>,
     heads: Vec<(PathBuf, Oid)>,
@@ -394,6 +400,10 @@ impl Catalog {
             let picking = admin
                 .as_deref()
                 .and_then(|a| picking(&git, a, reftable, head));
+            let reverting = admin
+                .as_deref()
+                .filter(|_| in_progress == Some("a revert"))
+                .and_then(|a| pseudo_ref(a, reftable, "REVERT_HEAD"));
             worktrees.push(Worktree {
                 main: path == main_place,
                 open: crate::worktree_folder::same_path(&path, &root),
@@ -406,6 +416,7 @@ impl Catalog {
                 rebasing,
                 merging,
                 picking,
+                reverting,
             });
         }
         for (place, admin) in &admins {
@@ -422,6 +433,11 @@ impl Catalog {
         } else {
             Vec::new()
         };
+        let stashed_for_revert = worktrees
+            .iter()
+            .find(|w| w.open)
+            .and_then(|w| w.reverting)
+            .and_then(|oid| crate::revert::stash_entry(&git, oid));
         Ok(Self {
             locals,
             remotes,
@@ -434,6 +450,7 @@ impl Catalog {
             main: main_place,
             root,
             conflicted,
+            stashed_for_revert,
             auto_setup_rebase,
             roots,
             heads,
@@ -818,6 +835,10 @@ pub enum Action {
     Merge(Box<crate::merge::Merge>),
     /// Cherry-picks commits onto the open worktree's branch.
     CherryPick(Box<crate::cherry_pick::CherryPick>),
+    /// Reverts a commit on the open worktree's branch, with a new commit at its tip.
+    Revert(Box<crate::revert::Revert>),
+    /// Puts back the changes parterre stashed before an operation, and drops the entry.
+    RestoreStash(Oid),
 }
 
 impl Action {
@@ -843,6 +864,8 @@ impl Action {
             ),
             Self::Merge(m) => format!("Merge {} into {}", crate::merge::short_target(m), m.branch),
             Self::CherryPick(c) => format!("Cherry-pick {} onto {}", c.name, c.branch),
+            Self::Revert(r) => format!("Revert {} in {}", short(r.commit), r.name()),
+            Self::RestoreStash(_) => "Restore stashed changes".into(),
         }
     }
 }
@@ -928,6 +951,22 @@ pub struct Report {
     pub steps: Vec<Step>,
     /// Done, but with something the user must see to: shown in orange until closed.
     pub attention: Option<Attention>,
+    /// The entry parterre stashed the changes in for the operation, left for the user to
+    /// restore.
+    pub stash: Option<Stashed>,
+    /// The commit the operation made, for the log to select.
+    pub created: Option<Oid>,
+}
+
+/// A stash entry parterre made, by its commit: other worktrees and sessions share the list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stashed {
+    pub oid: Oid,
+    /// Its name when it was made, such as `stash@{0}`, for the command shown. It's found by
+    /// its commit when restored.
+    pub name: String,
+    /// The files in it, by path in the worktree.
+    pub files: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1046,6 +1085,8 @@ impl Branches {
             Action::Rebase(r) => Ok(vec![crate::rebase::command(r)]),
             Action::Merge(m) => Ok(crate::merge::commands(m)),
             Action::CherryPick(c) => Ok(crate::cherry_pick::commands(c)),
+            Action::Revert(r) => Ok(crate::revert::commands(r)),
+            Action::RestoreStash(_) => Ok(vec![words(&["stash", "pop"])]),
         }
     }
 
@@ -1127,6 +1168,14 @@ impl Branches {
             crate::cherry_pick::execute(&catalog, pick, cancel, report)?;
             return Ok(None);
         }
+        if let Action::Revert(revert) = &action {
+            crate::revert::execute(&catalog, revert, cancel, report)?;
+            return Ok(None);
+        }
+        if let Action::RestoreStash(stash) = &action {
+            crate::revert::restore(&catalog, *stash, cancel, report)?;
+            return Ok(None);
+        }
         let mut commands = Self::commands(&catalog, &action)?;
         let switching = matches!(
             &action,
@@ -1177,7 +1226,9 @@ impl Branches {
             | Action::Reset(_)
             | Action::Rebase(_)
             | Action::Merge(_)
-            | Action::CherryPick(_) => {
+            | Action::CherryPick(_)
+            | Action::Revert(_)
+            | Action::RestoreStash(_) => {
                 unreachable!("handled above")
             }
             Action::Switch(name) => {

@@ -385,6 +385,7 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
     let files = &catalog.conflicted;
     let merging = open.and_then(|w| w.merging);
     let picking = open.and_then(|w| w.picking.as_ref());
+    let reverting = open.and_then(|w| w.reverting);
     let (mut text, hint) = match open.and_then(|w| w.rebasing.as_ref()) {
         None if let Some(p) = picking => {
             let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
@@ -395,6 +396,11 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
                 String::new()
             };
             (format!("Cherry-picking {commit} onto {branch}{at}"), FINISH)
+        }
+        None if let Some(commit) = reverting => {
+            let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
+            let commit = commit.short(repo.abbrev_len.max(7));
+            (format!("Reverting {commit} in {branch}"), FINISH)
         }
         None if let Some(theirs) = merging => {
             let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
@@ -426,10 +432,14 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
     };
     if !files.is_empty() && stuck != Stuck::Conflicts {
         text.push_str(&format!(": {}", plural(files.len(), "conflicted file")));
-    } else if merging.is_some() || picking.is_some() {
+    } else if merging.is_some() || picking.is_some() || reverting.is_some() {
         // Stopped with no conflicts: a hook refused to commit it, or a pick came out empty.
         text.push_str(": not committed");
     }
+    let stashed = catalog
+        .stashed_for_revert
+        .as_ref()
+        .map(|entry| format!(" Your changes are stashed in {entry}."));
     let (fill, color) = if ui.visuals().dark_mode {
         (
             Color32::from_rgb(75, 45, 10),
@@ -466,6 +476,9 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
                             label.on_hover_text(hover.join("\n"));
                         }
                         ui.label(RichText::new(hint).color(color));
+                        if let Some(stashed) = &stashed {
+                            ui.label(RichText::new(stashed).color(color));
+                        }
                     });
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
