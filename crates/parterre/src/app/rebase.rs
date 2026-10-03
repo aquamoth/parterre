@@ -130,7 +130,6 @@ impl RebaseDialog {
                 }
                 let n = self.commits.len();
                 let min = list_height(n.min(MIN_ROWS));
-                let top = ui.cursor().top();
                 let height = dialogs::growing(ui, grow, list_height(n), min);
                 if let Some(oid) = self.commits_table(ui, palette, options, height) {
                     asked.log = Some(oid);
@@ -148,7 +147,7 @@ impl RebaseDialog {
                 dialogs::command_box(ui, &[command_text(&rebase::command(&self.rebase()))]);
                 let enabled = self.preview.blocked(self.stash).is_none() && !busy;
                 let answer = dialogs::actions(ui, "Rebase", enabled, false, false);
-                dialogs::grown(ui, grow, top, after, min);
+                dialogs::grown(ui, grow, after, height, min);
                 answer
             });
         self.fresh = false;

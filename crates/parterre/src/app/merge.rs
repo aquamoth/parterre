@@ -133,7 +133,6 @@ impl MergeDialog {
                 }
                 let n = self.commits.len();
                 let min = list_height(n.min(MIN_ROWS));
-                let top = ui.cursor().top();
                 let height = dialogs::growing(ui, grow, list_height(n), min);
                 if let Some(oid) = self.commits_table(ui, palette, options, height) {
                     asked.log = Some(oid);
@@ -163,7 +162,7 @@ impl MergeDialog {
                 dialogs::command_box(ui, &[command_text(&merge::command(&self.merge()))]);
                 let enabled = self.blocked().is_none() && !busy;
                 let answer = dialogs::actions(ui, "Merge", enabled, false, false);
-                dialogs::grown(ui, grow, top, after, min);
+                dialogs::grown(ui, grow, after, height, min);
                 answer
             });
         self.fresh = false;

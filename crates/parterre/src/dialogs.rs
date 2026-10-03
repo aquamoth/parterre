@@ -22,6 +22,10 @@ pub const MARGIN: f32 = 20.0;
 /// The height a dialog's content is measured in: as tall as it wants.
 const UNBOUNDED: f32 = 100_000.0;
 
+/// How long, in seconds, a resizable dialog keeps the size it opened in, against a compositor
+/// handing it back another.
+const KEEP_OPENING_SIZE: f64 = 1.0;
+
 /// The narrowest a resizable dialog's content gets.
 const MIN_WIDTH: f32 = 420.0;
 
@@ -55,8 +59,8 @@ struct Window {
     resized: f64,
     /// The main window's frame it was last shown in.
     frame: u64,
-    /// A resizable one has had the size it opened in: the user sizes it from then on.
-    settled: bool,
+    /// When a resizable one's window was told its size: the user sizes it from a moment later.
+    opened: f64,
 }
 
 #[derive(Debug)]
@@ -240,6 +244,7 @@ impl<'a> Dialog<'a> {
                         }
                         window.hinted = Some(size);
                         window.resized = now;
+                        window.opened = now;
                     } else if !self.resizable && wayland() && window.hinted != Some(size) {
                         window.hinted = Some(size);
                         window.resized = now;
@@ -253,12 +258,16 @@ impl<'a> Dialog<'a> {
                     }
                     // A Wayland compositor may hand a window back the size it last knew (on
                     // focus, or from a configure sent before its title bar was in its frame),
-                    // and winit takes it. Ask again until the window has it.
+                    // and winit takes it. Ask again until the window has it. A resizable one is
+                    // handed back a size without its title bar just after it opens (GNOME):
+                    // its size is kept for a moment, and after that it is the user's.
                     let off = ui.ctx().content_rect().size() - size;
-                    if self.resizable && off.abs().max_elem() <= 1.0 {
-                        window.settled = true;
+                    let keep = !self.resizable || now - window.opened < KEEP_OPENING_SIZE;
+                    if self.resizable && keep {
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(50));
                     }
-                    if off.abs().max_elem() > 1.0 && !window.settled {
+                    if off.abs().max_elem() > 1.0 && keep {
                         if now - window.resized > 0.03 {
                             window.resized = now;
                             ui.ctx()
@@ -512,23 +521,36 @@ pub fn growing(ui: &Ui, id: Id, natural: f32, min: f32) -> f32 {
 
 /// After a resizable dialog's content: notes how much of it follows the growing part, which
 /// ended at `after`, for [`growing`] in the next frame, and keeps the window tall enough for the
-/// content with that part at `min`.
-pub fn grown(ui: &Ui, id: Id, top: f32, after: f32, min: f32) {
+/// content with that part at `min` rather than the `height` it was given.
+pub fn grown(ui: &Ui, id: Id, after: f32, height: f32, min: f32) {
     if ui.max_rect().height() > UNBOUNDED / 2.0 {
         return;
     }
-    let rest = ui.cursor().top() - after;
+    // To the content's end, not the cursor, which is past the space after it.
+    let end = ui.min_rect().bottom();
+    let rest = end - after;
     let before: Option<f32> = ui.data(|d| d.get_temp(id));
     if before.is_none_or(|b| (b - rest).abs() > 0.5) {
         ui.data_mut(|d| d.insert_temp(id, rest));
         // Laid out with the old figure: again, with this one.
         ui.ctx().request_repaint();
-        if !ui.ctx().embed_viewports() {
-            let height = (top - ui.max_rect().top()) + min + rest + 2.0 * MARGIN;
-            let width = MIN_WIDTH.min(ui.max_rect().width() + 2.0 * MARGIN);
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::MinInnerSize(vec2(width, height)));
-        }
+        return;
+    }
+    // Laid out with this figure, the content fits: the window can be as short as it would be
+    // with the growing part at `min`.
+    if ui.ctx().embed_viewports() {
+        return;
+    }
+    let content = end - ui.max_rect().top();
+    let least = vec2(
+        MIN_WIDTH.min(ui.max_rect().width() + 2.0 * MARGIN),
+        (content - (height - min) + 2.0 * MARGIN).round(),
+    );
+    let sent: Option<Vec2> = ui.data(|d| d.get_temp(id.with("least")));
+    if sent != Some(least) {
+        ui.data_mut(|d| d.insert_temp(id.with("least"), least));
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::MinInnerSize(least));
     }
 }
 
