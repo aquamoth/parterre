@@ -10,8 +10,8 @@
 //! - `parterre`: the version of parterre that wrote it, for people reading it.
 //! - `settings`: parterre's own settings (exported without what belongs to the computer:
 //!   window sizes and dividers).
-//! - `repository`: the settings of one repository (in an exported file), or `repositories`:
-//!   those of every repository, by its main worktree (stored).
+//! - `repository`: the settings of the repository shown (in an exported file), or
+//!   `repositories`: those of every repository, by its main worktree (stored).
 
 use std::collections::BTreeMap;
 
@@ -132,28 +132,17 @@ pub fn load(storage: Option<&dyn eframe::Storage>) -> (Settings, Stored, Option<
     }
 }
 
-/// What to export.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Part {
-    /// parterre's own settings.
-    Settings,
-    /// The settings of the repository shown.
-    Repository,
-}
-
-/// The exported file of `part`. `settings` holds the repository settings of the repository
-/// shown, as in the app.
-pub fn export(part: Part, settings: &Settings) -> String {
+/// The exported file: parterre's settings and, if `repository`, the settings of the repository
+/// shown, which `settings` holds as in the app.
+pub fn export(settings: &Settings, repository: bool) -> String {
     let mut file = header();
-    match part {
-        Part::Settings => {
-            let mut value = to_value(settings);
-            for path in local_paths() {
-                remove(&mut value, &path);
-            }
-            file["settings"] = value;
-        }
-        Part::Repository => file["repository"] = to_value(&RepoSettings::of(&settings.graph)),
+    let mut value = to_value(settings);
+    for path in local_paths() {
+        remove(&mut value, &path);
+    }
+    file["settings"] = value;
+    if repository {
+        file["repository"] = to_value(&RepoSettings::of(&settings.graph));
     }
     serde_json::to_string_pretty(&file).unwrap_or_default() + "\n"
 }
@@ -165,7 +154,8 @@ pub struct Imported {
     pub settings: Option<Settings>,
     /// The settings of a repository.
     pub repository: Option<RepoSettings>,
-    /// Settings left out: unknown here, or with values that don't read.
+    /// Settings left out: unknown here, or with values that don't read. Named from the top of
+    /// the file, `settings.theme` or `repository.ref_filter`.
     pub skipped: Vec<String>,
     /// Written by a newer format than this parterre reads.
     pub newer: bool,
@@ -375,15 +365,14 @@ mod tests {
     }
 
     #[test]
-    fn exported_settings_leave_out_the_computer_and_the_repository() {
+    fn exports_have_the_settings_and_the_filters_of_the_repository_shown() {
         let mut settings = Settings {
             theme: ThemeChoice::Dark,
             ..Settings::default()
         };
         filtered().apply(&mut settings.graph);
-        let file: Value = serde_json::from_str(&export(Part::Settings, &settings)).unwrap();
+        let file: Value = serde_json::from_str(&export(&settings, true)).unwrap();
         assert_eq!(file["version"], VERSION);
-        assert!(file.get("repository").is_none());
         let exported = &file["settings"];
         assert_eq!(exported["theme"], "Dark");
         assert!(exported["log_window"].get("size").is_none());
@@ -393,10 +382,13 @@ mod tests {
         assert!(exported["graph"].get("hide_branches").is_none());
         assert!(exported["graph"].get("show_tags").is_some());
 
-        let file: Value = serde_json::from_str(&export(Part::Repository, &settings)).unwrap();
-        assert!(file.get("settings").is_none());
         let repo: RepoSettings = serde_json::from_value(file["repository"].clone()).unwrap();
         assert_eq!(repo, filtered());
+
+        // Without a repository shown, there are no filters to export.
+        let file: Value = serde_json::from_str(&export(&settings, false)).unwrap();
+        assert!(file.get("repository").is_none());
+        assert_eq!(file["settings"]["theme"], "Dark");
     }
 
     #[test]
@@ -406,7 +398,7 @@ mod tests {
             show_overview: true,
             ..Settings::default()
         };
-        let file = export(Part::Settings, &theirs);
+        let file = export(&theirs, false);
 
         let mut mine = Settings {
             arrows: crate::settings::Arrows::None,

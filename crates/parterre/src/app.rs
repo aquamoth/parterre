@@ -60,7 +60,7 @@ use parterre_core::physics::RestPlace;
 pub(crate) enum Picked {
     Folder,
     Export(Format),
-    ExportSettings(settings_file::Part),
+    ExportSettings,
     ImportSettings,
 }
 
@@ -318,6 +318,8 @@ pub struct ParterreApp {
     settings_dir: Option<PathBuf>,
     /// What came of the last export or import of settings, and whether it failed.
     settings_note: Option<(String, bool)>,
+    /// A settings file read, while asking what of it to import.
+    import: Option<settings_window::Import>,
     /// Ask before resetting every setting.
     confirm_reset_settings: bool,
     details: Details,
@@ -458,6 +460,7 @@ impl ParterreApp {
             settings_file: None,
             settings_dir: None,
             settings_note: None,
+            import: None,
             confirm_reset_settings: false,
             details: Details::default(),
             log: log_window::LogWindow::default(),
@@ -884,7 +887,7 @@ impl ParterreApp {
             match (what, answer) {
                 (Picked::Folder, Some(dir)) => self.open_folder(&dir),
                 (Picked::Export(format), Some(path)) => self.export(format, path, ctx),
-                (Picked::ExportSettings(part), Some(path)) => self.export_settings(part, path),
+                (Picked::ExportSettings, Some(path)) => self.export_settings(path),
                 (Picked::ImportSettings, Some(path)) => self.import_settings(&path),
                 (_, None) => {}
             }
@@ -939,6 +942,19 @@ impl ParterreApp {
                     let page = SettingsPage::named(arg).ok_or("no such settings page")?;
                     self.open_settings(page);
                     return Ok(true);
+                }
+                // As if the file had been picked in the file dialog.
+                if kind == "export-settings" || kind == "import-settings" {
+                    self.open_settings(SettingsPage::Manage);
+                    if kind == "export-settings" {
+                        self.export_settings(PathBuf::from(arg));
+                    } else {
+                        self.import_settings(Path::new(arg));
+                    }
+                    return match &self.settings_note {
+                        Some((note, true)) => Err(note.clone()),
+                        _ => Ok(true),
+                    };
                 }
                 let repo = self.repo.clone().ok_or("no repository is open")?;
                 let oid = |name: &str| {
@@ -2751,6 +2767,7 @@ impl eframe::App for ParterreApp {
         self.pull_requests_dialog(&ctx);
         self.legend_window(&ctx);
         self.settings_window(&ctx);
+        self.import_settings_dialog(&ctx);
         self.reset_settings_dialog(&ctx);
         self.log_window(&ctx);
         self.compare_window(&ctx);

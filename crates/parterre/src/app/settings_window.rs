@@ -14,7 +14,7 @@ use super::toolbar::{HIDE_TIP, REF_FILTER_TIP, REMEMBER_TIP};
 use super::{ParterreApp, Picked};
 use crate::dialogs;
 use crate::settings::{Arrows, EdgeStyle, Look, RepoSettings, Settings};
-use crate::settings_file::{self, Part};
+use crate::settings_file::{self, Imported};
 use crate::text_size;
 use crate::theme::{BranchColor, ThemeChoice};
 use crate::widgets::{self, text_segmented};
@@ -84,12 +84,12 @@ const EDGE_GAP_TIP: &str = "Room for each edge that passes between the commits o
 const LOG_LAYOUT_TIP: &str = "How the log window arranges its commits, details and changed \
     files. Also in the log window's header.";
 const PER_REPOSITORY: &str = "each repository keeps its own filters.";
-const EXPORT_TIP: &str = "parterre's settings, to import on another computer or share with a \
-    team. Not window sizes, and not the filters, which are each repository's.";
-const EXPORT_REPOSITORY_TIP: &str = "The filters of the repository shown, to import into the \
-    same repository elsewhere.";
-const IMPORT_TIP: &str = "A file exported by parterre. What it has replaces the settings, or \
-    the filters of the repository shown; settings it lacks go back to their defaults.";
+const EXPORT_TIP: &str = "All settings and the filters of the repository shown, to import on \
+    another computer or share with a team. Not window sizes.";
+const IMPORT_TIP: &str = "A file exported by parterre. Choose what of it to import.";
+const IMPORT_SETTINGS_TIP: &str = "Every setting but the filters and window sizes. Settings the \
+    file lacks go back to their defaults.";
+const IMPORT_FILTERS_TIP: &str = "The filters in the file, for the repository shown.";
 const RESET_TIP: &str = "Every setting back to its default, and every repository's filters.";
 const PAGE: f32 = 440.0;
 
@@ -429,26 +429,11 @@ impl ParterreApp {
 
 impl ParterreApp {
     fn manage_page(&mut self, ui: &mut Ui) {
-        let repo = self
-            .repo
-            .as_deref()
-            .map(|r| RepoSettings::name(&RepoSettings::key(r)));
         title(ui, "Export and import");
         group(ui, |rows| {
             rows.row("Settings", EXPORT_TIP, |ui| {
                 if widgets::text_button(ui, "Export…").clicked() {
-                    self.settings_file = Some(Picked::ExportSettings(Part::Settings));
-                }
-            });
-            let label = match &repo {
-                Some(name) => format!("Filters of {name}"),
-                None => "Filters of a repository".to_owned(),
-            };
-            rows.row(&label, EXPORT_REPOSITORY_TIP, |ui| {
-                let export =
-                    ui.add_enabled_ui(repo.is_some(), |ui| widgets::text_button(ui, "Export…"));
-                if export.inner.clicked() {
-                    self.settings_file = Some(Picked::ExportSettings(Part::Repository));
+                    self.settings_file = Some(Picked::ExportSettings);
                 }
             });
             rows.row("Settings file", IMPORT_TIP, |ui| {
@@ -492,13 +477,15 @@ impl ParterreApp {
             .repo
             .as_deref()
             .map(|r| RepoSettings::name(&RepoSettings::key(r)));
-        let (title, name) = match (what, repo) {
-            (Picked::ExportSettings(Part::Repository), Some(repo)) => (
-                format!("Export the filters of {repo}"),
-                format!("parterre-{repo}.json"),
+        let (title, name) = match what {
+            Picked::ImportSettings => ("Import settings", String::new()),
+            _ => (
+                "Export settings",
+                match repo {
+                    Some(repo) => format!("parterre-{repo}.json"),
+                    None => "parterre-settings.json".into(),
+                },
             ),
-            (Picked::ImportSettings, _) => ("Import settings".into(), String::new()),
-            _ => ("Export settings".into(), "parterre-settings.json".into()),
         };
         let mut dialog = AsyncFileDialog::new()
             .set_title(title)
@@ -513,35 +500,103 @@ impl ParterreApp {
         dialog
     }
 
-    pub(super) fn export_settings(&mut self, part: Part, mut path: PathBuf) {
+    pub(super) fn export_settings(&mut self, mut path: PathBuf) {
         // A name typed without the extension gets it added.
         if path.extension().is_none() {
             path.set_extension("json");
         }
         self.settings_dir = path.parent().map(Path::to_owned);
-        let text = settings_file::export(part, &self.settings);
+        let text = settings_file::export(&self.settings, self.repo.is_some());
         self.settings_note = Some(match std::fs::write(&path, text) {
             Ok(()) => (format!("Exported to {}", path.display()), false),
             Err(e) => (format!("Could not write {}: {e}", path.display()), true),
         });
     }
 
+    /// Reads a settings file, and asks what of it to import.
     pub(super) fn import_settings(&mut self, path: &Path) {
         self.settings_dir = path.parent().map(Path::to_owned);
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         let imported = std::fs::read_to_string(path)
             .map_err(|e| e.to_string())
             .and_then(|text| settings_file::import(&text, &self.settings));
-        let imported = match imported {
-            Ok(imported) => imported,
-            Err(e) => {
-                self.settings_note = Some((format!("Could not import {name}: {e}"), true));
-                return;
+        match imported {
+            Ok(imported) => {
+                self.settings_note = None;
+                self.import = Some(Import {
+                    settings: imported.settings.is_some(),
+                    filters: imported.repository.is_some() && self.repo.is_some(),
+                    file: name.into_owned(),
+                    imported,
+                });
             }
+            Err(e) => self.settings_note = Some((format!("Could not import {name}: {e}"), true)),
+        }
+    }
+
+    /// Asks what of a settings file to import, over the settings window.
+    pub(super) fn import_settings_dialog(&mut self, ctx: &egui::Context) {
+        let repo = self
+            .repo
+            .as_deref()
+            .map(|r| RepoSettings::name(&RepoSettings::key(r)));
+        let Some(import) = &mut self.import else {
+            return;
         };
+        let shown = dialogs::Dialog::new("import-settings", "Import settings")
+            .width(380.0)
+            .modal()
+            .opener(egui::ViewportId::from_hash_of("settings"))
+            .show(ctx, |ui| {
+                ui.weak(format!("From {}", import.file));
+                ui.add_space(8.0);
+                if import.imported.settings.is_some() {
+                    ui.checkbox(&mut import.settings, "Settings")
+                        .on_hover_text(IMPORT_SETTINGS_TIP);
+                }
+                if import.imported.repository.is_some() {
+                    let label = match &repo {
+                        Some(name) => format!("Filters of {name}"),
+                        None => "Filters".to_owned(),
+                    };
+                    ui.add_enabled_ui(repo.is_some(), |ui| {
+                        ui.checkbox(&mut import.filters, label)
+                            .on_hover_text(IMPORT_FILTERS_TIP)
+                            .on_disabled_hover_text("Open a repository to import its filters.");
+                    });
+                }
+                let skipped = import.skipped();
+                if !skipped.is_empty() {
+                    ui.add_space(8.0);
+                    let newer = if import.imported.newer {
+                        " (from a newer parterre)"
+                    } else {
+                        ""
+                    };
+                    ui.weak(format!("Left out{newer}: {}", skipped.join(", ")));
+                }
+                ui.add_space(12.0);
+                ui.separator();
+                let chosen = import.settings || import.filters;
+                dialogs::actions(ui, "Import", chosen, false, false)
+            });
+        match shown.inner {
+            dialogs::Answer::Primary => {
+                if let Some(import) = self.import.take() {
+                    self.apply_import(import);
+                }
+            }
+            dialogs::Answer::Cancel => self.import = None,
+            dialogs::Answer::Open if shown.should_close() => self.import = None,
+            dialogs::Answer::Open => {}
+        }
+    }
+
+    fn apply_import(&mut self, import: Import) {
         let mut parts = Vec::new();
-        let mut note = String::new();
-        if let Some(mut settings) = imported.settings {
+        if import.settings
+            && let Some(mut settings) = import.imported.settings
+        {
             settings.sanitize();
             let remember =
                 std::mem::replace(&mut settings.remember_moves, self.settings.remember_moves);
@@ -549,31 +604,15 @@ impl ParterreApp {
             self.set_remember_moves(remember);
             parts.push("settings".to_owned());
         }
-        if let Some(repo_settings) = imported.repository {
-            match self.repo.as_deref() {
-                Some(repo) => {
-                    repo_settings.apply(&mut self.settings.graph);
-                    let name = RepoSettings::name(&RepoSettings::key(repo));
-                    parts.push(format!("filters of {name}"));
-                }
-                None => note.push_str(". Open a repository to import its filters"),
-            }
+        if import.filters
+            && let (Some(repo_settings), Some(repo)) = (import.imported.repository, &self.repo)
+        {
+            repo_settings.apply(&mut self.settings.graph);
+            let name = RepoSettings::name(&RepoSettings::key(repo));
+            parts.push(format!("the filters of {name}"));
         }
-        if !imported.skipped.is_empty() {
-            let newer = if imported.newer {
-                " (from a newer parterre)"
-            } else {
-                ""
-            };
-            let skipped = imported.skipped.join(", ");
-            note.push_str(&format!(". Left out{newer}: {skipped}"));
-        }
-        let parts = if parts.is_empty() {
-            "nothing".to_owned()
-        } else {
-            parts.join(" and ")
-        };
-        self.settings_note = Some((format!("Imported {parts} from {name}{note}"), false));
+        let note = format!("Imported {} from {}", parts.join(" and "), import.file);
+        self.settings_note = Some((note, false));
     }
 
     /// Asks before setting every setting back to its default, over the settings window.
@@ -611,6 +650,31 @@ impl ParterreApp {
         self.stored.reset();
         self.legacy_filters = None;
         self.settings_note = None;
+    }
+}
+
+/// A settings file read, and what of it to import.
+#[derive(Debug)]
+pub(super) struct Import {
+    file: String,
+    imported: Imported,
+    settings: bool,
+    filters: bool,
+}
+
+impl Import {
+    /// What is left out of the parts chosen.
+    fn skipped(&self) -> Vec<&str> {
+        let chosen = |name: &&String| {
+            (self.settings && name.starts_with("settings."))
+                || (self.filters && name.starts_with("repository."))
+        };
+        self.imported
+            .skipped
+            .iter()
+            .filter(chosen)
+            .map(String::as_str)
+            .collect()
     }
 }
 

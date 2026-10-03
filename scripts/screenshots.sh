@@ -76,6 +76,8 @@ for page in appearance branchcolours graph filters dragging advanced manage; do
     shot "settings-$page" window "open settings:$page"
 done
 shot reset-settings window $'open settings:manage\nclick "Reset…"'
+shot import-settings window "open export-settings:$work/settings.json
+open import-settings:$work/settings.json"
 shot shortcuts window "open shortcuts"
 shot legend window "open legend"
 shot about window "open about"
