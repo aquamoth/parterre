@@ -33,8 +33,8 @@ worktree. Then it saves one PNG for each of these into `/tmp/shots`, in about 15
 - the log, compare, diff and blame windows
 - the question before resetting all settings, and the one asking what of a settings file to
   import
-- the dialogs for creating a branch, adding or deleting a worktree, reset, rebase and merge
-  (into the current branch, and of the current branch into another)
+- the dialogs for creating a branch, adding or deleting a worktree, reset, rebase, merge
+  (into the current branch, and of the current branch into another), cherry-pick and revert
 
 Menus are cropped to the menus, and dialogs to the dialog. Use it to check a change everywhere
 at a glance, or to pick before and after pictures for a pull request.
@@ -138,7 +138,9 @@ takes a branch, a tag or a hash prefix. A name that doesn't exist fails the run.
 | `delete-worktree:FOLDER` | The question before deleting a worktree, by its folder's name |
 | `reset:REF[:MODE]` | The reset dialog, optionally with a mode (`soft`, `mixed`, `keep`, `hard`) chosen |
 | `rebase:REF`, `merge:REF` | The rebase onto a commit, or the merge of one, into the current branch |
+| `revert:REF` | The revert of a commit on the current branch |
 | `merge-into:BRANCH` | The merge of the current branch into local branch BRANCH, as a pull request merges |
+| `cherry-pick:REF` | The cherry-pick of the commits of REF the current branch lacks, as the graph's menu offers it |
 
 Everything else is done as a person would do it:
 
@@ -185,6 +187,7 @@ runs start from the defaults otherwise.
 | `--mode`, `--direction`, `--look`, `--max-row-width` | What the graph shows and how it is laid out |
 | `--current-branch`, `--filter`, `--hide`, `--branch-color` | Which branches show, and their colours |
 | `--no-remotes`, `--no-tags`, `--pull-requests`, `--worktrees` | Which refs show |
+| `--pull-requests-from FILE` | Pull requests from a file instead of GitHub, see [below](#pull-requests-without-github) |
 | `--drag-mode adapt\|free\|subtree` | What moves with a dragged node |
 | `--log-layout a\|b\|c\|d` | The log window's layout: `stacked`, `side-by-side`, `details-below`, `files-right` |
 | `--diff-form side\|unified`, `--diff-words`, `--diff-whitespace`, `--diff-unfolded` | The diff window's settings |
@@ -192,6 +195,24 @@ runs start from the defaults otherwise.
 
 `parterre --help` lists the common ones. The window settings at the bottom are hidden there,
 being of use mainly for automation.
+
+## Pull requests without GitHub
+
+`--pull-requests-from FILE` shows the pull requests in FILE instead of asking GitHub, so
+pictures of them need no network, no signed-in `gh` and no pull requests on GitHub. It turns
+pull requests on. FILE is a JSON array:
+
+```json
+[
+  {"number": 146, "title": "Checkout redesign", "author": "mira", "head": "feature/checkout-redesign", "base": "main"},
+  {"number": 139, "title": "Dark mode", "author": "sam", "draft": true, "head": "feature/dark-mode", "base": "main"}
+]
+```
+
+`head` and `base` are branches of `origin`, and each pull request is shown on the commit
+`origin/<head>` is at. `origin` must still point at GitHub (`git remote set-url origin
+https://github.com/owner/name.git` after fetching will do); that is where clicking a pull
+request goes. A mistake in the file, or a `head` that `origin` has no branch for, fails the run.
 
 ## Running without a display
 

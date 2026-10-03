@@ -4,6 +4,7 @@
 pub mod blame;
 pub mod branches;
 pub mod changed_files;
+pub mod cherry_pick;
 pub mod columns;
 pub mod compare;
 pub mod file_diff;
@@ -27,6 +28,7 @@ pub mod rebase;
 pub mod recent;
 pub mod repo;
 pub mod reset;
+pub mod revert;
 pub mod revgraph;
 pub mod route;
 pub mod text;

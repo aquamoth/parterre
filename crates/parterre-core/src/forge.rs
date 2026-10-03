@@ -140,6 +140,9 @@ pub enum ForgeError {
     Status { status: u16, message: String },
     #[error("unexpected answer from GitHub: {0}")]
     Parse(String),
+    /// From the file of `--pull-requests-from`.
+    #[error("pull requests file: {0}")]
+    Canned(String),
 }
 
 impl ForgeError {

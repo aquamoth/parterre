@@ -32,6 +32,8 @@ pub struct Automation {
     pub fit: bool,
     /// Zoom to apply (around the canvas centre) after the initial view is set up.
     pub zoom: Option<f32>,
+    /// Pull requests to show instead of GitHub's (`--pull-requests-from`), as JSON.
+    pub pull_requests: Option<String>,
     /// Something is still loading (a diff, a blame or its history): the script waits.
     pub waiting: bool,
     /// The workflow script being run; `--screenshot` is its last step.

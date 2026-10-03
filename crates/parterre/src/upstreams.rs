@@ -9,7 +9,8 @@
 //!
 //! A worktree with a rebase in progress has an orange zigzag edge from its HEAD, the commits
 //! replayed so far, to the branch being rebased, still at its old commit. One with a merge in
-//! progress has an orange dashed arrow from its HEAD to the commit being merged. These special
+//! progress has an orange dashed arrow from its HEAD to the commit being merged, and one with a
+//! cherry-pick stopped, to the commit being picked. These special
 //! edges run between node centres, cut where they cross the boxes' edges, as TortoiseGit draws
 //! them, and bend around the other boxes where they can.
 
@@ -291,6 +292,7 @@ fn along(path: &[Pos2], step: f32) -> Vec<(Pos2, egui::Vec2)> {
 /// zigzag between its HEAD's node and the branch being rebased; and for each with a merge in
 /// progress (see [`Marks::merging`]), an orange dashed arrow from its HEAD's node to the commit
 /// being merged: the edge the merge would add, with its arrowhead where the graph's arrows go.
+/// A stopped cherry-pick has the same arrow, to the commit being picked.
 pub fn paint_in_progress(
     painter: &Painter,
     canvas: Rect,

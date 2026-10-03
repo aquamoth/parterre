@@ -18,6 +18,7 @@ use parterre_core::{Oid, Repo};
 mod auto_reload;
 mod blame_window;
 mod branches;
+mod cherry_pick;
 mod column_borders;
 mod commit_table;
 mod compare_window;
@@ -28,6 +29,7 @@ mod merge;
 mod pull_requests;
 mod rebase;
 mod reset;
+mod revert;
 mod settings_window;
 mod syntax;
 #[cfg(test)]
@@ -474,7 +476,10 @@ impl ParterreApp {
             marked: None,
             moves,
             watcher: None,
-            pull_requests: pull_requests::PullRequestLoader::default(),
+            pull_requests: match &automation.pull_requests {
+                Some(json) => pull_requests::PullRequestLoader::canned(json),
+                None => pull_requests::PullRequestLoader::default(),
+            },
             pull_requests_setting,
             pull_requests_error: None,
             refresh_pull_requests: false,
@@ -989,8 +994,9 @@ impl ParterreApp {
 
     /// Automation: opens the branch or worktree form (`create-branch:REF`, `add-worktree:REF`),
     /// asks to delete a worktree (`delete-worktree:FOLDER`, its name), or opens the reset
-    /// dialog (`reset:REF`, or `reset:REF:MODE`), the rebase's (`rebase:REF`) or the merge
-    /// dialog (`merge:REF`), once the branch information is in.
+    /// dialog (`reset:REF`, or `reset:REF:MODE`), the rebase's (`rebase:REF`), the merge
+    /// dialog (`merge:REF`), the cherry-pick's (`cherry-pick:REF`, the commits of REF the
+    /// current branch lacks) or the revert's (`revert:REF`), once the branch information is in.
     fn open_branch_dialog(
         &mut self,
         ctx: &egui::Context,
@@ -1029,10 +1035,15 @@ impl ParterreApp {
                     into: name.to_owned(),
                 }
             }
+            "cherry-pick" => branches::Request::CherryPick {
+                picks: parterre_core::cherry_pick::Picks::Lacking(oid(name)?),
+                name: Some(name.to_owned()),
+            },
             "rebase" => branches::Request::Rebase {
                 onto: oid(name)?,
                 target: name.to_owned(),
             },
+            "revert" => branches::Request::Revert { commit: oid(name)? },
             "reset" => {
                 let (rev, mode) = match name.rsplit_once(':') {
                     Some((rev, mode)) => {
@@ -1168,6 +1179,11 @@ impl ParterreApp {
                 }
                 // Lay out again, with them.
                 self.requested = None;
+            }
+            // A file of pull requests given for a screenshot: a mistake in it fails the run.
+            Some(pull_requests::Loaded::Failed { error, .. }) if loader.is_canned() => {
+                eprintln!("parterre: {error}");
+                crate::automation::fail();
             }
             // Only the user's own request gets an answer: loads parterre makes by itself fail
             // quietly, and the button's tooltip says why.
@@ -2657,7 +2673,8 @@ fn rebasing_marks(
         .collect()
 }
 
-/// Each worktree with a merge in progress: its HEAD, and the commit being merged.
+/// Each worktree with a merge or a cherry-pick in progress: its HEAD, and the commit being
+/// merged or picked.
 fn merging_marks(
     repo: &Repo,
     catalog: Option<&parterre_core::branches::Catalog>,
@@ -2668,7 +2685,10 @@ fn merging_marks(
     catalog
         .worktrees
         .iter()
-        .filter_map(|w| Some((repo.lookup(&w.head?)?, repo.lookup(&w.merging?)?)))
+        .filter_map(|w| {
+            let theirs = w.merging.or(w.picking.as_ref().map(|p| p.commit))?;
+            Some((repo.lookup(&w.head?)?, repo.lookup(&theirs)?))
+        })
         .collect()
 }
 
@@ -2727,6 +2747,13 @@ impl eframe::App for ParterreApp {
             && self.repo.as_ref().is_some_and(|r| r.path == path)
         {
             self.reload();
+        }
+        // A revert says it's done by the log moving to the new commit.
+        if let Some(reverted) = self.branches.reverted.take() {
+            let here = self.repo.as_ref().is_some_and(|r| r.path == reverted.path);
+            if !(here && self.log.follow(reverted.from, reverted.to)) {
+                self.branches.reverted_unseen(&ctx, reverted);
+            }
         }
         if let Some(path) = self.branches.go_to.take() {
             self.go_to_worktree(&path);

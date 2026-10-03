@@ -17,9 +17,10 @@
 //! end. Every place is highlighted in the list. Esc in the find field leaves it; elsewhere it
 //! closes the window.
 //!
-//! Ctrl+ or Shift+click selects a second commit, and the menu of either compares the two, in
-//! the order they were selected, as the graph's Compare revisions does (#127). The details and
-//! files follow the one clicked last; the mark for comparison is left alone.
+//! Ctrl+click adds commits to the selection, Shift+click selects a range and Ctrl+A every
+//! commit. The menu of a selected one compares the commit selected first with the one clicked
+//! last, as the graph's Compare revisions does (#127), and cherry-picks the selection (#202).
+//! The details and files follow the one clicked last; the mark for comparison is left alone.
 
 use std::sync::Arc;
 
@@ -148,10 +149,10 @@ impl LogView {
             query,
             options,
             exact: None,
-            list: CommitList {
-                selected: (!list.commits.is_empty()).then_some(0),
-                reveal: true,
-                ..CommitList::default()
+            list: {
+                let mut first = CommitList::default();
+                first.select((!list.commits.is_empty()).then_some(0));
+                first
             },
             graph: LogGraph::new(&list),
             commits: list.commits,
@@ -169,6 +170,26 @@ impl LogView {
             return;
         }
         self.rebuild(repo, self.options);
+    }
+
+    /// After a revert: walks from the new commit `to` where the query walked from the branch's
+    /// old tip `from`, and selects it. False when the query doesn't walk from `from`.
+    fn follow(&mut self, from: Oid, to: Oid) -> bool {
+        if self.exact.is_some() {
+            return false;
+        }
+        let (Some(from), Some(to)) = (self.repo.lookup(&from), self.repo.lookup(&to)) else {
+            return false;
+        };
+        let Some(tip) = self.query.tips.iter().position(|&t| t == from) else {
+            return false;
+        };
+        self.query.tips[tip] = to;
+        self.rebuild(self.repo.clone(), self.options);
+        let row = self.commits.iter().position(|&c| c == to);
+        self.list.select(row);
+        self.list.reveal = true;
+        row.is_some()
     }
 
     /// Re-runs the query with other walk options, keeping the selected commit in view if it is
@@ -210,14 +231,17 @@ impl LogView {
         }
         self.commits = list.commits.clone();
         self.graph = LogGraph::new(&list);
-        self.list.selected = (!self.commits.is_empty()).then_some(0);
+        self.list.select((!self.commits.is_empty()).then_some(0));
         self.exact = Some(commits);
     }
 
     /// Re-runs the query on `repo` with `options`, keeping the selected commit if it is still
     /// listed, and the scroll position.
     fn rebuild(&mut self, repo: Arc<Repo>, options: LogOptions) {
-        let selected = self.selected_commit().map(|c| self.repo.commit(c).oid);
+        let oid = |i: usize| self.commits.get(i).map(|&c| self.repo.commit(c).oid);
+        let selected = self.list.selected.and_then(oid);
+        let anchor = self.list.anchor.and_then(oid);
+        let many: Vec<Oid> = self.list.many.iter().filter_map(|&i| oid(i)).collect();
         let map = |commits: &[CommitIx]| -> Vec<CommitIx> {
             commits
                 .iter()
@@ -232,11 +256,20 @@ impl LogView {
         *self = LogView::new(self.id, repo, query, options);
         (self.list.scroll, self.list.height) = (scroll, height);
         self.list.widths = widths;
-        if let Some(oid) = selected {
-            let at = self.repo.lookup(&oid);
-            if let Some(i) = self.commits.iter().position(|&c| Some(c) == at) {
-                self.list.selected = Some(i);
-            }
+        // The selection, by commit, where its commits are still listed.
+        let rows: std::collections::HashMap<Oid, usize> = self
+            .commits
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (self.repo.commit(c).oid, i))
+            .collect();
+        if let Some(&i) = selected.and_then(|o| rows.get(&o)) {
+            self.list.select(Some(i));
+            self.list.reveal = false;
+            self.list.anchor = anchor.and_then(|o| rows.get(&o).copied()).or(Some(i));
+            self.list
+                .many
+                .extend(many.iter().filter_map(|o| rows.get(o)));
         }
     }
 }
@@ -530,6 +563,16 @@ impl LogWindow {
         self.refind();
     }
 
+    /// After a revert, on the reloaded snapshot: the log that walked from the branch's old tip
+    /// `from` walks from the new commit `to`, selected. False when there's no such log.
+    pub fn follow(&mut self, from: Oid, to: Oid) -> bool {
+        let followed = self.view.as_mut().is_some_and(|v| v.follow(from, to));
+        if followed {
+            self.refind();
+        }
+        followed
+    }
+
     /// The window's title: `<repo> – Log`.
     fn title(&self) -> String {
         let name = self
@@ -662,6 +705,9 @@ impl LogWindow {
         }
         let Some(view) = &mut self.view else { return };
         let n = view.commits.len();
+        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A)) {
+            view.list.select_all(n);
+        }
         let page = view.list.page();
         let target = ui.input_mut(|i| {
             let mut key = |k: Key| i.consume_key(Modifiers::NONE, k);
@@ -861,7 +907,7 @@ impl LogWindow {
             graph,
             abbrev_len: repo.abbrev_len,
             palette: &env.palette,
-            select: Select::Pair,
+            select: Select::Many,
             icons: false,
         };
         let head = repo.head_commit().map(|c| repo.commit(c).oid);
@@ -896,6 +942,15 @@ impl LogWindow {
                     .pair()
                     .filter(|_| list.is_selected(i))
                     .map(|(a, b)| (repo.commit(commits[a]).oid, repo.commit(commits[b]).oid));
+                // The selected commits as listed, if this row is one of them.
+                let selection: Vec<Oid> = if list.is_selected(i) && list.many.len() > 1 {
+                    list.many
+                        .iter()
+                        .map(|&r| repo.commit(commits[r]).oid)
+                        .collect()
+                } else {
+                    vec![commit.oid]
+                };
                 let env = MenuEnv {
                     marked,
                     head,
@@ -905,10 +960,11 @@ impl LogWindow {
                 if let Some(r) = row_menu(ui, commit, &env) {
                     request = Some(r);
                 }
-                if let Some(r) = super::branches::node_menu(
+                if let Some(r) = super::branches::row_node_menu(
                     ui,
                     repo,
                     commit.oid,
+                    &selection,
                     branches,
                     branch_busy,
                     worktrees,
@@ -1096,7 +1152,8 @@ impl LogWindow {
 struct MenuEnv<'a> {
     marked: Option<&'a (Oid, String)>,
     head: Option<Oid>,
-    /// The two selected commits, in the order they were selected, when the row is one of them.
+    /// The commit selected first and the one clicked last, when the row is one of the
+    /// selected.
     pair: Option<(Oid, Oid)>,
     working_tree: bool,
 }
@@ -1912,6 +1969,41 @@ mod tests {
         w
     }
 
+    #[test]
+    fn a_revert_moves_the_log_to_the_new_commit() {
+        let mut w = window(&["tip", "change", "root"]);
+        let old = w.view.as_ref().unwrap().repo.clone();
+        let (from, change) = (old.commit(CommitIx(0)).oid, old.commit(CommitIx(1)).oid);
+        // The snapshot after the revert: its commit first, on top of the old tip.
+        let to = Oid::from_hex(&format!("{:f<40}", "")).unwrap();
+        let mut commits = vec![Commit {
+            oid: to,
+            parents: vec![CommitIx(1)],
+            subject: "Revert \"change\"".into(),
+            ..old.commit(CommitIx(0)).clone()
+        }];
+        commits.extend(old.commits.iter().map(|c| Commit {
+            parents: c.parents.iter().map(|p| CommitIx(p.0 + 1)).collect(),
+            ..c.clone()
+        }));
+        let new = Arc::new(Repo::new(
+            "/nowhere".into(),
+            commits,
+            Vec::new(),
+            parterre_core::repo::Head::Detached(CommitIx(0)),
+        ));
+        // The change reverted was selected; the reload alone keeps it.
+        w.view.as_mut().unwrap().list.select(Some(1));
+        w.reload(&new);
+        let view = w.view.as_ref().unwrap();
+        assert_eq!(view.commits.len(), 3, "still from the old tip");
+        assert!(!w.follow(change, to), "the log doesn't walk from there");
+        assert!(w.follow(from, to));
+        let view = w.view.as_ref().unwrap();
+        assert_eq!(view.commits.len(), 4);
+        assert_eq!(selected(&w), Some(0));
+    }
+
     fn frame(ctx: &egui::Context, w: &mut LogWindow, events: Vec<egui::Event>) {
         frame_with(ctx, w, events, Modifiers::NONE);
     }
@@ -2044,24 +2136,58 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_and_shift_click_select_a_pair_of_commits() {
+    fn ctrl_and_shift_click_select_many_and_compare_the_first_with_the_last() {
         let ctx = egui::Context::default();
         let mut w = window(&["e", "d", "c", "b", "a"]);
         frame(&ctx, &mut w, Vec::new());
+        let pair = |w: &LogWindow| w.view.as_ref().unwrap().list.pair();
+        let many = |w: &LogWindow| {
+            let list = &w.view.as_ref().unwrap().list;
+            list.many.iter().copied().collect::<Vec<_>>()
+        };
+        // The window opens with its first commit selected: Ctrl+click adds to it.
+        click_row(&ctx, &mut w, 2, Modifiers::COMMAND);
+        assert_eq!((pair(&w), many(&w)), (Some((0, 2)), vec![0, 2]));
         click_row(&ctx, &mut w, 1, Modifiers::NONE);
         click_row(&ctx, &mut w, 3, Modifiers::COMMAND);
-        let pair = |w: &LogWindow| w.view.as_ref().unwrap().list.pair();
         assert_eq!(pair(&w), Some((1, 3)));
         assert_eq!(selected(&w), Some(3), "the details follow the last clicked");
-        click_row(&ctx, &mut w, 2, Modifiers::SHIFT);
-        assert_eq!(pair(&w), Some((3, 2)));
+        // Shift+click: the range from the commit selected first, compared with the last.
+        click_row(&ctx, &mut w, 4, Modifiers::SHIFT);
+        assert_eq!((pair(&w), many(&w)), (Some((1, 4)), vec![1, 2, 3, 4]));
+        assert_eq!(selected(&w), Some(4));
+        // Ctrl+click takes one out; taking out the last clicked goes back to the first.
+        click_row(&ctx, &mut w, 2, Modifiers::COMMAND);
+        assert_eq!(many(&w), [1, 3, 4]);
+        click_row(&ctx, &mut w, 4, Modifiers::COMMAND);
+        assert_eq!((selected(&w), pair(&w)), (Some(1), None));
+        // A right-click on a selected row keeps them; on another, selects it alone.
+        right_click_row(&ctx, &mut w, 1);
+        assert_eq!(many(&w), [1, 3]);
+        right_click_row(&ctx, &mut w, 0);
+        assert_eq!((many(&w), pair(&w)), (vec![0], None));
         // A plain click or a key leaves one.
-        click_row(&ctx, &mut w, 4, Modifiers::NONE);
-        assert_eq!(pair(&w), None);
-        click_row(&ctx, &mut w, 0, Modifiers::COMMAND);
-        assert_eq!(pair(&w), Some((4, 0)));
+        frame(&ctx, &mut w, vec![key_with(Key::A, Modifiers::COMMAND)]);
+        assert_eq!(many(&w), [0, 1, 2, 3, 4]);
         frame(&ctx, &mut w, vec![key(Key::ArrowDown)]);
-        assert_eq!((pair(&w), selected(&w)), (None, Some(1)));
+        assert_eq!((many(&w), selected(&w)), (vec![1], Some(1)));
+        click_row(&ctx, &mut w, 4, Modifiers::NONE);
+        assert_eq!((many(&w), pair(&w)), (vec![4], None));
+    }
+
+    /// Right-clicks commit row `row`, right of where [`click_row`] clicks, so that the menu
+    /// that opens is out of its way.
+    fn right_click_row(ctx: &egui::Context, w: &mut LogWindow, row: usize) {
+        let pos = pos2(700.0, 40.0 + HEADING + (row as f32 + 0.5) * ROW);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame(ctx, w, vec![egui::Event::PointerMoved(pos)]);
+        frame(ctx, w, vec![button(true)]);
+        frame(ctx, w, vec![button(false)]);
     }
 
     fn has_find_focus(ctx: &egui::Context) -> bool {

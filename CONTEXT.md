@@ -88,12 +88,25 @@ moves its ref or switches to it and back. It can stop on a conflict, or when a h
 commit, leaving an operation in progress.
 _Avoid_: pulling in, integrating
 
+**Reverting a commit**:
+Undoing a commit with a new one at the tip of the open worktree's branch, whose message names
+the commit undone. A merge is undone against its first parent. It can stop on a conflict,
+leaving an operation in progress.
+_Avoid_: undoing a commit, rolling back, resetting
+
 **Merge method**:
 How a merge takes the other commits in: a fast-forward, which moves the branch up to them, or
 a merge commit, which joins them in even where a fast-forward would do. Merging the open
 worktree's branch into another, also rebase and fast-forward, or a semi-linear merge, which
 rebase the open worktree's branch onto the other first.
 _Avoid_: merge strategy (git's name for the algorithm that combines the changes), merge type
+
+**Cherry-picking**:
+Copying commits onto the open worktree's branch as new commits, oldest first, as if applied
+one at a time: either the commits chosen in the log, which need not be adjacent, or, from the
+graph, every commit of a node the branch lacks. Merges, and commits whose change is already
+there, are left out. It can stop on a conflict, leaving an operation in progress.
+_Avoid_: copying commits, porting, backporting
 
 **Adding a worktree**:
 Creating a new worktree in its own folder, with a branch or a detached HEAD checked out.

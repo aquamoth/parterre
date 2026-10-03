@@ -2,7 +2,7 @@
 //! rebased as the log window does, greying those git leaves out, with what to do with each
 //! (pick, squash or drop: for a selection of them at once, or for one by clicking its icon),
 //! and the banner across the graph while the open worktree is stuck with an operation in
-//! progress, such as a rebase or a merge.
+//! progress, such as a rebase, a merge or a cherry-pick.
 
 use std::sync::Arc;
 
@@ -384,7 +384,24 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
     let open = catalog.worktrees.iter().find(|w| w.open);
     let files = &catalog.conflicted;
     let merging = open.and_then(|w| w.merging);
+    let picking = open.and_then(|w| w.picking.as_ref());
+    let reverting = open.and_then(|w| w.reverting);
     let (mut text, hint) = match open.and_then(|w| w.rebasing.as_ref()) {
+        None if let Some(p) = picking => {
+            let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
+            let commit = p.commit.short(repo.abbrev_len.max(7));
+            let at = if p.total > 1 {
+                format!(" stopped at {}/{}", p.done, p.total)
+            } else {
+                String::new()
+            };
+            (format!("Cherry-picking {commit} onto {branch}{at}"), FINISH)
+        }
+        None if let Some(commit) = reverting => {
+            let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
+            let commit = commit.short(repo.abbrev_len.max(7));
+            (format!("Reverting {commit} in {branch}"), FINISH)
+        }
         None if let Some(theirs) = merging => {
             let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
             // `MERGE_HEAD` is only a commit, and `git status` names none at all.
@@ -415,10 +432,14 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
     };
     if !files.is_empty() && stuck != Stuck::Conflicts {
         text.push_str(&format!(": {}", plural(files.len(), "conflicted file")));
-    } else if merging.is_some() {
-        // Stopped with no conflicts: a hook refused to commit it.
+    } else if merging.is_some() || picking.is_some() || reverting.is_some() {
+        // Stopped with no conflicts: a hook refused to commit it, or a pick came out empty.
         text.push_str(": not committed");
     }
+    let stashed = catalog
+        .stashed_for_revert
+        .as_ref()
+        .map(|entry| format!(" Your changes are stashed in {entry}."));
     let (fill, color) = if ui.visuals().dark_mode {
         (
             Color32::from_rgb(75, 45, 10),
@@ -446,10 +467,18 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new("⚠").color(color).strong());
                         let label = ui.label(RichText::new(&text).color(color).strong());
-                        if !files.is_empty() {
-                            label.on_hover_text(files.join("\n"));
+                        // The commit a cherry-pick stopped at, by its subject, and the files.
+                        let subject = picking
+                            .and_then(|p| repo.lookup(&p.commit))
+                            .map(|c| repo.commit(c).subject.clone());
+                        let hover: Vec<String> = subject.into_iter().chain(files.clone()).collect();
+                        if !hover.is_empty() {
+                            label.on_hover_text(hover.join("\n"));
                         }
                         ui.label(RichText::new(hint).color(color));
+                        if let Some(stashed) = &stashed {
+                            ui.label(RichText::new(stashed).color(color));
+                        }
                     });
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
