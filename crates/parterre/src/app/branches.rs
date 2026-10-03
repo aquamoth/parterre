@@ -56,6 +56,11 @@ pub enum Request {
         theirs: Oid,
         target: String,
     },
+    /// The dialog for merging the open worktree's branch into local branch `into`, as a pull
+    /// request does.
+    MergeInto {
+        into: String,
+    },
 }
 
 /// One target gets a direct named item; several get the existing app's submenu treatment.
@@ -213,6 +218,7 @@ fn branch_section(
     target_menu(ui, "Delete branch", &deletions, busy, &mut request);
     rebase_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
     merge_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
+    merge_into_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
     if let Some(reset) = reset_item(ui, commit, Some(catalog), busy) {
         request = Some(reset);
     }
@@ -333,6 +339,45 @@ fn merge_targets(
         ui,
         &format!("Merge into {branch}"),
         |name| format!("Merge {name}{into}"),
+        &targets,
+        busy,
+        request,
+    );
+}
+
+/// *Merge feature into main…* for each local branch on the node that lacks commits of the open
+/// worktree's branch, as a pull request merges; greyed out while the open worktree is stuck.
+fn merge_into_targets(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    refs: &[&parterre_core::GitRef],
+    catalog: &Catalog,
+    busy: bool,
+    request: &mut Option<Request>,
+) {
+    let Some(source) = merge::offered_into(repo, catalog, commit) else {
+        return;
+    };
+    let stuck = catalog.stuck().map(|s| s.reason());
+    let mut names: Vec<&str> = refs
+        .iter()
+        .filter(|r| r.kind == RefKind::LocalBranch && r.name != source)
+        .map(|r| r.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let targets: Vec<Target> = names
+        .iter()
+        .map(|name| {
+            let into = (*name).to_owned();
+            (into.clone(), Request::MergeInto { into }, stuck.clone())
+        })
+        .collect();
+    target_menu_named(
+        ui,
+        &format!("Merge {source} into"),
+        |name| format!("Merge {source} into {name}…"),
         &targets,
         busy,
         request,
@@ -1446,6 +1491,19 @@ impl Tool {
                 });
                 self.merge_loading = Some(MergeLoading { target, opener, rx });
             }
+            Request::MergeInto { into } => {
+                let path = repo.path.clone();
+                let (tx, rx) = mpsc::channel();
+                let ctx = ctx.clone();
+                let name = into.clone();
+                std::thread::spawn(move || {
+                    let preview = merge::Preview::load_into(&path, &name);
+                    let _ = tx.send(preview.map_err(|e| e.to_string()));
+                    ctx.request_repaint();
+                });
+                let target = format!("into {into}");
+                self.merge_loading = Some(MergeLoading { target, opener, rx });
+            }
         }
     }
 
@@ -1467,12 +1525,12 @@ impl Tool {
         };
         match result {
             Ok(preview) => {
-                self.merge = Some(MergeDialog::new(
-                    preview,
-                    repo,
-                    loading.target,
-                    loading.opener,
-                ));
+                // Merging the open worktree's branch, the command names it.
+                let target = match &preview.outgoing {
+                    Some(out) => out.source.clone(),
+                    None => loading.target,
+                };
+                self.merge = Some(MergeDialog::new(preview, repo, target, loading.opener));
             }
             Err(e) => {
                 let title = format!("Merge {}", loading.target);
