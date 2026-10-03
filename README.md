@@ -88,8 +88,8 @@ arrangement for each repository.
 ## History, diffs and blame
 
 Double-click a node for its **log**, or select two for the commits between them. From there,
-open a file's **diff**, side by side or unified, with changed words marked. Or **blame** it,
-with the history of the file below and each line shaded by age. You can also **compare** any
+open a file's **diff**, side by side or unified, with changed words marked and code coloured
+by syntax. Or **blame** it, with the history of the file below and each line shaded by age. You can also **compare** any
 two commits, or a commit with your working tree.
 
 <table>

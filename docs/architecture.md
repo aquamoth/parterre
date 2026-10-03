@@ -194,11 +194,17 @@ crates/parterre        the binary (eframe/egui)
 ## Why these choices
 
 - **Rust + egui/eframe**: native speed, one codebase for Linux, Windows and macOS, and an
-  immediate-mode canvas that makes custom drawing and dragging simple. No system development
-  packages are needed to build on Linux (winit/glutin load Wayland/X11/GL at runtime).
+  immediate-mode canvas that makes custom drawing and dragging simple. No development packages
+  of system libraries are needed to build on Linux (winit/glutin load Wayland/X11/GL at
+  runtime); a C compiler is, for the TLS library (`ring`) and the tree-sitter grammars.
 - **git CLI instead of a git library**: always available where parterre is useful, honours
-  every repo configuration, fast enough (see above), and keeps the build free of C
-  dependencies.
+  every repo configuration, fast enough (see above), and needs no git library built or found.
+- **tree-sitter for syntax colour**: a grammar crate per language, each compiling its parser
+  (C) in its build script, and the grammars' own highlight queries mapped onto a dozen kinds
+  in `parterre-core::highlight`. Chosen over syntect in #205 and #208 for speed and precision,
+  with binary size not a constraint. Each file is highlighted in a child process (`parterre
+  --highlight LANG`), killed when the window closes or after ten seconds, so a grammar's
+  abort or runaway parse on an odd file costs the colours, not the window.
 - **Own layout instead of a graph-layout crate**: git-specific needs (first-parent weighting,
   TortoiseGit parity, layer splitting, bundling, anytime network simplex) and full control
   over performance. 15k nodes lay out in about 200 ms.
