@@ -2,7 +2,7 @@
 //! rebased as the log window does, greying those git leaves out, with what to do with each
 //! (pick, squash or drop: for a selection of them at once, or for one by clicking its icon),
 //! and the banner across the graph while the open worktree is stuck with an operation in
-//! progress, such as a rebase or a merge.
+//! progress, such as a rebase, a merge or a cherry-pick.
 
 use std::sync::Arc;
 
@@ -384,7 +384,18 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
     let open = catalog.worktrees.iter().find(|w| w.open);
     let files = &catalog.conflicted;
     let merging = open.and_then(|w| w.merging);
+    let picking = open.and_then(|w| w.picking.as_ref());
     let (mut text, hint) = match open.and_then(|w| w.rebasing.as_ref()) {
+        None if let Some(p) = picking => {
+            let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
+            let commit = p.commit.short(repo.abbrev_len.max(7));
+            let at = if p.total > 1 {
+                format!(" stopped at {}/{}", p.done, p.total)
+            } else {
+                String::new()
+            };
+            (format!("Cherry-picking {commit} onto {branch}{at}"), FINISH)
+        }
         None if let Some(theirs) = merging => {
             let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
             // `MERGE_HEAD` is only a commit, and `git status` names none at all.
@@ -415,8 +426,8 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
     };
     if !files.is_empty() && stuck != Stuck::Conflicts {
         text.push_str(&format!(": {}", plural(files.len(), "conflicted file")));
-    } else if merging.is_some() {
-        // Stopped with no conflicts: a hook refused to commit it.
+    } else if merging.is_some() || picking.is_some() {
+        // Stopped with no conflicts: a hook refused to commit it, or a pick came out empty.
         text.push_str(": not committed");
     }
     let (fill, color) = if ui.visuals().dark_mode {
@@ -446,8 +457,13 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new("⚠").color(color).strong());
                         let label = ui.label(RichText::new(&text).color(color).strong());
-                        if !files.is_empty() {
-                            label.on_hover_text(files.join("\n"));
+                        // The commit a cherry-pick stopped at, by its subject, and the files.
+                        let subject = picking
+                            .and_then(|p| repo.lookup(&p.commit))
+                            .map(|c| repo.commit(c).subject.clone());
+                        let hover: Vec<String> = subject.into_iter().chain(files.clone()).collect();
+                        if !hover.is_empty() {
+                            label.on_hover_text(hover.join("\n"));
                         }
                         ui.label(RichText::new(hint).color(color));
                     });

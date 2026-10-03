@@ -4,6 +4,7 @@
 pub mod blame;
 pub mod branches;
 pub mod changed_files;
+pub mod cherry_pick;
 pub mod columns;
 pub mod compare;
 pub mod file_diff;

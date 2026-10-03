@@ -190,8 +190,13 @@ impl Git {
     }
 
     /// Runs git with `input` on stdin and returns stdout, failing on a non-zero exit status.
-    pub(crate) fn run_with_input(&self, args: &[&str], input: String) -> Result<String, GitError> {
+    pub(crate) fn run_with_input(
+        &self,
+        args: &[&str],
+        input: impl Into<Vec<u8>>,
+    ) -> Result<String, GitError> {
         use std::io::Write as _;
+        let input = input.into();
         let mut child = self
             .command(args)
             .stdin(Stdio::piped())
@@ -200,7 +205,7 @@ impl Git {
         let mut stdin = child.stdin.take().expect("stdin is piped");
         // Write from another thread so a large output cannot deadlock against a full pipe.
         let writer = std::thread::spawn(move || {
-            let _ = stdin.write_all(input.as_bytes());
+            let _ = stdin.write_all(&input);
         });
         let out = child.wait_with_output().map_err(GitError::Spawn)?;
         let _ = writer.join();

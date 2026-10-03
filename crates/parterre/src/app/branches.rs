@@ -15,11 +15,13 @@ use parterre_core::reset::{Mode, Preview};
 use parterre_core::worktree_folder;
 use parterre_core::{Oid, RefKind, Repo};
 
+use super::cherry_pick::CherryPickDialog;
 use super::merge::MergeDialog;
 use super::rebase::{RebaseDialog, stuck_color};
 use super::reset::ResetDialog;
 use crate::theme::Palette;
 use crate::{dialogs, menu, widgets};
+use parterre_core::cherry_pick;
 use parterre_core::merge;
 use parterre_core::rebase;
 use parterre_core::revgraph::GraphOptions;
@@ -61,6 +63,12 @@ pub enum Request {
     MergeInto {
         into: String,
     },
+    /// The confirmation for cherry-picking `picks` onto the open worktree's branch; `name` is
+    /// what the graph's menu named them by.
+    CherryPick {
+        picks: cherry_pick::Picks,
+        name: Option<String>,
+    },
 }
 
 /// One target gets a direct named item; several get the existing app's submenu treatment.
@@ -73,7 +81,33 @@ pub fn node_menu(
     busy: bool,
     worktrees: bool,
 ) -> Option<Request> {
-    let branch = branch_section(ui, repo, commit, catalog, busy);
+    menu_for(ui, repo, commit, None, catalog, busy, worktrees)
+}
+
+/// [`node_menu`] for a row of the log, where *Cherry-pick* takes the `selection`, as listed,
+/// rather than everything the branch lacks.
+pub fn row_node_menu(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    selection: &[Oid],
+    catalog: Option<&Catalog>,
+    busy: bool,
+    worktrees: bool,
+) -> Option<Request> {
+    menu_for(ui, repo, commit, Some(selection), catalog, busy, worktrees)
+}
+
+fn menu_for(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    selection: Option<&[Oid]>,
+    catalog: Option<&Catalog>,
+    busy: bool,
+    worktrees: bool,
+) -> Option<Request> {
+    let branch = branch_section(ui, repo, commit, selection, catalog, busy);
     let worktree = worktrees
         .then(|| worktree_section(ui, commit, catalog, busy))
         .flatten();
@@ -92,6 +126,7 @@ fn branch_section(
     ui: &mut Ui,
     repo: &Repo,
     commit: Oid,
+    selection: Option<&[Oid]>,
     catalog: Option<&Catalog>,
     busy: bool,
 ) -> Option<Request> {
@@ -219,6 +254,13 @@ fn branch_section(
     rebase_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
     merge_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
     merge_into_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
+    let picked = match selection {
+        Some(selection) => cherry_pick_selection(ui, repo, selection, catalog, busy),
+        None => cherry_pick_lacking(ui, repo, commit, &refs, catalog, busy),
+    };
+    if let Some(pick) = picked {
+        request = Some(pick);
+    }
     if let Some(reset) = reset_item(ui, commit, Some(catalog), busy) {
         request = Some(reset);
     }
@@ -382,6 +424,84 @@ fn merge_into_targets(
         busy,
         request,
     );
+}
+
+/// *Cherry-pick feature onto main…*: every commit of the node main lacks, named after a branch
+/// on the node (a local one first), or its short hash; greyed out while the open worktree is
+/// stuck.
+fn cherry_pick_lacking(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    refs: &[&parterre_core::GitRef],
+    catalog: &Catalog,
+    busy: bool,
+) -> Option<Request> {
+    let branch = match catalog.stuck() {
+        Some(_) => stuck_branch(catalog),
+        None => cherry_pick::offered(repo, catalog, commit)?.to_owned(),
+    };
+    let mut names: Vec<&parterre_core::GitRef> = refs
+        .iter()
+        .copied()
+        .filter(|r| !r.name.ends_with("/HEAD") && r.name != branch)
+        .collect();
+    names.sort_by_key(|r| (r.kind != RefKind::LocalBranch, r.name.as_str()));
+    let name = names
+        .first()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| commit.short(repo.abbrev_len.max(7)));
+    let label = format!("Cherry-pick {name} onto {branch}…");
+    let request = Request::CherryPick {
+        picks: cherry_pick::Picks::Lacking(commit),
+        name: Some(name),
+    };
+    cherry_pick_item(ui, label, request, catalog, busy)
+}
+
+/// *Cherry-pick 3 commits onto main…*: the log's selection, as listed; greyed out while the
+/// open worktree is stuck.
+fn cherry_pick_selection(
+    ui: &mut Ui,
+    repo: &Repo,
+    selection: &[Oid],
+    catalog: &Catalog,
+    busy: bool,
+) -> Option<Request> {
+    let branch = match catalog.stuck() {
+        Some(_) => stuck_branch(catalog),
+        None => cherry_pick::offered_chosen(repo, catalog, selection)?.to_owned(),
+    };
+    let what = match selection {
+        [one] => one.short(repo.abbrev_len.max(7)),
+        many => format!("{} commits", many.len()),
+    };
+    let label = format!("Cherry-pick {what} onto {branch}…");
+    let request = Request::CherryPick {
+        picks: cherry_pick::Picks::Chosen(selection.to_vec()),
+        name: None,
+    };
+    cherry_pick_item(ui, label, request, catalog, busy)
+}
+
+fn cherry_pick_item(
+    ui: &mut Ui,
+    label: String,
+    request: Request,
+    catalog: &Catalog,
+    busy: bool,
+) -> Option<Request> {
+    let stuck = catalog.stuck().map(|s| s.reason());
+    let response = ui.add_enabled(!busy && stuck.is_none(), egui::Button::new(label));
+    let response = match stuck {
+        Some(reason) => response.on_disabled_hover_text(capitalized(&reason)),
+        None => response.on_disabled_hover_text(loading_reason(true)),
+    };
+    if response.clicked() {
+        ui.close();
+        return Some(request);
+    }
+    None
 }
 
 /// The branch a stuck worktree is rebasing, else its branch, for greyed-out labels.
@@ -1277,6 +1397,13 @@ struct RebaseLoading {
     rx: mpsc::Receiver<Result<rebase::Preview, String>>,
 }
 
+/// A cherry-pick's preview, being read for its confirmation.
+#[derive(Debug)]
+struct CherryPickLoading {
+    opener: ViewportId,
+    rx: mpsc::Receiver<Result<cherry_pick::Preview, String>>,
+}
+
 /// A merge's preview, being read for its dialog.
 #[derive(Debug)]
 struct MergeLoading {
@@ -1298,6 +1425,8 @@ pub struct Tool {
     rebase_loading: Option<RebaseLoading>,
     merge: Option<MergeDialog>,
     merge_loading: Option<MergeLoading>,
+    cherry_pick: Option<CherryPickDialog>,
+    cherry_pick_loading: Option<CherryPickLoading>,
     /// Diff windows asked for from a dialog.
     pub diff_requests: Vec<(Arc<Repo>, FileDiffSpec)>,
     job: Option<Job>,
@@ -1332,6 +1461,8 @@ impl Tool {
                 self.rebase_loading = None;
                 self.merge = None;
                 self.merge_loading = None;
+                self.cherry_pick = None;
+                self.cherry_pick_loading = None;
                 self.catalog = None;
             } else if let Some(dialog) = &self.reset
                 && self.previewing.is_none()
@@ -1387,6 +1518,7 @@ impl Tool {
         self.previewed(ctx);
         self.rebase_previewed(ctx);
         self.merge_previewed(ctx);
+        self.cherry_pick_previewed(ctx);
         let completed = self.job.as_ref().and_then(|job| match job.rx.try_recv() {
             Ok(result) => Some(result),
             Err(mpsc::TryRecvError::Empty) => None,
@@ -1503,6 +1635,44 @@ impl Tool {
                 });
                 let target = format!("into {into}");
                 self.merge_loading = Some(MergeLoading { target, opener, rx });
+            }
+            Request::CherryPick { picks, name } => {
+                let path = repo.path.clone();
+                let (tx, rx) = mpsc::channel();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let preview = cherry_pick::Preview::load(&path, &picks, name);
+                    let _ = tx.send(preview.map_err(|e| e.to_string()));
+                    ctx.request_repaint();
+                });
+                self.cherry_pick_loading = Some(CherryPickLoading { opener, rx });
+            }
+        }
+    }
+
+    /// Opens the cherry-pick's confirmation once its preview is read.
+    fn cherry_pick_previewed(&mut self, ctx: &egui::Context) {
+        let Some(loading) = &self.cherry_pick_loading else {
+            return;
+        };
+        let result = match loading.rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("The cherry-pick preview stopped unexpectedly.".into())
+            }
+        };
+        let loading = self.cherry_pick_loading.take().unwrap();
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
+        match result {
+            Ok(preview) => {
+                self.cherry_pick = Some(CherryPickDialog::new(preview, repo, ctx, loading.opener));
+            }
+            Err(e) => {
+                let title = "Cherry-pick".to_owned();
+                self.notice(ctx, repo.path.clone(), title, Report::default(), Some(e));
             }
         }
     }
@@ -1712,6 +1882,7 @@ impl Tool {
         self.reset_dialog(ctx);
         self.rebase_dialog(ctx, palette, options);
         self.merge_dialog(ctx, palette, options);
+        self.cherry_pick_dialog(ctx, palette, options);
         self.loss_dialog(ctx);
         self.notifications(ctx);
     }
@@ -1781,6 +1952,32 @@ impl Tool {
             }
             Some(dialogs::Answer::Cancel) => {}
             _ => self.merge = Some(dialog),
+        }
+    }
+
+    fn cherry_pick_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        palette: &Palette,
+        options: &GraphOptions,
+    ) {
+        let Some(mut dialog) = self.cherry_pick.take() else {
+            return;
+        };
+        let asked = dialog.show(ctx, self.busy(), palette, options);
+        let repo = self.repo.clone();
+        if let (Some(oid), Some(repo)) = (asked.log, &repo) {
+            self.log_request = Some((repo.clone(), vec![oid], false));
+        }
+        match asked.answer {
+            Some(dialogs::Answer::Primary) if !self.busy() => {
+                if let Some(repo) = &repo {
+                    let action = Action::CherryPick(Box::new(dialog.cherry_pick()));
+                    self.run(ctx, repo.path.clone(), action, None, dialog.opener);
+                }
+            }
+            Some(dialogs::Answer::Cancel) => {}
+            _ => self.cherry_pick = Some(dialog),
         }
     }
 

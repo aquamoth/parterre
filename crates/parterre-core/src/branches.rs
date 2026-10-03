@@ -45,6 +45,8 @@ pub struct Worktree {
     pub rebasing: Option<Rebasing>,
     /// The commit being merged there (`MERGE_HEAD`), when the operation in progress is a merge.
     pub merging: Option<Oid>,
+    /// The cherry-pick stopped there, when the operation in progress is one.
+    pub picking: Option<Picking>,
 }
 
 /// Why the open worktree is stuck.
@@ -84,6 +86,67 @@ pub struct Rebasing {
     /// The commits replayed so far, the one it stopped at included, of how many.
     pub done: usize,
     pub total: usize,
+}
+
+/// A cherry-pick git left stopped in a worktree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Picking {
+    /// The commit it stopped at (`CHERRY_PICK_HEAD`).
+    pub commit: Oid,
+    /// The commits picked so far, the one it stopped at included, of how many: 1 of 1 when
+    /// only one was picked.
+    pub done: usize,
+    pub total: usize,
+}
+
+/// The cherry-pick in a worktree's administrative folder, if one is stopped there at `head`.
+/// Git's sequencer keeps the commits still to pick, the one stopped at first, and where HEAD
+/// was when it started.
+fn picking(git: &Git, admin: &Path, reftable: bool, head: Option<Oid>) -> Option<Picking> {
+    let commit = pseudo_ref(admin, reftable, "CHERRY_PICK_HEAD")?;
+    let sequencer = admin.join("sequencer");
+    let todo = std::fs::read_to_string(sequencer.join("todo")).unwrap_or_default();
+    let left = todo
+        .lines()
+        .filter(|l| l.starts_with("pick ") || l.starts_with("p "))
+        .count();
+    let start = std::fs::read_to_string(sequencer.join("head"))
+        .ok()
+        .and_then(|s| Oid::from_hex(s.trim()));
+    let (done, total) = match (left, start, head) {
+        (1.., Some(start), Some(head)) => {
+            let range = format!("{}..{}", start.to_hex(), head.to_hex());
+            let picked: usize = git
+                .query(&["rev-list", "--count", &range])
+                .ok()
+                .flatten()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            (picked + 1, picked + left)
+        }
+        _ => (1, 1),
+    };
+    Some(Picking {
+        commit,
+        done,
+        total,
+    })
+}
+
+/// A pseudo-ref such as `CHERRY_PICK_HEAD` in a worktree's administrative folder: a file, or,
+/// with a reftable, a ref.
+fn pseudo_ref(admin: &Path, reftable: bool, name: &str) -> Option<Oid> {
+    if let Ok(text) = std::fs::read_to_string(admin.join(name)) {
+        return Oid::from_hex(text.lines().next()?.trim());
+    }
+    if !reftable {
+        return None;
+    }
+    let found = Git::new(admin)
+        .query(&["--git-dir=.", "rev-parse", "--verify", "--quiet", name])
+        .ok()
+        .flatten()?;
+    Oid::from_hex(found.trim())
 }
 
 /// The rebase in a worktree's administrative folder, if one is stopped there.
@@ -328,6 +391,9 @@ impl Catalog {
                 let text = std::fs::read_to_string(a.join("MERGE_HEAD")).ok()?;
                 Oid::from_hex(text.lines().next()?.trim())
             });
+            let picking = admin
+                .as_deref()
+                .and_then(|a| picking(&git, a, reftable, head));
             worktrees.push(Worktree {
                 main: path == main_place,
                 open: crate::worktree_folder::same_path(&path, &root),
@@ -339,6 +405,7 @@ impl Catalog {
                 in_progress,
                 rebasing,
                 merging,
+                picking,
             });
         }
         for (place, admin) in &admins {
@@ -749,6 +816,8 @@ pub enum Action {
     Rebase(Box<crate::rebase::Rebase>),
     /// Merges another commit into the open worktree's branch.
     Merge(Box<crate::merge::Merge>),
+    /// Cherry-picks commits onto the open worktree's branch.
+    CherryPick(Box<crate::cherry_pick::CherryPick>),
 }
 
 impl Action {
@@ -773,6 +842,7 @@ impl Action {
                 crate::rebase::short_target(r)
             ),
             Self::Merge(m) => format!("Merge {} into {}", crate::merge::short_target(m), m.branch),
+            Self::CherryPick(c) => format!("Cherry-pick {} onto {}", c.name, c.branch),
         }
     }
 }
@@ -975,6 +1045,7 @@ impl Branches {
             Action::Reset(r) => Ok(vec![crate::reset::command(r.mode, r.target)]),
             Action::Rebase(r) => Ok(vec![crate::rebase::command(r)]),
             Action::Merge(m) => Ok(crate::merge::commands(m)),
+            Action::CherryPick(c) => Ok(crate::cherry_pick::commands(c)),
         }
     }
 
@@ -1052,6 +1123,10 @@ impl Branches {
             crate::merge::execute(&catalog, merge, cancel, report)?;
             return Ok(None);
         }
+        if let Action::CherryPick(pick) = &action {
+            crate::cherry_pick::execute(&catalog, pick, cancel, report)?;
+            return Ok(None);
+        }
         let mut commands = Self::commands(&catalog, &action)?;
         let switching = matches!(
             &action,
@@ -1101,7 +1176,8 @@ impl Branches {
             Action::DeleteWorktree { .. }
             | Action::Reset(_)
             | Action::Rebase(_)
-            | Action::Merge(_) => {
+            | Action::Merge(_)
+            | Action::CherryPick(_) => {
                 unreachable!("handled above")
             }
             Action::Switch(name) => {
