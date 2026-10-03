@@ -974,7 +974,7 @@ impl Branches {
             Action::Delete { name, .. } => Ok(vec![words(&["branch", "-D", "--", name])]),
             Action::Reset(r) => Ok(vec![crate::reset::command(r.mode, r.target)]),
             Action::Rebase(r) => Ok(vec![crate::rebase::command(r)]),
-            Action::Merge(m) => Ok(vec![crate::merge::command(m)]),
+            Action::Merge(m) => Ok(crate::merge::commands(m)),
         }
     }
 

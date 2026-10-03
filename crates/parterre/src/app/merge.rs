@@ -8,7 +8,7 @@ use eframe::egui::{self, Id, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::command_text;
 use parterre_core::log::{LogOptions, LogQuery};
 use parterre_core::log_graph::LogGraph;
-use parterre_core::merge::{self, Method, Preview};
+use parterre_core::merge::{self, Method, Preview, Rebased};
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::{CommitIx, Oid, Repo};
 
@@ -35,6 +35,8 @@ pub struct MergeDialog {
     /// What the command names the target by: a branch's name, or the full hash.
     target: String,
     pub method: Method,
+    /// PROTOTYPE (#188): what a rebase method rebases.
+    pub rebased: Rebased,
     pub message: String,
     pub stash: bool,
     /// The window it was asked from.
@@ -77,6 +79,7 @@ impl MergeDialog {
         };
         MergeDialog {
             method: preview.default_method(),
+            rebased: preview.default_rebased(Method::RebaseFastForward),
             message: preview.message.clone(),
             stash: preview.auto_stash,
             refs: repo.refs_by_commit(),
@@ -92,8 +95,13 @@ impl MergeDialog {
     }
 
     pub fn merge(&self) -> merge::Merge {
-        self.preview
-            .merge(self.target.clone(), self.method, self.stash, &self.message)
+        self.preview.merge(
+            self.target.clone(),
+            self.method,
+            self.rebased,
+            self.stash,
+            &self.message,
+        )
     }
 
     /// The target as the dialog names it: a branch, or a short hash.
@@ -102,8 +110,13 @@ impl MergeDialog {
     }
 
     fn blocked(&self) -> Option<String> {
-        self.preview
-            .blocked(self.method, self.stash, &self.message, &self.name())
+        self.preview.blocked(
+            self.method,
+            self.rebased,
+            self.stash,
+            &self.message,
+            &self.name(),
+        )
     }
 
     /// `busy` while another Git operation runs.
@@ -139,7 +152,10 @@ impl MergeDialog {
                 }
                 let after = ui.cursor().top();
                 self.methods(ui, &name);
-                ui.add_enabled_ui(self.method == Method::MergeCommit, |ui| {
+                if self.method.rebases() {
+                    self.prototype_rebased(ui, &name);
+                }
+                ui.add_enabled_ui(self.method.commits(), |ui| {
                     ui.label("Message");
                     ui.add(
                         egui::TextEdit::multiline(&mut self.message)
@@ -150,7 +166,7 @@ impl MergeDialog {
                 })
                 .response
                 .on_disabled_hover_text("A fast-forward makes no commit");
-                if self.preview.dirty {
+                if self.preview.dirty && !self.method.rebases() {
                     ui.checkbox(&mut self.stash, "Stash changes").on_hover_text(
                         "Set your uncommitted changes aside first, and put them back \
                          afterwards (git merge --autostash).",
@@ -159,7 +175,11 @@ impl MergeDialog {
                 if let Some(why) = self.blocked() {
                     ui.colored_label(ui.visuals().error_fg_color, why);
                 }
-                dialogs::command_box(ui, &[command_text(&merge::command(&self.merge()))]);
+                let commands: Vec<String> = merge::commands(&self.merge())
+                    .iter()
+                    .map(|c| command_text(c))
+                    .collect();
+                dialogs::command_box(ui, &commands);
                 let enabled = self.blocked().is_none() && !busy;
                 let answer = dialogs::actions(ui, "Merge", enabled, false, false);
                 dialogs::grown(ui, grow, after, height, min);
@@ -203,12 +223,68 @@ impl MergeDialog {
                     );
                     if radio.clicked() || help.clicked() {
                         self.method = m;
+                        // PROTOTYPE (#188): semi-linear can't pick onto the branch.
+                        if self.preview.unrebasable(m, self.rebased, name).is_some() {
+                            self.rebased = self.preview.default_rebased(m);
+                        }
                     }
                 })
             })
             .response
             .on_disabled_hover_text(unavailable.unwrap_or_default());
         }
+    }
+
+    /// PROTOTYPE (#188): what the rebase method rebases, the question being prototyped.
+    fn prototype_rebased(&mut self, ui: &mut Ui, name: &str) {
+        let accent = egui::Color32::from_rgb(200, 120, 255);
+        ui.indent("prototype-rebased", |ui| {
+            ui.label(
+                RichText::new("PROTOTYPE · What's rebased")
+                    .small()
+                    .color(accent),
+            );
+            for r in Rebased::ALL {
+                let unavailable = self.preview.unrebasable(self.method, r, name);
+                ui.add_enabled_ui(unavailable.is_none(), |ui| {
+                    ui.horizontal_top(|ui| {
+                        let radio = ui
+                            .allocate_ui_with_layout(
+                                vec2(METHOD_NAME + 40.0, 18.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_min_width(METHOD_NAME + 40.0);
+                                    ui.radio(self.rebased == r, r.name(name))
+                                },
+                            )
+                            .inner;
+                        let help = ui.add(
+                            egui::Label::new(
+                                RichText::new(r.help(&self.preview.branch, name))
+                                    .small()
+                                    .weak(),
+                            )
+                            .wrap()
+                            .sense(egui::Sense::click()),
+                        );
+                        if radio.clicked() || help.clicked() {
+                            self.rebased = r;
+                        }
+                    })
+                })
+                .response
+                .on_disabled_hover_text(unavailable.unwrap_or_default());
+            }
+            let (replays, merges) = (self.preview.replays, self.preview.merges);
+            let mut facts = format!("Replays {replays}");
+            if merges > 0 {
+                facts.push_str(&format!(
+                    ", flattens {merges} merge{}",
+                    if merges == 1 { "" } else { "s" }
+                ));
+            }
+            ui.label(RichText::new(facts).small().color(accent));
+        });
     }
 
     /// The commits coming in, as the log window lists them, `height` tall. Returns the one
