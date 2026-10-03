@@ -375,38 +375,18 @@ impl ParterreApp {
         // recording.
         cc.egui_ctx
             .set_embed_viewports(automation.is_active() || automation.record.is_some());
-        if automation.script.is_some() {
+        if automation.is_active() {
             cc.egui_ctx
                 .add_plugin(crate::automation::TextCollector(automation.texts.clone()));
         }
         cc.egui_ctx.add_plugin(crate::dialogs::ModalLock::default());
-        let demo_settings = automation
-            .demo_open
-            .as_deref()
-            .and_then(|o| o.strip_prefix("settings"))
-            .map(|page| SettingsPage::named(page.trim_start_matches(':')).unwrap_or_default());
         // Automated runs are short and show one window (viewports are embedded), so they neither
         // freeze nor need their frame rate capped: they run as fast as they can.
         let frame_limiter = (!vsync && !automation.is_active()).then(FrameLimiter::default);
-        let demo_log: Option<Vec<parterre_core::CommitIx>> = automation
-            .demo_log
-            .as_deref()
-            .zip(repo.as_ref())
-            .map(|(spec, repo)| {
-                spec.split("..")
-                    .filter_map(|name| {
-                        let commit = repo.resolve(name);
-                        if commit.is_none() {
-                            eprintln!("--demo-log: no commit named {name}");
-                        }
-                        commit
-                    })
-                    .collect()
-            });
         // Pull requests on at startup (the default) were not turned on by the user: whatever
         // comes of loading them, nothing is said.
         let pull_requests_setting = settings.graph.show_pull_requests;
-        let mut app = ParterreApp {
+        ParterreApp {
             title: window_title(repo.as_ref()),
             repo: repo.map(Arc::new),
             recent,
@@ -435,8 +415,8 @@ impl ParterreApp {
             status: open_error.map(|e| (e, true)),
             show_shortcuts: false,
             show_legend: false,
-            show_settings: demo_settings.is_some(),
-            settings_page: demo_settings.unwrap_or_default(),
+            show_settings: false,
+            settings_page: SettingsPage::default(),
             show_about: false,
             export: None,
             export_dir: None,
@@ -463,52 +443,7 @@ impl ParterreApp {
             zoom_text: String::new(),
             automation,
             frame_limiter,
-        };
-        if let (Some(commits), Some(repo)) = (demo_log, app.repo.clone()) {
-            app.open_log(repo, &commits);
         }
-        let demo_oid = |repo: &Repo, name: &str, flag: &str| {
-            let oid = repo.resolve(name).map(|c| repo.commit(c).oid);
-            if oid.is_none() {
-                eprintln!("{flag}: no commit named {name}");
-            }
-            oid
-        };
-        if let (Some(name), Some(repo)) = (app.automation.demo_mark.clone(), app.repo.clone())
-            && let Some(oid) = demo_oid(&repo, &name, "--demo-mark")
-        {
-            app.compare_request(CompareRequest::Mark(Some(oid)));
-        }
-        if let (Some(name), Some(repo)) = (app.automation.demo_select.clone(), app.repo.clone())
-            && let Some(oid) = demo_oid(&repo, &name, "--demo-select")
-        {
-            app.pending_select = vec![oid];
-        }
-        if let (Some(spec), Some(repo)) = (app.automation.demo_compare.clone(), app.repo.clone()) {
-            match spec.split_once("..") {
-                Some((a, "WORKING_TREE")) => {
-                    if let Some(a) = demo_oid(&repo, a, "--demo-compare") {
-                        app.compare_request(CompareRequest::WorkingTree(a));
-                    }
-                }
-                Some((a, b)) => {
-                    if let (Some(a), Some(b)) = (
-                        demo_oid(&repo, a, "--demo-compare"),
-                        demo_oid(&repo, b, "--demo-compare"),
-                    ) {
-                        app.compare(a, b);
-                    }
-                }
-                None => eprintln!("--demo-compare: expected <ref>..<ref>"),
-            }
-        }
-        if let Some(spec) = app.automation.demo_diff.clone() {
-            app.open_demo_diff(&spec, &cc.egui_ctx);
-        }
-        if let Some(spec) = app.automation.demo_blame.clone() {
-            app.open_demo_blame(&spec, &cc.egui_ctx);
-        }
-        app
     }
 
     /// Starts a new layout when the graph or layout options changed, and installs finished
@@ -890,111 +825,117 @@ impl ParterreApp {
         }
     }
 
-    /// Automation: opens the branch or worktree form (`--demo-open create-branch:REF` or
-    /// `add-worktree:REF`), asks to delete a worktree (`delete-worktree:FOLDER`, its name), or
-    /// opens the reset dialog (`reset:REF`, or `reset:REF:MODE`), the rebase's confirmation
-    /// (`rebase:REF`) or the merge dialog (`merge:REF`), once the branch information is in.
-    fn demo_dialog(&mut self, ctx: &egui::Context) {
-        let Some((kind, name)) = self
-            .automation
-            .demo_open
-            .as_deref()
-            .and_then(|o| o.split_once(':'))
-            .filter(|(k, _)| {
-                matches!(
-                    *k,
-                    "create-branch"
-                        | "add-worktree"
-                        | "delete-worktree"
-                        | "reset"
-                        | "rebase"
-                        | "merge"
-                )
-            })
-            .map(|(k, n)| (k.to_owned(), n.to_owned()))
-        else {
-            return;
-        };
-        let (Some(repo), Some(catalog)) = (self.repo.clone(), self.branches.catalog.clone()) else {
-            return;
-        };
-        // Still something to wait for, so the screenshot waits as for the other popups.
-        self.automation.demo_open = Some("dialog".into());
-        if kind == "delete-worktree" {
-            if let Some(w) = catalog.worktrees.iter().find(|w| w.name() == name) {
-                let action = parterre_core::branches::Action::DeleteWorktree {
-                    path: w.path.clone(),
-                };
-                let request = branches::Request::Run(action);
-                self.branches.request(ctx, request, egui::ViewportId::ROOT);
-            }
-            return;
-        }
-        if kind == "merge" {
-            if let Some(theirs) = repo.resolve(&name).map(|c| repo.commit(c).oid) {
-                let request = branches::Request::Merge {
-                    theirs,
-                    target: name,
-                };
-                self.branches.request(ctx, request, egui::ViewportId::ROOT);
-            }
-            return;
-        }
-        if kind == "rebase" {
-            if let Some(onto) = repo.resolve(&name).map(|c| repo.commit(c).oid) {
-                let request = branches::Request::Rebase { onto, target: name };
-                self.branches.request(ctx, request, egui::ViewportId::ROOT);
-            }
-            return;
-        }
-        if kind == "reset" {
-            let (rev, mode) = match name.rsplit_once(':') {
-                Some((rev, mode)) => (
-                    rev,
-                    parterre_core::reset::Mode::ALL
-                        .into_iter()
-                        .find(|m| m.name().eq_ignore_ascii_case(mode)),
-                ),
-                None => (name.as_str(), None),
-            };
-            if let Some(target) = repo.resolve(rev).map(|c| repo.commit(c).oid) {
-                let request = branches::Request::Reset { target, mode };
-                self.branches.request(ctx, request, egui::ViewportId::ROOT);
-            }
-            return;
-        }
-        let Some(start) = repo.resolve(&name).map(|c| repo.commit(c).oid) else {
-            return;
-        };
-        let request = if kind == "add-worktree" {
-            branches::Request::AddWorktree { start }
-        } else {
-            branches::Request::Create {
-                start,
-                track: None,
-                switch: false,
-            }
-        };
-        self.branches.request(ctx, request, egui::ViewportId::ROOT);
-    }
-
-    /// Automation: opens what a script's `open` step names: a toolbar popup (`menu`, `filter`,
-    /// `zoom`, `drag`), the settings (`settings`, or `settings:PAGE`), `about`, `shortcuts`,
-    /// `legend`, or a dialog as `--demo-open` names it.
-    fn open_named(&mut self, ctx: &egui::Context, what: String) {
-        match what.as_str() {
-            "menu" | "filter" | "zoom" | "drag" => egui::Popup::open_id(ctx, popup_id(&what)),
+    /// Automation: opens what a script's `open` step names (see `docs/automation.md`). `Ok(false)`
+    /// while it can't be opened yet: the dialogs of the branch tool wait for its information.
+    fn open_named(&mut self, ctx: &egui::Context, what: &str) -> Result<bool, String> {
+        match what {
+            "menu" | "filter" | "zoom" | "drag" => egui::Popup::open_id(ctx, popup_id(what)),
             "about" => self.show_about = true,
             "shortcuts" => self.show_shortcuts = true,
             "legend" => self.show_legend = true,
-            _ => match what.strip_prefix("settings") {
-                Some(page) => {
-                    let page = SettingsPage::named(page.trim_start_matches(':'));
-                    self.open_settings(page.unwrap_or(self.settings_page));
+            "settings" => self.open_settings(self.settings_page),
+            _ => {
+                let (kind, arg) = what
+                    .split_once(':')
+                    .ok_or("unknown; see docs/automation.md")?;
+                if kind == "settings" {
+                    let page = SettingsPage::named(arg).ok_or("no such settings page")?;
+                    self.open_settings(page);
+                    return Ok(true);
                 }
-                None => self.automation.demo_open = Some(what),
-            },
+                let repo = self.repo.clone().ok_or("no repository is open")?;
+                let oid = |name: &str| {
+                    repo.resolve(name)
+                        .map(|c| repo.commit(c).oid)
+                        .ok_or_else(|| format!("no commit named {name}"))
+                };
+                match kind {
+                    "log" => {
+                        let commits = arg
+                            .split("..")
+                            .map(|name| repo.resolve(name).ok_or(format!("no commit named {name}")))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        self.open_log(repo.clone(), &commits);
+                    }
+                    "compare" => match arg.split_once("..").ok_or("expected REF..REF")? {
+                        (a, "WORKING_TREE") => {
+                            self.compare_request(CompareRequest::WorkingTree(oid(a)?));
+                        }
+                        (a, b) => self.compare(oid(a)?, oid(b)?),
+                    },
+                    "diff" => self.open_named_diff(&repo, arg, ctx)?,
+                    "blame" => self.open_named_blame(&repo, arg, ctx)?,
+                    _ => return self.open_branch_dialog(ctx, &repo, kind, arg),
+                }
+            }
         }
+        Ok(true)
+    }
+
+    /// Automation: opens the branch or worktree form (`create-branch:REF`, `add-worktree:REF`),
+    /// asks to delete a worktree (`delete-worktree:FOLDER`, its name), or opens the reset
+    /// dialog (`reset:REF`, or `reset:REF:MODE`), the rebase's (`rebase:REF`) or the merge
+    /// dialog (`merge:REF`), once the branch information is in.
+    fn open_branch_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        repo: &Repo,
+        kind: &str,
+        name: &str,
+    ) -> Result<bool, String> {
+        let Some(catalog) = self.branches.catalog.clone() else {
+            return Ok(false);
+        };
+        let oid = |name: &str| {
+            repo.resolve(name)
+                .map(|c| repo.commit(c).oid)
+                .ok_or_else(|| format!("no commit named {name}"))
+        };
+        let request = match kind {
+            "delete-worktree" => {
+                let w = catalog
+                    .worktrees
+                    .iter()
+                    .find(|w| w.name() == name)
+                    .ok_or_else(|| format!("no worktree named {name}"))?;
+                branches::Request::Run(parterre_core::branches::Action::DeleteWorktree {
+                    path: w.path.clone(),
+                })
+            }
+            "merge" => branches::Request::Merge {
+                theirs: oid(name)?,
+                target: name.to_owned(),
+            },
+            "rebase" => branches::Request::Rebase {
+                onto: oid(name)?,
+                target: name.to_owned(),
+            },
+            "reset" => {
+                let (rev, mode) = match name.rsplit_once(':') {
+                    Some((rev, mode)) => {
+                        let mode = parterre_core::reset::Mode::ALL
+                            .into_iter()
+                            .find(|m| m.name().eq_ignore_ascii_case(mode))
+                            .ok_or_else(|| format!("no reset mode {mode}"))?;
+                        (rev, Some(mode))
+                    }
+                    None => (name, None),
+                };
+                branches::Request::Reset {
+                    target: oid(rev)?,
+                    mode,
+                }
+            }
+            "add-worktree" => branches::Request::AddWorktree { start: oid(name)? },
+            "create-branch" => branches::Request::Create {
+                start: oid(name)?,
+                track: None,
+                switch: false,
+            },
+            _ => return Err("unknown; see docs/automation.md".into()),
+        };
+        self.branches.request(ctx, request, egui::ViewportId::ROOT);
+        Ok(true)
     }
 
     /// Makes another worktree of the same repository the open one. It's the same history, so
@@ -2671,9 +2612,12 @@ impl eframe::App for ParterreApp {
             self.go_to_worktree(&path);
         }
         if let Some(what) = self.automation.open.take() {
-            self.open_named(&ctx, what);
+            match self.open_named(&ctx, &what) {
+                Ok(true) => {}
+                Ok(false) => self.automation.open = Some(what),
+                Err(e) => self.automation.fail(&ctx, &format!("open {what}: {e}")),
+            }
         }
-        self.demo_dialog(&ctx);
         self.update_pull_requests(&ctx);
         self.ensure_scene(&ctx);
         self.view_before = self.view;
@@ -2737,13 +2681,8 @@ impl eframe::App for ParterreApp {
                     && self.job.is_some();
             self.automation.waiting =
                 self.diffs.is_loading() || self.blames.is_loading() || pulling;
-            self.automation.drive(
-                &ctx,
-                self.scene.as_mut(),
-                &mut self.view,
-                self.canvas,
-                &self.settings.net,
-            );
+            self.automation
+                .drive(&ctx, self.scene.as_ref(), &mut self.view, self.canvas);
         }
 
         self.file_dialogs(&ctx, frame);

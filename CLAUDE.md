@@ -18,8 +18,9 @@ Commands (Rust from `~/.cargo/bin`):
   `GIT_CONFIG_SYSTEM="$PWD/.github/autocrlf.gitconfig" cargo test --workspace` (CI does, #182).
 - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all` before committing.
 - `cargo run --release -p parterre-core --example stats -- <repo>` – graph sizes and timings.
-- `cargo run --release -- <repo> --screenshot out.png` – render one frame to a PNG (for checking
-  visuals without a human).
-- `scripts/screenshots.sh /tmp/shots` – every window, dialog and menu of a demo repo as PNGs.
-  `--script FILE` drives the window (click by on-screen text, type, crop screenshots to a dialog
-  or menu) and `--record out.gif|out.mp4` records it, for PR previews; see `docs/screenshots.md`.
+- Automation, for checking visuals without a human (`docs/automation.md`):
+  - `cargo run -- <repo> --screenshot out.png` – the window as a PNG.
+  - `--script FILE` – drive the window: `open` any window or dialog, click by on-screen text or
+    `node:REF`, type, and take screenshots cropped to a dialog or menu.
+  - `--record out.gif|out.mp4` – record it, for PR previews.
+  - `scripts/screenshots.sh /tmp/shots` – every window, dialog and menu of a demo repo as PNGs.

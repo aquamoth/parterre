@@ -1,6 +1,6 @@
-//! Scripted runs for checking the rendering without a human: take a screenshot after a few
-//! frames, optionally after dragging a node or opening the context menu, then exit. Or run a
-//! workflow script ([`crate::script`]), and record the window ([`crate::record`]).
+//! Scripted runs (`--script`, `--screenshot`): the steps of a workflow script
+//! ([`crate::script`]) fed to the window frame by frame, as a person's input, then exit. And
+//! recording the window (`--record`, [`crate::record`]). See `docs/automation.md`.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -8,11 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Event, Pos2, Rect, Vec2, vec2};
-use parterre_core::physics::NetParams;
+use eframe::egui::{self, Event, Pos2, Rect, vec2};
 
 use crate::record::{self, Recorder};
-use crate::scene::{Scene, to_point};
+use crate::scene::Scene;
 use crate::script::{self, Crop, Step, Target};
 use crate::view::View;
 
@@ -29,84 +28,26 @@ pub fn failed() -> bool {
 
 #[derive(Debug, Default)]
 pub struct Automation {
-    /// Save a PNG of the window here, then exit.
-    pub screenshot: Option<PathBuf>,
     /// Start with the whole graph fitted instead of at HEAD.
     pub fit: bool,
-    /// Drag the node nearest the centre by this much before the screenshot (in the drag mode
-    /// of the settings).
-    pub demo_drag: Option<Vec2>,
     /// Zoom to apply (around the canvas centre) after the initial view is set up.
     pub zoom: Option<f32>,
-    /// Drag this node (a ref name or hash prefix) instead of the one nearest the centre.
-    pub demo_node: Option<String>,
-    /// Right-click before the screenshot, to show the context menu.
-    pub demo_menu: Option<DemoMenu>,
-    /// Open the ☰ menu, a toolbar popover (`filter`, `zoom`, `drag`) or the settings
-    /// (`settings`, or `settings:<page>`) before the screenshot.
-    pub demo_open: Option<String>,
-    /// Open the log window on `<ref>` or `<ref>..<ref>` (as if those nodes were selected in
-    /// that order) before the screenshot.
-    pub demo_log: Option<String>,
-    /// Open a diff window on `<commit>:<path>` (against the commit's first parent) before the
-    /// screenshot.
-    pub demo_diff: Option<String>,
-    /// Open a blame window on `<commit>:<path>[:<line>]` before the screenshot.
-    pub demo_blame: Option<String>,
-    /// Open the compare window on `<ref>..<ref>` before the screenshot.
-    pub demo_compare: Option<String>,
-    /// Mark `<ref>` for comparison before the screenshot.
-    pub demo_mark: Option<String>,
-    /// Select the node of `<ref>` before the screenshot.
-    pub demo_select: Option<String>,
-    /// Something is still loading (a diff, a blame or its history): hold the screenshot.
+    /// Something is still loading (a diff, a blame or its history): the script waits.
     pub waiting: bool,
-    /// This frame is a screenshot of the script: no pointer, and not recorded.
-    unrecorded: bool,
-    /// The workflow script being run.
+    /// The workflow script being run; `--screenshot` is its last step.
     pub script: Option<Runner>,
     /// Where the window is recorded to.
     pub record: Option<Recorder>,
-    /// What a script step asks to open (as `demo_open` names it), for the app to take.
+    /// What a script step asks to open, for the app to take; put back while it can't yet.
     pub open: Option<String>,
     /// The texts on screen in the last frame, and where, for a script to aim at.
     pub texts: Texts,
+    /// This frame is a screenshot of the script: no pointer, and not recorded.
+    unrecorded: bool,
     /// When an interactive recording started.
     recording_since: Option<Instant>,
-    /// Where the context menu is opened, once chosen.
-    menu_at: Option<Pos2>,
-    /// When (in egui's clock) the menu or popover was opened.
-    opened_at: Option<f64>,
     frame: u32,
-    requested: bool,
-    frame_times: Vec<std::time::Instant>,
-    dragging: Option<(usize, egui::Pos2)>,
-}
-
-impl Automation {
-    pub fn new(
-        screenshot: Option<PathBuf>,
-        fit: bool,
-        demo_drag: Option<Vec2>,
-        zoom: Option<f32>,
-    ) -> Automation {
-        Automation {
-            screenshot,
-            fit,
-            demo_drag,
-            zoom,
-            ..Default::default()
-        }
-    }
-}
-
-/// What to right-click for `demo_menu`.
-#[derive(Clone, Copy, Debug)]
-pub enum DemoMenu {
-    /// The node of `demo_node`, or the one nearest the centre.
-    Node,
-    /// The empty spot farthest from any node.
-    Canvas,
+    frame_times: Vec<Instant>,
 }
 
 /// Why a screenshot was taken.
@@ -118,50 +59,23 @@ enum Shot {
     Frame(u64),
 }
 
-const DRAG_START: u32 = 5;
-const MENU_START: u32 = 5;
-const DRAG_FRAMES: u32 = 30;
-const SETTLE_FRAMES: u32 = 90;
-
 impl Automation {
+    /// A scripted run: no stored settings, viewports embedded, frames on a clock of their own.
     pub fn is_active(&self) -> bool {
-        self.screenshot.is_some() || self.demo_drag.is_some() || self.script.is_some()
+        self.script.is_some()
     }
 
-    /// Scripted runs keep time by frames, so a recording plays at the speed it would have
-    /// had, however slowly its frames were captured.
-    fn clocked(&self) -> bool {
-        self.script.is_some() || self.record.is_some() && self.is_active()
-    }
-
-    /// Feeds the synthetic events of the script, or those of `demo_menu`: move there,
-    /// right-click, then hover the second item. Called before each frame, after
-    /// [`Self::drive`] has counted the last.
+    /// Feeds the events of the script to the coming frame, and keeps time by frames, so a
+    /// recording plays at the speed it would have had however slowly its frames were
+    /// captured. Called before each frame, after [`Self::drive`] has counted the last.
     pub fn inject_input(&mut self, raw: &mut egui::RawInput) {
-        if self.clocked() {
-            raw.time = Some(f64::from(self.frame) / 60.0);
-            raw.predicted_dt = 1.0 / 60.0;
-        }
-        if let Some(runner) = &mut self.script {
-            raw.events
-                .extend(runner.queue.pop_front().unwrap_or_default());
-        }
-        let Some(at) = self.menu_at else { return };
-        let button = |pressed| egui::Event::PointerButton {
-            pos: at,
-            button: egui::PointerButton::Secondary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
+        let Some(runner) = &mut self.script else {
+            return;
         };
-        match self.frame - MENU_START {
-            1 => raw.events.push(egui::Event::PointerMoved(at)),
-            2 => raw.events.push(button(true)),
-            3 => raw.events.push(button(false)),
-            6 => raw
-                .events
-                .push(egui::Event::PointerMoved(at + vec2(60.0, 45.0))),
-            _ => {}
-        }
+        raw.time = Some(f64::from(self.frame) / 60.0);
+        raw.predicted_dt = 1.0 / 60.0;
+        raw.events
+            .extend(runner.queue.pop_front().unwrap_or_default());
     }
 
     /// Automated runs step the physics at a fixed rate so they are reproducible.
@@ -169,15 +83,22 @@ impl Automation {
         self.is_active().then_some(1.0 / 60.0)
     }
 
-    /// Called after each frame. Without a scene (no repository open) only the popups can be
-    /// opened before the screenshot.
+    /// A step the app carries out (`open`) went wrong: the run stops with a failure.
+    pub fn fail(&mut self, ctx: &egui::Context, message: &str) {
+        let line = self.script.as_mut().map_or(0, Runner::end);
+        eprintln!("parterre: script line {line}: {message}");
+        fail();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Called after each frame. Without a scene (no repository open) a script can still open
+    /// and click the window's other parts.
     pub fn drive(
         &mut self,
         ctx: &egui::Context,
-        mut scene: Option<&mut Scene>,
+        scene: Option<&Scene>,
         view: &mut View,
         canvas: Rect,
-        params: &NetParams,
     ) {
         let shots: Vec<_> = ctx.input(|i| {
             i.raw
@@ -191,7 +112,6 @@ impl Automation {
                 })
                 .collect()
         });
-        let mut last = None;
         for (image, data) in shots {
             match data.as_deref().and_then(|d| d.downcast_ref::<Shot>()) {
                 Some(Shot::Frame(slot)) => {
@@ -209,7 +129,7 @@ impl Automation {
                         runner.shots -= 1;
                     }
                 }
-                None => last = Some(image),
+                None => {}
             }
         }
         if !self.is_active() {
@@ -217,101 +137,31 @@ impl Automation {
             return;
         }
         self.frame += 1;
-        self.frame_times.push(std::time::Instant::now());
+        self.frame_times.push(Instant::now());
         ctx.request_repaint();
         if self.frame == 2
             && let Some(z) = self.zoom
         {
             view.zoom_around(canvas, canvas.center(), z / view.zoom);
         }
+        self.run_script(ctx, scene, view, canvas);
+    }
 
-        if self.frame == MENU_START {
-            self.opened_at = Some(ctx.input(|i| i.time));
-        }
-        if self.frame == MENU_START
-            && let Some(name) = &self.demo_open
-            && matches!(name.as_str(), "menu" | "filter" | "zoom" | "drag")
-        {
-            egui::Popup::open_id(ctx, crate::app::popup_id(name));
-        }
-        if self.frame == MENU_START
-            && let Some(scene) = scene.as_deref()
-        {
-            self.menu_at = match self.demo_menu {
-                Some(DemoMenu::Node) => self
-                    .demo_node(scene, view, canvas)
-                    .map(|n| view.to_screen(canvas, scene.node_center(n))),
-                Some(DemoMenu::Canvas) => Some(emptiest_spot(scene, view, canvas)),
-                None => None,
-            };
-        }
-
-        if let Some(delta) = self.demo_drag
-            && let Some(scene) = scene.as_deref_mut()
-        {
-            let f = self.frame;
-            if f == DRAG_START {
-                if let Some(n) = self.demo_node(scene, view, canvas) {
-                    let carried = scene.carried_nodes(&[n], params.model);
-                    scene.net.grab(n, &[n], &carried, params.model.adapts());
-                    self.dragging = Some((n, scene.node_center(n)));
-                }
-            } else if let Some((_, start)) = self.dragging {
-                if f <= DRAG_START + DRAG_FRAMES {
-                    let t = (f - DRAG_START) as f32 / DRAG_FRAMES as f32;
-                    scene.net.drag_to(to_point(start + delta * t));
-                } else if f == DRAG_START + DRAG_FRAMES + 1 {
-                    scene.net.release(params);
-                }
-            }
-        }
-
-        if self.script.is_some() {
-            self.run_script(ctx, scene.as_deref(), view, canvas);
-            return;
-        }
-
-        let shoot_at = if self.demo_drag.is_some() {
-            DRAG_START + DRAG_FRAMES + SETTLE_FRAMES
-        } else if self.demo_menu.is_some()
-            || self.demo_open.is_some()
-            || self.demo_log.is_some()
-            || self.demo_diff.is_some()
-            || self.demo_blame.is_some()
-            || self.demo_compare.is_some()
-        {
-            MENU_START + 60
-        } else {
-            8
-        };
-        // Popups fade in over wall-clock time, which 60 frames of a small window can undercut.
-        let faded_in = self.opened_at.is_none_or(|t| {
-            ctx.input(|i| i.time) - t > 2.0 * f64::from(ctx.global_style().animation_time)
-        });
-        if self.frame >= shoot_at && faded_in && !self.waiting && !self.requested {
-            self.requested = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
-        }
-        self.record_frame(ctx, false);
-        if let Some(image) = last {
-            let gaps: Vec<f32> = self
-                .frame_times
-                .windows(2)
-                .skip(3)
-                .map(|w| (w[1] - w[0]).as_secs_f32() * 1000.0)
-                .collect();
-            if !gaps.is_empty() {
-                let mean = gaps.iter().sum::<f32>() / gaps.len() as f32;
-                let max = gaps.iter().copied().fold(0.0, f32::max);
-                eprintln!(
-                    "frame interval: mean {mean:.1} ms, max {max:.1} ms over {} frames",
-                    gaps.len()
-                );
-            }
-            if let Some(path) = &self.screenshot {
-                save(&image, path);
-            }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    /// How fast the frames came, for benchmarks: printed when the run ends.
+    fn report_frame_times(&self) {
+        let gaps: Vec<f32> = self
+            .frame_times
+            .windows(2)
+            .skip(3)
+            .map(|w| (w[1] - w[0]).as_secs_f32() * 1000.0)
+            .collect();
+        if !gaps.is_empty() {
+            let mean = gaps.iter().sum::<f32>() / gaps.len() as f32;
+            let max = gaps.iter().copied().fold(0.0, f32::max);
+            eprintln!(
+                "frame interval: mean {mean:.1} ms, max {max:.1} ms over {} frames",
+                gaps.len()
+            );
         }
     }
 
@@ -327,7 +177,7 @@ impl Automation {
         let Some(runner) = &mut self.script else {
             return;
         };
-        if self.frame < START || self.waiting {
+        if self.frame < START || self.waiting || self.open.is_some() {
             self.record_frame(ctx, false);
             return;
         }
@@ -364,9 +214,7 @@ impl Automation {
                 shot = true;
             }
             Action::Done => {
-                if let Some(path) = &self.screenshot {
-                    eprintln!("ran the script; screenshot in {}", path.display());
-                }
+                self.report_frame_times();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Action::Failed(message) => {
@@ -393,7 +241,7 @@ impl Automation {
             self.unrecorded = true;
             return;
         }
-        let slot = if self.clocked() {
+        let slot = if self.is_active() {
             u64::from(self.frame) * u64::from(record::FPS) / 60
         } else {
             let since = *self.recording_since.get_or_insert_with(Instant::now);
@@ -549,6 +397,15 @@ impl Runner {
             finished: false,
             ended: false,
         }
+    }
+
+    /// Stops the script: the window is closing. The line of the last step taken.
+    fn end(&mut self) -> usize {
+        self.ended = true;
+        self.next
+            .checked_sub(1)
+            .and_then(|i| self.lines.get(i))
+            .map_or(0, |l| l.number)
     }
 
     /// Adds a screenshot of the whole window after the last step.
@@ -717,26 +574,6 @@ impl Runner {
                 .push_back(vec![Event::PointerMoved(from.lerp(to, eased))]);
         }
         self.pointer = Some(to);
-    }
-}
-
-impl Automation {
-    /// The node named by `demo_node` (a ref name or hash prefix), or the one nearest the
-    /// centre of the canvas.
-    fn demo_node(&self, scene: &Scene, view: &View, canvas: Rect) -> Option<usize> {
-        let centre = view.to_world(canvas, canvas.center());
-        let named = self
-            .demo_node
-            .as_deref()
-            .and_then(|name| named_node(scene, name));
-        named.or_else(|| {
-            (0..scene.node_count()).min_by(|&a, &b| {
-                scene
-                    .node_center(a)
-                    .distance_sq(centre)
-                    .total_cmp(&scene.node_center(b).distance_sq(centre))
-            })
-        })
     }
 }
 

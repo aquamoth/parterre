@@ -2406,16 +2406,15 @@ impl ParterreApp {
             .open(repo, spec, line, &self.settings.blame_window, ctx);
     }
 
-    /// Opens a blame window on `<commit>:<path>` (a ref or hash prefix; `WORKING_TREE` for the
-    /// working tree), for `--demo-blame`. A `:<line>` after the path chooses that line (from 1).
-    pub(super) fn open_demo_blame(&mut self, spec: &str, ctx: &egui::Context) {
-        let Some(repo) = self.repo.clone() else {
-            return;
-        };
-        let Some((rev, path)) = spec.split_once(':') else {
-            eprintln!("--demo-blame: expected <commit>:<path>");
-            return;
-        };
+    /// Opens the blame of `path` at `rev` (a ref or hash prefix, or `WORKING_TREE`), with
+    /// line `line` (from 1) chosen if given, for a script's `open blame:REV:PATH[:LINE]`.
+    pub(super) fn open_named_blame(
+        &mut self,
+        repo: &Arc<Repo>,
+        spec: &str,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        let (rev, path) = spec.split_once(':').ok_or("expected COMMIT:PATH")?;
         let (path, line) = match path.rsplit_once(':') {
             Some((p, l)) if l.parse::<usize>().is_ok() => (p, l.parse::<usize>().ok()),
             _ => (path, None),
@@ -2423,17 +2422,17 @@ impl ParterreApp {
         let rev = if rev == "WORKING_TREE" {
             Rev::WorkingTree
         } else {
-            let Some(ix) = repo.resolve(rev) else {
-                eprintln!("--demo-blame: no commit named {rev}");
-                return;
-            };
+            let ix = repo
+                .resolve(rev)
+                .ok_or_else(|| format!("no commit named {rev}"))?;
             Rev::Commit(repo.commit(ix).oid)
         };
         let spec = BlameSpec {
             rev,
             path: path.to_owned(),
         };
-        self.open_blame(repo, spec, line.map(|l| l.saturating_sub(1)), ctx);
+        self.open_blame(repo.clone(), spec, line.map(|l| l.saturating_sub(1)), ctx);
+        Ok(())
     }
 }
 

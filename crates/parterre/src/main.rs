@@ -128,12 +128,12 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     export: Option<PathBuf>,
 
-    /// Render the window to a PNG file and exit (for testing and documentation).
+    /// Save the window as a PNG and exit, once the graph is in (after --script, if given).
     #[arg(long, value_name = "FILE")]
     screenshot: Option<PathBuf>,
 
     /// Run a workflow script (FILE, or - for standard input): click, type and take screenshots
-    /// of any window, dialog or menu, one step per line (see docs/screenshots.md), then exit.
+    /// of any window, dialog or menu, one step per line (see docs/automation.md), then exit.
     #[arg(long, value_name = "FILE")]
     script: Option<PathBuf>,
 
@@ -150,70 +150,20 @@ struct Cli {
     #[arg(long, hide = true)]
     overview: bool,
 
-    /// Zoom (1 = 100%) of a PNG or WebP --export, or of the screenshot around the centre of its initial
-    /// view.
+    /// Zoom (1 = 100%) of a PNG or WebP --export, or of a scripted run around the centre of its
+    /// initial view.
     #[arg(long)]
     zoom: Option<f32>,
 
-    /// Drag the centre node by DX,DY before taking the screenshot (demonstrates the physics).
-    #[arg(long, value_name = "DX,DY", value_parser = parse_vec, hide = true)]
-    demo_drag: Option<(f32, f32)>,
-
-    /// The node to drag with --demo-drag: a ref name or hash prefix (default: the one nearest
-    /// the centre).
-    #[arg(long, value_name = "NAME", hide = true)]
-    demo_node: Option<String>,
-
-    /// Right-click a node (--demo-node, or the one nearest the centre) or empty canvas before
-    /// taking the screenshot, to show the context menu.
-    #[arg(long, value_enum, hide = true)]
-    demo_menu: Option<DemoMenuArg>,
-
-    /// Open the menu, a toolbar popover (filter, zoom, drag), the settings (settings, or
-    /// settings:PAGE), the branch or worktree form at a commit (create-branch:REF,
-    /// add-worktree:REF), the question before deleting a worktree (delete-worktree:FOLDER), or
-    /// the reset dialog (reset:REF, or reset:REF:MODE), the rebase's confirmation (rebase:REF)
-    /// or the merge dialog (merge:REF) before taking the screenshot.
-    #[arg(long, value_name = "WHAT", hide = true)]
-    demo_open: Option<String>,
-
-    /// Open the log window before taking the screenshot: of REF, or of the range FIRST..SECOND
-    /// (refs or hash prefixes, as if those nodes were selected in that order).
-    #[arg(long, value_name = "REF[..REF]", hide = true)]
-    demo_log: Option<String>,
-
-    /// Open a diff window before taking the screenshot: of PATH as COMMIT changed it (a ref or
-    /// hash prefix), against the commit's first parent.
-    #[arg(long, value_name = "COMMIT:PATH", hide = true)]
-    demo_diff: Option<String>,
-
-    /// Open a blame window before taking the screenshot: of PATH at COMMIT (a ref or hash
-    /// prefix, or WORKING_TREE), with line LINE (from 1) chosen if given.
-    #[arg(long, value_name = "COMMIT:PATH[:LINE]", hide = true)]
-    demo_blame: Option<String>,
-
-    /// Open the compare window on FIRST..SECOND (refs or hash prefixes, as if those nodes were
-    /// selected in that order; WORKING_TREE for the working tree) before taking the screenshot.
-    #[arg(long, value_name = "REF..REF", hide = true)]
-    demo_compare: Option<String>,
-
-    /// Mark REF (a ref or hash prefix) for comparison before taking the screenshot.
-    #[arg(long, value_name = "REF", hide = true)]
-    demo_mark: Option<String>,
-
-    /// Select the node of REF (a ref or hash prefix) before taking the screenshot.
-    #[arg(long, value_name = "REF", hide = true)]
-    demo_select: Option<String>,
-
-    /// The diff window's form (for --demo-diff).
+    /// The diff window's form (a setting).
     #[arg(long, value_enum, hide = true)]
     diff_form: Option<DiffFormArg>,
 
-    /// How the diff window finds changed words (for --demo-diff).
+    /// How the diff window finds changed words (a setting).
     #[arg(long, value_enum, hide = true)]
     diff_words: Option<DiffWordsArg>,
 
-    /// What whitespace counts in the diff window (for --demo-diff).
+    /// What whitespace counts in the diff window (a setting).
     #[arg(long, value_enum, hide = true)]
     diff_whitespace: Option<DiffWhitespaceArg>,
 
@@ -221,12 +171,12 @@ struct Cli {
     #[arg(long, hide = true)]
     diff_unfolded: bool,
 
-    /// The log window's layout (for --demo-log): stacked, side-by-side, details-below or
+    /// The log window's layout: stacked, side-by-side, details-below or
     /// files-right, or a, b, c or d.
     #[arg(long, value_enum, hide = true)]
     log_layout: Option<LogLayoutArg>,
 
-    /// What moves when dragging (for --demo-drag).
+    /// What moves when dragging a node.
     #[arg(long, value_enum, hide = true)]
     drag_mode: Option<DragModeArg>,
 }
@@ -272,12 +222,6 @@ enum LogLayoutArg {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum DemoMenuArg {
-    Node,
-    Canvas,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
 enum Mode {
     /// Commits with refs, and merges joining them (TortoiseGit default).
     Labelled,
@@ -313,14 +257,6 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
     Ok((
         w.parse().map_err(|_| "bad width")?,
         h.parse().map_err(|_| "bad height")?,
-    ))
-}
-
-fn parse_vec(s: &str) -> Result<(f32, f32), String> {
-    let (x, y) = s.split_once(',').ok_or("expected DX,DY")?;
-    Ok((
-        x.parse().map_err(|_| "bad DX")?,
-        y.parse().map_err(|_| "bad DY")?,
     ))
 }
 
@@ -402,33 +338,18 @@ fn main() -> ExitCode {
         ..Default::default()
     };
     options.glow_options.vsync = vsync;
-    let mut automation = Automation::new(
-        cli.screenshot.clone(),
-        cli.fit,
-        cli.demo_drag.map(|(x, y)| egui::vec2(x, y)),
-        cli.zoom,
-    );
-    if let Some(lines) = script {
-        let mut runner = automation::Runner::new(lines);
-        // Taken once the script has run.
-        if let Some(path) = automation.screenshot.take() {
+    let mut automation = Automation::default();
+    automation.fit = cli.fit;
+    automation.zoom = cli.zoom;
+    // `--screenshot` alone is a script of one step.
+    if script.is_some() || cli.screenshot.is_some() {
+        let mut runner = automation::Runner::new(script.unwrap_or_default());
+        if let Some(path) = cli.screenshot.clone() {
             runner.push_screenshot(path);
         }
         automation.script = Some(runner);
     }
     automation.record = record.map(|(path, format)| record::Recorder::new(path, format));
-    automation.demo_node = cli.demo_node.clone();
-    automation.demo_open = cli.demo_open.clone();
-    automation.demo_log = cli.demo_log.clone();
-    automation.demo_diff = cli.demo_diff.clone();
-    automation.demo_blame = cli.demo_blame.clone();
-    automation.demo_compare = cli.demo_compare.clone();
-    automation.demo_mark = cli.demo_mark.clone();
-    automation.demo_select = cli.demo_select.clone();
-    automation.demo_menu = cli.demo_menu.map(|m| match m {
-        DemoMenuArg::Node => automation::DemoMenu::Node,
-        DemoMenuArg::Canvas => automation::DemoMenu::Canvas,
-    });
     let overrides = move |s: &mut settings::Settings| apply_cli(&cli, s);
     settings::adopt_old_storage();
     let result = eframe::run_native(

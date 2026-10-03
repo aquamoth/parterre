@@ -96,9 +96,8 @@ crates/parterre        the binary (eframe/egui)
                        terminal there
   widgets.rs           icon buttons, segmented buttons, switches, text fields
   settings.rs          persisted settings and the Classic/Modern looks
-  automation.rs        --screenshot / --demo-drag / --demo-menu / --demo-open / --demo-log /
-                       --demo-compare / --demo-mark / --demo-select / --demo-blame scripted
-                       runs (the log window's layout: --log-layout), and running --script
+  automation.rs        scripted runs (--script, --screenshot): steps fed to the window as
+                       input, frame by frame; see docs/automation.md
   script.rs            workflow scripts (--script): click, type, screenshot, … one step a line
   record.rs            --record: the window as a GIF, a video through ffmpeg, or PNG frames
 ```
