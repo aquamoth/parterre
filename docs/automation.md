@@ -31,6 +31,8 @@ worktree. Then it saves one PNG for each of these into `/tmp/shots`, in about 15
 - every settings page
 - the Keyboard and mouse, Legend and About windows
 - the log, compare, diff and blame windows
+- the question before resetting all settings, and the one asking what of a settings file to
+  import
 - the dialogs for creating a branch, adding or deleting a worktree, reset, rebase and merge
   (into the current branch, and of the current branch into another)
 
@@ -125,7 +127,8 @@ takes a branch, a tag or a hash prefix. A name that doesn't exist fails the run.
 | `open …` | Shows |
 | --- | --- |
 | `menu`, `filter`, `zoom`, `drag` | The ☰ menu or a toolbar popover |
-| `settings`, `settings:PAGE` | The settings, at `appearance`, `branchcolours`, `graph`, `filters`, `dragging` or `advanced` |
+| `settings`, `settings:PAGE` | The settings, at `appearance`, `branchcolours`, `graph`, `filters`, `dragging`, `advanced` or `manage` |
+| `export-settings:FILE`, `import-settings:FILE` | The settings' Manage page, as if FILE had been picked to export to (written at once) or import from (the dialog asking what to import) |
 | `about`, `shortcuts`, `legend` | About parterre, Keyboard and mouse, the legend |
 | `log:REF`, `log:FIRST..SECOND` | The log of a commit, or of a range (as if the nodes were selected in that order) |
 | `compare:FIRST..SECOND` | The compare window; `SECOND` may be `WORKING_TREE` |

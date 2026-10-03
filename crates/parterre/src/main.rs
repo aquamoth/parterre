@@ -20,6 +20,7 @@ mod render;
 mod scene;
 mod script;
 mod settings;
+mod settings_file;
 mod system_theme;
 mod text_size;
 mod theme;
@@ -351,7 +352,6 @@ fn main() -> ExitCode {
     }
     automation.record = record.map(|(path, format)| record::Recorder::new(path, format));
     let overrides = move |s: &mut settings::Settings| apply_cli(&cli, s);
-    settings::adopt_old_storage();
     let result = eframe::run_native(
         settings::APP_ID,
         options,

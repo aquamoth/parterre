@@ -14,6 +14,7 @@ pub mod git;
 pub mod glyphs;
 pub mod icon;
 pub mod layout;
+pub mod lenient;
 pub mod log;
 pub mod log_graph;
 pub mod log_layout;

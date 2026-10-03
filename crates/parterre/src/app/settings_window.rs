@@ -2,13 +2,19 @@
 //! nor blocks the app, and every change applies at once, so the graph behind shows what a
 //! setting does.
 
-use eframe::egui::{self, Align, Layout, RichText, ScrollArea, Stroke, Ui, vec2};
-use parterre_core::layout::{Direction, LayoutOptions, Ranking};
+use std::path::{Path, PathBuf};
 
-use super::ParterreApp;
+use eframe::egui::{self, Align, Layout, RichText, ScrollArea, Stroke, Ui, vec2};
+use parterre_core::glyphs;
+use parterre_core::layout::{Direction, LayoutOptions, Ranking};
+use rfd::AsyncFileDialog;
+
 use super::log_window::layout_picker;
 use super::toolbar::{HIDE_TIP, REF_FILTER_TIP, REMEMBER_TIP};
-use crate::settings::{Arrows, EdgeStyle, Look};
+use super::{ParterreApp, Picked};
+use crate::dialogs;
+use crate::settings::{Arrows, EdgeStyle, Look, RepoSettings, Settings};
+use crate::settings_file::{self, Imported};
 use crate::text_size;
 use crate::theme::{BranchColor, ThemeChoice};
 use crate::widgets::{self, text_segmented};
@@ -22,16 +28,18 @@ pub enum SettingsPage {
     Filters,
     Dragging,
     Advanced,
+    Manage,
 }
 
 impl SettingsPage {
-    const ALL: [SettingsPage; 6] = [
+    const ALL: [SettingsPage; 7] = [
         SettingsPage::Appearance,
         SettingsPage::BranchColours,
         SettingsPage::Graph,
         SettingsPage::Filters,
         SettingsPage::Dragging,
         SettingsPage::Advanced,
+        SettingsPage::Manage,
     ];
 
     /// The page named `name` (its label, in any case, without spaces), for the screenshot
@@ -50,6 +58,7 @@ impl SettingsPage {
             SettingsPage::Filters => "Filters",
             SettingsPage::Dragging => "Dragging",
             SettingsPage::Advanced => "Advanced",
+            SettingsPage::Manage => "Manage",
         }
     }
 }
@@ -74,6 +83,14 @@ const NODE_GAP_TIP: &str = "Space between neighbouring commits in a row (Tortois
 const EDGE_GAP_TIP: &str = "Room for each edge that passes between the commits of a row.";
 const LOG_LAYOUT_TIP: &str = "How the log window arranges its commits, details and changed \
     files. Also in the log window's header.";
+const PER_REPOSITORY: &str = "each repository keeps its own filters.";
+const EXPORT_TIP: &str = "All settings and the filters of the repository shown, to import on \
+    another computer or share with a team. Not window sizes.";
+const IMPORT_TIP: &str = "A file exported by parterre. Choose what of it to import.";
+const IMPORT_SETTINGS_TIP: &str = "Every setting but the filters and window sizes. Settings the \
+    file lacks go back to their defaults.";
+const IMPORT_FILTERS_TIP: &str = "The filters in the file, for the repository shown.";
+const RESET_TIP: &str = "Every setting back to its default, and every repository's filters.";
 const PAGE: f32 = 440.0;
 
 impl ParterreApp {
@@ -182,7 +199,7 @@ impl ParterreApp {
 
     fn settings_page_ui(&mut self, ui: &mut Ui) {
         let page = self.settings_page;
-        if page != SettingsPage::Advanced {
+        if !matches!(page, SettingsPage::Advanced | SettingsPage::Manage) {
             title(ui, page.label());
         }
         let s = &mut self.settings;
@@ -307,25 +324,15 @@ impl ParterreApp {
                     },
                 );
             }),
-            SettingsPage::Filters => group(ui, |rows| {
-                let g = &mut s.graph;
-                rows.switch(
-                    "Current branch only",
-                    "Only HEAD's history (TortoiseGit's \"Current branch\").",
-                    &mut g.current_branch_only,
-                );
-                rows.switch(
-                    "First parent only",
-                    "Follow only first parents: merged side branches without refs disappear.",
-                    &mut g.first_parent_only,
-                );
-                rows.row("Branch filter", REF_FILTER_TIP, |ui| {
-                    text_field(ui, &mut g.ref_filter, "e.g. main, release");
+            SettingsPage::Filters => {
+                let repo = self.repo.as_deref().map(RepoSettings::key);
+                ui.weak(match repo {
+                    Some(key) => format!("For {}: {PER_REPOSITORY}", RepoSettings::name(&key)),
+                    None => format!("For the repository shown: {PER_REPOSITORY}"),
                 });
-                rows.row("Hide branches", HIDE_TIP, |ui| {
-                    text_field(ui, &mut g.hide_branches, "e.g. pipeline/*, release/*");
-                });
-            }),
+                ui.add_space(8.0);
+                filters(ui, s);
+            }
             SettingsPage::Dragging => {
                 let mut remember = s.remember_moves;
                 group(ui, |rows| {
@@ -338,6 +345,7 @@ impl ParterreApp {
                 });
                 self.set_remember_moves(remember);
             }
+            SettingsPage::Manage => self.manage_page(ui),
             SettingsPage::Advanced => {
                 title(ui, "Upstreams");
                 group(ui, |rows| {
@@ -417,6 +425,278 @@ impl ParterreApp {
             }
         }
     }
+}
+
+impl ParterreApp {
+    fn manage_page(&mut self, ui: &mut Ui) {
+        title(ui, "Export and import");
+        group(ui, |rows| {
+            rows.row("Settings", EXPORT_TIP, |ui| {
+                if widgets::text_button(ui, "Export…").clicked() {
+                    self.settings_file = Some(Picked::ExportSettings);
+                }
+            });
+            rows.row("Settings file", IMPORT_TIP, |ui| {
+                if widgets::text_button(ui, "Import…").clicked() {
+                    self.settings_file = Some(Picked::ImportSettings);
+                }
+            });
+        });
+        if let Some((note, failed)) = &self.settings_note {
+            ui.add_space(6.0);
+            let color = if *failed {
+                ui.visuals().error_fg_color
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            ui.label(RichText::new(note).color(color));
+        }
+        ui.add_space(14.0);
+        title(ui, "Reset");
+        group(ui, |rows| {
+            rows.row("All settings, in every repository", RESET_TIP, |ui| {
+                if widgets::text_button(ui, "Reset…").clicked() {
+                    self.confirm_reset_settings = true;
+                }
+            });
+        });
+    }
+
+    /// Keeps the settings of the repository shown with the others'.
+    pub(super) fn keep_repo_settings(&mut self) {
+        if let Some(repo) = &self.repo {
+            let key = RepoSettings::key(repo);
+            self.stored
+                .keep(key, RepoSettings::of(&self.settings.graph));
+        }
+    }
+
+    /// The file dialog for exporting or importing settings.
+    pub(super) fn settings_dialog(&self, what: Picked, frame: &eframe::Frame) -> AsyncFileDialog {
+        let repo = self
+            .repo
+            .as_deref()
+            .map(|r| RepoSettings::name(&RepoSettings::key(r)));
+        let (title, name) = match what {
+            Picked::ImportSettings => ("Import settings", String::new()),
+            _ => (
+                "Export settings",
+                match repo {
+                    Some(repo) => format!("parterre-{repo}.json"),
+                    None => "parterre-settings.json".into(),
+                },
+            ),
+        };
+        let mut dialog = AsyncFileDialog::new()
+            .set_title(title)
+            .set_parent(frame)
+            .add_filter("parterre settings", &["json"]);
+        if !name.is_empty() {
+            dialog = dialog.set_file_name(name);
+        }
+        if let Some(dir) = &self.settings_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog
+    }
+
+    pub(super) fn export_settings(&mut self, mut path: PathBuf) {
+        // A name typed without the extension gets it added.
+        if path.extension().is_none() {
+            path.set_extension("json");
+        }
+        self.settings_dir = path.parent().map(Path::to_owned);
+        let text = settings_file::export(&self.settings, self.repo.is_some());
+        self.settings_note = Some(match std::fs::write(&path, text) {
+            Ok(()) => (format!("Exported to {}", path.display()), false),
+            Err(e) => (format!("Could not write {}: {e}", path.display()), true),
+        });
+    }
+
+    /// Reads a settings file, and asks what of it to import.
+    pub(super) fn import_settings(&mut self, path: &Path) {
+        self.settings_dir = path.parent().map(Path::to_owned);
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let imported = std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| settings_file::import(&text, &self.settings));
+        match imported {
+            Ok(imported) => {
+                self.settings_note = None;
+                self.import = Some(Import {
+                    settings: imported.settings.is_some(),
+                    filters: imported.repository.is_some() && self.repo.is_some(),
+                    file: name.into_owned(),
+                    imported,
+                });
+            }
+            Err(e) => self.settings_note = Some((format!("Could not import {name}: {e}"), true)),
+        }
+    }
+
+    /// Asks what of a settings file to import, over the settings window.
+    pub(super) fn import_settings_dialog(&mut self, ctx: &egui::Context) {
+        let repo = self
+            .repo
+            .as_deref()
+            .map(|r| RepoSettings::name(&RepoSettings::key(r)));
+        let Some(import) = &mut self.import else {
+            return;
+        };
+        let shown = dialogs::Dialog::new("import-settings", "Import settings")
+            .width(380.0)
+            .modal()
+            .opener(egui::ViewportId::from_hash_of("settings"))
+            .show(ctx, |ui| {
+                ui.weak(format!("From {}", import.file));
+                ui.add_space(8.0);
+                if import.imported.settings.is_some() {
+                    ui.checkbox(&mut import.settings, "Settings")
+                        .on_hover_text(IMPORT_SETTINGS_TIP);
+                }
+                if import.imported.repository.is_some() {
+                    let label = match &repo {
+                        Some(name) => format!("Filters of {name}"),
+                        None => "Filters".to_owned(),
+                    };
+                    ui.add_enabled_ui(repo.is_some(), |ui| {
+                        ui.checkbox(&mut import.filters, label)
+                            .on_hover_text(IMPORT_FILTERS_TIP)
+                            .on_disabled_hover_text("Open a repository to import its filters.");
+                    });
+                }
+                let skipped = import.skipped();
+                if !skipped.is_empty() {
+                    ui.add_space(8.0);
+                    let newer = if import.imported.newer {
+                        " (from a newer parterre)"
+                    } else {
+                        ""
+                    };
+                    ui.weak(format!("Left out{newer}: {}", skipped.join(", ")));
+                }
+                ui.add_space(12.0);
+                ui.separator();
+                let chosen = import.settings || import.filters;
+                dialogs::actions(ui, "Import", chosen, false, false)
+            });
+        match shown.inner {
+            dialogs::Answer::Primary => {
+                if let Some(import) = self.import.take() {
+                    self.apply_import(import);
+                }
+            }
+            dialogs::Answer::Cancel => self.import = None,
+            dialogs::Answer::Open if shown.should_close() => self.import = None,
+            dialogs::Answer::Open => {}
+        }
+    }
+
+    fn apply_import(&mut self, import: Import) {
+        let mut parts = Vec::new();
+        if import.settings
+            && let Some(mut settings) = import.imported.settings
+        {
+            settings.sanitize();
+            let remember =
+                std::mem::replace(&mut settings.remember_moves, self.settings.remember_moves);
+            self.settings = settings;
+            self.set_remember_moves(remember);
+            parts.push("settings".to_owned());
+        }
+        if import.filters
+            && let (Some(repo_settings), Some(repo)) = (import.imported.repository, &self.repo)
+        {
+            repo_settings.apply(&mut self.settings.graph);
+            let name = RepoSettings::name(&RepoSettings::key(repo));
+            parts.push(format!("the filters of {name}"));
+        }
+        let note = format!("Imported {} from {}", parts.join(" and "), import.file);
+        self.settings_note = Some((note, false));
+    }
+
+    /// Asks before setting every setting back to its default, over the settings window.
+    pub(super) fn reset_settings_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_reset_settings {
+            return;
+        }
+        let shown = dialogs::Dialog::new("reset-settings", "Reset all settings?")
+            .icon(glyphs::RESET, true)
+            .width(380.0)
+            .modal()
+            .opener(egui::ViewportId::from_hash_of("settings"))
+            .show(ctx, |ui| {
+                ui.label(
+                    "Every setting goes back to its default, in every repository. Recent \
+                     repositories and remembered moves are kept.",
+                );
+                ui.add_space(12.0);
+                ui.separator();
+                dialogs::actions(ui, "Reset", true, true, true)
+            });
+        match shown.inner {
+            dialogs::Answer::Primary => {
+                self.confirm_reset_settings = false;
+                self.reset_settings();
+            }
+            dialogs::Answer::Cancel => self.confirm_reset_settings = false,
+            dialogs::Answer::Open if shown.should_close() => self.confirm_reset_settings = false,
+            dialogs::Answer::Open => {}
+        }
+    }
+
+    fn reset_settings(&mut self) {
+        self.settings = Settings::default();
+        self.stored.reset();
+        self.settings_note = None;
+    }
+}
+
+/// A settings file read, and what of it to import.
+#[derive(Debug)]
+pub(super) struct Import {
+    file: String,
+    imported: Imported,
+    settings: bool,
+    filters: bool,
+}
+
+impl Import {
+    /// What is left out of the parts chosen.
+    fn skipped(&self) -> Vec<&str> {
+        let chosen = |name: &&String| {
+            (self.settings && name.starts_with("settings."))
+                || (self.filters && name.starts_with("repository."))
+        };
+        self.imported
+            .skipped
+            .iter()
+            .filter(chosen)
+            .map(String::as_str)
+            .collect()
+    }
+}
+
+fn filters(ui: &mut Ui, s: &mut Settings) {
+    let g = &mut s.graph;
+    group(ui, |rows| {
+        rows.switch(
+            "Current branch only",
+            "Only HEAD's history (TortoiseGit's \"Current branch\").",
+            &mut g.current_branch_only,
+        );
+        rows.switch(
+            "First parent only",
+            "Follow only first parents: merged side branches without refs disappear.",
+            &mut g.first_parent_only,
+        );
+        rows.row("Branch filter", REF_FILTER_TIP, |ui| {
+            text_field(ui, &mut g.ref_filter, "e.g. main, release");
+        });
+        rows.row("Hide branches", HIDE_TIP, |ui| {
+            text_field(ui, &mut g.hide_branches, "e.g. pipeline/*, release/*");
+        });
+    });
 }
 
 fn title(ui: &mut Ui, text: &str) {

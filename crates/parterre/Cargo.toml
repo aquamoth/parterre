@@ -29,7 +29,10 @@ clap.workspace = true
 eframe.workspace = true
 image.workspace = true
 rfd.workspace = true
+# The format eframe saves its storage in, to tell whether the stored file is corrupt.
+ron = "0.12"
 serde.workspace = true
+serde_json.workspace = true
 
 # Only to turn on a feature of eframe's winit: on Wayland desktops that leave the title bar to
 # the app (GNOME), draw an Adwaita-style one with the window title, instead of a plain grey bar.
@@ -38,8 +41,6 @@ winit = { version = "0.30", default-features = false, features = ["wayland-csd-a
 
 [dev-dependencies]
 tempfile.workspace = true
-# The format eframe saves settings in, for testing that old settings still load.
-ron = "0.12"
 
 [build-dependencies]
 embed-resource = "3"

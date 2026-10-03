@@ -44,7 +44,8 @@ use crate::frame_pacing::FrameLimiter;
 use crate::menu;
 use crate::render::{self, Marks};
 use crate::scene::{FONT_SIZE, Scene, to_point};
-use crate::settings::{MOVES_KEY, RECENT_KEY, RememberedMoves, STORAGE_KEY, Settings, load_moves};
+use crate::settings::{MOVES_KEY, RECENT_KEY, RememberedMoves, RepoSettings, Settings, load_moves};
+use crate::settings_file::{self, Stored};
 use crate::system_theme::SystemTheme;
 use crate::text_size;
 use crate::theme::{Palette, ThemeChoice};
@@ -54,9 +55,11 @@ use parterre_core::physics::RestPlace;
 
 /// What a file dialog is picking for.
 #[derive(Clone, Copy, Debug)]
-enum Picked {
+pub(crate) enum Picked {
     Folder,
     Export(Format),
+    ExportSettings,
+    ImportSettings,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -249,6 +252,9 @@ struct Search {
     request_focus: bool,
 }
 
+/// Said in the status bar when the stored settings couldn't be read.
+const CORRUPT_SETTINGS: &str = "The saved settings were corrupt: defaults restored";
+
 pub struct ParterreApp {
     /// The most recently loaded snapshot, used for new layouts. The scene on screen keeps its
     /// own snapshot until a new layout replaces it. `None` until a repository is opened.
@@ -263,6 +269,9 @@ pub struct ParterreApp {
     /// The window title last set.
     title: String,
     settings: Settings,
+    /// Every repository's settings as last kept. The repository shown has its own in
+    /// `settings`, which are kept here when another is shown and when saving.
+    stored: Stored,
     /// False for automated runs, so they don't overwrite the user's settings.
     persist: bool,
     scene: Option<Scene>,
@@ -301,6 +310,16 @@ pub struct ParterreApp {
     export: Option<Format>,
     /// The folder exported to last, where the save dialog starts next time.
     export_dir: Option<PathBuf>,
+    /// Show the file dialog for exporting or importing settings at the end of this frame.
+    settings_file: Option<Picked>,
+    /// The folder settings were last exported to or imported from.
+    settings_dir: Option<PathBuf>,
+    /// What came of the last export or import of settings, and whether it failed.
+    settings_note: Option<(String, bool)>,
+    /// A settings file read, while asking what of it to import.
+    import: Option<settings_window::Import>,
+    /// Ask before resetting every setting.
+    confirm_reset_settings: bool,
     details: Details,
     /// The log window (Show log), and what it keeps while closed.
     log: log_window::LogWindow,
@@ -361,15 +380,16 @@ impl ParterreApp {
         vsync: bool,
     ) -> ParterreApp {
         let persist = !automation.is_active();
-        let mut settings: Settings = cc
-            .storage
-            .filter(|_| persist)
-            .and_then(|s| eframe::get_value(s, STORAGE_KEY))
-            .unwrap_or_default();
+        let storage = cc.storage.filter(|_| persist);
+        let (mut settings, stored, corrupt) = settings_file::load(storage);
+        // eframe starts from nothing when its whole file is corrupt.
+        let corrupt = corrupt || persist && crate::settings::storage_corrupt();
+        let repo_settings = repo
+            .as_ref()
+            .map_or_else(RepoSettings::default, |repo| stored.settings_of(repo));
+        repo_settings.apply(&mut settings.graph);
         overrides(&mut settings);
-        // Settings edited by hand or saved by another version may put a divider out of reach.
-        settings.log_window.dividers = settings.log_window.dividers.clamped();
-        settings.text_size = parterre_core::text_size::sanitize(settings.text_size);
+        settings.sanitize();
         cc.egui_ctx.set_zoom_factor(settings.text_size);
         let moves: RememberedMoves = cc
             .storage
@@ -407,6 +427,7 @@ impl ParterreApp {
             pick_folder: false,
             file_dialog: None,
             settings,
+            stored,
             persist,
             scene: None,
             requested: None,
@@ -427,7 +448,9 @@ impl ParterreApp {
             pending_select: Vec::new(),
             drag: None,
             search: Search::default(),
-            status: open_error.map(|e| (e, true)),
+            status: open_error
+                .or_else(|| corrupt.then(|| CORRUPT_SETTINGS.to_owned()))
+                .map(|e| (e, true)),
             show_shortcuts: false,
             show_legend: false,
             show_settings: false,
@@ -435,6 +458,11 @@ impl ParterreApp {
             show_about: false,
             export: None,
             export_dir: None,
+            settings_file: None,
+            settings_dir: None,
+            settings_note: None,
+            import: None,
+            confirm_reset_settings: false,
             details: Details::default(),
             log: log_window::LogWindow::default(),
             focus_log: false,
@@ -794,8 +822,14 @@ impl ParterreApp {
         self.show_repo(None);
     }
 
-    /// Replaces the repository shown, and forgets everything about the old one.
+    /// Replaces the repository shown, and forgets everything about the old one but its
+    /// settings, which the new one's replace.
     fn show_repo(&mut self, repo: Option<Repo>) {
+        self.keep_repo_settings();
+        let repo_settings = repo
+            .as_ref()
+            .map_or_else(RepoSettings::default, |repo| self.stored.settings_of(repo));
+        repo_settings.apply(&mut self.settings.graph);
         self.repo = repo.map(Arc::new);
         self.scene = None;
         self.requested = None;
@@ -844,6 +878,7 @@ impl ParterreApp {
     /// one is open at a time; requests made meanwhile are dropped.
     fn file_dialogs(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let (folder, export) = (std::mem::take(&mut self.pick_folder), self.export.take());
+        let settings_file = self.settings_file.take();
         if let Some(pending) = &self.file_dialog {
             let Some(answer) = pending.answer() else {
                 return;
@@ -853,6 +888,8 @@ impl ParterreApp {
             match (what, answer) {
                 (Picked::Folder, Some(dir)) => self.open_folder(&dir),
                 (Picked::Export(format), Some(path)) => self.export(format, path, ctx),
+                (Picked::ExportSettings, Some(path)) => self.export_settings(path),
+                (Picked::ImportSettings, Some(path)) => self.import_settings(&path),
                 (_, None) => {}
             }
             return;
@@ -865,6 +902,12 @@ impl ParterreApp {
         {
             let what = Picked::Export(format);
             self.file_dialog = Some(Pending::start(what, dialog.save_file(), ctx));
+        } else if let Some(what) = settings_file {
+            let dialog = self.settings_dialog(what, frame);
+            self.file_dialog = Some(match what {
+                Picked::ImportSettings => Pending::start(what, dialog.pick_file(), ctx),
+                _ => Pending::start(what, dialog.save_file(), ctx),
+            });
         }
     }
 
@@ -900,6 +943,19 @@ impl ParterreApp {
                     let page = SettingsPage::named(arg).ok_or("no such settings page")?;
                     self.open_settings(page);
                     return Ok(true);
+                }
+                // As if the file had been picked in the file dialog.
+                if kind == "export-settings" || kind == "import-settings" {
+                    self.open_settings(SettingsPage::Manage);
+                    if kind == "export-settings" {
+                        self.export_settings(PathBuf::from(arg));
+                    } else {
+                        self.import_settings(Path::new(arg));
+                    }
+                    return match &self.settings_note {
+                        Some((note, true)) => Err(note.clone()),
+                        _ => Ok(true),
+                    };
                 }
                 let repo = self.repo.clone().ok_or("no repository is open")?;
                 let oid = |name: &str| {
@@ -2712,6 +2768,8 @@ impl eframe::App for ParterreApp {
         self.pull_requests_dialog(&ctx);
         self.legend_window(&ctx);
         self.settings_window(&ctx);
+        self.import_settings_dialog(&ctx);
+        self.reset_settings_dialog(&ctx);
         self.log_window(&ctx);
         self.compare_window(&ctx);
         self.diff_windows(&ctx);
@@ -2763,7 +2821,11 @@ impl eframe::App for ParterreApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         if self.persist {
-            eframe::set_value(storage, STORAGE_KEY, &self.settings);
+            self.keep_repo_settings();
+            storage.set_string(
+                settings_file::STORAGE_KEY,
+                self.stored.write(&self.settings),
+            );
             eframe::set_value(storage, MOVES_KEY, &self.moves);
             eframe::set_value(storage, RECENT_KEY, &self.recent);
         }

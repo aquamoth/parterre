@@ -1,5 +1,6 @@
 //! User-adjustable settings, persisted between runs by eframe.
 
+use parterre_core::Repo;
 use parterre_core::blame::Moves;
 use parterre_core::file_diff::{Whitespace, WordMode};
 use parterre_core::layout::LayoutOptions;
@@ -17,8 +18,6 @@ use crate::theme::{BranchColor, ThemeChoice};
 pub const APP_ID: &str = "se.trustfall.parterre";
 /// Names the storage directory, which is older than the app id and stays where it was.
 const STORAGE_ID: &str = "parterre";
-/// What the app was called up to 0.2, and its storage directory then.
-const OLD_APP_ID: &str = "gitgraph";
 
 /// The file eframe saves the settings in. Left to itself it would name the directory after the
 /// root viewport's app id.
@@ -26,58 +25,76 @@ pub fn storage_file() -> Option<std::path::PathBuf> {
     eframe::storage_dir(STORAGE_ID).map(|dir| dir.join("app.ron"))
 }
 
-// The storage keys still carry the old name, so settings saved before the rename keep loading.
-pub const STORAGE_KEY: &str = "gitgraph-settings";
+/// True if the file eframe saves in is there but can't be read: eframe then starts from
+/// nothing, and overwrites it on saving.
+pub fn storage_corrupt() -> bool {
+    storage_file().is_some_and(|file| file_corrupt(&file))
+}
+
+fn file_corrupt(file: &std::path::Path) -> bool {
+    match std::fs::read_to_string(file) {
+        Ok(text) => ron::from_str::<std::collections::HashMap<String, String>>(&text).is_err(),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Storage key for remembered node positions: repository path -> commit hash -> rest offset
 /// from the layout, and whether the node was moved by hand. Lists the children of displaced
 /// nodes too, so that commits missing from it are new (see
-/// `parterre_core::physics::Net::rest_offsets`); in older saves an untouched child of a
-/// displaced node counts as new once.
-pub const MOVES_KEY: &str = "gitgraph-rest-offsets";
+/// `parterre_core::physics::Net::rest_offsets`).
+pub const MOVES_KEY: &str = "parterre-moves";
 /// Storage key for the recently opened repositories, newest first.
 pub const RECENT_KEY: &str = "parterre-recent-repositories";
-/// The format before nodes gave way to each other: only dropped (pinned) nodes and offsets.
-const OLD_MOVES_KEY: &str = "gitgraph-moved-nodes";
-
 pub type RememberedMoves =
     std::collections::HashMap<String, std::collections::HashMap<String, (f32, f32, bool)>>;
 
-/// Carries over what the app saved while it was called gitgraph: the first time it runs as
-/// parterre, it copies the old storage directory's `app.ron`, the one file eframe keeps there.
-pub fn adopt_old_storage() {
-    if let (Some(from), Some(to)) = (
-        eframe::storage_dir(OLD_APP_ID),
-        eframe::storage_dir(STORAGE_ID),
-    ) {
-        copy_storage(&from, &to);
-    }
-}
-
-/// Copies `app.ron` from one storage directory into another that has none yet. Best effort:
-/// when it fails, the app starts with default settings.
-fn copy_storage(from: &std::path::Path, to: &std::path::Path) {
-    let (old, new) = (from.join("app.ron"), to.join("app.ron"));
-    if old.exists() && !new.exists() {
-        let _ = std::fs::create_dir_all(to).and_then(|()| std::fs::copy(&old, &new));
-    }
-}
-
-/// Loads remembered node positions, converting the older format.
+/// Loads remembered node positions.
 pub fn load_moves(storage: &dyn eframe::Storage) -> RememberedMoves {
-    if let Some(moves) = eframe::get_value(storage, MOVES_KEY) {
-        return moves;
+    eframe::get_value(storage, MOVES_KEY).unwrap_or_default()
+}
+
+/// The settings of one repository: what the Filter popover sets. Every other setting is
+/// parterre's, the same in every repository.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RepoSettings {
+    pub current_branch_only: bool,
+    pub first_parent_only: bool,
+    pub ref_filter: String,
+    pub hide_branches: String,
+}
+
+impl RepoSettings {
+    /// The repository settings among `graph`, which holds those of the repository shown.
+    pub fn of(graph: &GraphOptions) -> RepoSettings {
+        RepoSettings {
+            current_branch_only: graph.current_branch_only,
+            first_parent_only: graph.first_parent_only,
+            ref_filter: graph.ref_filter.clone(),
+            hide_branches: graph.hide_branches.clone(),
+        }
     }
-    let old: std::collections::HashMap<String, std::collections::HashMap<String, (f32, f32)>> =
-        eframe::get_value(storage, OLD_MOVES_KEY).unwrap_or_default();
-    old.into_iter()
-        .map(|(repo, nodes)| {
-            let nodes = nodes
-                .into_iter()
-                .map(|(hex, (dx, dy))| (hex, (dx, dy, true)))
-                .collect();
-            (repo, nodes)
-        })
-        .collect()
+
+    pub fn apply(&self, graph: &mut GraphOptions) {
+        graph.current_branch_only = self.current_branch_only;
+        graph.first_parent_only = self.first_parent_only;
+        graph.ref_filter.clone_from(&self.ref_filter);
+        graph.hide_branches.clone_from(&self.hide_branches);
+    }
+
+    /// Which repository `repo` is, for its settings: its main worktree, so that every worktree
+    /// of a repository has the same.
+    pub fn key(repo: &Repo) -> String {
+        let main = repo.worktrees.first().map_or(&repo.path, |main| &main.path);
+        main.display().to_string()
+    }
+
+    /// The name of the repository `key` is, for showing.
+    pub fn name(key: &str) -> String {
+        let path = std::path::Path::new(key);
+        path.file_name()
+            .map_or_else(|| key.to_owned(), |n| n.to_string_lossy().into_owned())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +325,15 @@ impl Default for DiffWindowSettings {
     }
 }
 
+impl Settings {
+    /// Puts back in reach what settings edited by hand or saved by another version may put out
+    /// of it: a divider, the text size.
+    pub fn sanitize(&mut self) {
+        self.log_window.dividers = self.log_window.dividers.clamped();
+        self.text_size = parterre_core::text_size::sanitize(self.text_size);
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         let mut s = Settings {
@@ -340,24 +366,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn copies_old_storage_once() {
+    fn a_stored_file_that_does_not_parse_is_corrupt() {
         let tmp = tempfile::tempdir().unwrap();
-        let (from, to) = (tmp.path().join("old"), tmp.path().join("new"));
-        std::fs::create_dir(&from).unwrap();
-        std::fs::write(from.join("app.ron"), "saved").unwrap();
-        copy_storage(&from, &to);
-        assert_eq!(
-            std::fs::read_to_string(to.join("app.ron")).unwrap(),
-            "saved"
-        );
-
-        // Once the new directory has its own file, the old one is left alone.
-        std::fs::write(from.join("app.ron"), "saved later").unwrap();
-        copy_storage(&from, &to);
-        assert_eq!(
-            std::fs::read_to_string(to.join("app.ron")).unwrap(),
-            "saved"
-        );
+        let file = tmp.path().join("app.ron");
+        assert!(!file_corrupt(&file));
+        std::fs::write(&file, r#"{"parterre-settings": "{}", "window": "()"}"#).unwrap();
+        assert!(!file_corrupt(&file));
+        for text in ["", r#"{"parterre-settings": "{"#, "\0\0\0"] {
+            std::fs::write(&file, text).unwrap();
+            assert!(file_corrupt(&file), "{text:?}");
+        }
     }
 
     #[test]
@@ -396,64 +414,70 @@ mod tests {
         )));
     }
 
-    #[test]
-    fn log_window_settings_saved_before_layouts_still_load() {
-        // As the log window saved them with layout A only (#39).
-        let old: Settings = ron::from_str("(log_window: (size: (900.0, 600.0)))").unwrap();
-        assert_eq!(old.log_window.size, [900.0, 600.0]);
-        assert_eq!(old.log_window.layout, LogLayout::Stacked);
-        assert_eq!(old.log_window.dividers, Dividers::default());
+    /// Settings as stored: JSON, read one setting at a time onto the defaults.
+    fn read(json: &str) -> Settings {
+        let file = serde_json::from_str(json).unwrap();
+        parterre_core::lenient::read(&Settings::default(), &file).value
+    }
 
-        // Dividers saved for some layouts only keep the defaults of the others.
-        let partial: LogWindowSettings =
-            ron::from_str("(layout: FilesRight, dividers: (side_by_side: (0.3, 0.5)))").unwrap();
-        assert_eq!(partial.layout, LogLayout::FilesRight);
-        assert_eq!(partial.dividers.side_by_side, [0.3, 0.5]);
-        assert_eq!(partial.dividers.stacked, Dividers::default().stacked);
+    fn round_trip(s: &Settings) -> Settings {
+        read(&serde_json::to_string(s).unwrap())
     }
 
     #[test]
-    fn settings_saved_before_diff_windows_start_with_the_defaults() {
-        let old: Settings = ron::from_str("(log_window: (size: (900.0, 600.0)))").unwrap();
-        assert_eq!(old.diff_window, DiffWindowSettings::default());
-        assert!(old.diff_window.fold);
+    fn log_window_settings_missing_get_the_defaults() {
+        let s = read(r#"{"log_window": {"size": [900.0, 600.0]}}"#);
+        assert_eq!(s.log_window.size, [900.0, 600.0]);
+        assert_eq!(s.log_window.layout, LogLayout::Stacked);
+        assert_eq!(s.log_window.dividers, Dividers::default());
+
+        // Dividers of some layouts only keep the defaults of the others.
+        let s = read(
+            r#"{"log_window": {"layout": "FilesRight", "dividers": {"side_by_side": [0.3, 0.5]}}}"#,
+        );
+        assert_eq!(s.log_window.layout, LogLayout::FilesRight);
+        assert_eq!(s.log_window.dividers.side_by_side, [0.3, 0.5]);
+        assert_eq!(s.log_window.dividers.stacked, Dividers::default().stacked);
+    }
+
+    #[test]
+    fn diff_window_settings_start_with_the_defaults_and_are_kept() {
+        let s = read(r#"{"log_window": {"size": [900.0, 600.0]}}"#);
+        assert_eq!(s.diff_window, DiffWindowSettings::default());
+        assert!(s.diff_window.fold);
 
         let mut s = Settings::default();
         s.diff_window.form = DiffForm::Unified;
         s.diff_window.words = WordMode::Block;
         s.diff_window.whitespace = Whitespace::IgnoreAll;
         s.diff_window.fold = false;
-        let back: Settings = ron::from_str(&ron::to_string(&s).unwrap()).unwrap();
-        assert_eq!(back.diff_window, s.diff_window);
+        assert_eq!(round_trip(&s).diff_window, s.diff_window);
     }
 
     #[test]
     fn text_size_starts_at_100_percent_and_is_kept() {
-        let old: Settings = ron::from_str("(log_window: (size: (900.0, 600.0)))").unwrap();
-        assert_eq!(old.text_size, 1.0);
+        assert_eq!(read("{}").text_size, 1.0);
 
         let s = Settings {
             text_size: 1.25,
             ..Settings::default()
         };
-        let back: Settings = ron::from_str(&ron::to_string(&s).unwrap()).unwrap();
-        assert_eq!(back.text_size, 1.25);
+        assert_eq!(round_trip(&s).text_size, 1.25);
     }
 
     #[test]
     fn the_history_pane_is_remembered_and_shown_by_default() {
-        let old: Settings = ron::from_str("(blame_window: (size: (900.0, 600.0)))").unwrap();
-        assert!(old.blame_window.show_history);
+        let s = read(r#"{"blame_window": {"size": [900.0, 600.0]}}"#);
+        assert!(s.blame_window.show_history);
         assert_eq!(
-            old.blame_window.history_height,
+            s.blame_window.history_height,
             BlameWindowSettings::default().history_height
         );
 
         let mut s = Settings::default();
         s.blame_window.show_history = false;
         s.blame_window.history_height = 300.0;
-        let back: Settings = ron::from_str(&ron::to_string(&s).unwrap()).unwrap();
-        assert_eq!(back.blame_window, s.blame_window);
+        assert_eq!(round_trip(&s).blame_window, s.blame_window);
     }
 
     #[test]
@@ -461,8 +485,6 @@ mod tests {
         let mut s = Settings::default();
         s.log_window.layout = LogLayout::DetailsBelow;
         s.log_window.dividers.set(LogLayout::DetailsBelow, 1, 0.3);
-        let text = ron::to_string(&s).unwrap();
-        let back: Settings = ron::from_str(&text).unwrap();
-        assert_eq!(back.log_window, s.log_window);
+        assert_eq!(round_trip(&s).log_window, s.log_window);
     }
 }

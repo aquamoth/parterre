@@ -37,6 +37,8 @@ crates/parterre-core   GUI-free; everything testable lives here
                        origin (and its parent), signed in with `gh auth token`, within a
                        rate-limit budget; HTTPS through ureq behind the `github` feature
   recent.rs            the recently opened repositories
+  lenient.rs           reading settings one at a time, so files of older and newer
+                       versions load all they can, and writing back what was left out
   watch.rs             fingerprint of the files git keeps refs and worktrees in, for
                        reloading by itself
   glyphs.rs            toolbar and menu icons as SVG path data, and a path flattener
@@ -95,7 +97,9 @@ crates/parterre        the binary (eframe/egui)
   file_manager.rs      opens a worktree's folder in the platform's file manager, or a
                        terminal there
   widgets.rs           icon buttons, segmented buttons, switches, text fields
-  settings.rs          persisted settings and the Classic/Modern looks
+  settings.rs          persisted settings, each repository's (the filters), and the
+                       Classic/Modern looks
+  settings_file.rs     settings as versioned JSON: stored, exported and imported
   automation.rs        scripted runs (--script, --screenshot): steps fed to the window as
                        input, frame by frame; see docs/automation.md
   script.rs            workflow scripts (--script): click, type, screenshot, … one step a line
