@@ -81,14 +81,18 @@ conflict, leaving an operation in progress.
 _Avoid_: moving a branch, updating a branch
 
 **Merging a branch**:
-Taking another branch's or commit's commits into the open worktree's branch, by a merge
-method. It can stop on a conflict, or when a hook refuses to commit, leaving an operation in
-progress.
+Taking another branch's or commit's commits into the open worktree's branch, or, as a pull
+request does, the open worktree's branch into another local branch, by a merge method. Into
+another branch, the merge runs in that branch's worktree, or, when it's checked out nowhere,
+moves its ref or switches to it and back. It can stop on a conflict, or when a hook refuses to
+commit, leaving an operation in progress.
 _Avoid_: pulling in, integrating
 
 **Merge method**:
 How a merge takes the other commits in: a fast-forward, which moves the branch up to them, or
-a merge commit, which joins them in even where a fast-forward would do.
+a merge commit, which joins them in even where a fast-forward would do. Merging the open
+worktree's branch into another, also rebase and fast-forward, or a semi-linear merge, which
+rebase the open worktree's branch onto the other first.
 _Avoid_: merge strategy (git's name for the algorithm that combines the changes), merge type
 
 **Adding a worktree**:

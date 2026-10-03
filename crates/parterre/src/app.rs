@@ -906,6 +906,14 @@ impl ParterreApp {
                 theirs: oid(name)?,
                 target: name.to_owned(),
             },
+            "merge-into" => {
+                if !catalog.locals.iter().any(|b| b.name == name) {
+                    return Err(format!("no local branch named {name}"));
+                }
+                branches::Request::MergeInto {
+                    into: name.to_owned(),
+                }
+            }
             "rebase" => branches::Request::Rebase {
                 onto: oid(name)?,
                 target: name.to_owned(),

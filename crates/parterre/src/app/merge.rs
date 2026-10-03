@@ -139,7 +139,7 @@ impl MergeDialog {
                 }
                 let after = ui.cursor().top();
                 self.methods(ui, &name);
-                ui.add_enabled_ui(self.method == Method::MergeCommit, |ui| {
+                ui.add_enabled_ui(self.method.commits(), |ui| {
                     ui.label("Message");
                     ui.add(
                         egui::TextEdit::multiline(&mut self.message)
@@ -150,16 +150,27 @@ impl MergeDialog {
                 })
                 .response
                 .on_disabled_hover_text("A fast-forward makes no commit");
-                if self.preview.dirty {
-                    ui.checkbox(&mut self.stash, "Stash changes").on_hover_text(
+                if self.preview.stashable(self.method) {
+                    let how = if self.preview.outgoing.is_some() {
+                        "git rebase --autostash"
+                    } else {
+                        "git merge --autostash"
+                    };
+                    let help = format!(
                         "Set your uncommitted changes aside first, and put them back \
-                         afterwards (git merge --autostash).",
+                         afterwards ({how})."
                     );
+                    ui.checkbox(&mut self.stash, "Stash changes")
+                        .on_hover_text(help);
                 }
                 if let Some(why) = self.blocked() {
                     ui.colored_label(ui.visuals().error_fg_color, why);
                 }
-                dialogs::command_box(ui, &[command_text(&merge::command(&self.merge()))]);
+                let commands: Vec<String> = merge::commands(&self.merge())
+                    .iter()
+                    .map(|c| command_text(c))
+                    .collect();
+                dialogs::command_box(ui, &commands);
                 let enabled = self.blocked().is_none() && !busy;
                 let answer = dialogs::actions(ui, "Merge", enabled, false, false);
                 dialogs::grown(ui, grow, after, height, min);
@@ -177,7 +188,7 @@ impl MergeDialog {
     /// The merge methods, each with what it does; those that make no sense here are greyed
     /// out, with why on hover.
     fn methods(&mut self, ui: &mut Ui, name: &str) {
-        for m in Method::ALL {
+        for &m in self.preview.methods() {
             let unavailable = self.preview.unavailable(m, name);
             ui.add_enabled_ui(unavailable.is_none(), |ui| {
                 ui.horizontal_top(|ui| {
@@ -327,6 +338,8 @@ mod tests {
         }
         assert!(!h.shows("mine"), "only the commits coming in");
         assert!(h.shows("Joins up into main with a merge commit."));
+        // Rebasing is for merging the open worktree's branch into another.
+        assert!(!h.shows("Rebase and fast-forward"));
         assert!(!h.shows("Stash changes"));
         // Diverged: a fast-forward makes no sense, and clicking it picks nothing.
         h.click("Fast-forward");
@@ -540,7 +553,7 @@ mod tests {
             !node("behind", None)
                 .0
                 .iter()
-                .any(|t| t.starts_with("Merge"))
+                .any(|t| t.starts_with("Merge") && !t.starts_with("Merge main into"))
         );
         // A commit with no branch on it (as the log's rows have it too): the commit alone.
         let short = rev(p, "up~1").short(repo.abbrev_len.max(7));
@@ -554,5 +567,142 @@ mod tests {
             }
             other => panic!("expected a merge: {other:?}"),
         }
+    }
+
+    /// The open worktree on `feature` (base → one → two), and `main` (base → mine) checked
+    /// out in a linked worktree, in the second folder returned.
+    fn pull_request() -> (tempfile::TempDir, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        git(p, &["config", "user.name", "Test"]);
+        git(p, &["config", "user.email", "test@example.com"]);
+        commit(p, "file", "base\n", "base");
+        git(p, &["switch", "-q", "-c", "feature"]);
+        commit(p, "one", "one\n", "my one");
+        commit(p, "two", "two\n", "my two");
+        git(p, &["switch", "-q", "main"]);
+        commit(p, "mine", "mine\n", "main's own");
+        git(p, &["switch", "-q", "feature"]);
+        let other = tempfile::tempdir().unwrap();
+        let main = other.path().join("main");
+        git(
+            p,
+            &["worktree", "add", "-q", main.to_str().unwrap(), "main"],
+        );
+        (dir, other)
+    }
+
+    fn open_into(h: &mut Harness, into: &str) {
+        let request = Request::MergeInto { into: into.into() };
+        h.ask(request, &format!("Merge feature into {into}"));
+    }
+
+    #[test]
+    fn merging_the_open_branch_into_another_rebases_it_and_runs_there() {
+        let (dir, _other) = pull_request();
+        let mut h = Harness::new(dir);
+        let mine = h.rev("main");
+        open_into(&mut h, "main");
+        for subject in ["my one", "my two"] {
+            assert!(h.shows(subject), "{subject}: {:?}", h.texts);
+        }
+        assert!(!h.shows("main's own"), "only the commits going in");
+        assert!(h.shows("Replays feature's commits on top of main, then moves main up to them."));
+        h.click("Rebase and fast-forward");
+        h.click("Git command");
+        assert!(h.shows("git rebase main"), "{:?}", h.texts);
+        // Long temporary folders (macOS) wrap the line, so not up to its end.
+        assert!(h.shows_part(" merge --ff-only "), "{:?}", h.texts);
+        h.click("Merge");
+        h.until("main moves up to feature", |h| {
+            h.rev("main") == h.rev("feature")
+        });
+        assert_eq!(h.rev("feature~2"), mine);
+        h.until("the notification", |h| {
+            h.shows("Merge feature into main") && !h.shows("Cancel")
+        });
+    }
+
+    #[test]
+    fn the_stash_box_shows_for_the_rebase_methods_only() {
+        let (dir, _other) = pull_request();
+        write(dir.path(), "one", "edited\n");
+        let mut h = Harness::new(dir);
+        open_into(&mut h, "main");
+        // A merge commit runs in main's worktree: this one's changes stay as they are.
+        assert!(!h.shows("Stash changes"));
+        assert!(!h.shows("Commit or stash your changes first."));
+        h.click("Semi-linear merge");
+        assert!(h.shows("Commit or stash your changes first."));
+        h.click("Stash changes");
+        assert!(!h.shows("Commit or stash your changes first."));
+        h.click("Git command");
+        assert!(h.shows("git rebase --autostash main"), "{:?}", h.texts);
+    }
+
+    #[test]
+    fn the_menus_offer_merging_the_open_branch_into_the_branches_on_a_node() {
+        let (dir, _other) = pull_request();
+        let p = dir.path();
+        git(p, &["branch", "has-it", "feature"]);
+        let (repo, catalog) = load(p);
+        let node = |at: &str, click: Option<&str>| {
+            let (repo, catalog, commit) = (&repo, &catalog, rev(p, at));
+            menu(
+                move |ui| branches::node_menu(ui, repo, commit, Some(catalog), false, false),
+                click,
+            )
+        };
+        let (texts, asked) = node("main", Some("Merge feature into main…"));
+        assert!(
+            texts.contains(&"Merge into feature".to_owned()),
+            "{texts:?}"
+        );
+        match asked {
+            Some(Request::MergeInto { into }) => assert_eq!(into, "main"),
+            other => panic!("expected merging into main: {other:?}"),
+        }
+        // Already has feature's commits.
+        assert!(
+            !node("has-it", None)
+                .0
+                .iter()
+                .any(|t| t.starts_with("Merge feature into"))
+        );
+        // Two branches on the node: a submenu.
+        git(p, &["branch", "release", "main"]);
+        let (repo, catalog) = load(p);
+        let (texts, _) = menu(
+            |ui| branches::node_menu(ui, &repo, rev(p, "main"), Some(&catalog), false, false),
+            None,
+        );
+        assert!(
+            texts.contains(&"Merge feature into".to_owned()),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn merging_into_another_branch_is_greyed_out_while_this_worktree_is_stuck() {
+        let (dir, _other) = pull_request();
+        let p = dir.path();
+        git(p, &["switch", "-q", "-c", "side", "main"]);
+        commit(p, "one", "side\n", "side one");
+        git(p, &["switch", "-q", "feature"]);
+        let out = std::process::Command::new("git")
+            .current_dir(p)
+            .args(["merge", "-q", "side"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "it conflicts");
+        let (repo, catalog) = load(p);
+        let item = "Merge feature into main…";
+        let (texts, asked) = menu(
+            |ui| branches::node_menu(ui, &repo, rev(p, "main"), Some(&catalog), false, false),
+            Some(item),
+        );
+        assert!(texts.contains(&item.to_owned()), "{texts:?}");
+        assert!(asked.is_none(), "greyed out");
     }
 }

@@ -39,13 +39,14 @@ export XDG_DATA_HOME=$work/data XDG_CONFIG_HOME=$work/config
 failed=()
 
 # shot NAME CROP STEPS [ARGS...]: run STEPS (a script, one step per line), then take NAME.png,
-# cropped to the topmost window (window), the open menus (popup) or not at all (full).
+# cropped to the topmost window (window), the open menus (popup) or not at all (full). Of the
+# demo repository, or of the worktree in $SHOT_REPO.
 shot() {
     local name=$1 crop=$2 steps=$3
     shift 3
     # shellcheck disable=SC2086 # PARTERRE_ARGS is a list of arguments.
     if ! printf '%s\nscreenshot "%s/%s.png" %s\n' "$steps" "$out" "$name" "$crop" |
-        "$bin" "$repo" --window-size 1200x800 --script - "$@" ${PARTERRE_ARGS:-} \
+        "$bin" "${SHOT_REPO:-$repo}" --window-size 1200x800 --script - "$@" ${PARTERRE_ARGS:-} \
             2> >(grep -v '^saved screenshot\|^frame interval' >&2); then
         failed+=("$name")
     fi
@@ -89,6 +90,9 @@ shot delete-worktree window $'open delete-worktree:demo-login\nwait 0.5'
 shot reset window $'open reset:v0.3.0\nwait 0.5'
 shot rebase window $'open rebase:feature/dark-mode\nwait 0.5'
 shot merge window $'open merge:feature/dark-mode\nwait 0.5'
+git -C "$repo" worktree add -q "$work/demo-dark-mode" feature/dark-mode
+SHOT_REPO=$work/demo-dark-mode shot merge-into window \
+    $'right-click node:main\nclick "Merge feature/dark-mode into main…"\nwait 0.5'
 
 echo "screenshots in $out"
 if ((${#failed[@]})); then
