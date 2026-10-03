@@ -12,8 +12,8 @@ TortoiseGit's *Revision Graph*. It leaves out the commits in between and shows h
 tags, remotes, worktrees and open pull requests relate.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
-  <img alt="parterre showing a repository with local and remote branches, tags, three worktrees and four open pull requests; the pointer rests on pull request #146, whose tooltip names its title, author and branches" src="docs/images/hero-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/hero-dark.png">
+  <img alt="parterre showing a repository with local and remote branches, tags, three worktrees and four open pull requests; the pointer rests on pull request #146, whose tooltip names its title, author and branches" src="docs/images/0.6/hero-light.png">
 </picture>
 
 A parterre is a formal garden laid out in patterns, made to be seen from the upper floors of
@@ -39,8 +39,8 @@ Detached worktrees, such as one for reviewing a pull request, show in cyan.
   says what is stopped there and which files conflict.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/worktrees-dark.png">
-  <img alt="The context menu of a branch checked out in another worktree: create, switch, rebase, merge, cherry-pick and reset; add, go to and delete worktrees; open the worktree in the file system or a terminal" src="docs/images/worktrees-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/worktrees-dark.png">
+  <img alt="The context menu of a branch checked out in another worktree: create, switch, rebase, merge, cherry-pick and reset; add, go to and delete worktrees; open the worktree in the file system or a terminal" src="docs/images/0.6/worktrees-light.png">
 </picture>
 
 Turn worktrees on with the folder button in the toolbar.
@@ -68,8 +68,8 @@ worktree in the middle of a rebase gets an **orange zigzag** from where it has g
 the branch being rebased.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/rebase-dark.png">
-  <img alt="fix/cart-rounding, rebased onto main but not pushed, is selected: a dashed arrow runs to origin/fix/cart-rounding, its new commits are green and the replaced ones grey dashed. On the left, an orange zigzag joins feature/checkout-redesign to its worktree, which is stopped part-way through a rebase" src="docs/images/rebase-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/rebase-dark.png">
+  <img alt="fix/cart-rounding, rebased onto main but not pushed, is selected: a dashed arrow runs to origin/fix/cart-rounding, its new commits are green and the replaced ones grey dashed. On the left, an orange zigzag joins feature/checkout-redesign to its worktree, which is stopped part-way through a rebase" src="docs/images/0.6/rebase-light.png">
 </picture>
 
 ## Arrange it your way
@@ -81,8 +81,8 @@ everything back. Turn on *Remember moved nodes* (*Settings → Dragging*) to kee
 arrangement for each repository.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/drag-dark.gif">
-  <img alt="Dragging nodes: the graph gives way, a subtree moves as one, and R returns everything to the layout" src="docs/images/drag-light.gif">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/drag-dark.gif">
+  <img alt="Dragging nodes: the graph gives way, a subtree moves as one, and R returns everything to the layout" src="docs/images/0.6/drag-light.gif">
 </picture>
 
 ## History, diffs and blame
@@ -96,20 +96,20 @@ two commits, or a commit with your working tree.
   <tr>
     <td width="33%">
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/images/log-dark.png">
-        <img alt="The log window: a branch's history with a graph column, branch labels with ahead and behind counts, the selected commit's details and changed files" src="docs/images/log-light.png">
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/log-dark.png">
+        <img alt="The log window: a branch's history with a graph column, branch labels with ahead and behind counts, the selected commit's details and changed files" src="docs/images/0.6/log-light.png">
       </picture>
     </td>
     <td width="33%">
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/images/diff-dark.png">
-        <img alt="The diff window, side by side, with the changed words marked" src="docs/images/diff-light.png">
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/diff-dark.png">
+        <img alt="The diff window, side by side, with the changed words marked" src="docs/images/0.6/diff-light.png">
       </picture>
     </td>
     <td width="33%">
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/images/blame-dark.png">
-        <img alt="The blame window: each line's commit, author and date, shaded by age, over the file's history" src="docs/images/blame-light.png">
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/blame-dark.png">
+        <img alt="The blame window: each line's commit, author and date, shaded by age, over the file's history" src="docs/images/0.6/blame-light.png">
       </picture>
     </td>
   </tr>

@@ -88,6 +88,15 @@ Chocolatey's automated validator and verifier; the first ones also by a human mo
 can take weeks. A version on Chocolatey can't be replaced once approved, so a broken one is
 fixed with a new release.
 
+## Screenshots
+
+The README, the crates.io README and the AppStream metadata
+(`packaging/linux/se.trustfall.parterre.metainfo.xml`) show screenshots from
+`docs/images/<major>.<minor>/`, the version of parterre they were taken of, linked through
+`raw.githubusercontent.com/…/main/`. Packages and crates already published keep linking to
+their folder, so never move or delete one: take new screenshots into a new folder, and point
+the three at it.
+
 ## Version strings
 
 `parterre --version` and the foot of the ☰ menu show which build is running:
