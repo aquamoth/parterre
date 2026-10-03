@@ -150,6 +150,13 @@ crates/parterre        the binary (eframe/egui)
    - **Drop:** whatever moved rests where it is from then on, so moved nodes keep giving way
      to later drags instead of being pinned. Drops, resets and returns to the layout are
      undoable.
+   - **Relayout:** a reload (or the same options laid out again, as when pull requests
+     arrive) puts the scene's nodes back by commit: a node resting away from the layout goes
+     beside its first parent as it was, since a changed graph may lay the two out differently,
+     and new commits go beside theirs. Remembered moves of an earlier session, and nodes
+     without the same first parent, keep their offset from the layout. Then the graph settles
+     as after a drop of the nodes moved by hand: the rest give way, overlapping boxes are
+     pushed apart and children kept above their parents.
    - Only the dragged nodes' neighbourhood (up to 8000 particles) is simulated, and the
      simulation sleeps when still.
    - **Routing** (`route.rs`): edges whose layout route no longer fits are routed afresh.

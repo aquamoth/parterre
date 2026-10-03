@@ -8,7 +8,7 @@
 use parterre_core::layout::{
     self, Direction, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking,
 };
-use parterre_core::physics::{DragModel, FLOW_GAP, Net, NetParams};
+use parterre_core::physics::{DragModel, FLOW_GAP, Net, NetParams, RestPlace};
 
 struct Rng(u64);
 impl Rng {
@@ -240,6 +240,88 @@ fn physics_keeps_children_above_parents() {
                 have >= needed - 1.0,
                 "iter {iter} {params:?}, dragged {node} by {along}: edge {c} -> {p} \
                  has {have} along the flow, needs {needed}"
+            );
+        }
+    }
+}
+
+/// Putting moved nodes back into a layout they no longer fit (as after a reload that changed
+/// the graph) leaves no boxes overlapping: nodes moved by hand land on others (and on each
+/// other), some beside their first parent, and a few others rest a little away from the
+/// layout. Putting the result back again changes nothing.
+#[test]
+fn physics_restores_without_overlaps() {
+    let mut rng = Rng(env_or("PHYSICS_SEED", 1990));
+    for iter in 0..env_or("PHYSICS_ITERS", 120) as usize {
+        let n = 2 + rng.below(60) as usize;
+        let inp = input(&mut rng, n);
+        let opts = LayoutOptions {
+            concentrate_edges: iter % 2 == 0,
+            ranking: Ranking::ALL[iter % 3],
+            direction: Direction::ALL[iter % 4],
+            ..LayoutOptions::default()
+        };
+        let l = layout::layout(&inp, &opts);
+        let first_parent = |i: usize| {
+            inp.edges
+                .iter()
+                .find(|e| e.child as usize == i && e.first_parent)
+                .map(|e| e.parent as usize)
+        };
+        let mut saved: Vec<RestPlace> = Vec::new();
+        let moved = 1 + rng.below(3) as usize;
+        for k in 0..moved + rng.below(4) as usize {
+            let node = rng.below(n as u64) as usize;
+            if saved.iter().any(|s| s.node == node) {
+                continue;
+            }
+            let by_hand = k < moved;
+            let offset = if by_hand {
+                // Onto another node, give or take a little.
+                let onto = l.nodes[rng.below(n as u64) as usize];
+                Point::new(
+                    onto.x - l.nodes[node].x + rng.f() * 30.0 - 15.0,
+                    onto.y - l.nodes[node].y + rng.f() * 10.0 - 5.0,
+                )
+            } else {
+                Point::new(rng.f() * 80.0 - 40.0, rng.f() * 20.0 - 10.0)
+            };
+            let beside = first_parent(node).filter(|_| rng.below(2) == 0).map(|p| {
+                (
+                    p,
+                    Point::new(rng.f() * 300.0 - 150.0, -40.0 - rng.f() * 80.0),
+                )
+            });
+            saved.push(RestPlace {
+                node,
+                offset,
+                moved: by_hand,
+                beside,
+            });
+        }
+        let mut net = Net::new(&l, &inp.sizes);
+        net.restore(saved.clone(), &NetParams::default());
+        assert!(!net.is_awake(), "iter {iter}: settles at once");
+        for i in 0..n {
+            let p = net.node_pos(i);
+            assert!(p.x.is_finite() && p.y.is_finite(), "iter {iter}: node {i}");
+        }
+        assert_eq!(net.tidiness().overlaps, 0, "iter {iter}: n={n}");
+        if let [only] = saved.as_slice() {
+            let mut alone = Net::new(&l, &inp.sizes);
+            alone.restore([*only], &NetParams::default());
+            assert!(
+                (alone.node_pos(only.node).x - net.node_pos(only.node).x).abs() < 0.01,
+                "iter {iter}: the node moved by hand stays"
+            );
+        }
+        let mut again = Net::new(&l, &inp.sizes);
+        again.restore(net.rest_places(), &NetParams::default());
+        for i in 0..n {
+            let (a, b) = (net.node_pos(i), again.node_pos(i));
+            assert!(
+                (a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01,
+                "iter {iter}: node {i} put back again moved from {a:?} to {b:?}"
             );
         }
     }

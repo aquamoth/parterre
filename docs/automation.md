@@ -60,8 +60,11 @@ for them.
   pull requests have loaded.
 - **Ends with an exit code.** It exits 0 when the script is done. It exits 1 if a step fails or
   a screenshot can't be saved, after saying why on stderr.
-- **Reports frame times.** It prints the frame interval on stderr at the end, for benchmarks:
-  `frame interval: mean 3.7 ms, max 41.0 ms over 22 frames`.
+- **Reports frame times and tidiness.** It prints the frame interval on stderr at the end, for
+  benchmarks: `frame interval: mean 3.7 ms, max 41.0 ms over 22 frames`. And how tidy the graph
+  is, for checking a change to the layout or the physics: `graph: 0 overlapping boxes, 6 edges
+  through boxes, 0 doubling back, 0 detours`. The layout's own curves count as a few edges
+  through boxes; compare the numbers before and after a change.
 
 ## Workflow scripts
 
