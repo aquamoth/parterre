@@ -259,6 +259,12 @@ impl ParterreApp {
                     );
                     rows.switch("Overview map", OVERVIEW_TIP, &mut s.show_overview);
                     rows.switch("Status bar", STATUS_TIP, &mut s.show_status_bar);
+                    rows.switch(
+                        "Syntax colour",
+                        "Colour code by its language in the diff and blame windows. Their \
+                         toolbars toggle it too.",
+                        &mut s.syntax_colour,
+                    );
                 });
                 ui.add_space(14.0);
                 title(ui, "Log window");

@@ -172,6 +172,10 @@ struct Cli {
     #[arg(long, hide = true)]
     diff_unfolded: bool,
 
+    /// Plain text in the diff and blame windows: no syntax colour (a setting).
+    #[arg(long, hide = true)]
+    no_syntax_colour: bool,
+
     /// The log window's layout: stacked, side-by-side, details-below or
     /// files-right, or a, b, c or d.
     #[arg(long, value_enum, hide = true)]
@@ -472,6 +476,9 @@ fn apply_cli(cli: &Cli, s: &mut settings::Settings) {
     }
     if cli.diff_unfolded {
         s.diff_window.fold = false;
+    }
+    if cli.no_syntax_colour {
+        s.syntax_colour = false;
     }
     if let Some(size) = cli.text_size {
         s.text_size = size;

@@ -719,10 +719,10 @@ impl DiffWindow {
         }
     }
 
-    fn contents(&mut self, ui: &mut Ui, settings: &mut DiffWindowSettings) {
+    fn contents(&mut self, ui: &mut Ui, settings: &mut DiffWindowSettings, syntax: &mut bool) {
         self.refresh();
         let c = colors(ui);
-        self.toolbar(ui, settings, &c);
+        self.toolbar(ui, settings, syntax, &c);
         self.header(ui, &c);
         let body = ui.available_rect_before_wrap();
         ui.painter().rect_filled(body, 0.0, c.pane);
@@ -753,7 +753,7 @@ impl DiffWindow {
                 Content::Text { .. } => {
                     let mut child = ui.new_child(UiBuilder::new().max_rect(body));
                     child.set_clip_rect(body.intersect(ui.clip_rect()));
-                    self.body(&mut child, body, &c);
+                    self.body(&mut child, body, *syntax, &c);
                 }
             },
         }
@@ -762,7 +762,13 @@ impl DiffWindow {
 
     /// Form, changes, folding and whitespace on the left; find in the middle; word mode and
     /// Blame on the right.
-    fn toolbar(&mut self, ui: &mut Ui, settings: &mut DiffWindowSettings, c: &Colors) {
+    fn toolbar(
+        &mut self,
+        ui: &mut Ui,
+        settings: &mut DiffWindowSettings,
+        syntax: &mut bool,
+        c: &Colors,
+    ) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), TOOLBAR), Sense::hover());
         ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
         let mut bar = ui.new_child(
@@ -873,6 +879,8 @@ impl DiffWindow {
             self.options.whitespace = ws;
             settings.whitespace = ws;
         }
+        ui.add_space(14.0);
+        widgets::syntax_button(ui, syntax);
 
         let why = if self.spec.is_submodule() {
             Some("A submodule has no lines to blame")
@@ -1039,7 +1047,7 @@ impl DiffWindow {
     }
 
     /// The rows, the overview strip and the horizontal scrollbar.
-    fn body(&mut self, ui: &mut Ui, full: Rect, c: &Colors) {
+    fn body(&mut self, ui: &mut Ui, full: Rect, syntax_on: bool, c: &Colors) {
         // The toolbar, drawn just before, may have changed the form or the folding.
         self.refresh();
         if let Some(line) = self.goto.take()
@@ -1060,7 +1068,8 @@ impl DiffWindow {
             return;
         };
         let diff = &ready.diff;
-        let syntax = &ready.syntax;
+        let none = None;
+        let syntax = if syntax_on { &ready.syntax } else { &none };
         let font = FontId::monospace(FONT_SIZE);
         let row_h = ui.fonts_mut(|f| f.row_height(&font)).ceil() + 3.0;
         let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
@@ -1528,6 +1537,7 @@ impl DiffWindow {
         &mut self,
         ctx: &egui::Context,
         settings: &mut DiffWindowSettings,
+        syntax: &mut bool,
         text_size: &mut f32,
         window_theme: Option<egui::SystemTheme>,
         icon: &Arc<egui::IconData>,
@@ -1581,7 +1591,7 @@ impl DiffWindow {
                 .frame(egui::Frame::central_panel(&ui.ctx().global_style()).inner_margin(0))
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
-                    self.contents(ui, settings);
+                    self.contents(ui, settings, syntax);
                 });
         });
     }
@@ -2120,6 +2130,7 @@ impl ParterreApp {
             window.show(
                 ctx,
                 &mut settings.diff_window,
+                &mut settings.syntax_colour,
                 &mut settings.text_size,
                 self.window_theme,
                 &self.window_icon,
@@ -2234,9 +2245,10 @@ mod tests {
         // As `show` does, less the viewport. Nothing is rendered, so the texture updates are
         // discarded.
         w.poll();
+        let mut syntax = true;
         ctx.run_ui(input, |ui| {
             w.handle_keys(ui, settings);
-            w.contents(ui, settings);
+            w.contents(ui, settings, &mut syntax);
         })
         .textures_delta
         .clear();
@@ -2332,7 +2344,7 @@ mod tests {
             };
             let _ = ctx.run_ui(input, |ui| {
                 w.handle_keys(ui, &mut settings);
-                w.contents(ui, &mut settings);
+                w.contents(ui, &mut settings, &mut true);
             });
             frame(&ctx, &mut w, &mut settings, Vec::new());
             assert_eq!(w.current, expected, "after F7 with {modifiers:?}");

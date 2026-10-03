@@ -959,10 +959,11 @@ impl BlameWindow {
         &mut self,
         ui: &mut Ui,
         settings: &mut BlameWindowSettings,
+        syntax: &mut bool,
         env: &Env,
     ) -> Vec<BlameRequest> {
         let c = colors(ui);
-        self.toolbar(ui, settings);
+        self.toolbar(ui, settings, syntax);
         self.header(ui, &c);
         let rest = ui.available_rect_before_wrap();
         let above = Rect::from_min_max(rest.min, pos2(rest.right(), rest.bottom() - INFO));
@@ -982,7 +983,7 @@ impl BlameWindow {
             Load::Ready(_) => {
                 let mut child = ui.new_child(UiBuilder::new().max_rect(body));
                 child.set_clip_rect(body.intersect(ui.clip_rect()));
-                hovered = self.body(&mut child, body, &c, &mut requests);
+                hovered = self.body(&mut child, body, *syntax, &c, &mut requests);
             }
         }
         if let Some((bar, pane)) = history {
@@ -1008,7 +1009,7 @@ impl BlameWindow {
 
     /// Whether whitespace changes and moved lines count, as icon segments; on the right,
     /// whether the history pane shows.
-    fn toolbar(&mut self, ui: &mut Ui, settings: &mut BlameWindowSettings) {
+    fn toolbar(&mut self, ui: &mut Ui, settings: &mut BlameWindowSettings, syntax: &mut bool) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), TOOLBAR), Sense::hover());
         ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
         let mut bar = ui.new_child(
@@ -1058,6 +1059,8 @@ impl BlameWindow {
             self.options.moves = moves;
             settings.moves = moves;
         }
+        ui.add_space(14.0);
+        widgets::syntax_button(ui, syntax);
         if self.spec.reads_working_tree() {
             ui.add_space(14.0);
             ui.label(RichText::new("F5 blames again").size(12.0).color(weak));
@@ -1271,6 +1274,7 @@ impl BlameWindow {
         &mut self,
         ui: &mut Ui,
         full: Rect,
+        syntax_on: bool,
         c: &Colors,
         requests: &mut Vec<BlameRequest>,
     ) -> Option<usize> {
@@ -1439,7 +1443,8 @@ impl BlameWindow {
                 let clip = Rect::from_x_y_ranges(text_x..=rect.right(), rect.y_range())
                     .intersect(ui.clip_rect());
                 // The line in its syntax colours, when it has any.
-                let g = match ready.syntax.as_ref().and_then(|s| s.get(i)) {
+                let spans = ready.syntax.as_ref().filter(|_| syntax_on);
+                let g = match spans.and_then(|s| s.get(i)) {
                     Some(spans) if !spans.is_empty() => {
                         let dark = ui.visuals().dark_mode;
                         let spans = syntax::in_text(&line.raw, &line.text, spans);
@@ -1996,7 +2001,12 @@ impl BlameWindow {
                 .frame(egui::Frame::central_panel(&ui.ctx().global_style()).inner_margin(0))
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
-                    requests = self.contents(ui, &mut settings.blame_window, &env);
+                    requests = self.contents(
+                        ui,
+                        &mut settings.blame_window,
+                        &mut settings.syntax_colour,
+                        &env,
+                    );
                 });
         });
         requests
@@ -2578,7 +2588,7 @@ mod tests {
                 graph: &graph,
             };
             w.handle_keys(ui);
-            requests = w.contents(ui, settings, &env);
+            requests = w.contents(ui, settings, &mut true, &env);
         })
         .textures_delta
         .clear();
@@ -3189,7 +3199,7 @@ mod tests {
                     palette: Palette::new(false, &[]),
                     graph: &graph,
                 };
-                w.contents(ui, settings, &env);
+                w.contents(ui, settings, &mut true, &env);
             })
             .textures_delta
             .clear();
@@ -3246,6 +3256,40 @@ mod tests {
         clicked(&ctx, &mut w, &mut settings, pos2(975.0, TOOLBAR / 2.0));
         assert!(!w.show_history);
         assert!(!settings.show_history);
+    }
+
+    #[test]
+    fn the_toolbar_palette_toggles_the_syntax_colour_setting() {
+        let ctx = egui::Context::default();
+        let mut w = listed_window();
+        let mut settings = BlameWindowSettings::default();
+        let graph = GraphOptions::default();
+        let mut syntax = true;
+        let mut run = |w: &mut BlameWindow, syntax: &mut bool, events| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 700.0))),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                let env = Env {
+                    palette: Palette::new(false, &[]),
+                    graph: &graph,
+                };
+                w.contents(ui, &mut settings, syntax, &env);
+            })
+            .textures_delta
+            .clear();
+        };
+        run(&mut w, &mut syntax, Vec::new());
+        // After the whitespace and moved-lines segments and the gaps between: the palette.
+        let p = pos2(211.0, TOOLBAR / 2.0);
+        for expected in [false, true] {
+            let press = vec![egui::Event::PointerMoved(p), button(p, true, false)];
+            run(&mut w, &mut syntax, press);
+            run(&mut w, &mut syntax, vec![button(p, false, false)]);
+            assert_eq!(syntax, expected);
+        }
     }
 
     fn shift(key: Key) -> egui::Event {

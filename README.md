@@ -138,7 +138,7 @@ side by side or unified (`Ctrl+D`), with changed words marked, unchanged stretch
 (click a fold to open it), an overview of the changes on the right, and long lines that
 scroll sideways. Code is coloured by syntax, as in VS Code, for Markdown, Java, C#, Rust,
 TypeScript, Python, SQL, Protocol Buffers and a dozen more languages (in the blame window
-too). `Ctrl+Down` / `Ctrl+Up` (or `F7` / `Shift+F7`) move between changes. The
+too; the palette button in either toolbar turns it off, for both). `Ctrl+Down` / `Ctrl+Up` (or `F7` / `Shift+F7`) move between changes. The
 toolbar also picks how changed words are found and whether whitespace counts. Drag over the
 old or the new text (double-click for a word, `Shift`+click to extend, `Ctrl+A` for all) or
 click line numbers for whole lines, then `Ctrl+C` copies it as it is in the file, tabs kept.

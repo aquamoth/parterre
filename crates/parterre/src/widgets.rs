@@ -168,6 +168,23 @@ pub fn icon_button(ui: &mut Ui, glyph: Glyph, on: bool) -> Response {
     response
 }
 
+/// The diff and blame windows' syntax colour toggle (#209): the palette, tinted while code
+/// is coloured by its language. One setting for both windows.
+pub fn syntax_button(ui: &mut Ui, on: &mut bool) {
+    let (title, body) = if *on {
+        (
+            "Syntax colour",
+            "Code is coloured by its language. Click for plain text.",
+        )
+    } else {
+        ("Plain text", "Click to colour code by its language.")
+    };
+    let response = icon_button(ui, glyphs::PALETTE, *on);
+    if tip_explained(response, title, "", body).clicked() {
+        *on = !*on;
+    }
+}
+
 /// A small icon button, e.g. inside the find field.
 pub fn mini_button(ui: &mut Ui, glyph: Glyph) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
