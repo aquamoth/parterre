@@ -172,6 +172,26 @@ impl LogView {
         self.rebuild(repo, self.options);
     }
 
+    /// After a revert: walks from the new commit `to` where the query walked from the branch's
+    /// old tip `from`, and selects it. False when the query doesn't walk from `from`.
+    fn follow(&mut self, from: Oid, to: Oid) -> bool {
+        if self.exact.is_some() {
+            return false;
+        }
+        let (Some(from), Some(to)) = (self.repo.lookup(&from), self.repo.lookup(&to)) else {
+            return false;
+        };
+        let Some(tip) = self.query.tips.iter().position(|&t| t == from) else {
+            return false;
+        };
+        self.query.tips[tip] = to;
+        self.rebuild(self.repo.clone(), self.options);
+        let row = self.commits.iter().position(|&c| c == to);
+        self.list.select(row);
+        self.list.reveal = true;
+        row.is_some()
+    }
+
     /// Re-runs the query with other walk options, keeping the selected commit in view if it is
     /// still listed.
     fn set_options(&mut self, options: LogOptions) {
@@ -541,6 +561,16 @@ impl LogWindow {
             view.reload(repo.clone());
         }
         self.refind();
+    }
+
+    /// After a revert, on the reloaded snapshot: the log that walked from the branch's old tip
+    /// `from` walks from the new commit `to`, selected. False when there's no such log.
+    pub fn follow(&mut self, from: Oid, to: Oid) -> bool {
+        let followed = self.view.as_mut().is_some_and(|v| v.follow(from, to));
+        if followed {
+            self.refind();
+        }
+        followed
     }
 
     /// The window's title: `<repo> – Log`.
@@ -1937,6 +1967,41 @@ mod tests {
             vec2(1100.0, 760.0),
         );
         w
+    }
+
+    #[test]
+    fn a_revert_moves_the_log_to_the_new_commit() {
+        let mut w = window(&["tip", "change", "root"]);
+        let old = w.view.as_ref().unwrap().repo.clone();
+        let (from, change) = (old.commit(CommitIx(0)).oid, old.commit(CommitIx(1)).oid);
+        // The snapshot after the revert: its commit first, on top of the old tip.
+        let to = Oid::from_hex(&format!("{:f<40}", "")).unwrap();
+        let mut commits = vec![Commit {
+            oid: to,
+            parents: vec![CommitIx(1)],
+            subject: "Revert \"change\"".into(),
+            ..old.commit(CommitIx(0)).clone()
+        }];
+        commits.extend(old.commits.iter().map(|c| Commit {
+            parents: c.parents.iter().map(|p| CommitIx(p.0 + 1)).collect(),
+            ..c.clone()
+        }));
+        let new = Arc::new(Repo::new(
+            "/nowhere".into(),
+            commits,
+            Vec::new(),
+            parterre_core::repo::Head::Detached(CommitIx(0)),
+        ));
+        // The change reverted was selected; the reload alone keeps it.
+        w.view.as_mut().unwrap().list.select(Some(1));
+        w.reload(&new);
+        let view = w.view.as_ref().unwrap();
+        assert_eq!(view.commits.len(), 3, "still from the old tip");
+        assert!(!w.follow(change, to), "the log doesn't walk from there");
+        assert!(w.follow(from, to));
+        let view = w.view.as_ref().unwrap();
+        assert_eq!(view.commits.len(), 4);
+        assert_eq!(selected(&w), Some(0));
     }
 
     fn frame(ctx: &egui::Context, w: &mut LogWindow, events: Vec<egui::Event>) {

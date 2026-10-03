@@ -29,6 +29,7 @@ mod merge;
 mod pull_requests;
 mod rebase;
 mod reset;
+mod revert;
 mod settings_window;
 #[cfg(test)]
 mod tool_harness;
@@ -990,8 +991,8 @@ impl ParterreApp {
     /// Automation: opens the branch or worktree form (`create-branch:REF`, `add-worktree:REF`),
     /// asks to delete a worktree (`delete-worktree:FOLDER`, its name), or opens the reset
     /// dialog (`reset:REF`, or `reset:REF:MODE`), the rebase's (`rebase:REF`), the merge
-    /// dialog (`merge:REF`) or the cherry-pick's (`cherry-pick:REF`, the commits of REF the
-    /// current branch lacks), once the branch information is in.
+    /// dialog (`merge:REF`), the cherry-pick's (`cherry-pick:REF`, the commits of REF the
+    /// current branch lacks) or the revert's (`revert:REF`), once the branch information is in.
     fn open_branch_dialog(
         &mut self,
         ctx: &egui::Context,
@@ -1038,6 +1039,7 @@ impl ParterreApp {
                 onto: oid(name)?,
                 target: name.to_owned(),
             },
+            "revert" => branches::Request::Revert { commit: oid(name)? },
             "reset" => {
                 let (rev, mode) = match name.rsplit_once(':') {
                     Some((rev, mode)) => {
@@ -2736,6 +2738,13 @@ impl eframe::App for ParterreApp {
             && self.repo.as_ref().is_some_and(|r| r.path == path)
         {
             self.reload();
+        }
+        // A revert says it's done by the log moving to the new commit.
+        if let Some(reverted) = self.branches.reverted.take() {
+            let here = self.repo.as_ref().is_some_and(|r| r.path == reverted.path);
+            if !(here && self.log.follow(reverted.from, reverted.to)) {
+                self.branches.reverted_unseen(&ctx, reverted);
+            }
         }
         if let Some(path) = self.branches.go_to.take() {
             self.go_to_worktree(&path);

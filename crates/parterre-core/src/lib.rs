@@ -27,6 +27,7 @@ pub mod rebase;
 pub mod recent;
 pub mod repo;
 pub mod reset;
+pub mod revert;
 pub mod revgraph;
 pub mod route;
 pub mod text;
