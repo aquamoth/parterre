@@ -17,8 +17,14 @@ use super::log_window::{self, HEADING};
 use crate::dialogs;
 use crate::theme::Palette;
 
-/// The commits listed before the table scrolls.
-const MAX_ROWS: usize = 12;
+/// The commits listed at least, however small the window: the table scrolls.
+const MIN_ROWS: usize = 3;
+
+/// A commit table's height for `rows` commits: a little more than the rows, for the spacing
+/// around its scroll area.
+pub fn list_height(rows: usize) -> f32 {
+    HEADING + ROW * rows.max(1) as f32 + 12.0
+}
 
 /// The width of the methods' names, before their help.
 const METHOD_NAME: f32 = 130.0;
@@ -116,45 +122,49 @@ impl MergeDialog {
             .width(width)
             .opener(self.opener)
             .raise(self.fresh)
+            .resizable()
             .show(ctx, |ui| {
-                dialogs::fields(ui, |ui| {
-                    if let Some(ix) = self.repo.lookup(&self.preview.theirs)
-                        && dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len)
-                    {
-                        asked.log = Some(self.preview.theirs);
-                    }
-                    ui.add_space(6.0);
-                    if let Some(oid) = self.commits_table(ui, palette, options) {
-                        asked.log = Some(oid);
-                    }
-                    ui.add_space(6.0);
-                    self.methods(ui, &name);
-                    ui.add_space(6.0);
-                    ui.add_enabled_ui(self.method == Method::MergeCommit, |ui| {
-                        ui.label("Message");
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.message)
-                                .id_salt("merge-message")
-                                .desired_rows(3)
-                                .desired_width(f32::INFINITY),
-                        );
-                    })
-                    .response
-                    .on_disabled_hover_text("A fast-forward makes no commit");
-                    if self.preview.dirty {
-                        ui.add_space(6.0);
-                        ui.checkbox(&mut self.stash, "Stash changes").on_hover_text(
-                            "Set your uncommitted changes aside first, and put them back \
-                             afterwards (git merge --autostash).",
-                        );
-                    }
-                    if let Some(why) = self.blocked() {
-                        ui.colored_label(ui.visuals().error_fg_color, why);
-                    }
-                });
+                // Only the commits scroll: everything else stays in view.
+                let grow = Id::new("merge-commits-rest");
+                if let Some(ix) = self.repo.lookup(&self.preview.theirs)
+                    && dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len)
+                {
+                    asked.log = Some(self.preview.theirs);
+                }
+                let n = self.commits.len();
+                let min = list_height(n.min(MIN_ROWS));
+                let top = ui.cursor().top();
+                let height = dialogs::growing(ui, grow, list_height(n), min);
+                if let Some(oid) = self.commits_table(ui, palette, options, height) {
+                    asked.log = Some(oid);
+                }
+                let after = ui.cursor().top();
+                self.methods(ui, &name);
+                ui.add_enabled_ui(self.method == Method::MergeCommit, |ui| {
+                    ui.label("Message");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.message)
+                            .id_salt("merge-message")
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
+                })
+                .response
+                .on_disabled_hover_text("A fast-forward makes no commit");
+                if self.preview.dirty {
+                    ui.checkbox(&mut self.stash, "Stash changes").on_hover_text(
+                        "Set your uncommitted changes aside first, and put them back \
+                         afterwards (git merge --autostash).",
+                    );
+                }
+                if let Some(why) = self.blocked() {
+                    ui.colored_label(ui.visuals().error_fg_color, why);
+                }
                 dialogs::command_box(ui, &[command_text(&merge::command(&self.merge()))]);
                 let enabled = self.blocked().is_none() && !busy;
-                dialogs::actions(ui, "Merge", enabled, false, false)
+                let answer = dialogs::actions(ui, "Merge", enabled, false, false);
+                dialogs::grown(ui, grow, top, after, min);
+                answer
             });
         self.fresh = false;
         asked.answer = Some(if shown.should_close() {
@@ -202,12 +212,14 @@ impl MergeDialog {
         }
     }
 
-    /// The commits coming in, as the log window lists them. Returns the one double-clicked.
+    /// The commits coming in, as the log window lists them, `height` tall. Returns the one
+    /// double-clicked.
     fn commits_table(
         &mut self,
         ui: &mut Ui,
         palette: &Palette,
         options: &GraphOptions,
+        height: f32,
     ) -> Option<Oid> {
         let c = log_window::colors(ui);
         let table = CommitTable {
@@ -218,8 +230,6 @@ impl MergeDialog {
             palette,
             pairs: false,
         };
-        // A little more than the rows, for the spacing around the scroll area.
-        let height = HEADING + ROW * self.commits.len().clamp(1, MAX_ROWS) as f32 + 12.0;
         let (repo, commits, refs) = (&*self.repo, &self.commits, &self.refs);
         let list = &mut self.list;
         let clicks = ui
@@ -337,6 +347,45 @@ mod tests {
         h.until("the notification", |h| {
             h.shows("Merge up into main") && !h.shows("Cancel")
         });
+    }
+
+    /// With more commits than fit, only the list scrolls: the commit line above it, and the
+    /// methods, message and buttons below it, stay on screen.
+    #[test]
+    fn a_long_list_scrolls_alone() {
+        let dir = repository(true);
+        let p = dir.path();
+        git(p, &["switch", "-q", "up"]);
+        for i in 0..80 {
+            git(
+                p,
+                &[
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    &format!("their step {i}"),
+                ],
+            );
+        }
+        git(p, &["switch", "-q", "main"]);
+        let mut h = Harness::new(dir);
+        open(&mut h);
+        for _ in 0..10 {
+            h.frame();
+        }
+        let screen = 1000.0;
+        for text in [
+            "their step 79",
+            "Merge commit",
+            "Message",
+            "Cancel",
+            "Merge",
+        ] {
+            let at = h.at(text);
+            assert!(at.y < screen, "{text} at {at:?}");
+        }
+        assert!(!h.shows("their step 0"), "the list scrolls");
     }
 
     #[test]
