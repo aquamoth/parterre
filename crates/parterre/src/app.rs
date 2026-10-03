@@ -222,8 +222,6 @@ struct LayoutJob {
     rx: std::sync::mpsc::Receiver<Scene>,
     /// The options it was laid out with.
     key: (GraphOptions, LayoutOptions),
-    /// Where the nodes of the scene on screen rested when it started, to put back.
-    carried: Option<Carried>,
     /// Commit near the view centre and its screen position, to keep the view steady.
     anchor: Option<(Oid, Pos2)>,
     selected_commits: Vec<Oid>,
@@ -268,8 +266,9 @@ pub struct ParterreApp {
     /// False for automated runs, so they don't overwrite the user's settings.
     persist: bool,
     scene: Option<Scene>,
-    /// Options of the most recently requested layout, and of the scene on screen.
+    /// Options of the most recently requested layout.
     requested: Option<(GraphOptions, LayoutOptions)>,
+    /// Options the scene on screen was laid out with.
     scene_key: Option<(GraphOptions, LayoutOptions)>,
     job: Option<LayoutJob>,
     view: View,
@@ -468,13 +467,6 @@ impl ParterreApp {
         let key = (self.settings.graph.clone(), self.settings.layout.clone());
         if self.requested.as_ref() != Some(&key) {
             self.requested = Some(key.clone());
-            // Moved nodes go along to a newer snapshot of the same graph, and to any relayout
-            // if they are to be remembered.
-            let carried = if self.settings.remember_moves || self.scene_key.as_ref() == Some(&key) {
-                self.carried_places()
-            } else {
-                None
-            };
             let font = FontId::monospace(FONT_SIZE);
             let text_height = ctx.fonts_mut(|f| f.row_height(&font));
             let input = ctx.fonts_mut(|f| {
@@ -497,7 +489,6 @@ impl ParterreApp {
             self.job = Some(LayoutJob {
                 rx,
                 key,
-                carried,
                 anchor: self.view_anchor(),
                 selected_commits: if pending.is_empty() {
                     self.selected_commits()
@@ -513,6 +504,14 @@ impl ParterreApp {
             return;
         };
         let job = self.job.take().expect("job exists");
+        // Moved nodes go along to a newer snapshot of the same graph, and to any relayout if
+        // they are to be remembered: as they rest now, after any drop during the layout.
+        let same = self.scene_key.as_ref() == Some(&job.key);
+        let carried = if self.settings.remember_moves || same {
+            self.carried_places()
+        } else {
+            None
+        };
         self.scene = Some(scene);
         self.scene_key = Some(job.key);
         self.hovered = None;
@@ -529,7 +528,7 @@ impl ParterreApp {
         self.selection.extend(selected);
         self.selected_edge = job.selected_edge.and_then(|(c, p)| self.edge_for(&c, &p));
         self.update_search();
-        self.restore_moves(job.carried);
+        self.restore_moves(carried);
         if let (Some((oid, screen)), Some(scene)) = (job.anchor, &self.scene)
             && let Some(node) = self.node_for(&oid)
             && self.canvas.is_positive()

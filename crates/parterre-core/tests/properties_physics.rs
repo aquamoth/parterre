@@ -246,8 +246,9 @@ fn physics_keeps_children_above_parents() {
 }
 
 /// Putting moved nodes back into a layout they no longer fit (as after a reload that changed
-/// the graph) leaves no boxes overlapping: one node moved by hand lands on another, and a few
-/// others rest a little away from the layout.
+/// the graph) leaves no boxes overlapping: nodes moved by hand land on others (and on each
+/// other), some beside their first parent, and a few others rest a little away from the
+/// layout. Putting the result back again changes nothing.
 #[test]
 fn physics_restores_without_overlaps() {
     let mut rng = Rng(env_or("PHYSICS_SEED", 1990));
@@ -261,42 +262,67 @@ fn physics_restores_without_overlaps() {
             ..LayoutOptions::default()
         };
         let l = layout::layout(&inp, &opts);
-        let mut net = Net::new(&l, &inp.sizes);
-        let (moved, onto) = (rng.below(n as u64) as usize, rng.below(n as u64) as usize);
-        let nudge = Point::new(rng.f() * 30.0 - 15.0, rng.f() * 10.0 - 5.0);
-        let to = |a: usize, b: usize| {
-            Point::new(l.nodes[b].x - l.nodes[a].x, l.nodes[b].y - l.nodes[a].y)
+        let first_parent = |i: usize| {
+            inp.edges
+                .iter()
+                .find(|e| e.child as usize == i && e.first_parent)
+                .map(|e| e.parent as usize)
         };
-        let mut saved = vec![RestPlace {
-            node: moved,
-            offset: Point::new(to(moved, onto).x + nudge.x, to(moved, onto).y + nudge.y),
-            moved: true,
-            beside: None,
-        }];
-        for _ in 0..rng.below(4) {
+        let mut saved: Vec<RestPlace> = Vec::new();
+        let moved = 1 + rng.below(3) as usize;
+        for k in 0..moved + rng.below(4) as usize {
             let node = rng.below(n as u64) as usize;
-            if node != moved {
-                let offset = Point::new(rng.f() * 80.0 - 40.0, rng.f() * 20.0 - 10.0);
-                saved.push(RestPlace {
-                    node,
-                    offset,
-                    moved: false,
-                    beside: None,
-                });
+            if saved.iter().any(|s| s.node == node) {
+                continue;
             }
+            let by_hand = k < moved;
+            let offset = if by_hand {
+                // Onto another node, give or take a little.
+                let onto = l.nodes[rng.below(n as u64) as usize];
+                Point::new(
+                    onto.x - l.nodes[node].x + rng.f() * 30.0 - 15.0,
+                    onto.y - l.nodes[node].y + rng.f() * 10.0 - 5.0,
+                )
+            } else {
+                Point::new(rng.f() * 80.0 - 40.0, rng.f() * 20.0 - 10.0)
+            };
+            let beside = first_parent(node).filter(|_| rng.below(2) == 0).map(|p| {
+                (
+                    p,
+                    Point::new(rng.f() * 300.0 - 150.0, -40.0 - rng.f() * 80.0),
+                )
+            });
+            saved.push(RestPlace {
+                node,
+                offset,
+                moved: by_hand,
+                beside,
+            });
         }
-        net.restore(saved, &NetParams::default());
+        let mut net = Net::new(&l, &inp.sizes);
+        net.restore(saved.clone(), &NetParams::default());
         assert!(!net.is_awake(), "iter {iter}: settles at once");
         for i in 0..n {
             let p = net.node_pos(i);
             assert!(p.x.is_finite() && p.y.is_finite(), "iter {iter}: node {i}");
         }
-        let moved_to = net.node_pos(moved);
-        let wanted = Point::new(l.nodes[onto].x + nudge.x, l.nodes[onto].y + nudge.y);
-        assert!(
-            (moved_to.x - wanted.x).abs() < 0.01 && (moved_to.y - wanted.y).abs() < 0.01,
-            "iter {iter}: the node moved by hand stays"
-        );
         assert_eq!(net.tidiness().overlaps, 0, "iter {iter}: n={n}");
+        if let [only] = saved.as_slice() {
+            let mut alone = Net::new(&l, &inp.sizes);
+            alone.restore([*only], &NetParams::default());
+            assert!(
+                (alone.node_pos(only.node).x - net.node_pos(only.node).x).abs() < 0.01,
+                "iter {iter}: the node moved by hand stays"
+            );
+        }
+        let mut again = Net::new(&l, &inp.sizes);
+        again.restore(net.rest_places(), &NetParams::default());
+        for i in 0..n {
+            let (a, b) = (net.node_pos(i), again.node_pos(i));
+            assert!(
+                (a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01,
+                "iter {iter}: node {i} put back again moved from {a:?} to {b:?}"
+            );
+        }
     }
 }

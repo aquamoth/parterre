@@ -129,10 +129,14 @@ const PUSH_WAKE: usize = 32;
 const SWEEPS: usize = 12;
 /// Sweeps when a drag ends, so that the shape that becomes permanent has converged.
 const FINAL_SWEEPS: usize = 48;
-/// Rounds of [`SWEEPS`] when settling after a restore (see [`Net::settle`]).
-const SETTLE_ROUNDS: usize = 8;
-/// At most this many passes of separating alone end settling after a restore.
+/// Rounds of [`SWEEPS`] when settling after a restore (see [`Net::settle`]), and how many
+/// particles around the overlapping nodes are woken for it at first.
+const SETTLE_ROUNDS: usize = 4;
+const SETTLE_WAKE: usize = 1_000;
+/// At most this many passes of separating alone end settling after a restore, and they stop
+/// after this many in a row clear no more overlap.
 const SEPARATE_ROUNDS: usize = 64;
+const SEPARATE_PATIENCE: usize = 4;
 /// Integration substeps per frame for following the targets.
 const SUBSTEPS: usize = 4;
 /// Natural frequency (Hz) with which particles follow their targets.
@@ -159,6 +163,8 @@ const SEPARATED_BACK: u8 = 2;
 /// away, with this stiffness (edge springs have 1). Both scale linearly with `push`.
 const MAGNET_RANGE: f32 = 64.0;
 const MAGNET_STIFFNESS: f32 = 1.5;
+/// Cell size (layout units) of the coarse grid that picks the nodes near moving ones.
+const NEAR_CELL: f32 = 512.0;
 /// Nearby nodes are collected once per frame, up to this far beyond the magnet range.
 const NEAR_SLACK: f32 = 24.0;
 /// A drop changes a particle's rest position only if it moved more than this.
@@ -1000,12 +1006,13 @@ impl Net {
 
     /// Puts nodes back where they rested at once (the edges at them follow): those that rested
     /// away from the layout beside their first parent as they were, if they still have it
-    /// ([`RestPlace::beside`]), else at their rest offset from the layout. A node that was not saved but has a parent resting away
-    /// from the layout is a new commit (see [`Net::rest_places`]); it keeps its place beside
-    /// its first parent, taking on its displacement, and moves on against the flow if that
-    /// leaves it not clear above a parent. The layout may have changed since the places were
-    /// saved, so the graph then settles as after a drop (see [`Net::settle`]). Meant for a
-    /// fresh net; not recorded for undo.
+    /// ([`RestPlace::beside`]), else at their rest offset from the layout. A node that was not
+    /// saved but has a parent resting away from the layout is a new commit (see
+    /// [`Net::rest_places`]); it keeps its place beside its first parent, taking on its
+    /// displacement, and moves on against the flow if that leaves it not clear above a parent.
+    /// The layout may have changed since the places were saved, so the graph then settles
+    /// where nodes overlap (see [`Net::settle`]). Meant for a fresh net; not recorded for
+    /// undo.
     pub fn restore(&mut self, saved: impl IntoIterator<Item = RestPlace>, params: &NetParams) {
         self.cancel_grab();
         let n = self.node_count;
@@ -1042,6 +1049,10 @@ impl Net {
             by.insert(i as u32, sub(sub(rest, self.origin[i]), self.home[i]));
         }
         self.place_new_nodes(&mut by);
+        if by.values().all(|&d| d == Point::default()) {
+            // Everything rests in the layout already, with the layout's routes.
+            return;
+        }
         for (p, _, after) in self.shifted_homes(&by) {
             let p = p as usize;
             self.set_home(p, after);
@@ -1057,27 +1068,24 @@ impl Net {
         self.route_blocked_edges();
     }
 
-    /// Lets the graph settle around the nodes resting away from the layout, at once: the shape
-    /// a drop of the nodes moved by hand would leave in [`DragModel::Adapt`], with overlapping
-    /// boxes pushed apart and children kept above their parents. Nodes moved by hand stay put;
-    /// the others give way, and rest where they end up.
+    /// Lets the graph settle at once where nodes resting away from the layout overlap others:
+    /// the shape a drop of the nodes moved by hand would leave in [`DragModel::Adapt`], with
+    /// overlapping boxes pushed apart and children kept above their parents. Nodes moved by
+    /// hand stay put unless they leave no room between them; the others give way, and rest
+    /// where they end up.
     fn settle(&mut self, params: &NetParams) {
-        let n = self.node_count;
-        let displaced: Vec<u32> = (0..n as u32)
-            .filter(|&i| self.is_displaced(i as usize))
-            .collect();
-        let Some(&anchor) = displaced.first() else {
+        let overlapping = self.overlapping();
+        let Some(&anchor) = overlapping.first() else {
             return;
         };
-        let held: Vec<(u32, Point)> = displaced
-            .iter()
-            .filter(|&&i| self.moved[i as usize])
-            .map(|&i| (i, self.disp[i as usize]))
+        let held: Vec<(u32, Point)> = (0..self.node_count as u32)
+            .filter(|&i| self.moved[i as usize] && self.is_displaced(i as usize))
+            .map(|i| (i, self.disp[i as usize]))
             .collect();
         for &(p, _) in &held {
             self.held[p as usize] = true;
         }
-        self.wake_around(&displaced, ACTIVE_BUDGET);
+        self.wake_around(&overlapping, SETTLE_WAKE);
         self.settling = true;
         self.grab = Some(Grab {
             anchor,
@@ -1100,22 +1108,65 @@ impl Net {
             self.shape(&params, SWEEPS);
         }
         // A row of nodes pushed along it clears one pair per sweep, while the springs pull it
-        // back between sweeps: finish by separating alone, keeping children above parents.
+        // back between sweeps: finish by separating alone, keeping children above parents, for
+        // as long as that clears overlaps. If some are left (a node wedged between nodes moved
+        // by hand), those give way too. The edges at the nodes it moves bend along.
+        let n = self.node_count;
+        let start: Vec<(u32, Point)> = self
+            .active
+            .iter()
+            .filter(|&&i| (i as usize) < n)
+            .map(|&i| (i, self.target[i as usize]))
+            .collect();
+        let (mut least, mut stalled) = (f32::INFINITY, 0);
         for _ in 0..SEPARATE_ROUNDS {
             let near = self.near_pairs(OVERLAP_MARGIN);
             let mut target = std::mem::take(&mut self.target);
-            let overlapping = near
+            let overlap: f32 = near
                 .iter()
-                .any(|pair| self.gap(pair, &target, pair.margin()).0 < -REST_EPSILON);
-            if overlapping {
+                .map(|pair| (-self.gap(pair, &target, pair.margin()).0).max(0.0))
+                .sum();
+            if overlap < 0.99 * least {
+                (least, stalled) = (overlap, 0);
+            } else {
+                stalled += 1;
+            }
+            let mut done = overlap <= REST_EPSILON || stalled >= SEPARATE_PATIENCE;
+            if done && overlap > REST_EPSILON {
+                let grab = self.grab.as_ref().expect("settling");
+                if grab.held.iter().any(|&(p, _)| self.held[p as usize]) {
+                    for &(p, _) in &grab.held {
+                        self.held[p as usize] = false;
+                    }
+                    (least, stalled, done) = (overlap, 0, false);
+                }
+            }
+            if !done {
                 self.separate_nodes(&mut target, &near);
                 let segments = self.flow_segments();
                 self.keep_flow_order(&segments, true, &mut target);
             }
             self.target = target;
-            if !overlapping {
+            if done {
                 break;
             }
+        }
+        self.clear_along_layers();
+        let by: HashMap<u32, Point> = start
+            .into_iter()
+            .map(|(i, was)| (i, sub(self.target[i as usize], was)))
+            .filter(|&(_, d)| len(d) > REST_EPSILON)
+            .collect();
+        let mut edges: Vec<u32> = by
+            .keys()
+            .flat_map(|&i| self.node_edges[i as usize].iter().copied())
+            .collect();
+        edges.sort_unstable();
+        edges.dedup();
+        for (p, shift) in self.bend_shifts(&edges, |i| by.get(&i).copied().unwrap_or_default()) {
+            let p = p as usize;
+            self.activate(p);
+            self.target[p] = add(self.target[p], shift);
         }
         self.settling = false;
         let grab = self.grab.take().expect("grab exists");
@@ -1132,6 +1183,62 @@ impl Net {
         }
         self.deactivate_all();
         self.awake = false;
+    }
+
+    /// Clears whatever overlap settling leaves (where it and the order along the flow can't
+    /// both be cleared) by pushing nodes along their layer, which never turns an edge around:
+    /// of each overlapping pair, the one farther along moves on.
+    fn clear_along_layers(&mut self) {
+        let (along, _) = self.axes();
+        for _ in 0..self.node_count {
+            let near = self.near_pairs(OVERLAP_MARGIN);
+            let mut pushed = false;
+            for pair in &near {
+                let (a, b) = (pair.a as usize, pair.b as usize);
+                let place = |i: usize| add(self.origin[i], self.target[i]);
+                let d = sub(place(b), place(a));
+                let ext = add(self.half[a], self.half[b]);
+                if d.x.abs() >= ext.x - BLOCK_SLACK || d.y.abs() >= ext.y - BLOCK_SLACK {
+                    continue;
+                }
+                let apart = dot(d, along);
+                let last = if apart < 0.0 { a } else { b };
+                let short = dot(ext, along) + OVERLAP_MARGIN - apart.abs();
+                self.activate(last);
+                self.target[last] = add(self.target[last], scale(along, short));
+                pushed = true;
+            }
+            if !pushed {
+                break;
+            }
+        }
+    }
+
+    /// Nodes whose boxes overlap at rest (more than grazing), where at least one of the two
+    /// rests away from the layout (the layout itself leaves none).
+    fn overlapping(&mut self) -> Vec<u32> {
+        let n = self.node_count;
+        let rest = |i: usize| add(self.origin[i], self.home[i]);
+        let boxes: Vec<(u32, Point, Point)> =
+            (0..n).map(|i| (i as u32, rest(i), self.half[i])).collect();
+        self.grid.rebuild(&boxes);
+        let mut pairs = Vec::new();
+        self.grid.candidate_pairs(&mut pairs);
+        let mut out: Vec<u32> = pairs
+            .into_iter()
+            .filter(|&(a, b)| {
+                let (a, b) = (a as usize, b as usize);
+                let d = sub(rest(b), rest(a));
+                let ext = add(self.half[a], self.half[b]);
+                (self.is_displaced(a) || self.is_displaced(b))
+                    && d.x.abs() < ext.x - BLOCK_SLACK
+                    && d.y.abs() < ext.y - BLOCK_SLACK
+            })
+            .flat_map(|(a, b)| [a, b])
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// Adds the new commits among the nodes not in `by` (see [`Net::restore`]) to `by`, which
@@ -1826,37 +1933,39 @@ impl Net {
         let moving = |i: usize| {
             self.held[i]
                 || len(sub(self.target[i], self.home[i])) > REST_EPSILON
-                || self.settling && i < n && self.home[i] != Point::default()
+                || self.settling && self.home[i] != Point::default()
         };
-        let mut area: Option<(Point, Point)> = None;
+        // Only nodes near a moving one: the coarse cells the moving boxes (grown by `pad`)
+        // touch. One box around them all would take in most of a big graph when they are
+        // far apart.
+        let cells_of = |p: Point, h: Point| {
+            let cell = |v: f32| (v / NEAR_CELL).floor() as i32;
+            let (x0, y0, x1, y1) = (
+                cell(p.x - h.x),
+                cell(p.y - h.y),
+                cell(p.x + h.x),
+                cell(p.y + h.y),
+            );
+            (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
+        };
+        let mut area: HashSet<(i32, i32)> = HashSet::new();
         for &i in &self.active {
             let i = i as usize;
             if i < n && moving(i) {
-                let (lo, hi) = (sub(place(i), self.half[i]), add(place(i), self.half[i]));
-                area = Some(match area {
-                    None => (lo, hi),
-                    Some((a, b)) => (
-                        Point::new(a.x.min(lo.x), a.y.min(lo.y)),
-                        Point::new(b.x.max(hi.x), b.y.max(hi.y)),
-                    ),
-                });
+                let grown = add(self.half[i], Point::new(pad, pad));
+                area.extend(cells_of(place(i), grown));
             }
         }
-        let Some((lo, hi)) = area else {
+        if area.is_empty() {
             return Vec::new();
-        };
-        let mut items = Vec::new();
-        for i in 0..n {
-            let (p, h) = (place(i), self.half[i]);
-            if p.x + h.x >= lo.x - pad
-                && p.x - h.x <= hi.x + pad
-                && p.y + h.y >= lo.y - pad
-                && p.y - h.y <= hi.y + pad
-            {
-                let grown = Point::new(h.x + pad / 2.0, h.y + pad / 2.0);
-                items.push((i as u32, p, grown));
-            }
         }
+        let items: Vec<(u32, Point, Point)> = (0..n)
+            .filter(|&i| cells_of(place(i), self.half[i]).any(|c| area.contains(&c)))
+            .map(|i| {
+                let grown = Point::new(self.half[i].x + pad / 2.0, self.half[i].y + pad / 2.0);
+                (i as u32, place(i), grown)
+            })
+            .collect();
         self.grid.rebuild(&items);
         let mut pairs = Vec::new();
         self.grid.candidate_pairs(&mut pairs);
@@ -1979,7 +2088,11 @@ impl Net {
             self.activate_heading(a, target[a]);
             self.activate_heading(b, target[b]);
             let push = scale(away, -gap);
-            let (wa, wb) = (self.yields(a, scale(push, -1.0)), self.yields(b, push));
+            let (mut wa, mut wb) = (self.yields(a, scale(push, -1.0)), self.yields(b, push));
+            if wa + wb == 0.0 && self.settling && self.held[a] && self.held[b] {
+                // Two nodes moved by hand, put back on each other: both give way.
+                (wa, wb) = (1.0, 1.0);
+            }
             if wa + wb == 0.0 {
                 continue;
             }
@@ -3163,6 +3276,25 @@ mod tests {
         };
         net.restore([unplaced], &NetParams::default());
         assert!(close(net.node_pos(0), l.nodes[0]));
+    }
+
+    #[test]
+    fn a_child_goes_back_beside_its_parent_after_the_parent() {
+        // 0 -> 1 -> 2 -> 3 -> 4, with 1 and 0 both resting away; the child is listed first.
+        let (_, mut net) = chain_net();
+        let (to_1, to_0) = (Point::new(200.0, -30.0), Point::new(-120.0, -60.0));
+        let place = |node: usize, beside: usize, apart: Point| RestPlace {
+            node,
+            offset: Point::new(1.0, 0.0),
+            moved: true,
+            beside: Some((beside, apart)),
+        };
+        net.restore(
+            [place(0, 1, to_0), place(1, 2, to_1)],
+            &NetParams::default(),
+        );
+        assert!(close(sub(net.node_pos(1), net.node_pos(2)), to_1));
+        assert!(close(sub(net.node_pos(0), net.node_pos(1)), to_0));
     }
 
     #[test]
