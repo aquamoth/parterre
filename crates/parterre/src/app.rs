@@ -903,6 +903,7 @@ impl ParterreApp {
                         | "reset"
                         | "rebase"
                         | "merge"
+                        | "merge-into"
                 )
             })
             .map(|(k, n)| (k.to_owned(), n.to_owned()))
@@ -922,6 +923,23 @@ impl ParterreApp {
                 let request = branches::Request::Run(action);
                 self.branches.request(ctx, request, egui::ViewportId::ROOT);
             }
+            return;
+        }
+        // PROTOTYPE (#188): `merge-into:BRANCH`, or `merge-into:BRANCH:METHOD` (its name, in
+        // lower case with dashes).
+        if kind == "merge-into" {
+            let (into, method) = match name.split_once(':') {
+                Some((into, m)) => (
+                    into.to_owned(),
+                    parterre_core::merge::Method::ALL
+                        .into_iter()
+                        .find(|x| x.name().to_lowercase().replace(' ', "-") == m),
+                ),
+                None => (name.clone(), None),
+            };
+            self.branches.demo_method = method;
+            let request = branches::Request::MergeInto { into };
+            self.branches.request(ctx, request, egui::ViewportId::ROOT);
             return;
         }
         if kind == "merge" {

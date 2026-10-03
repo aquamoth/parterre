@@ -1312,6 +1312,8 @@ pub struct Tool {
     rebase: Option<RebaseDialog>,
     rebase_loading: Option<RebaseLoading>,
     merge: Option<MergeDialog>,
+    /// PROTOTYPE (#188), automation: the method the next merge dialog opens with.
+    pub demo_method: Option<merge::Method>,
     merge_loading: Option<MergeLoading>,
     /// Diff windows asked for from a dialog.
     pub diff_requests: Vec<(Arc<Repo>, FileDiffSpec)>,
@@ -1544,7 +1546,11 @@ impl Tool {
                     Some(out) => out.source.clone(),
                     None => loading.target,
                 };
-                self.merge = Some(MergeDialog::new(preview, repo, target, loading.opener));
+                let mut dialog = MergeDialog::new(preview, repo, target, loading.opener);
+                if let Some(m) = self.demo_method.take() {
+                    dialog.method = m;
+                }
+                self.merge = Some(dialog);
             }
             Err(e) => {
                 let title = format!("Merge {}", loading.target);
