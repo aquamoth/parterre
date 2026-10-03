@@ -27,9 +27,6 @@ pub const VERSION: u64 = 1;
 
 /// The storage key of the stored document.
 pub const STORAGE_KEY: &str = "parterre-settings";
-/// Where parterre kept its settings in RON before, up to 0.6's prereleases. Not read: removed
-/// on saving.
-pub const OLD_STORAGE_KEY: &str = "gitgraph-settings";
 
 /// Settings that belong to the computer, not exported: window sizes and dividers.
 const MACHINE: [&[&str]; 6] = [
@@ -109,12 +106,16 @@ impl Stored {
     }
 }
 
-/// Loads the stored settings, parterre's and every repository's: the defaults without any.
-pub fn load(storage: Option<&dyn eframe::Storage>) -> (Settings, Stored) {
-    storage
-        .and_then(|storage| storage.get_string(STORAGE_KEY))
-        .and_then(|text| Stored::read(&text))
-        .unwrap_or_default()
+/// Loads the stored settings, parterre's and every repository's: the defaults without any, or
+/// if they are corrupt, which the last value says.
+pub fn load(storage: Option<&dyn eframe::Storage>) -> (Settings, Stored, bool) {
+    let Some(text) = storage.and_then(|storage| storage.get_string(STORAGE_KEY)) else {
+        return Default::default();
+    };
+    match Stored::read(&text) {
+        Some((settings, stored)) => (settings, stored, false),
+        None => (Settings::default(), Stored::default(), true),
+    }
 }
 
 /// The exported file: parterre's settings and, if `repository`, the settings of the repository
@@ -326,21 +327,35 @@ mod tests {
         stored.keep(RepoSettings::key(&repo), filtered());
         let mut storage = Memory::default();
         eframe::Storage::set_string(&mut storage, STORAGE_KEY, stored.write(&settings));
-        let (back, stored) = load(Some(&storage));
+        let (back, stored, corrupt) = load(Some(&storage));
         assert_eq!(back, settings);
         assert_eq!(stored.settings_of(&repo), filtered());
-
-        // The RON settings parterre kept before aren't read.
-        let mut storage = Memory::default();
-        eframe::set_value(&mut storage, OLD_STORAGE_KEY, &settings);
-        let (back, stored) = load(Some(&storage));
-        assert_eq!(back, Settings::default());
-        assert_eq!(stored.settings_of(&repo), RepoSettings::default());
+        assert!(!corrupt);
 
         // Nothing stored, or an automated run: the defaults.
-        let (back, stored) = load(None);
-        assert_eq!(back, Settings::default());
-        assert!(stored.repositories.is_empty());
+        for storage in [Some(&Memory::default() as &dyn eframe::Storage), None] {
+            let (back, stored, corrupt) = load(storage);
+            assert_eq!(back, Settings::default());
+            assert!(stored.repositories.is_empty());
+            assert!(!corrupt);
+        }
+    }
+
+    #[test]
+    fn corrupt_settings_load_as_the_defaults_and_say_so() {
+        for text in [
+            "{\"version\": 1, \"settings\": {\"theme\": \"Da",
+            "",
+            "[1, 2]",
+            "{}",
+        ] {
+            let mut storage = Memory::default();
+            eframe::Storage::set_string(&mut storage, STORAGE_KEY, text.into());
+            let (settings, stored, corrupt) = load(Some(&storage));
+            assert_eq!(settings, Settings::default(), "{text}");
+            assert!(stored.repositories.is_empty());
+            assert!(corrupt, "{text}");
+        }
     }
 
     #[test]

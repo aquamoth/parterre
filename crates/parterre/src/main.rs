@@ -352,7 +352,6 @@ fn main() -> ExitCode {
     }
     automation.record = record.map(|(path, format)| record::Recorder::new(path, format));
     let overrides = move |s: &mut settings::Settings| apply_cli(&cli, s);
-    settings::adopt_old_storage();
     let result = eframe::run_native(
         settings::APP_ID,
         options,

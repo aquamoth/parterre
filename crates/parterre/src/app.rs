@@ -252,6 +252,9 @@ struct Search {
     request_focus: bool,
 }
 
+/// Said in the status bar when the stored settings couldn't be read.
+const CORRUPT_SETTINGS: &str = "The saved settings were corrupt: defaults restored";
+
 pub struct ParterreApp {
     /// The most recently loaded snapshot, used for new layouts. The scene on screen keeps its
     /// own snapshot until a new layout replaces it. `None` until a repository is opened.
@@ -378,7 +381,9 @@ impl ParterreApp {
     ) -> ParterreApp {
         let persist = !automation.is_active();
         let storage = cc.storage.filter(|_| persist);
-        let (mut settings, stored) = settings_file::load(storage);
+        let (mut settings, stored, corrupt) = settings_file::load(storage);
+        // eframe starts from nothing when its whole file is corrupt.
+        let corrupt = corrupt || persist && crate::settings::storage_corrupt();
         let repo_settings = repo
             .as_ref()
             .map_or_else(RepoSettings::default, |repo| stored.settings_of(repo));
@@ -443,7 +448,9 @@ impl ParterreApp {
             pending_select: Vec::new(),
             drag: None,
             search: Search::default(),
-            status: open_error.map(|e| (e, true)),
+            status: open_error
+                .or_else(|| corrupt.then(|| CORRUPT_SETTINGS.to_owned()))
+                .map(|e| (e, true)),
             show_shortcuts: false,
             show_legend: false,
             show_settings: false,
@@ -2819,7 +2826,6 @@ impl eframe::App for ParterreApp {
                 settings_file::STORAGE_KEY,
                 self.stored.write(&self.settings),
             );
-            storage.remove_string(settings_file::OLD_STORAGE_KEY);
             eframe::set_value(storage, MOVES_KEY, &self.moves);
             eframe::set_value(storage, RECENT_KEY, &self.recent);
         }
