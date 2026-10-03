@@ -1,13 +1,14 @@
 //! Rebasing the open worktree's branch onto another commit: which of its commits git would
 //! leave out, and running it. It is plain `git rebase <target>`, so the user's configuration
 //! applies: no `--rebase-merges`, so merges are flattened, and git drops commits whose change
-//! is already in the target. A rebase that stops on conflicts leaves the worktree with an
+//! is already in the target. Commits the user squashes or drops make it `git rebase -i`, with
+//! the todo list written for git. A rebase that stops on conflicts leaves the worktree with an
 //! operation in progress, finished with git for now.
 
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::branches::{Attention, Cancel, Catalog, Error, Report, Stuck, run};
+use crate::branches::{Attention, Cancel, Catalog, Error, Report, Stuck, run, run_with};
 use crate::git::Git;
 use crate::log::is_ancestor;
 use crate::{Oid, Repo};
@@ -24,11 +25,64 @@ pub struct Rebase {
     /// `--autostash` (`Some(true)`) or `--no-autostash` (`Some(false)`), where it differs from
     /// what `rebase.autoStash` does.
     pub autostash: Option<bool>,
+    /// The todo list of an interactive rebase, in the order git replays the commits; empty
+    /// when every commit is picked, for a plain rebase.
+    pub todo: Vec<(Oid, Todo)>,
+}
+
+/// What an interactive rebase does with a commit: git's todo commands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Todo {
+    #[default]
+    Pick,
+    /// Melds it into the commit replayed before it, keeping both messages.
+    Squash,
+    Drop,
+}
+
+impl Todo {
+    pub const ALL: [Todo; 3] = [Todo::Pick, Todo::Squash, Todo::Drop];
+
+    /// The command as the todo list names it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Todo::Pick => "pick",
+            Todo::Squash => "squash",
+            Todo::Drop => "drop",
+        }
+    }
+}
+
+/// What the rebase does with the commits, given what was `chosen` for them, in git's order: a
+/// squash with no commit kept before it, which git refuses, is a pick until there is one again.
+pub fn effective(chosen: &[(Oid, Todo)]) -> Vec<(Oid, Todo)> {
+    let mut kept = false;
+    chosen
+        .iter()
+        .map(|&(oid, todo)| {
+            let todo = match todo {
+                Todo::Squash if !kept => Todo::Pick,
+                todo => todo,
+            };
+            kept |= todo != Todo::Drop;
+            (oid, todo)
+        })
+        .collect()
+}
+
+/// The todo list git reads for `todo`, one line per commit.
+pub fn todo_list(todo: &[(Oid, Todo)]) -> String {
+    todo.iter()
+        .map(|(oid, t)| format!("{} {}\n", t.word(), oid.to_hex()))
+        .collect()
 }
 
 /// The command a rebase runs.
 pub fn command(rebase: &Rebase) -> Vec<String> {
     let mut args = vec!["rebase".to_owned()];
+    if !rebase.todo.is_empty() {
+        args.push("--interactive".into());
+    }
     match rebase.autostash {
         Some(true) => args.push("--autostash".into()),
         Some(false) => args.push("--no-autostash".into()),
@@ -80,6 +134,9 @@ pub struct Preview {
     already_there: HashSet<Oid>,
     /// The branch's merges since the target.
     merges: HashSet<Oid>,
+    /// The commits git replays, in its order (the oldest first), and what the user chose to do
+    /// with each (see [`effective`]).
+    replayed: Vec<(Oid, Todo)>,
     /// Uncommitted changes to tracked files, which a rebase refuses to start with.
     pub dirty: bool,
     /// `rebase.autoStash` is set.
@@ -117,6 +174,16 @@ impl Preview {
             "--merges",
             &format!("{}..{}", onto.to_hex(), head.to_hex()),
         ])?;
+        // The commits `git rebase -i` lists, in its order.
+        let replayed = git.run(&[
+            "rev-list",
+            "--reverse",
+            "--topo-order",
+            "--right-only",
+            "--cherry-pick",
+            "--no-merges",
+            &range,
+        ])?;
         let dirty = !git
             .run(&["status", "--porcelain", "--untracked-files=no"])?
             .trim()
@@ -132,6 +199,11 @@ impl Preview {
             onto,
             already_there: oids(marks, "="),
             merges: oids(merges, ""),
+            replayed: replayed
+                .lines()
+                .filter_map(Oid::from_hex)
+                .map(|oid| (oid, Todo::Pick))
+                .collect(),
             dirty,
             auto_stash,
         })
@@ -146,6 +218,37 @@ impl Preview {
         } else {
             None
         }
+    }
+
+    /// What the rebase does with `commit`, if git replays it.
+    pub fn todo(&self, commit: Oid) -> Option<Todo> {
+        effective(&self.replayed)
+            .into_iter()
+            .find(|(oid, _)| *oid == commit)
+            .map(|(_, t)| t)
+    }
+
+    /// Has the rebase do `todo` with `commit`, if git replays it.
+    pub fn set_todo(&mut self, commit: Oid, todo: Todo) {
+        if let Some(entry) = self.replayed.iter_mut().find(|(oid, _)| *oid == commit) {
+            entry.1 = todo;
+        }
+    }
+
+    /// Whether squashing `commits` squashes every one of them that git replays, and at least
+    /// one: each has a commit kept before it.
+    pub fn can_squash(&self, commits: &[Oid]) -> bool {
+        let mut chosen = self.replayed.clone();
+        let mut any = false;
+        for entry in &mut chosen {
+            if commits.contains(&entry.0) {
+                entry.1 = Todo::Squash;
+                any = true;
+            }
+        }
+        any && effective(&chosen)
+            .iter()
+            .all(|(oid, t)| *t == Todo::Squash || !commits.contains(oid))
     }
 
     /// Why the rebase can't start as chosen.
@@ -166,6 +269,14 @@ impl Preview {
             onto: self.onto,
             target,
             autostash,
+            todo: {
+                let todo = effective(&self.replayed);
+                if todo.iter().all(|(_, t)| *t == Todo::Pick) {
+                    Vec::new()
+                } else {
+                    todo
+                }
+            },
         }
     }
 }
@@ -196,7 +307,30 @@ pub(crate) fn execute(
             .unwrap_or(0)
     };
     let before = stashes();
-    let ok = run(&git, command(rebase), cancel, report)?;
+    let ok = if rebase.todo.is_empty() {
+        run(&git, command(rebase), cancel, report)?
+    } else {
+        // Git asks its sequence editor for the todo list: copy ours over it.
+        let dir = git.run(&["rev-parse", "--absolute-git-dir"])?;
+        let path = Path::new(dir.trim()).join("parterre-rebase-todo");
+        std::fs::write(&path, todo_list(&rebase.todo))
+            .map_err(|e| Error::Invalid(format!("Couldn't write the todo list: {e}")))?;
+        // Git runs it with sh, Git for Windows' too, which takes forward slashes.
+        let quoted = path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace('\'', r"'\''");
+        let editor = format!("cp '{quoted}'");
+        let ok = run_with(
+            &git,
+            command(rebase),
+            &[("GIT_SEQUENCE_EDITOR", &editor)],
+            cancel,
+            report,
+        );
+        let _ = std::fs::remove_file(&path);
+        ok?
+    };
     let after = Catalog::load(&catalog.root)?;
     if let Some(Stuck::InProgress(_)) = after.stuck() {
         let n = after.conflicted.len();

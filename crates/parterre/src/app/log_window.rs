@@ -40,7 +40,7 @@ use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{find_urls, thousands};
 use parterre_core::{Commit, CommitIx, GitRef, Label, Oid, RefKind, Repo, Worktree};
 
-use super::commit_table::{CommitList, CommitTable, Row};
+use super::commit_table::{CommitList, CommitTable, Row, Select};
 use super::compare_window::CompareRequest;
 use super::file_table::{DiffQueue, FileTable, Lister, Listing};
 use super::{Details, ParterreApp};
@@ -861,7 +861,8 @@ impl LogWindow {
             graph,
             abbrev_len: repo.abbrev_len,
             palette: &env.palette,
-            pairs: true,
+            select: Select::Pair,
+            icons: false,
         };
         let head = repo.head_commit().map(|c| repo.commit(c).oid);
         let marked = env.marked;

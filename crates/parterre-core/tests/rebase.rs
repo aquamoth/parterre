@@ -6,7 +6,7 @@ mod common;
 use common::TestRepo;
 use parterre_core::Oid;
 use parterre_core::branches::{Action, Branches, Cancel, Catalog, Outcome, Report, Stuck};
-use parterre_core::rebase::{self, Preview, Skipped};
+use parterre_core::rebase::{self, Preview, Skipped, Todo};
 
 fn oid(s: &str) -> Oid {
     Oid::from_hex(s).unwrap()
@@ -109,6 +109,10 @@ fn the_preview_greys_what_git_leaves_out_and_the_rebase_agrees() {
     assert_eq!(p.skipped(oid(&merge)), Some(Skipped::Merge));
     assert_eq!(p.skipped(oid(&feature)), None);
     assert_eq!(p.skipped(oid(&side)), None);
+    // Only what git replays has a todo command.
+    assert_eq!(p.todo(oid(&fix)), None);
+    assert_eq!(p.todo(oid(&merge)), None);
+    assert_eq!(p.todo(oid(&feature)), Some(Todo::Pick));
 
     let rebase = p.rebase("up".into(), false);
     assert_eq!(rebase::command(&rebase), ["rebase", "up"]);
@@ -163,6 +167,7 @@ fn a_conflict_stops_it_and_leaves_the_worktree_stuck() {
         onto: rev(&r, "up"),
         target: "up".into(),
         autostash: None,
+        todo: Vec::new(),
     };
     let error = failed(execute(&r, again));
     assert!(error.contains("no longer checked out"), "{error}");
@@ -273,4 +278,99 @@ fn onto_a_commit_names_it_by_its_full_hash() {
     assert_eq!(rebase::short_target(&rebase), up.to_hex()[..7]);
     done(execute(&r, rebase));
     assert_eq!(rev(&r, "main~1"), up);
+}
+
+/// `main` with four commits of its own, a to d, on `up`'s base.
+fn four() -> (TestRepo, [Oid; 4]) {
+    let mut r = diverged();
+    r.git(&["reset", "-q", "--hard", "main~1"]);
+    let commits = ["a", "b", "c", "d"].map(|name| {
+        r.write(name, name.as_bytes());
+        oid(&r.commit_all(name))
+    });
+    (r, commits)
+}
+
+#[test]
+fn squashed_and_dropped_commits_make_it_interactive() {
+    let (r, [a, b, c, d]) = four();
+    let mut p = preview(&r, "up");
+    p.set_todo(b, Todo::Squash);
+    p.set_todo(c, Todo::Drop);
+    let rebase = p.rebase("up".into(), false);
+    assert_eq!(
+        rebase.todo,
+        [
+            (a, Todo::Pick),
+            (b, Todo::Squash),
+            (c, Todo::Drop),
+            (d, Todo::Pick)
+        ]
+    );
+    assert_eq!(
+        rebase::todo_list(&rebase.todo),
+        format!(
+            "pick {}\nsquash {}\ndrop {}\npick {}\n",
+            a.to_hex(),
+            b.to_hex(),
+            c.to_hex(),
+            d.to_hex()
+        )
+    );
+    assert_eq!(rebase::command(&rebase), ["rebase", "--interactive", "up"]);
+    let report = done(execute(&r, rebase));
+    assert!(report.attention.is_none());
+    let replayed = r.git(&["log", "--format=%s", "up..main"]);
+    assert_eq!(replayed.lines().collect::<Vec<_>>(), ["d", "a"]);
+    // The squash keeps both messages, without git's comments.
+    assert_eq!(r.git(&["log", "-1", "--format=%B", "main~1"]), "a\n\nb");
+    assert!(r.path().join("b").exists());
+    assert!(!r.path().join("c").exists());
+    assert_eq!(Catalog::load(r.path()).unwrap().stuck(), None);
+}
+
+#[test]
+fn every_commit_picked_is_a_plain_rebase() {
+    let (r, [a, ..]) = four();
+    let mut p = preview(&r, "up");
+    p.set_todo(a, Todo::Drop);
+    p.set_todo(a, Todo::Pick);
+    let rebase = p.rebase("up".into(), false);
+    assert!(rebase.todo.is_empty());
+    assert_eq!(rebase::command(&rebase), ["rebase", "up"]);
+}
+
+#[test]
+fn a_squash_with_nothing_kept_before_it_is_a_pick_until_there_is() {
+    let (r, [a, b, c, _]) = four();
+    let mut p = preview(&r, "up");
+    p.set_todo(b, Todo::Squash);
+    assert_eq!(p.todo(b), Some(Todo::Squash));
+    // Dropping the commit it melds into makes it a pick; picking that again, a squash again.
+    p.set_todo(a, Todo::Drop);
+    assert_eq!(p.todo(b), Some(Todo::Pick));
+    assert_eq!(p.rebase("up".into(), false).todo[1], (b, Todo::Pick));
+    assert_eq!(p.blocked(false), None);
+    p.set_todo(a, Todo::Pick);
+    assert_eq!(p.todo(b), Some(Todo::Squash));
+    // Nothing before the first: it can't be squashed, alone or with the others.
+    assert!(!p.can_squash(&[a]));
+    assert!(!p.can_squash(&[a, c]));
+    assert!(p.can_squash(&[b, c]));
+    p.set_todo(a, Todo::Drop);
+    assert!(!p.can_squash(&[b]));
+    assert!(p.can_squash(&[c]));
+    // Nor are commits git doesn't replay.
+    assert!(!p.can_squash(&[rev(&r, "up")]));
+}
+
+#[test]
+fn dropping_every_commit_leaves_the_branch_at_the_target() {
+    let (r, commits) = four();
+    let mut p = preview(&r, "up");
+    for c in commits {
+        p.set_todo(c, Todo::Drop);
+    }
+    done(execute(&r, p.rebase("up".into(), false)));
+    assert_eq!(rev(&r, "main"), rev(&r, "up"));
 }

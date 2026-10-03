@@ -218,6 +218,40 @@ pub fn text_button(ui: &mut Ui, text: &str) -> Response {
     response
 }
 
+/// A [`text_button`] with `glyph` in `color` before the text.
+pub fn icon_text_button(ui: &mut Ui, glyph: Glyph, color: Color32, text: &str) -> Response {
+    let (text_color, color) = if ui.is_enabled() {
+        (ui.visuals().text_color(), color)
+    } else {
+        let weak = ui.visuals().weak_text_color();
+        (weak, weak)
+    };
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        egui::TextStyle::Button.resolve(ui.style()),
+        text_color,
+    );
+    let icon = 16.0;
+    let size = vec2(galley.size().x + icon + 6.0 + 24.0, 28.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let t = tones(ui);
+    let fill = if response.is_pointer_button_down_on() || response.hovered() {
+        t.press
+    } else {
+        t.seg_bg
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
+    let left = rect.left() + 12.0;
+    let icon_rect = Rect::from_min_size(
+        egui::pos2(left, rect.center().y - icon / 2.0),
+        Vec2::splat(icon),
+    );
+    paint_glyph(ui.painter(), icon_rect, glyph, color);
+    let at = egui::pos2(left + icon + 6.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(at, galley, text_color);
+    response
+}
+
 /// A dialog's main button: white text on the accent colour, at least `min_width` wide.
 pub fn primary_button(ui: &mut Ui, text: &str, min_width: f32) -> Response {
     let galley = ui.painter().layout_no_wrap(
