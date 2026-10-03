@@ -12,6 +12,8 @@ homepage.workspace = true
 readme = "README.md"
 
 [features]
+# PROTOTYPE (#208): tree-sitter syntax colour, SQL as the single grammar.
+syntax = ["dep:tree-sitter", "dep:tree-sitter-highlight", "dep:tree-sitter-sequel"]
 # Open pull requests from GitHub's API (`forge::github`): the HTTPS client. Without it, loading
 # them fails.
 github = ["dep:ureq"]
@@ -23,6 +25,10 @@ serde.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
 ureq = { workspace = true, optional = true }
+# PROTOTYPE (#208): see the `syntax` feature.
+tree-sitter = { version = "0.27", optional = true }
+tree-sitter-highlight = { version = "0.27", optional = true }
+tree-sitter-sequel = { version = "0.3", optional = true }
 
 # Finding Git for Windows when git.exe isn't on PATH (see src/git/program.rs).
 [target.'cfg(windows)'.dependencies]

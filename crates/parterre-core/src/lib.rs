@@ -12,6 +12,7 @@ pub mod find;
 pub mod forge;
 pub mod git;
 pub mod glyphs;
+pub mod highlight;
 pub mod icon;
 pub mod layout;
 pub mod lenient;

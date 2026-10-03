@@ -18,7 +18,9 @@ name = "parterre"
 path = "src/main.rs"
 
 [features]
-default = ["github"]
+default = ["github", "syntax"]
+# PROTOTYPE (#208): tree-sitter syntax colour in the diff and blame windows.
+syntax = ["parterre-core/syntax"]
 # Open pull requests from GitHub, shown on their head commits.
 github = ["parterre-core/github"]
 
