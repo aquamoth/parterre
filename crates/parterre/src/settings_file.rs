@@ -25,9 +25,11 @@ use crate::settings::{RepoSettings, Settings};
 /// The format's version.
 pub const VERSION: u64 = 1;
 
-/// The storage key of the stored document. (`settings::STORAGE_KEY` keeps the settings in the
-/// format parterre used before, for older versions to read.)
+/// The storage key of the stored document.
 pub const STORAGE_KEY: &str = "parterre-settings";
+/// Where parterre kept its settings in RON before, up to 0.6's prereleases. Not read: removed
+/// on saving.
+pub const OLD_STORAGE_KEY: &str = "gitgraph-settings";
 
 /// Settings that belong to the computer, not exported: window sizes and dividers.
 const MACHINE: [&[&str]; 6] = [
@@ -91,13 +93,10 @@ impl Stored {
         *self = Stored::default();
     }
 
-    /// The settings of `repo`. One without settings of its own has the defaults, or the
-    /// `legacy` filters if there are any: they go to the first repository asked for.
-    pub fn settings_of(&self, repo: &Repo, legacy: &mut Option<RepoSettings>) -> RepoSettings {
-        match self.repositories.get(&RepoSettings::key(repo)) {
-            Some(settings) => settings.clone(),
-            None => legacy.take().unwrap_or_default(),
-        }
+    /// The settings of `repo`: the defaults if it has none of its own.
+    pub fn settings_of(&self, repo: &Repo) -> RepoSettings {
+        let key = RepoSettings::key(repo);
+        self.repositories.get(&key).cloned().unwrap_or_default()
     }
 
     /// Keeps `repo` as the settings of the repository `key`. The defaults aren't kept.
@@ -110,26 +109,12 @@ impl Stored {
     }
 }
 
-/// Loads the stored settings: parterre's, every repository's, and the filters an older
-/// parterre kept for all repositories, if it was the last to save.
-pub fn load(storage: Option<&dyn eframe::Storage>) -> (Settings, Stored, Option<RepoSettings>) {
-    let Some(storage) = storage else {
-        return Default::default();
-    };
-    if let Some(read) = storage
-        .get_string(STORAGE_KEY)
-        .and_then(|s| Stored::read(&s))
-    {
-        return (read.0, read.1, None);
-    }
-    match eframe::get_value::<Settings>(storage, crate::settings::STORAGE_KEY) {
-        Some(settings) => {
-            let legacy = RepoSettings::of(&settings.graph);
-            let legacy = (legacy != RepoSettings::default()).then_some(legacy);
-            (settings, Stored::default(), legacy)
-        }
-        None => Default::default(),
-    }
+/// Loads the stored settings, parterre's and every repository's: the defaults without any.
+pub fn load(storage: Option<&dyn eframe::Storage>) -> (Settings, Stored) {
+    storage
+        .and_then(|storage| storage.get_string(STORAGE_KEY))
+        .and_then(|text| Stored::read(&text))
+        .unwrap_or_default()
 }
 
 /// The exported file: parterre's settings and, if `repository`, the settings of the repository
@@ -323,21 +308,12 @@ mod tests {
     }
 
     #[test]
-    fn upgrading_gives_the_filters_kept_for_every_repository_to_the_first_one_shown() {
-        let mut old = Settings {
+    fn loads_the_stored_document_or_the_defaults() {
+        let settings = Settings {
             theme: ThemeChoice::Dark,
             ..Settings::default()
         };
-        filtered().apply(&mut old.graph);
-        let mut storage = Memory::default();
-        eframe::set_value(&mut storage, crate::settings::STORAGE_KEY, &old);
-        let (settings, stored, legacy) = load(Some(&storage));
-        assert_eq!(settings.theme, ThemeChoice::Dark);
-        assert!(stored.repositories.is_empty());
-        assert_eq!(legacy, Some(filtered()));
-
-        // Once stored as a document, that is what is read: the older format is only written
-        // for older versions.
+        let mut stored = Stored::default();
         let repo = Repo::new(
             "/src/app".into(),
             Vec::new(),
@@ -347,21 +323,24 @@ mod tests {
                 target: None,
             },
         );
-        let (mut stored, mut legacy) = (stored, legacy);
-        stored.keep(
-            RepoSettings::key(&repo),
-            stored.settings_of(&repo, &mut legacy),
-        );
-        assert_eq!(legacy, None);
+        stored.keep(RepoSettings::key(&repo), filtered());
+        let mut storage = Memory::default();
         eframe::Storage::set_string(&mut storage, STORAGE_KEY, stored.write(&settings));
-        let (_, stored, legacy) = load(Some(&storage));
-        assert_eq!(legacy, None);
-        assert_eq!(stored.settings_of(&repo, &mut None), filtered());
+        let (back, stored) = load(Some(&storage));
+        assert_eq!(back, settings);
+        assert_eq!(stored.settings_of(&repo), filtered());
+
+        // The RON settings parterre kept before aren't read.
+        let mut storage = Memory::default();
+        eframe::set_value(&mut storage, OLD_STORAGE_KEY, &settings);
+        let (back, stored) = load(Some(&storage));
+        assert_eq!(back, Settings::default());
+        assert_eq!(stored.settings_of(&repo), RepoSettings::default());
 
         // Nothing stored, or an automated run: the defaults.
-        let (settings, stored, legacy) = load(None);
-        assert_eq!(settings, Settings::default());
-        assert!(stored.repositories.is_empty() && legacy.is_none());
+        let (back, stored) = load(None);
+        assert_eq!(back, Settings::default());
+        assert!(stored.repositories.is_empty());
     }
 
     #[test]

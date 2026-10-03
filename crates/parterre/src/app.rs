@@ -44,9 +44,7 @@ use crate::frame_pacing::FrameLimiter;
 use crate::menu;
 use crate::render::{self, Marks};
 use crate::scene::{FONT_SIZE, Scene, to_point};
-use crate::settings::{
-    MOVES_KEY, RECENT_KEY, RememberedMoves, RepoSettings, STORAGE_KEY, Settings, load_moves,
-};
+use crate::settings::{MOVES_KEY, RECENT_KEY, RememberedMoves, RepoSettings, Settings, load_moves};
 use crate::settings_file::{self, Stored};
 use crate::system_theme::SystemTheme;
 use crate::text_size;
@@ -271,9 +269,6 @@ pub struct ParterreApp {
     /// Every repository's settings as last kept. The repository shown has its own in
     /// `settings`, which are kept here when another is shown and when saving.
     stored: Stored,
-    /// Filters saved by a parterre that kept them for every repository, for the first
-    /// repository shown.
-    legacy_filters: Option<RepoSettings>,
     /// False for automated runs, so they don't overwrite the user's settings.
     persist: bool,
     scene: Option<Scene>,
@@ -383,10 +378,10 @@ impl ParterreApp {
     ) -> ParterreApp {
         let persist = !automation.is_active();
         let storage = cc.storage.filter(|_| persist);
-        let (mut settings, stored, mut legacy_filters) = settings_file::load(storage);
-        let repo_settings = repo.as_ref().map_or_else(RepoSettings::default, |repo| {
-            stored.settings_of(repo, &mut legacy_filters)
-        });
+        let (mut settings, stored) = settings_file::load(storage);
+        let repo_settings = repo
+            .as_ref()
+            .map_or_else(RepoSettings::default, |repo| stored.settings_of(repo));
         repo_settings.apply(&mut settings.graph);
         overrides(&mut settings);
         settings.sanitize();
@@ -428,7 +423,6 @@ impl ParterreApp {
             file_dialog: None,
             settings,
             stored,
-            legacy_filters,
             persist,
             scene: None,
             requested: None,
@@ -825,9 +819,9 @@ impl ParterreApp {
     /// settings, which the new one's replace.
     fn show_repo(&mut self, repo: Option<Repo>) {
         self.keep_repo_settings();
-        let repo_settings = repo.as_ref().map_or_else(RepoSettings::default, |repo| {
-            self.stored.settings_of(repo, &mut self.legacy_filters)
-        });
+        let repo_settings = repo
+            .as_ref()
+            .map_or_else(RepoSettings::default, |repo| self.stored.settings_of(repo));
         repo_settings.apply(&mut self.settings.graph);
         self.repo = repo.map(Arc::new);
         self.scene = None;
@@ -2825,8 +2819,7 @@ impl eframe::App for ParterreApp {
                 settings_file::STORAGE_KEY,
                 self.stored.write(&self.settings),
             );
-            // For an older parterre: it reads these.
-            eframe::set_value(storage, STORAGE_KEY, &self.settings);
+            storage.remove_string(settings_file::OLD_STORAGE_KEY);
             eframe::set_value(storage, MOVES_KEY, &self.moves);
             eframe::set_value(storage, RECENT_KEY, &self.recent);
         }

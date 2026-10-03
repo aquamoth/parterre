@@ -648,7 +648,6 @@ impl ParterreApp {
     fn reset_settings(&mut self) {
         self.settings = Settings::default();
         self.stored.reset();
-        self.legacy_filters = None;
         self.settings_note = None;
     }
 }

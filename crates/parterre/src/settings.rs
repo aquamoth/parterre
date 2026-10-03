@@ -27,8 +27,7 @@ pub fn storage_file() -> Option<std::path::PathBuf> {
     eframe::storage_dir(STORAGE_ID).map(|dir| dir.join("app.ron"))
 }
 
-// The storage keys still carry the old name, so settings saved before the rename keep loading.
-pub const STORAGE_KEY: &str = "gitgraph-settings";
+// The key still carries the old name, so moves saved before the rename keep loading.
 /// Storage key for remembered node positions: repository path -> commit hash -> rest offset
 /// from the layout, and whether the node was moved by hand. Lists the children of displaced
 /// nodes too, so that commits missing from it are new (see
