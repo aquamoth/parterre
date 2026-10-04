@@ -18,16 +18,20 @@ name = "parterre"
 path = "src/main.rs"
 
 [features]
-default = ["github", "syntax"]
+default = ["github", "send", "syntax"]
 # Syntax colour in the diff and blame windows (#209).
 syntax = ["parterre-highlight/syntax"]
 # Open pull requests from GitHub, shown on their head commits.
 github = ["parterre-forge/github"]
+# The update check (#258), and whatever else parterre asks or sends over the network: off, it
+# makes no requests of its own. The switch for packagers (docs/building.md#features).
+send = ["parterre-telemetry/send"]
 
 [dependencies]
 parterre-core.workspace = true
 parterre-forge.workspace = true
 parterre-highlight.workspace = true
+parterre-telemetry.workspace = true
 parterre-util.workspace = true
 anyhow.workspace = true
 clap.workspace = true

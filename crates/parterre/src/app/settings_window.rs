@@ -27,17 +27,19 @@ pub enum SettingsPage {
     Graph,
     Filters,
     Dragging,
+    Privacy,
     Advanced,
     Manage,
 }
 
 impl SettingsPage {
-    const ALL: [SettingsPage; 7] = [
+    const ALL: [SettingsPage; 8] = [
         SettingsPage::Appearance,
         SettingsPage::BranchColours,
         SettingsPage::Graph,
         SettingsPage::Filters,
         SettingsPage::Dragging,
+        SettingsPage::Privacy,
         SettingsPage::Advanced,
         SettingsPage::Manage,
     ];
@@ -57,6 +59,7 @@ impl SettingsPage {
             SettingsPage::Graph => "Graph",
             SettingsPage::Filters => "Filters",
             SettingsPage::Dragging => "Dragging",
+            SettingsPage::Privacy => "Privacy",
             SettingsPage::Advanced => "Advanced",
             SettingsPage::Manage => "Manage",
         }
@@ -91,6 +94,9 @@ const IMPORT_SETTINGS_TIP: &str = "Every setting but the filters and window size
     file lacks go back to their defaults.";
 const IMPORT_FILTERS_TIP: &str = "The filters in the file, for the repository shown.";
 const RESET_TIP: &str = "Every setting back to its default, and every repository's filters.";
+const UPDATES_TIP: &str = "Ask GitHub once a day whether a newer release is out. Sends nothing \
+    of parterre's own.";
+const NO_UPDATES_TIP: &str = "Not in this build: its package manager updates parterre.";
 const PAGE: f32 = 440.0;
 
 impl ParterreApp {
@@ -362,6 +368,24 @@ impl ParterreApp {
                 });
                 self.set_remember_moves(remember);
             }
+            SettingsPage::Privacy => group(ui, |rows| {
+                // Without `send`, and on Snap and Flatpak, there is nothing to turn on.
+                let available = parterre_telemetry::has_update_check();
+                let tip = if available {
+                    UPDATES_TIP
+                } else {
+                    NO_UPDATES_TIP
+                };
+                rows.row("Check for updates", tip, |ui| {
+                    let mut off = false;
+                    let on = if available {
+                        &mut s.check_for_updates
+                    } else {
+                        &mut off
+                    };
+                    ui.add_enabled_ui(available, |ui| widgets::switch(ui, on));
+                });
+            }),
             SettingsPage::Manage => self.manage_page(ui),
             SettingsPage::Advanced => {
                 title(ui, "Upstreams");

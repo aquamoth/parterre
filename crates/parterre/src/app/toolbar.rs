@@ -69,8 +69,8 @@ impl ParterreApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let menu_button =
-                widgets::popover_button(ui, Id::new(MENU_ID), Some(glyphs::MENU), false);
+            let newer = self.newer_release().is_some();
+            let menu_button = widgets::menu_button(ui, Id::new(MENU_ID), newer);
             let menu_button = tip(menu_button, "Menu", "");
             Popup::menu(&menu_button).style(menu::style).show(|ui| {
                 menu::fit_window(ui, |ui| {
@@ -512,6 +512,16 @@ impl ParterreApp {
         }
         if menu::item(ui, "About parterre", "", Mark::None).clicked() {
             self.show_about = true;
+        }
+        // While a newer release is out (#258), just above this build's version.
+        if let Some(update) = self.newer_release() {
+            menu::separator(ui);
+            let label = RichText::new(format!("Download {}", update.version))
+                .color(widgets::tones(ui).accent)
+                .strong();
+            if menu::item(ui, label, "", Mark::None).clicked() {
+                self.download(ui.ctx(), &update.download);
+            }
         }
         // For users who start parterre from a file manager or Start menu (#68).
         ui.add_space(4.0);

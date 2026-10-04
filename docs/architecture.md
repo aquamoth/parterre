@@ -1,8 +1,8 @@
 # Architecture
 
-parterre is a Cargo workspace with five crates: the domain library, two adapters over external
+parterre is a Cargo workspace with six crates: the domain library, three adapters over external
 stacks, the handles they share, and the binary (#214). Forge depends on core; core and
-highlight on util; the binary on all four; nothing on the binary.
+highlight on util; telemetry on none of ours; the binary on all five; nothing on the binary.
 
 ```
 crates/parterre-util   the cancellation handles: `Cancel` holds the one child process running
@@ -69,12 +69,23 @@ crates/parterre-highlight
                        the child process the app runs them in, with a budget and a Cancel
   proto_highlights.scm the Protocol Buffers query, which its crate doesn't export
 
+crates/parterre-telemetry
+                       what parterre asks and sends over the network (#175); for now the
+                       update check (#258)
+  lib.rs               the update check's thread, at start and then every 24 h; the channel,
+                       stamped at build time (`PARTERRE_CHANNEL`), or Snap and Flatpak at
+                       run time
+  update.rs            versions and their order, which release a build hears of, and where
+                       *Download* goes on each channel; no network
+  github.rs            GitHub's releases API through ureq, behind the `send` feature
+
 crates/parterre        the binary (eframe/egui)
   build.rs             asks git for the commit and sets the version string
   main.rs              CLI (clap), window setup
   version.rs           release/dev version strings (runs in build.rs; see docs/releasing.md)
   app.rs               canvas interaction, search, status bar, windows, opening folders
     toolbar.rs         the toolbar, its popovers and the ☰ menu
+    updates.rs         the update check as the settings say, and *Download* in the ☰ menu
     settings_window.rs the settings: pages of rows, applied as you change them
     auto_reload.rs     a worker thread that reloads when the refs change
     pull_requests.rs   loads open pull requests on a worker thread while they are shown, cached

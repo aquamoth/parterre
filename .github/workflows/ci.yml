@@ -94,7 +94,7 @@ jobs:
       - name: Check crates alone
         if: env.BUILD == 'true'
         run: |
-          cargo check -p parterre-util -p parterre-core -p parterre-forge -p parterre-highlight
+          cargo check -p parterre-util -p parterre-core -p parterre-forge -p parterre-highlight -p parterre-telemetry
           cargo check -p parterre-highlight --no-default-features
           cargo check -p parterre --no-default-features
       - name: Test

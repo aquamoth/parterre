@@ -1916,6 +1916,7 @@ dependencies = [
  "parterre-core",
  "parterre-forge",
  "parterre-highlight",
+ "parterre-telemetry",
  "parterre-util",
  "rfd",
  "ron",
@@ -1981,6 +1982,15 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-xml",
  "tree-sitter-yaml",
+]
+
+[[package]]
+name = "parterre-telemetry"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

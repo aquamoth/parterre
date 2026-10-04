@@ -25,7 +25,7 @@ This builds the debug binary and makes a demo repository with a change to a file
 worktree. Then it saves one PNG for each of these into `/tmp/shots`, in about 15 seconds:
 
 - the main window: as opened, fitted, after dragging a node, and while searching
-- the ☰ menu and each of its submenus
+- the ☰ menu and each of its submenus, and the menu while a newer release is out
 - the toolbar popovers
 - the context menus of a node and of the canvas, with their submenus
 - every settings page
@@ -127,7 +127,7 @@ takes a branch, a tag or a hash prefix. A name that doesn't exist fails the run.
 | `open …` | Shows |
 | --- | --- |
 | `menu`, `filter`, `zoom`, `drag` | The ☰ menu or a toolbar popover |
-| `settings`, `settings:PAGE` | The settings, at `appearance`, `branchcolours`, `graph`, `filters`, `dragging`, `advanced` or `manage` |
+| `settings`, `settings:PAGE` | The settings, at `appearance`, `branchcolours`, `graph`, `filters`, `dragging`, `privacy`, `advanced` or `manage` |
 | `export-settings:FILE`, `import-settings:FILE` | The settings' Manage page, as if FILE had been picked to export to (written at once) or import from (the dialog asking what to import) |
 | `about`, `shortcuts`, `legend` | About parterre, Keyboard and mouse, the legend |
 | `log:REF`, `log:FIRST..SECOND` | The log of a commit, or of a range (as if the nodes were selected in that order) |
@@ -192,6 +192,11 @@ runs start from the defaults otherwise.
 | `--log-layout a\|b\|c\|d` | The log window's layout: `stacked`, `side-by-side`, `details-below`, `files-right` |
 | `--diff-form side\|unified`, `--diff-words`, `--diff-whitespace`, `--diff-unfolded` | The diff window's settings |
 | `--no-syntax-colour` | Plain text in the diff and blame windows, as their toolbar button gives |
+| `--newer-release VERSION` | A newer release out, e.g. `0.7.0`: the bold blue ☰ icon and *Download 0.7.0* in the menu |
+
+Scripted runs never ask GitHub for newer releases: `--newer-release` is the only answer they
+get. *Download* does what it does for the build being run, which for one without a channel
+(any local build) is copying `cargo install --locked parterre`.
 
 `parterre --help` lists the common ones. The window settings at the bottom are hidden there,
 being of use mainly for automation.

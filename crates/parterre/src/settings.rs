@@ -212,6 +212,8 @@ pub struct Settings {
     /// Colour code by its language in the diff and blame windows (#209). Their toolbars
     /// toggle it too.
     pub syntax_colour: bool,
+    /// Ask GitHub once a day whether a newer release is out (#258).
+    pub check_for_updates: bool,
     /// Colours for branches by name; the first matching rule wins.
     pub branch_colors: Vec<BranchColor>,
     pub log_window: LogWindowSettings,
@@ -372,6 +374,7 @@ impl Default for Settings {
             remember_moves: false,
             auto_reload: true,
             syntax_colour: true,
+            check_for_updates: true,
             branch_colors: Vec::new(),
             log_window: LogWindowSettings::default(),
             diff_window: DiffWindowSettings::default(),
@@ -501,6 +504,17 @@ mod tests {
         s.blame_window.show_history = false;
         s.blame_window.history_height = 300.0;
         assert_eq!(round_trip(&s).blame_window, s.blame_window);
+    }
+
+    #[test]
+    fn the_update_check_is_on_by_default_and_turned_off_for_good() {
+        assert!(read("{}").check_for_updates);
+
+        let s = Settings {
+            check_for_updates: false,
+            ..Settings::default()
+        };
+        assert!(!round_trip(&s).check_for_updates);
     }
 
     #[test]

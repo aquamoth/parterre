@@ -62,9 +62,14 @@ pub fn tones(ui: &Ui) -> Tones {
 
 /// Paints `glyph` scaled into `rect`.
 pub fn paint_glyph(painter: &Painter, rect: Rect, glyph: Glyph, color: Color32) {
+    paint_glyph_weighted(painter, rect, glyph, color, 1.0);
+}
+
+/// [`paint_glyph`] with lines `weight` times as thick.
+fn paint_glyph_weighted(painter: &Painter, rect: Rect, glyph: Glyph, color: Color32, weight: f32) {
     let scale = rect.width() / glyphs::SIZE;
     let at = |p: [f32; 2]| rect.min + vec2(p[0], p[1]) * scale;
-    let stroke = Stroke::new(glyphs::STROKE * scale, color);
+    let stroke = Stroke::new(glyphs::STROKE * scale * weight, color);
     for part in glyph {
         match *part {
             Part::Path(d) => {
@@ -301,10 +306,7 @@ pub fn popover_button(ui: &mut Ui, id: Id, glyph: Option<Glyph>, on: bool) -> Re
     } else {
         vec2(20.0, BUTTON)
     };
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    let response = ui.interact(rect, id, Sense::click());
-    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
-    paint_background(ui, rect, &response, on, open);
+    let (rect, response) = popover_button_area(ui, id, size, on);
     let color = icon_color(ui, on);
     match glyph {
         Some(glyph) => {
@@ -322,6 +324,28 @@ pub fn popover_button(ui: &mut Ui, id: Id, glyph: Option<Glyph>, on: bool) -> Re
         }
     }
     response
+}
+
+/// The ☰ menu's [`popover_button`], its icon bold and blue while `marked`: a newer release is
+/// out (#258).
+pub fn menu_button(ui: &mut Ui, id: Id, marked: bool) -> Response {
+    if !marked {
+        return popover_button(ui, id, Some(glyphs::MENU), false);
+    }
+    let (rect, response) = popover_button_area(ui, id, Vec2::splat(BUTTON), false);
+    let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
+    let accent = tones(ui).accent;
+    paint_glyph_weighted(ui.painter(), icon, glyphs::MENU, accent, 1.8);
+    response
+}
+
+/// The room and background of a [`popover_button`].
+fn popover_button_area(ui: &mut Ui, id: Id, size: Vec2, on: bool) -> (Rect, Response) {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let response = ui.interact(rect, id, Sense::click());
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+    paint_background(ui, rect, &response, on, open);
+    (rect, response)
 }
 
 /// Icon segments of which one is selected, e.g. the drag modes. `tip` adds each segment's

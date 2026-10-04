@@ -1,0 +1,25 @@
+[package]
+name = "parterre-telemetry"
+description = "Internal to parterre: what it asks and sends over the network, for now the update check. No stability promises."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[features]
+# Requests (`send`): the HTTPS client, and reading GitHub's answers. Without it the crate asks
+# and sends nothing and there is no update check: the switch for packagers (#258).
+send = ["dep:serde", "dep:serde_json", "dep:ureq"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
+
+[lints]
+workspace = true

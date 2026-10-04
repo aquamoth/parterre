@@ -176,7 +176,7 @@ _Avoid_: log pane, commit list
 
 **Update check**:
 Asking GitHub whether a newer release is out, at start and then once a day. It sends nothing of
-parterre's own. When a newer version is out, the menu icon turns blue and offers *Update now*.
+parterre's own. When a newer version is out, the menu icon turns blue and offers *Download*.
 _Avoid_: ping, heartbeat, telemetry
 
 **Install ID**:

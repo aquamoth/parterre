@@ -182,8 +182,9 @@ filters, the log, diff, blame and compare windows, and settings you can share wi
 - [docs/building.md](docs/building.md): build it yourself (`cargo build --release`).
 - [docs/architecture.md](docs/architecture.md): how it works. `crates/parterre-core` holds
   the git loading, graph reduction, layout and physics, free of any GUI; `parterre-forge` the
-  pull requests and `parterre-highlight` the syntax colour, each with its own dependencies;
-  `parterre-util` what they share; `crates/parterre` is the egui window.
+  pull requests, `parterre-highlight` the syntax colour and `parterre-telemetry` the update
+  check, each with its own dependencies; `parterre-util` what they share; `crates/parterre` is
+  the egui window.
 - [docs/research/](docs/research/): how TortoiseGit's revision graph works, with source links.
 
 Ideas, questions and bugs are welcome in [GitHub issues](https://github.com/aquamoth/parterre/issues).

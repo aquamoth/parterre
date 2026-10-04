@@ -35,6 +35,7 @@ mod syntax;
 #[cfg(test)]
 mod tool_harness;
 mod toolbar;
+mod updates;
 
 pub use toolbar::{popup_id, toolbar_button_id};
 
@@ -350,6 +351,8 @@ pub struct ParterreApp {
     pull_requests_error: Option<parterre_forge::ForgeError>,
     /// Load the pull requests again (F5).
     refresh_pull_requests: bool,
+    /// Asks GitHub whether a newer release is out, while `settings.check_for_updates` is on.
+    update_check: Option<parterre_telemetry::UpdateCheck>,
     system_theme: SystemTheme,
     /// The theme last given to the window (its title bar), if any.
     window_theme: Option<egui::SystemTheme>,
@@ -485,6 +488,7 @@ impl ParterreApp {
             pull_requests_setting,
             pull_requests_error: None,
             refresh_pull_requests: false,
+            update_check: None,
             system_theme: SystemTheme::watch(&cc.egui_ctx),
             window_theme: None,
             settings_window_theme: None,
@@ -2822,6 +2826,7 @@ impl eframe::App for ParterreApp {
             }
         }
         self.update_pull_requests(&ctx);
+        self.update_check(&ctx);
         self.ensure_scene(&ctx);
         self.view_before = self.view;
         self.handle_keys(&ctx);

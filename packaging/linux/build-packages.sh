@@ -3,7 +3,10 @@
 # crates/parterre/Cargo.toml names. Needs cargo-deb, cargo-generate-rpm and cargo-about.
 #
 #   cargo build --release [--target TRIPLE]
-#   packaging/linux/build-packages.sh [--target TRIPLE] [OUT]   (default OUT: target/packages)
+#   packaging/linux/build-packages.sh [--target TRIPLE] [--only deb|rpm] [OUT]
+#
+# OUT defaults to target/packages. The release workflow builds each package with --only, from a
+# build stamped with its channel (PARTERRE_CHANNEL=deb or rpm, #258).
 #
 # The packages take their version from the binary: the release tag's in the release workflow,
 # X.Y.Z-dev.N+commit otherwise. A pre-release's - becomes ~, which sorts before the release in
@@ -13,10 +16,22 @@ set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
 target=
-if [ "${1-}" = --target ]; then
-    target=$2
+only=
+while [ $# -gt 1 ]; do
+    case $1 in
+    --target) target=$2 ;;
+    --only) only=$2 ;;
+    *) break ;;
+    esac
     shift 2
-fi
+done
+case $only in
+'' | deb | rpm) ;;
+*)
+    echo "--only takes deb or rpm, not $only" >&2
+    exit 1
+    ;;
+esac
 out=${1:-target/packages}
 dir=target/${target:+$target/}release
 bin=$dir/parterre
@@ -46,18 +61,22 @@ case $release in
     ;;
 esac
 
-cargo deb -p parterre --no-build --no-strip --no-dbgsym ${target:+--target "$target"} \
-    --deb-version "$version" -o "$out/"
-# Its own automatic requirements, but for weak glibc versions (rpm-find-requires.sh).
-# cargo-generate-rpm ignores how the script exits, so a broken one would go unnoticed.
-find_requires=$root/packaging/linux/rpm-find-requires.sh
-if ! echo "$root/$bin" | "$find_requires" | grep -q '^libc\.so\.6()'; then
-    echo "$find_requires found no libc requirement for $bin" >&2
-    exit 1
+if [ "$only" != rpm ]; then
+    cargo deb -p parterre --no-build --no-strip --no-dbgsym ${target:+--target "$target"} \
+        --deb-version "$version" -o "$out/"
 fi
-cargo generate-rpm -p crates/parterre ${target:+--target "$target"} \
-    --auto-req "$find_requires" \
-    -s "version = \"$version\"" -o "$out/"
+if [ "$only" != deb ]; then
+    # Its own automatic requirements, but for weak glibc versions (rpm-find-requires.sh).
+    # cargo-generate-rpm ignores how the script exits, so a broken one would go unnoticed.
+    find_requires=$root/packaging/linux/rpm-find-requires.sh
+    if ! echo "$root/$bin" | "$find_requires" | grep -q '^libc\.so\.6()'; then
+        echo "$find_requires found no libc requirement for $bin" >&2
+        exit 1
+    fi
+    cargo generate-rpm -p crates/parterre ${target:+--target "$target"} \
+        --auto-req "$find_requires" \
+        -s "version = \"$version\"" -o "$out/"
+fi
 # The ~ stays inside the packages but not in their file names, which GitHub may rewrite.
 for f in "$out"/parterre*~*; do
     [ -e "$f" ] && mv "$f" "$(echo "$f" | tr '~' -)"

@@ -62,6 +62,7 @@ for sub in "Recent folders" Export Show Filter Zoom Drag "Newest commits"; do
     name=$(tr 'A-Z ' 'a-z-' <<<"$sub")
     shot "menu-$name" popup $'click toolbar:menu\nhover "'"$sub"'"'
 done
+shot menu-update popup "click toolbar:menu" --newer-release 9.9.9
 for popover in filter zoom drag; do
     shot "popover-$popover" popup "click toolbar:$popover"
 done
@@ -72,7 +73,7 @@ for sub in Compare Open Copy; do
 done
 shot context-canvas popup "right-click canvas"
 
-for page in appearance branchcolours graph filters dragging advanced manage; do
+for page in appearance branchcolours graph filters dragging privacy advanced manage; do
     shot "settings-$page" window "open settings:$page"
 done
 shot reset-settings window $'open settings:manage\nclick "Reset…"'

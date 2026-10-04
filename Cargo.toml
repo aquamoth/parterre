@@ -5,6 +5,7 @@ members = [
     "crates/parterre-core",
     "crates/parterre-forge",
     "crates/parterre-highlight",
+    "crates/parterre-telemetry",
     "crates/parterre",
 ]
 
@@ -30,6 +31,7 @@ parterre-core = { path = "crates/parterre-core", version = "=0.0.0" }
 parterre-forge = { path = "crates/parterre-forge", version = "=0.0.0" }
 # Without its default `syntax`, which the app turns on through its own feature.
 parterre-highlight = { path = "crates/parterre-highlight", version = "=0.0.0", default-features = false }
+parterre-telemetry = { path = "crates/parterre-telemetry", version = "=0.0.0" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -46,10 +48,10 @@ eframe = { version = "0.36", default-features = false, features = [
 rfd = "0.17"
 image = { version = "0.25", default-features = false, features = ["gif", "png", "webp"] }
 tempfile = "3"
-# HTTPS for GitHub's API (open pull requests), behind parterre-forge's `github` feature: rustls
-# with ring, checking certificates against the operating system's trust store (so it works
-# behind proxies that inspect TLS with their own certificate authority), and no system TLS
-# library. Not ureq's default `rustls` feature, which bundles Mozilla's roots (webpki-roots,
+# HTTPS for GitHub's API (open pull requests, and the update check), behind parterre-forge's
+# `github` feature and parterre-telemetry's `send`: rustls with ring, checking certificates
+# against the operating system's trust store (so it works behind proxies that inspect TLS with
+# their own certificate authority), and no system TLS library. Not ureq's default `rustls` feature, which bundles Mozilla's roots (webpki-roots,
 # CDLA-Permissive-2.0, a licence packaging/about.toml doesn't accept); `_ring` is how ureq
 # picks ring without them. About 20 crates and 2 MB.
 ureq = { version = "3.4", default-features = false, features = [

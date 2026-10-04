@@ -76,6 +76,28 @@ its source would have to ship alongside, and every git security fix would need a
 release. Switching to a git library (gitoxide) would be a large rewrite; see
 `crates/parterre-core/src/git.rs` for why parterre uses the CLI.
 
+## Update check
+
+parterre asks GitHub's releases API at start and then once a day whether a newer release is out
+(#226, #258). It sends nothing of its own. A newer one turns the ☰ icon bold blue and ends the
+menu with *Download X.Y.Z*, which does what fits the channel parterre came through:
+
+| Channel | *Download* |
+|---|---|
+| MSI (also winget and Chocolatey, which install it), zip, tarballs, .deb, .rpm | opens that channel's own file of the release in the browser |
+| crates.io (`cargo install`), and any build without a channel | copies `cargo install --locked parterre` |
+| Snap, Flathub | nothing: their stores update parterre, and there is no check |
+
+- **The channel is stamped at build time.** Each packaging job in `release.yml` builds with
+  `PARTERRE_CHANNEL` set to `msi`, `zip`, `tarball`, `deb` or `rpm`, so the installer and the
+  packages each get a build of their own. Snap and Flatpak are told at run time by
+  `SNAP_NAME=parterre` and `FLATPAK_ID=se.trustfall.parterre`.
+- **Pre-releases:** a release build compares with the latest release, a release candidate (or
+  a dev build) with the newest of any kind, so it hears of the next candidate and the final.
+- **Off switches:** *Check for updates* in Settings › Privacy, for users. For packagers, the
+  `send` feature: built without it, parterre makes no requests of its own at all
+  ([building.md](building.md#features)).
+
 ## Windows
 
 - **Per-user MSI** built with WiX v7. WiX's Open Source Maintenance Fee applies only to users
