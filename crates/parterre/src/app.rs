@@ -357,6 +357,8 @@ pub struct ParterreApp {
     settings_window_theme: Option<egui::SystemTheme>,
     /// The text size the settings window was last shown at, while it is open.
     settings_window_text_size: Option<f32>,
+    /// The size the settings window opened in, while it is open.
+    settings_window_size: Option<Vec2>,
     window_icon: Arc<egui::IconData>,
     /// What is typed into the zoom level, while it has the focus.
     zoom_text: String,
@@ -487,6 +489,7 @@ impl ParterreApp {
             window_theme: None,
             settings_window_theme: None,
             settings_window_text_size: None,
+            settings_window_size: None,
             window_icon: Arc::new(crate::icon::icon()),
             zoom_text: String::new(),
             automation,
@@ -2338,158 +2341,231 @@ impl ParterreApp {
     }
 
     fn legend_window(&mut self, ctx: &egui::Context) {
+        if !self.show_legend {
+            return;
+        }
         let palette = Palette::new(
             ctx.global_style().visuals.dark_mode,
             &self.settings.branch_colors,
         );
         let mut open_colours = false;
-        egui::Window::new("Legend")
-            .open(&mut self.show_legend)
-            .resizable(false)
-            .collapsible(false)
+        let rules = &self.settings.branch_colors;
+        let shown = crate::dialogs::Dialog::new("legend", "Legend")
+            .width(520.0)
+            .resizable()
             .show(ctx, |ui| {
-                let swatch = |ui: &mut Ui, fill: Color32, text: &str, what: &str| {
-                    ui.horizontal(|ui| {
-                        let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
-                        ui.painter().rect_filled(rect, 4.0, fill);
-                        ui.painter().text(
-                            rect.left_center() + vec2(8.0, 0.0),
-                            egui::Align2::LEFT_CENTER,
-                            text,
-                            FontId::monospace(12.0),
-                            crate::theme::text_on(fill),
-                        );
-                        ui.label(what);
-                    });
-                };
-                swatch(
-                    ui,
-                    palette.current_branch,
-                    "main",
-                    "Current branch (HEAD), or a detached HEAD",
-                );
-                swatch(ui, palette.local_branch, "feature/x", "Local branch");
-                swatch(
-                    ui,
-                    palette.remote_branch,
-                    "origin/feature/x",
-                    "Remote-tracking branch",
-                );
-                swatch(ui, palette.tag, "v1.2.0", "Tag");
-                swatch(ui, palette.stash, "stash", "Stash");
-                swatch(ui, palette.other_ref, "pull/12/head", "Other ref");
-                for (fill, what) in [
-                    (
-                        palette.pull_request,
-                        "Open pull request on GitHub (click to open)",
-                    ),
-                    (palette.draft_pull_request, "Draft pull request"),
-                ] {
-                    ui.horizontal(|ui| {
-                        let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
-                        let text = crate::theme::text_on(fill);
-                        ui.painter().rect_filled(rect, 4.0, fill);
-                        // As in the graph: the number right-aligned, after the glyph.
-                        let (end, _) = render::pull_request_label(rect, 0.0, 1.0);
-                        let number = ui.painter().text(
-                            end,
-                            egui::Align2::RIGHT_CENTER,
-                            "12",
-                            FontId::monospace(12.0),
-                            text,
-                        );
-                        let (_, icon) = render::pull_request_label(rect, number.width(), 1.0);
-                        crate::widgets::paint_glyph(
-                            ui.painter(),
-                            icon,
-                            parterre_core::glyphs::PULL_REQUEST,
-                            text,
-                        );
-                        ui.label(what);
-                    });
-                }
-                for (fill, name, italics, glyph, what) in [
-                    (
-                        palette.local_branch,
-                        "feature/y",
-                        false,
-                        parterre_core::glyphs::FOLDER,
-                        "Branch checked out in another worktree",
-                    ),
-                    (
-                        palette.worktree,
-                        "wt-fix",
-                        true,
-                        parterre_core::glyphs::FOLDER,
-                        "Another worktree's detached HEAD",
-                    ),
-                    (
-                        palette.missing_worktree,
-                        "wt-old",
-                        true,
-                        parterre_core::glyphs::FOLDER_GONE,
-                        "Worktree whose folder is gone",
-                    ),
-                ] {
-                    ui.horizontal(|ui| {
-                        let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
-                        let text = crate::theme::text_on(fill);
-                        ui.painter().rect_filled(rect, 4.0, fill);
-                        // As in the graph: the name after the glyph.
-                        let icon = Rect::from_center_size(
-                            rect.left_center() + vec2(14.0, 0.0),
-                            Vec2::splat(12.0),
-                        );
-                        crate::widgets::paint_glyph(ui.painter(), icon, glyph, text);
-                        let format = egui::TextFormat {
-                            font_id: FontId::monospace(12.0),
-                            color: text,
-                            italics,
-                            ..egui::TextFormat::default()
-                        };
-                        let job = egui::text::LayoutJob::single_section(name.to_owned(), format);
-                        let galley = ui.painter().layout_job(job);
-                        let at = rect.left_center() + vec2(24.0, -galley.size().y / 2.0);
-                        ui.painter().galley(at, galley, text);
-                        ui.label(what);
-                    });
-                }
-                ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
-                    ui.painter().rect_filled(rect, 4.0, palette.plain_fill);
-                    ui.painter().text(
-                        rect.left_center() + vec2(8.0, 0.0),
-                        egui::Align2::LEFT_CENTER,
-                        "1a2b3c4d",
-                        FontId::monospace(12.0),
-                        palette.plain_text,
-                    );
-                    ui.label("Commit without refs (branch point or merge)");
-                });
-                for rule in &self.settings.branch_colors {
-                    swatch(ui, rule.color, &rule.patterns, "Branches matching");
-                }
-                if ui.link("Branch colours…").clicked() {
-                    open_colours = true;
-                }
-                ui.add_space(6.0);
-                ui.label(
-                    "Arrows point from a commit to its parents. Edges may stand for many hidden",
-                );
-                ui.label("commits; hover an edge to list them, click it to keep it highlighted.");
+                crate::dialogs::fields(ui, |ui| legend(ui, &palette, rules, &mut open_colours));
+                ui.separator();
+                crate::dialogs::actions(ui, "", false, false, false)
             });
+        if shown.inner == crate::dialogs::Answer::Cancel || shown.should_close() {
+            self.show_legend = false;
+        }
         if open_colours {
             self.open_settings(SettingsPage::BranchColours);
         }
     }
 
     fn shortcuts_window(&mut self, ctx: &egui::Context) {
-        egui::Window::new("Keyboard and mouse")
-            .open(&mut self.show_shortcuts)
-            .resizable(false)
-            .collapsible(false)
+        if !self.show_shortcuts {
+            return;
+        }
+        let shown = crate::dialogs::Dialog::new("shortcuts", "Keyboard and mouse")
+            .width(760.0)
+            .resizable()
             .show(ctx, |ui| {
-                egui::Grid::new("shortcuts").striped(true).show(ui, |ui| {
+                crate::dialogs::fields(ui, shortcuts);
+                ui.separator();
+                crate::dialogs::actions(ui, "", false, false, false)
+            });
+        if shown.inner == crate::dialogs::Answer::Cancel || shown.should_close() {
+            self.show_shortcuts = false;
+        }
+    }
+
+    /// The "Appropriate Legal Notices" of GPL-3.0 section 5(d). NOTICE requires works based on
+    /// parterre to keep showing them.
+    fn about_window(&mut self, ctx: &egui::Context) {
+        if !self.show_about {
+            return;
+        }
+        // Paths chosen by build.rs.
+        const NOTICE: &str = include_str!(env!("PARTERRE_NOTICE"));
+        const LICENSE: &str = include_str!(env!("PARTERRE_LICENSE"));
+        // Both texts are wrapped at 80 columns already: as wide as that, and the scroll bar.
+        let font = egui::TextStyle::Monospace.resolve(&ctx.global_style());
+        let column = ctx.fonts_mut(|f| f.glyph_width(&font, '0'));
+        let shown = crate::dialogs::Dialog::new("about", "About parterre")
+            .width((81.0 * column + 16.0).ceil())
+            .resizable()
+            .show(ctx, |ui| {
+                ui.heading(format!("parterre {}", crate::VERSION));
+                crate::dialogs::fields(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(NOTICE).monospace()).extend());
+                    ui.collapsing("GNU General Public License, version 3", |ui| {
+                        ui.add(egui::Label::new(RichText::new(LICENSE).monospace()).extend());
+                    });
+                });
+                ui.separator();
+                crate::dialogs::actions(ui, "", false, false, false)
+            });
+        if shown.inner == crate::dialogs::Answer::Cancel || shown.should_close() {
+            self.show_about = false;
+        }
+    }
+}
+
+/// The legend's rows: what each colour and mark in the graph stands for. Sets `open_colours`
+/// when the branch colours are asked for.
+fn legend(
+    ui: &mut Ui,
+    palette: &Palette,
+    rules: &[crate::theme::BranchColor],
+    open_colours: &mut bool,
+) {
+    let swatch = |ui: &mut Ui, fill: Color32, text: &str, what: &str| {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
+            ui.painter().rect_filled(rect, 4.0, fill);
+            ui.painter().text(
+                rect.left_center() + vec2(8.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                text,
+                FontId::monospace(12.0),
+                crate::theme::text_on(fill),
+            );
+            ui.label(what);
+        });
+    };
+    swatch(
+        ui,
+        palette.current_branch,
+        "main",
+        "Current branch (HEAD), or a detached HEAD",
+    );
+    swatch(ui, palette.local_branch, "feature/x", "Local branch");
+    swatch(
+        ui,
+        palette.remote_branch,
+        "origin/feature/x",
+        "Remote-tracking branch",
+    );
+    swatch(ui, palette.tag, "v1.2.0", "Tag");
+    swatch(ui, palette.stash, "stash", "Stash");
+    swatch(ui, palette.other_ref, "pull/12/head", "Other ref");
+    for (fill, what) in [
+        (
+            palette.pull_request,
+            "Open pull request on GitHub (click to open)",
+        ),
+        (palette.draft_pull_request, "Draft pull request"),
+    ] {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
+            let text = crate::theme::text_on(fill);
+            ui.painter().rect_filled(rect, 4.0, fill);
+            // As in the graph: the number right-aligned, after the glyph.
+            let (end, _) = render::pull_request_label(rect, 0.0, 1.0);
+            let number = ui.painter().text(
+                end,
+                egui::Align2::RIGHT_CENTER,
+                "12",
+                FontId::monospace(12.0),
+                text,
+            );
+            let (_, icon) = render::pull_request_label(rect, number.width(), 1.0);
+            crate::widgets::paint_glyph(
+                ui.painter(),
+                icon,
+                parterre_core::glyphs::PULL_REQUEST,
+                text,
+            );
+            ui.label(what);
+        });
+    }
+    for (fill, name, italics, glyph, what) in [
+        (
+            palette.local_branch,
+            "feature/y",
+            false,
+            parterre_core::glyphs::FOLDER,
+            "Branch checked out in another worktree",
+        ),
+        (
+            palette.worktree,
+            "wt-fix",
+            true,
+            parterre_core::glyphs::FOLDER,
+            "Another worktree's detached HEAD",
+        ),
+        (
+            palette.missing_worktree,
+            "wt-old",
+            true,
+            parterre_core::glyphs::FOLDER_GONE,
+            "Worktree whose folder is gone",
+        ),
+    ] {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
+            let text = crate::theme::text_on(fill);
+            ui.painter().rect_filled(rect, 4.0, fill);
+            // As in the graph: the name after the glyph.
+            let icon =
+                Rect::from_center_size(rect.left_center() + vec2(14.0, 0.0), Vec2::splat(12.0));
+            crate::widgets::paint_glyph(ui.painter(), icon, glyph, text);
+            let format = egui::TextFormat {
+                font_id: FontId::monospace(12.0),
+                color: text,
+                italics,
+                ..egui::TextFormat::default()
+            };
+            let job = egui::text::LayoutJob::single_section(name.to_owned(), format);
+            let galley = ui.painter().layout_job(job);
+            let at = rect.left_center() + vec2(24.0, -galley.size().y / 2.0);
+            ui.painter().galley(at, galley, text);
+            ui.label(what);
+        });
+    }
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
+        ui.painter().rect_filled(rect, 4.0, palette.plain_fill);
+        ui.painter().text(
+            rect.left_center() + vec2(8.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            "1a2b3c4d",
+            FontId::monospace(12.0),
+            palette.plain_text,
+        );
+        ui.label("Commit without refs (branch point or merge)");
+    });
+    for rule in rules {
+        swatch(ui, rule.color, &rule.patterns, "Branches matching");
+    }
+    if ui.link("Branch colours…").clicked() {
+        *open_colours = true;
+    }
+    ui.add_space(6.0);
+    ui.add(
+        egui::Label::new(
+            "Arrows point from a commit to its parents. Edges may stand for many \
+                         hidden commits; hover an edge to list them, click it to keep it \
+                         highlighted.",
+        )
+        .wrap(),
+    );
+}
+
+/// The keys and mouse actions of the main window, in two columns.
+fn shortcuts(ui: &mut Ui) {
+    let keys_width = 220.0;
+    egui::Grid::new("shortcuts")
+                    .striped(true)
+                    .num_columns(2)
+                    .min_col_width(keys_width)
+        // Rows as close as in a table, not a dialog's fields.
+        .spacing(vec2(12.0, 6.0))
+                    .show(ui, |ui| {
                     for (keys, what) in [
                         (
                             "Drag a node",
@@ -2531,7 +2607,7 @@ impl ParterreApp {
                         ("+ / - / 0", "Zoom in / out / 100%"),
                         (
                             "Ctrl+wheel off the graph",
-                            "Text size of every window (Settings → Appearance); Ctrl+plus / \
+                            "Text size of every window (Settings, Appearance); Ctrl+plus / \
                              minus / 0 in the log, diff and settings windows",
                         ),
                         ("F, double-click background", "Fit the whole graph"),
@@ -2550,39 +2626,10 @@ impl ParterreApp {
                         ),
                     ] {
                         ui.strong(keys);
-                        ui.label(what);
+                        ui.add(egui::Label::new(what).wrap());
                         ui.end_row();
                     }
                 });
-            });
-    }
-
-    /// The "Appropriate Legal Notices" of GPL-3.0 section 5(d). NOTICE requires works based on
-    /// parterre to keep showing them.
-    fn about_window(&mut self, ctx: &egui::Context) {
-        // Paths chosen by build.rs.
-        const NOTICE: &str = include_str!(env!("PARTERRE_NOTICE"));
-        const LICENSE: &str = include_str!(env!("PARTERRE_LICENSE"));
-        // Room for the title bar and the heading; the texts scroll within the rest.
-        let max_height = ctx.content_rect().height() - 140.0;
-        egui::Window::new("About parterre")
-            .open(&mut self.show_about)
-            .resizable(false)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.heading(format!("parterre {}", crate::VERSION));
-                ui.add_space(4.0);
-                egui::ScrollArea::vertical()
-                    .max_height(max_height)
-                    .show(ui, |ui| {
-                        // Both texts are wrapped at 80 columns already.
-                        ui.add(egui::Label::new(RichText::new(NOTICE).monospace()).extend());
-                        ui.collapsing("GNU General Public License, version 3", |ui| {
-                            ui.add(egui::Label::new(RichText::new(LICENSE).monospace()).extend());
-                        });
-                    });
-            });
-    }
 }
 
 /// "Apps – parterre", or just "parterre" while no repository is open.

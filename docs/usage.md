@@ -89,7 +89,8 @@ the overview map and export), there are:
 
 Everything parterre changes, it changes with git, in the **open worktree**: the one you opened,
 marked with a folder on its HEAD. Each dialog shows the git command it runs, under *Git
-command*.
+command*. A dialog with a list or a message can be resized; its list or message takes the room,
+and it opens as wide as you left it last time.
 
 **Worktrees** are off by default; the toolbar's folder button shows them. Each one is marked
 with a folder, first on its commit, in the graph and in the log: the branches they have checked
