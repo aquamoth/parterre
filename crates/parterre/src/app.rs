@@ -2547,9 +2547,10 @@ fn legend(
             ui.label(what);
         });
     }
+    // Every worktree in the worktree colour; a detached one differs by its italics alone.
     for (fill, name, italics, glyph, what) in [
         (
-            palette.local_branch,
+            palette.worktree,
             "feature/y",
             false,
             parterre_core::glyphs::FOLDER,
