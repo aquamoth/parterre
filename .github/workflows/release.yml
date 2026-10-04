@@ -3,10 +3,15 @@ name: Release
 # Pushing a tag vX.Y.Z[-prerelease] publishes a GitHub Release with binaries for Linux, Windows
 # and macOS, the Windows installer, and .deb and .rpm packages. PARTERRE_RELEASE_TAG supplies
 # the binary's version; build.rs checks that the tag points at the clean commit being built.
-# See docs/releasing.md.
+# The packages are installed on Linux and Windows first, and nothing is published unless that
+# passes. See docs/releasing.md.
+#
+# Started by hand on a branch (gh workflow run release.yml --ref BRANCH), it builds, packages and
+# installs the same way but publishes nothing, leaving the packages as artifacts (#246).
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,7 +39,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     env:
-      PARTERRE_RELEASE_TAG: ${{ github.ref_name }}
+      # By hand there is no release tag; the version follows the nearest one, as in any build.
+      PARTERRE_RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
     # No rust-cache: caches saved by a tag run are never restored by later runs, and a release
     # should come from a clean build anyway.
     steps:
@@ -46,6 +52,9 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends build-essential ca-certificates curl git
       - uses: actions/checkout@v6
+        # By hand, the whole history with its tags: the version follows the nearest release tag.
+        with:
+          fetch-depth: ${{ github.event_name == 'push' && 1 || 0 }}
       # The checkout belongs to the runner's user and the container runs as root; git ignores
       # such repositories unless they are marked safe.
       - name: Trust the checkout
@@ -57,7 +66,7 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Check version
-        if: ${{ !matrix.cross }}
+        if: ${{ !matrix.cross && github.event_name == 'push' }}
         shell: bash
         run: |
           expected="parterre ${GITHUB_REF_NAME#v} ($(git rev-parse --short=7 HEAD))"
@@ -70,12 +79,23 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: ${{ runner.os == 'Linux' && 'cargo-about,cargo-deb,cargo-generate-rpm' || 'cargo-about' }}
+      # The files' names carry the tag's version, or by hand `git describe`'s.
+      - name: Name
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            version=${GITHUB_REF_NAME#v}
+          else
+            version=$(git describe --tags --match 'v[0-9]*' --always)
+            version=${version#v}
+          fi
+          echo "NAME=parterre-$version-${{ matrix.target }}" >> "$GITHUB_ENV"
       # The binary with the README, its license, NOTICE and the licenses of the crates built
       # into it.
       - name: Package
         shell: bash
         run: |
-          name="parterre-${GITHUB_REF_NAME#v}-${{ matrix.target }}"
+          name=$NAME
           mkdir -p "$name" dist
           cp README.md LICENSE NOTICE "$name/"
           cargo about generate --locked -c packaging/about.toml packaging/about.hbs \
@@ -98,9 +118,8 @@ jobs:
         shell: bash
         run: |
           dotnet tool install --global wix --version 7.0.0
-          name="parterre-${GITHUB_REF_NAME#v}-${{ matrix.target }}"
           PATH="$USERPROFILE/.dotnet/tools:$PATH" \
-            pwsh packaging/windows/build-msi.ps1 -Stage "$name" -Out "dist/$name.msi"
+            pwsh packaging/windows/build-msi.ps1 -Stage "$NAME" -Out "dist/$NAME.msi"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
@@ -115,11 +134,36 @@ jobs:
     with:
       artifact: x86_64-unknown-linux-gnu
 
+  # Installs the MSI per user (its default, as winget does) and machine-wide (as Chocolatey does)
+  # before it is published, runs parterre and removes it (packaging/windows/test-msi.ps1).
+  windows-install:
+    name: Install (Windows, ${{ matrix.scope }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [user, machine]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: packaging/windows
+      - uses: actions/download-artifact@v8
+        with:
+          name: x86_64-pc-windows-msvc
+          path: dist
+      - name: Install, run and remove
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem dist\*.msi
+          packaging\windows\test-msi.ps1 -Msi $msi.FullName -Scope ${{ matrix.scope }}
+
   # The tag is on a commit of main, which CI has tested on all three systems, Linux in the same
   # Ubuntu 22.04 container as the build above. Instead of testing it again, wait for that run
   # and publish only if it passed (#236).
   ci:
     name: CI passed
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -154,7 +198,8 @@ jobs:
 
   publish:
     name: Publish
-    needs: [build, linux-packages, ci]
+    needs: [build, linux-packages, windows-install, ci]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -180,8 +225,7 @@ jobs:
             --generate-notes \
             $prerelease
 
-  # The Chocolatey package, from the MSI just published. Pre-releases are built and tested but
-  # not pushed.
+  # The Chocolatey package, from the MSI just published. Pre-releases are built but not pushed.
   chocolatey:
     name: Chocolatey
     needs: publish

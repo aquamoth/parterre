@@ -1,12 +1,12 @@
 name: Chocolatey
 
-# Builds the Chocolatey package for a release from its MSI, and tests it by installing and
-# uninstalling it. With push, the package is then pushed to the community repository with the
-# CHOCOLATEY_API_KEY secret of the `chocolatey` environment. See docs/releasing.md#chocolatey.
+# Builds the Chocolatey package for a release from its MSI. With push, the package is then pushed
+# to the community repository with the CHOCOLATEY_API_KEY secret of the `chocolatey` environment.
+# The package isn't install-tested: release.yml tests the MSI it wraps before publishing (#246).
+# See docs/releasing.md#chocolatey.
 #
 # - Called by release.yml after each release, pushing releases but not pre-releases.
 # - Started by hand for an existing release: gh workflow run chocolatey.yml -f tag=v0.5.1 -f push=true
-# - On pull requests that change the package, for the latest release, without pushing.
 on:
   workflow_call:
     inputs:
@@ -16,10 +16,6 @@ on:
     inputs:
       tag: { description: "Release tag, e.g. v0.5.1", type: string, required: true }
       push: { description: "Push to community.chocolatey.org", type: boolean, default: false }
-  pull_request:
-    paths:
-      - packaging/chocolatey/**
-      - .github/workflows/chocolatey.yml
 
 permissions:
   contents: read
@@ -39,9 +35,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         run: |
-          tag=${TAG:-$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)}
-          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*.msi' --dir msi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.msi' --dir msi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       - name: Build
         id: build
         shell: pwsh
@@ -50,27 +45,6 @@ jobs:
           packaging\chocolatey\build.ps1 -Tag '${{ steps.msi.outputs.tag }}' -Msi $msi.FullName -Out dist
           $version = '${{ steps.msi.outputs.tag }}'.Substring(1)
           "version=$version" >> $env:GITHUB_OUTPUT
-      # As a user would, except that git is already on the runner: the package must install
-      # parterre machine-wide, put it on PATH, and remove it again.
-      - name: Test
-        shell: pwsh
-        env:
-          VERSION: ${{ steps.build.outputs.version }}
-        run: |
-          choco install parterre --version $env:VERSION --source "$PWD\dist" --ignore-dependencies -y --no-progress
-          if ($LASTEXITCODE) { throw "choco install failed: $LASTEXITCODE" }
-          $exe = "$env:ProgramFiles\parterre\parterre.exe"
-          # PowerShell doesn't capture the output of a GUI-subsystem program like parterre.exe
-          # (`& $exe` returns nothing), so redirect it to a file.
-          Start-Process $exe --version -Wait -NoNewWindow -RedirectStandardOutput version.txt
-          $actual = "$(Get-Content -Raw version.txt)".Trim()
-          Write-Host $actual
-          if ($actual -notlike "parterre $env:VERSION (*)") { throw "--version printed '$actual'" }
-          $path = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-          if ($path -notlike "*$env:ProgramFiles\parterre*") { throw "parterre is not on the machine PATH: $path" }
-          choco uninstall parterre -y --no-progress
-          if ($LASTEXITCODE) { throw "choco uninstall failed: $LASTEXITCODE" }
-          if (Test-Path $exe) { throw "$exe is still there after uninstalling" }
       - uses: actions/upload-artifact@v7
         with:
           name: chocolatey
