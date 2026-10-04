@@ -291,12 +291,12 @@ What it takes **(derived from the READMEs and Zed)**:
   executable **(unverified)**.
 - **Linux ptrace permission.** Yama's ptrace scope stops one process reading another unless
   allowed; `minidumper-child` calls `crash-handler`'s `set_ptracer(Some(server_pid))`
-  ([crash-handler linux.rs, 0.7.0](https://docs.rs/crate/crash-handler/0.7.0/source/src/linux.rs),
-  `minidumper-child` `client.rs`).
+  ([`CrashHandler::set_ptracer`](https://docs.rs/crash-handler/0.8.1/crash_handler/struct.CrashHandler.html#method.set_ptracer),
+  called from `minidumper-child`'s `client.rs`).
 - **`unsafe`.** Installing the handler goes through `crash_handler::make_crash_event`, an
   `unsafe fn` ([docs.rs](https://docs.rs/crash-handler/0.8.1/crash_handler/fn.make_crash_event.html)).
   parterre denies `unsafe_code` workspace-wide, with one local exception
-  ([Cargo.toml#L64-L67](https://github.com/aquamoth/parterre/blob/21503e0b16adfdf72499f7be14312f556cfcb2ad/Cargo.toml#L64-L67));
+  ([Cargo.toml#L64-L67](https://github.com/aquamoth/parterre/blob/21503e0b16adfdf72499f7be14312f556cfcb2ad/Cargo.toml#L62-L65));
   `minidumper-child` or `sentry-minidump` keep the `unsafe` inside their own crates.
 - **macOS signals.** Mach exception ports take precedence over signal handlers, so "if you use
   this crate in conjunction with signal handling on MacOS, you will not get the results you
@@ -308,7 +308,7 @@ What it takes **(derived from the READMEs and Zed)**:
   All pure Rust, no C++ build.
 - **Size:** no published figure, and I didn't build. Judging by the dependency list it is in the
   hundreds of kilobytes, far below the ~2 MB that `ureq` + rustls cost parterre
-  ([Cargo.toml#L46-L51](https://github.com/aquamoth/parterre/blob/21503e0b16adfdf72499f7be14312f556cfcb2ad/Cargo.toml#L46-L51))
+  ([Cargo.toml#L46-L51](https://github.com/aquamoth/parterre/blob/21503e0b16adfdf72499f7be14312f556cfcb2ad/Cargo.toml#L49-L54))
   **(unverified, not measured)**.
 - **Then the dump has to go somewhere**, and is only readable with the matching symbols (§5).
   Minidumps "might contain sensitive information … such as environment variables, local
@@ -341,7 +341,7 @@ For parterre it would mean:
   `UreqHttpTransport::with_agent`
   ([transports/ureq.rs#L71](https://github.com/getsentry/sentry-rust/blob/0.49.3/sentry/src/transports/ureq.rs#L71)) **(derived, not built)**.
 - Default features include `release-health`, which sends sessions, i.e. usage data
-  ([sentry/Cargo.toml#L24](https://github.com/getsentry/sentry-rust/blob/0.49.3/sentry/Cargo.toml#L24),
+  ([sentry/Cargo.toml#L24](https://github.com/getsentry/sentry-rust/blob/0.49.3/sentry/Cargo.toml#L24-L33),
   [Releases & Health](https://docs.sentry.io/platforms/rust/configuration/releases/)). Turn off
   default features and pick `panic`, `backtrace`, `contexts`, `minidump`, `ureq` deliberately,
   so crash reporting doesn't quietly become usage tracking.
@@ -487,8 +487,11 @@ PostHog is also a candidate for the usage-counting side of #175, and would take 
 
 For parterre **(derived)**:
 - A frozen main thread is not a crash, so no hook or minidump fires. A watchdog thread has to
-  notice that the main thread stopped making progress, and can then record it, or ask the
-  minidump monitor for a dump of the live process, which `minidumper`'s client can request.
+  notice that the main thread stopped making progress, and can then record it. With §4.1 in
+  place it could also ask for a dump of the live process: `crash-handler` has
+  [`simulate_signal`](https://docs.rs/crash-handler/0.8.1/crash_handler/struct.CrashHandler.html#method.simulate_signal)
+  (Linux) for raising its crash event without a crash, and a minidump holds every thread's
+  stack, the frozen main thread's included **(unverified for this use)**.
 - egui repaints only when something happens, so "no frame for N seconds" is normal when idle.
   The watchdog has to time work the main thread started (Zed's approach), or ask for a repaint
   and time the answer. A hidden or minimised window may legitimately not paint, especially on
