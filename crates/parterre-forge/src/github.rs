@@ -23,8 +23,8 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{ForgeError, PullRequest, PullRequests, Remote};
-use crate::git::Git;
-use crate::oid::Oid;
+use parterre_core::git::Git;
+use parterre_core::oid::Oid;
 
 /// GitHub's GraphQL endpoint. Tokens are only ever sent here.
 #[cfg_attr(not(feature = "github"), allow(dead_code))]
@@ -224,7 +224,7 @@ fn pull_requests(
 }
 
 /// The branches of the remote `remote` (`refs/remotes/<remote>/*`, without `HEAD`).
-fn remote_branches(git: &Git, remote: &str) -> Result<Vec<String>, crate::git::GitError> {
+fn remote_branches(git: &Git, remote: &str) -> Result<Vec<String>, parterre_core::git::GitError> {
     let prefix = format!("refs/remotes/{remote}/");
     let out = git.run(&["for-each-ref", "--format=%(refname)%00%(symref)", &prefix])?;
     Ok(out
@@ -419,7 +419,7 @@ mod json {
     use serde::Deserialize;
 
     use super::{GithubRepo, WEB};
-    use crate::oid::Oid;
+    use parterre_core::oid::Oid;
 
     #[derive(Debug, Deserialize)]
     pub struct Answer {
@@ -492,8 +492,8 @@ mod json {
     impl PullRequest {
         /// The pull request, into `base`, if its head is a commit id. Its page is built here,
         /// not taken from the answer, so that only github.com is ever opened.
-        pub fn to_pull_request(&self, base: &GithubRepo) -> Option<crate::forge::PullRequest> {
-            Some(crate::forge::PullRequest {
+        pub fn to_pull_request(&self, base: &GithubRepo) -> Option<crate::PullRequest> {
+            Some(crate::PullRequest {
                 number: self.number,
                 title: self.title.clone(),
                 author: self

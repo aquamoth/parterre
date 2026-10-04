@@ -1,11 +1,11 @@
-//! Colours for the syntax spans of `parterre_core::highlight` (#209), and the sections a
+//! Colours for the syntax spans of `parterre_highlight` (#209), and the sections a
 //! line's text is laid out in when its syntax colours and its changed words (background)
 //! are combined.
 
 use eframe::egui::text::TextFormat;
 use eframe::egui::{Color32, FontId, Stroke};
 use parterre_core::file_diff::display_map;
-use parterre_core::highlight::{Kind, Spans};
+use parterre_highlight::{Kind, Spans};
 use std::ops::Range;
 
 /// The colour of a kind of span, or `None` for the plain text colour. VS Code's Light+ and

@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/parterre-core", "crates/parterre"]
+members = [
+    "crates/parterre-util",
+    "crates/parterre-core",
+    "crates/parterre-forge",
+    "crates/parterre-highlight",
+    "crates/parterre",
+]
 
 [workspace.package]
 # Not parterre's version, which comes from the git tags (docs/releasing.md). 0.0.0 so that it
@@ -19,7 +25,10 @@ homepage = "https://github.com/aquamoth/parterre"
 
 [workspace.dependencies]
 # crates.io needs a version next to the path; keep it equal to the workspace version above.
+parterre-util = { path = "crates/parterre-util", version = "=0.0.0" }
 parterre-core = { path = "crates/parterre-core", version = "=0.0.0" }
+parterre-forge = { path = "crates/parterre-forge", version = "=0.0.0" }
+parterre-highlight = { path = "crates/parterre-highlight", version = "=0.0.0" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -36,7 +45,7 @@ eframe = { version = "0.36", default-features = false, features = [
 rfd = "0.17"
 image = { version = "0.25", default-features = false, features = ["gif", "png", "webp"] }
 tempfile = "3"
-# HTTPS for GitHub's API (open pull requests), behind parterre-core's `github` feature: rustls
+# HTTPS for GitHub's API (open pull requests), behind parterre-forge's `github` feature: rustls
 # with ring, checking certificates against the operating system's trust store (so it works
 # behind proxies that inspect TLS with their own certificate authority), and no system TLS
 # library. Not ureq's default `rustls` feature, which bundles Mozilla's roots (webpki-roots,

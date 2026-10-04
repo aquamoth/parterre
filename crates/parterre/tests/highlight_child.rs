@@ -1,8 +1,8 @@
 //! Syntax colour in a child process (#209): a grammar that aborts, or a parse that never
 //! ends, costs the colours and nothing else.
 
-use parterre_core::git::Cancel;
-use parterre_core::highlight::{BUDGET, Engine, Kind, Language, in_child};
+use parterre_highlight::{BUDGET, Engine, Kind, Language, in_child};
+use parterre_util::Cancel;
 use std::path::PathBuf;
 use std::time::Duration;
 

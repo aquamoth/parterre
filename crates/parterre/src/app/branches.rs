@@ -7,13 +7,14 @@ use std::sync::{Arc, mpsc};
 
 use eframe::egui::{self, Color32, Id, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::{
-    Action, AddWorktree, Branches, Cancel, Catalog, Checkout, Create, CreateDraft, Outcome, Report,
+    Action, AddWorktree, Branches, Catalog, Checkout, Create, CreateDraft, Outcome, Report,
     Warning, command_text,
 };
 use parterre_core::file_diff::FileDiffSpec;
 use parterre_core::reset::{Mode, Preview};
 use parterre_core::worktree_folder;
 use parterre_core::{Oid, RefKind, Repo};
+use parterre_util::CancelTree as Cancel;
 
 use super::cherry_pick::CherryPickDialog;
 use super::merge::MergeDialog;

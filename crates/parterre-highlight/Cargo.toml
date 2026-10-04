@@ -1,0 +1,74 @@
+[package]
+name = "parterre-highlight"
+description = "Internal to parterre: syntax colour for the diff and blame windows, through tree-sitter. No stability promises."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[features]
+# The grammars (#209): tree-sitter and one crate per language, each compiling its parser (C)
+# with `cc` in its build script. Without the feature, no file has a language.
+syntax = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-highlight",
+    "dep:tree-sitter-bash",
+    "dep:tree-sitter-c",
+    "dep:tree-sitter-c-sharp",
+    "dep:tree-sitter-containerfile",
+    "dep:tree-sitter-cpp",
+    "dep:tree-sitter-css",
+    "dep:tree-sitter-go",
+    "dep:tree-sitter-html",
+    "dep:tree-sitter-java",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-json",
+    "dep:tree-sitter-make",
+    "dep:tree-sitter-md",
+    "dep:tree-sitter-proto",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-sequel",
+    "dep:tree-sitter-toml-ng",
+    "dep:tree-sitter-typescript",
+    "dep:tree-sitter-xml",
+    "dep:tree-sitter-yaml",
+]
+
+[dependencies]
+parterre-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tree-sitter = { version = "0.27", optional = true }
+tree-sitter-highlight = { version = "0.27", optional = true }
+tree-sitter-bash = { version = "0.25", optional = true }
+tree-sitter-c = { version = "0.24", optional = true }
+tree-sitter-c-sharp = { version = "0.23", optional = true }
+tree-sitter-containerfile = { version = "0.9", optional = true }
+tree-sitter-cpp = { version = "0.23", optional = true }
+tree-sitter-css = { version = "0.25", optional = true }
+tree-sitter-go = { version = "0.25", optional = true }
+tree-sitter-html = { version = "0.23", optional = true }
+tree-sitter-java = { version = "0.23", optional = true }
+tree-sitter-javascript = { version = "0.25", optional = true }
+tree-sitter-json = { version = "0.24", optional = true }
+tree-sitter-make = { version = "1.1", optional = true }
+tree-sitter-md = { version = "0.5", optional = true }
+tree-sitter-proto = { version = "0.6", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+# Pins `cc ~1.2`, which holds the whole build's cc at 1.2.x: `find-msvc-tools` must then be
+# 0.1.14 or later (0.1.13 broke cc 1.2.x on Windows), and the other grammars' cc stays old.
+tree-sitter-sequel = { version = "0.3", optional = true }
+tree-sitter-toml-ng = { version = "0.7", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-xml = { version = "0.7", optional = true }
+tree-sitter-yaml = { version = "0.7", optional = true }
+
+[lints]
+workspace = true

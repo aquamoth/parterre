@@ -4,11 +4,11 @@
 use std::sync::Arc;
 
 use eframe::egui::{Color32, FontId, Pos2, Rect, Vec2, pos2, vec2};
-use parterre_core::forge::{PullRequest, PullRequests};
 use parterre_core::layout::{self, Layout, LayoutEdge, LayoutInput, LayoutOptions, Point};
 use parterre_core::physics::{DragModel, Net};
 use parterre_core::revgraph::{self, RevGraph};
 use parterre_core::{Label, RefKind, Repo};
+use parterre_forge::{PullRequest, PullRequests};
 
 use crate::settings::Settings;
 
@@ -357,8 +357,8 @@ pub fn to_point(p: Pos2) -> Point {
 
 #[cfg(test)]
 mod tests {
-    use parterre_core::forge::{PullRequest, PullRequests, Remote};
     use parterre_core::{Commit, CommitIx, Head, Oid};
+    use parterre_forge::{PullRequest, PullRequests, Remote};
 
     use super::*;
 

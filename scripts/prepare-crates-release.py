@@ -11,7 +11,9 @@ import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?")
-LOCK_PACKAGE = re.compile(r'(?m)^(\[\[package\]\]\nname = "(?:parterre|parterre-core)"\nversion = ")([^"]+)(")')
+# The workspace's crates, all published at parterre's version.
+CRATES = ["parterre", "parterre-util", "parterre-core", "parterre-forge", "parterre-highlight"]
+LOCK_PACKAGE = re.compile(r'(?m)^(\[\[package\]\]\nname = "(?:' + "|".join(CRATES) + r')"\nversion = ")([^"]+)(")')
 
 
 def run(*args: str, cwd: pathlib.Path = ROOT) -> str:
@@ -29,23 +31,27 @@ def update_versions(checkout: pathlib.Path, version: str) -> bool:
     source = manifest.read_text()
     data = tomllib.loads(source)
     old = data["workspace"]["package"]["version"]
-    dependency = data["workspace"]["dependencies"]["parterre-core"]["version"]
-    if dependency != f"={old}":
-        raise ValueError(f"parterre-core dependency {dependency!r} differs from workspace version {old!r}")
+    internal = [name for name in CRATES if name != "parterre"]
+    for name in internal:
+        dependency = data["workspace"]["dependencies"][name]["version"]
+        if dependency != f"={old}":
+            raise ValueError(f"{name} dependency {dependency!r} differs from workspace version {old!r}")
     lock = checkout / "Cargo.lock"
     lock_source = lock.read_text()
-    packages = [p for p in tomllib.loads(lock_source)["package"] if p["name"] in {"parterre", "parterre-core"}]
-    if len(packages) != 2 or any(p["version"] != old for p in packages):
+    packages = [p for p in tomllib.loads(lock_source)["package"] if p["name"] in set(CRATES)]
+    if len(packages) != len(CRATES) or any(p["version"] != old for p in packages):
         raise ValueError("Cargo.lock workspace versions differ from Cargo.toml")
     if old == version:
         return False
 
     changed = replace_once(source, f'version = "{old}"', f'version = "{version}"')
-    changed = replace_once(changed, f'version = "={old}"', f'version = "={version}"')
+    if changed.count(f'version = "={old}"') != len(internal):
+        raise ValueError(f"expected {len(internal)} internal dependency versions in Cargo.toml")
+    changed = changed.replace(f'version = "={old}"', f'version = "={version}"')
 
     matches = LOCK_PACKAGE.findall(lock_source)
-    if len(matches) != 2 or any(found != old for _, found, _ in matches):
-        raise ValueError("expected two workspace package entries in Cargo.lock")
+    if len(matches) != len(CRATES) or any(found != old for _, found, _ in matches):
+        raise ValueError(f"expected {len(CRATES)} workspace package entries in Cargo.lock")
     changed_lock = LOCK_PACKAGE.sub(lambda match: f"{match[1]}{version}{match[3]}", lock_source)
     manifest.write_text(changed)
     lock.write_text(changed_lock)

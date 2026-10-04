@@ -1,5 +1,6 @@
 //! Core of parterre: load a repository, reduce it to a TortoiseGit-style revision graph,
-//! and lay that graph out. Nothing in this crate depends on a GUI toolkit.
+//! and lay that graph out. Nothing in this crate depends on a GUI toolkit. The pull-request
+//! client and the syntax colour are crates of their own (#214).
 
 pub mod blame;
 pub mod branches;
@@ -10,10 +11,8 @@ pub mod compare;
 pub mod file_diff;
 pub mod file_history;
 pub mod find;
-pub mod forge;
 pub mod git;
 pub mod glyphs;
-pub mod highlight;
 pub mod icon;
 pub mod layout;
 pub mod lenient;

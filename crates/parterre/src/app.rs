@@ -347,7 +347,7 @@ pub struct ParterreApp {
     /// Whether pull requests were turned on in the last frame, to see the user turn them on.
     pull_requests_setting: bool,
     /// Why pull requests the user asked for couldn't be loaded, shown in a dialog.
-    pull_requests_error: Option<parterre_core::forge::ForgeError>,
+    pull_requests_error: Option<parterre_forge::ForgeError>,
     /// Load the pull requests again (F5).
     refresh_pull_requests: bool,
     system_theme: SystemTheme,
@@ -2863,7 +2863,7 @@ impl eframe::App for ParterreApp {
 /// Where the diff and blame windows colour code by syntax (#209): in a child process, this
 /// program again, so that a grammar's crash costs the colours and not the window. Not at
 /// all if the program's own path is unknown, rather than in this process.
-fn highlight_engine() -> parterre_core::highlight::Engine {
-    use parterre_core::highlight::Engine;
+fn highlight_engine() -> parterre_highlight::Engine {
+    use parterre_highlight::Engine;
     std::env::current_exe().map_or(Engine::Off, Engine::Child)
 }

@@ -20,12 +20,15 @@ path = "src/main.rs"
 [features]
 default = ["github", "syntax"]
 # Syntax colour in the diff and blame windows (#209).
-syntax = ["parterre-core/syntax"]
+syntax = ["parterre-highlight/syntax"]
 # Open pull requests from GitHub, shown on their head commits.
-github = ["parterre-core/github"]
+github = ["parterre-forge/github"]
 
 [dependencies]
 parterre-core.workspace = true
+parterre-forge.workspace = true
+parterre-highlight.workspace = true
+parterre-util.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 eframe.workspace = true

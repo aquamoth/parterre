@@ -1,10 +1,13 @@
+// The throwaway-repository helpers of parterre-core's tests, shared rather than copied.
+#[path = "../../parterre-core/tests/common/mod.rs"]
 mod common;
 
 use common::TestRepo;
-use parterre_core::forge::github::{self, GithubRepo};
-use parterre_core::forge::{self, PullRequest, PullRequests, Remote};
 use parterre_core::git::Git;
 use parterre_core::revgraph::{self, GraphOptions};
+use parterre_forge as forge;
+use parterre_forge::github::{self, GithubRepo};
+use parterre_forge::{PullRequest, PullRequests, Remote};
 
 #[test]
 fn finds_github_origins_through_insteadof() {

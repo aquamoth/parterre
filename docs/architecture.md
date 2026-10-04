@@ -1,8 +1,13 @@
 # Architecture
 
-parterre is a Cargo workspace with two crates:
+parterre is a Cargo workspace with five crates: the domain library, two adapters over external
+stacks, the handles they share, and the binary (#214).
 
 ```
+crates/parterre-util   the cancellation handles: `Cancel` holds the one child process running
+                       under it and kills it when cancelled; `CancelTree` kills a git
+                       operation's whole process group or tree, hooks included
+
 crates/parterre-core   GUI-free; everything testable lives here
   git.rs               run `git log` / `git for-each-ref` / `git worktree list`, parse into a
                        Repo; changed files of a commit (`git diff-tree`)
@@ -31,11 +36,6 @@ crates/parterre-core   GUI-free; everything testable lives here
                        push or replaced by a rebase (a counterpart by patch, or by author,
                        author date and subject), and the edges that hold them
   pattern.rs           branch-name wildcards, for hiding and colouring branches
-  forge.rs             open pull requests: the model, where each is shown (head commit and
-                       base-branch refs), remotes and upstreams from git
-    github.rs          github.com remotes; one GraphQL request per 100 fetched branches of
-                       origin (and its parent), signed in with `gh auth token`, within a
-                       rate-limit budget; HTTPS through ureq behind the `github` feature
   recent.rs            the recently opened repositories
   lenient.rs           reading settings one at a time, so files of older and newer
                        versions load all they can, and writing back what was left out
@@ -51,6 +51,19 @@ crates/parterre-core   GUI-free; everything testable lives here
     mod.rs             pipeline, variable layer spacing, direction/rotation
   physics.rs           rearranging by hand: springs, weak magnets, drag modes, undo
   route.rs             routing edges afresh around rearranged nodes
+
+crates/parterre-forge  open pull requests, on core's types
+  lib.rs               the model, where each is shown (head commit and base-branch refs),
+                       remotes and upstreams from git
+  github.rs            github.com remotes; one GraphQL request per 100 fetched branches of
+                       origin (and its parent), signed in with `gh auth token`, within a
+                       rate-limit budget; HTTPS through ureq behind the `github` feature
+
+crates/parterre-highlight  syntax colour for the diff and blame windows (#209)
+  lib.rs               a file's language from its path; language-neutral spans per line
+                       through tree-sitter, the 23 grammars behind the `syntax` feature;
+                       the child process the app runs them in, with a budget and a Cancel
+  proto_highlights.scm the Protocol Buffers query, which its crate doesn't export
 
 crates/parterre        the binary (eframe/egui)
   build.rs             asks git for the commit and sets the version string
@@ -201,7 +214,7 @@ crates/parterre        the binary (eframe/egui)
   every repo configuration, fast enough (see above), and needs no git library built or found.
 - **tree-sitter for syntax colour**: a grammar crate per language, each compiling its parser
   (C) in its build script, and the grammars' own highlight queries mapped onto a dozen kinds
-  in `parterre-core::highlight`. Chosen over syntect in #205 and #208 for speed and precision,
+  in `parterre-highlight`. Chosen over syntect in #205 and #208 for speed and precision,
   with binary size not a constraint. Each file is highlighted in a child process (`parterre
   --highlight LANG`), killed when the window closes or after ten seconds, so a grammar's
   abort or runaway parse on an odd file costs the colours, not the window.
