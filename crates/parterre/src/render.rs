@@ -608,17 +608,26 @@ pub fn row_colors(row: &Row, palette: &Palette) -> (Color32, Color32, Color32) {
     }
 }
 
+/// Fill of a worktree's row: greyer when its folder is gone.
+pub fn worktree_fill(c: Checkout, palette: &Palette) -> Color32 {
+    if c.missing {
+        palette.missing_worktree
+    } else {
+        palette.worktree
+    }
+}
+
 fn row_fill(row: &Row, palette: &Palette) -> Color32 {
     match &row.kind {
         RowKind::Hash => palette.plain_fill,
-        // Only a detached worktree has a colour of its own: it stands in for HEAD.
-        RowKind::Worktree(c) => {
-            if c.missing {
-                palette.missing_worktree
-            } else {
-                palette.worktree
-            }
-        }
+        RowKind::Worktree(c) => worktree_fill(*c, palette),
+        // Every worktree is in the worktree colour, but the open one's HEAD stays red, and
+        // the colour beats the branch colour rules (#132).
+        RowKind::Ref {
+            worktree: Some(c),
+            head: false,
+            ..
+        } => worktree_fill(*c, palette),
         RowKind::Ref { kind, head, .. } => palette.ref_fill(*kind, *head, &row.label),
         RowKind::PullRequest { draft: false, .. } => palette.pull_request,
         RowKind::PullRequest { draft: true, .. } => palette.draft_pull_request,
@@ -729,6 +738,7 @@ pub fn paint_overview(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parterre_core::RefKind;
 
     #[test]
     fn pull_request_numbers_are_right_aligned_after_their_glyph() {
@@ -745,5 +755,55 @@ mod tests {
             assert_eq!(icon.center().y, row.center().y);
             assert!(row.contains_rect(icon));
         }
+    }
+
+    #[test]
+    fn every_worktree_row_is_in_the_worktree_colour_but_head() {
+        let palette = Palette::light();
+        let row = |label: &str, kind| Row {
+            label: label.into(),
+            kind,
+            width: 0.0,
+        };
+        let checkout = |missing| Some(Checkout { index: 1, missing });
+        let branch = |worktree, head| RowKind::Ref {
+            kind: RefKind::LocalBranch,
+            head,
+            worktree,
+        };
+        assert_eq!(
+            row_fill(&row("topic", branch(None, false)), &palette),
+            palette.local_branch
+        );
+        assert_eq!(
+            row_fill(&row("topic", branch(checkout(false), false)), &palette),
+            palette.worktree
+        );
+        assert_eq!(
+            row_fill(&row("topic", branch(checkout(true), false)), &palette),
+            palette.missing_worktree
+        );
+        // The open worktree's branch and detached HEAD are red as ever.
+        assert_eq!(
+            row_fill(&row("main", branch(checkout(false), true)), &palette),
+            palette.current_branch
+        );
+        let detached = RowKind::Ref {
+            kind: RefKind::DetachedHead,
+            head: true,
+            worktree: checkout(false),
+        };
+        assert_eq!(
+            row_fill(&row("wt", detached), &palette),
+            palette.current_branch
+        );
+        // A detached worktree differs by its italics alone.
+        assert_eq!(
+            row_fill(
+                &row("wt", RowKind::Worktree(checkout(false).unwrap())),
+                &palette
+            ),
+            palette.worktree
+        );
     }
 }

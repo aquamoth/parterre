@@ -22,8 +22,8 @@ the house. This one gives you that view of a repository: every branch at once, f
 ## Worktrees, all of them, in one window
 
 Running several agents or tasks at once, each in a worktree of its own? parterre shows every
-worktree of the repository in the same graph, with its folder on the commit it has checked out.
-Detached worktrees, such as one for reviewing a pull request, show in cyan.
+worktree of the repository in the same graph, with its folder on the commit it has checked out,
+in cyan. A detached worktree, such as one for reviewing a pull request, is named by its folder.
 
 - **Go to** a worktree to make it the one parterre works in. The layout and your open windows
   stay, since it is the same history.

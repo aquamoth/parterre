@@ -95,9 +95,10 @@ command*. A dialog with a list or a message can be resized; its list or message 
 and it opens as wide as you left it last time.
 
 **Worktrees** are off by default; the toolbar's folder button shows them. Each one is marked
-with a folder, first on its commit, in the graph and in the log: the branches they have checked
-out, even where hidden, and detached ones in cyan, with the folder's name in italics. A worktree
-whose folder is gone gets a crossed-out folder. From a node's menu:
+with a folder, first on its commit, in the graph and in the log, in cyan: the branches they
+have checked out, even where hidden, and detached ones with the folder's name in italics. The
+open worktree's branch stays red, as HEAD. A worktree whose folder is gone gets a crossed-out
+folder and a greyer fill. From a node's menu:
 
 - *Add worktree here…* makes a new worktree at the commit, on a new branch that can track a
   remote one, in a folder next to the repository's (`<repo>.worktrees/` unless you pick

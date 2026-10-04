@@ -1337,9 +1337,10 @@ pub(super) fn badge(
             palette.worktree
         }
     };
-    // As in the graph: a worktree's folder glyph (crossed out if it is gone) before the
-    // branch it has checked out, and a detached one in a colour of its own and in italics.
+    // As in the graph: a worktree's folder glyph (crossed out if it is gone) before its
+    // name, in the worktree colour unless it is HEAD's, and a detached one in italics.
     let (fill, worktree) = match *badge {
+        Badge::Ref(r, Some(w), _) if !r.is_head => (worktree_fill(w), Some(w)),
         Badge::Ref(r, w, _) => (palette.ref_fill(r.kind, r.is_head, &r.name), w),
         Badge::Worktree(w) => (worktree_fill(w), Some(w)),
     };

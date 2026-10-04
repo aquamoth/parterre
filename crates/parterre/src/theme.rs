@@ -88,7 +88,8 @@ pub struct Palette {
     /// Open pull requests, and draft ones. Not in TortoiseGit.
     pub pull_request: Color32,
     pub draft_pull_request: Color32,
-    /// Other worktrees' detached HEADs, and those whose folder is gone. Not in TortoiseGit.
+    /// Other worktrees, branch or detached, and those whose folder is gone. Not in
+    /// TortoiseGit.
     pub worktree: Color32,
     pub missing_worktree: Color32,
     pub selection: Color32,
