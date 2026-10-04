@@ -80,6 +80,8 @@ crates/parterre-telemetry
   usage.rs             whether anything may go to PostHog (the first-run prompt's answer,
                        `DO_NOT_TRACK`, debug builds), the install ID, and which lifecycle
                        events a launch sends; no network
+  session.rs           the `$session_id` (#262): a new UUIDv7 after 30 min idle, 24 h, or
+                       on opening another repository; the caller's clock, no network
   github.rs            GitHub's releases API through ureq, behind the `send` feature
   posthog.rs           all of the PostHog code: posthog-rs's client on a thread of its own,
                        the events and their standard properties, behind the `send` feature
@@ -92,7 +94,8 @@ crates/parterre        the binary (eframe/egui)
     toolbar.rs         the toolbar, its popovers and the ☰ menu
     updates.rs         the update check as the settings say, and *Download* in the ☰ menu
     privacy.rs         the first-run prompt, and the usage statistics as the user's choices
-                       say; Settings › Privacy shows them
+                       say, told of input and repositories opened; Settings › Privacy shows
+                       them
     settings_window.rs the settings: pages of rows, applied as you change them
     auto_reload.rs     a worker thread that reloads when the refs change
     pull_requests.rs   loads open pull requests on a worker thread while they are shown, cached

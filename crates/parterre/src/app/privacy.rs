@@ -4,8 +4,14 @@
 //!
 //! Nothing is sent before the prompt is answered, the update check included. Scripted runs never
 //! send, and show the prompt only when a script opens it (`open first-run`).
+//!
+//! The usage statistics are told of the user's input ([`UserInput`]) and the repositories opened,
+//! which decide their sessions (#262).
+
+use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Align, Layout, RichText, Ui, vec2};
+use parterre_core::Repo;
 use parterre_telemetry::{Build, Choices, Context, Lifecycle, Usage};
 
 use super::ParterreApp;
@@ -50,6 +56,8 @@ pub(super) struct Telemetry {
     first_run: bool,
     /// The screen's size the launch was told with.
     screen: Option<[f32; 2]>,
+    /// The repository opened last ([`repository_of`]), for the usage statistics started after.
+    repository: Option<PathBuf>,
 }
 
 impl Telemetry {
@@ -77,7 +85,18 @@ impl Telemetry {
             launching: (!asks).then_some(0),
             first_run: false,
             screen: None,
+            repository: None,
         }
+    }
+
+    /// The user opened `repo`: another repository than the one opened last starts a new
+    /// session.
+    pub fn opened(&mut self, repo: &Repo) {
+        let repository = repository_of(repo);
+        if let Some(usage) = &mut self.usage {
+            usage.opened(repository);
+        }
+        self.repository = Some(repository.to_owned());
     }
 
     /// Whether the usage statistics are to be sent now.
@@ -89,6 +108,12 @@ impl Telemetry {
     /// Tells the launch once the screen's size is known (or after a while without), and then
     /// starts and stops the usage statistics as the user's choices say.
     fn update(&mut self, ctx: &egui::Context) {
+        let input = ctx.with_plugin(|seen: &mut UserInput| std::mem::take(&mut seen.0));
+        if input == Some(true)
+            && let Some(usage) = &mut self.usage
+        {
+            usage.input();
+        }
         if self.prompt.is_some() {
             return;
         }
@@ -123,6 +148,10 @@ impl Telemetry {
             };
             let events = std::mem::take(&mut self.pending);
             self.usage = Usage::start(Some(answer.choices()), context, events);
+            // The repository open as they start is their first session's.
+            if let (Some(usage), Some(repository)) = (&mut self.usage, &self.repository) {
+                usage.opened(repository);
+            }
         }
     }
 
@@ -141,6 +170,36 @@ impl Telemetry {
             usage.close();
         }
     }
+}
+
+/// A repository as the usage statistics' sessions tell them apart: by its main worktree, the
+/// same whichever of its worktrees is open (or by its own folder when git lists none).
+fn repository_of(repo: &Repo) -> &Path {
+    repo.worktrees.first().map_or(&repo.path, |main| &main.path)
+}
+
+/// Notes whether the user gave input, in any of parterre's windows, since the usage statistics
+/// last asked: a key, the pointer, the wheel, a touch. Registered once, with
+/// [`egui::Context::add_plugin`]; each window's input passes through it.
+#[derive(Debug, Default)]
+pub(super) struct UserInput(bool);
+
+impl egui::Plugin for UserInput {
+    fn debug_name(&self) -> &'static str {
+        "parterre-user-input"
+    }
+
+    fn input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
+        self.0 |= input.events.iter().any(is_user_input);
+    }
+}
+
+/// Whether `event` is the user's doing, not the window's or egui's own.
+fn is_user_input(event: &egui::Event) -> bool {
+    !matches!(
+        event,
+        egui::Event::WindowFocused(_) | egui::Event::PointerGone | egui::Event::Screenshot { .. }
+    )
 }
 
 impl ParterreApp {
@@ -401,5 +460,52 @@ mod tests {
         // Scripted, and a debug build: the launch's events are dropped, nothing started.
         assert!(t.pending.is_empty());
         assert!(t.usage.is_none());
+    }
+
+    #[test]
+    fn user_input_is_noted_until_asked_and_the_windows_own_events_are_not() {
+        let ctx = egui::Context::default();
+        ctx.add_plugin(UserInput::default());
+        let pass = |events: Vec<Event>| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |_| {});
+            output.textures_delta.clear();
+        };
+        let asked = || ctx.with_plugin(|seen: &mut UserInput| std::mem::take(&mut seen.0));
+        pass(vec![Event::WindowFocused(true), Event::PointerGone]);
+        assert_eq!(asked(), Some(false));
+        // Two passes, as when another window and then the main one ran, before it is asked.
+        pass(vec![Event::PointerMoved(Pos2::new(5.0, 5.0))]);
+        pass(Vec::new());
+        assert_eq!(asked(), Some(true));
+        assert_eq!(asked(), Some(false));
+        pass(vec![Event::Text("a".into())]);
+        assert_eq!(asked(), Some(true));
+    }
+
+    #[test]
+    fn worktrees_of_a_repository_are_the_same_repository() {
+        let head = parterre_core::Head::Branch {
+            name: "refs/heads/topic".into(),
+            target: None,
+        };
+        let mut repo = Repo::new("/src/a-topic".into(), Vec::new(), Vec::new(), head);
+        // Where git lists none.
+        assert_eq!(repository_of(&repo), Path::new("/src/a-topic"));
+        // The main worktree, listed first.
+        for path in ["/src/a", "/src/a-topic"] {
+            repo.worktrees.push(parterre_core::Worktree {
+                path: path.into(),
+                head: None,
+                branch: None,
+                locked: false,
+                missing: false,
+                open: path == "/src/a-topic",
+            });
+        }
+        assert_eq!(repository_of(&repo), Path::new("/src/a"));
     }
 }

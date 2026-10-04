@@ -6,6 +6,10 @@
 //! false`), PostHog's anonymous events, and PostHog's standard properties, added in
 //! `before_send` as its mobile SDKs add them. Only the channel and git's version get parterre's
 //! own names.
+//!
+//! The session (`$session_id`, #262) goes on each usage event as it is made, not in
+//! `before_send`: nothing else this client sends, such as a crash report (`$exception`), carries
+//! it, as a session would tie it to the install ID's events.
 
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
@@ -28,8 +32,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the usage statistics thread is told.
 enum Command {
-    /// The window closes: say so, send what is queued, and tell the sender once done.
-    Close(mpsc::Sender<()>),
+    /// The window closes, in session `.0`: say so, send what is queued, and tell the sender once
+    /// done.
+    Close(String, mpsc::Sender<()>),
 }
 
 /// The usage statistics' own thread, which talks to PostHog. Dropped, it sends what it has
@@ -40,36 +45,49 @@ pub(crate) struct Sender {
 }
 
 impl Sender {
-    /// Starts the thread, which sends `events` at once, to `host`.
-    pub(crate) fn start(host: &str, context: Context, events: Vec<Lifecycle>) -> Sender {
+    /// Starts the thread, which sends `events` at once, in `session`, to `host`.
+    pub(crate) fn start(
+        host: &str,
+        context: Context,
+        session: String,
+        events: Vec<Lifecycle>,
+    ) -> Sender {
         let (commands, received) = mpsc::channel();
         let host = host.to_owned();
         let spawned = std::thread::Builder::new()
             .name("usage statistics".into())
-            .spawn(move || run(&host, &context, events, &received));
+            .spawn(move || run(&host, &context, (&session, events), &received));
         // Without a thread, nothing is sent: commands go nowhere.
         drop(spawned);
         Sender { commands }
     }
 
-    /// `Application Backgrounded`, then what is queued is sent, waiting at most `wait`.
-    pub(crate) fn close(self, wait: Duration) {
+    /// `Application Backgrounded`, in `session`, then what is queued is sent, waiting at most
+    /// `wait`.
+    pub(crate) fn close(self, session: String, wait: Duration) {
         let (done, finished) = mpsc::channel();
-        if self.commands.send(Command::Close(done)).is_ok() {
+        if self.commands.send(Command::Close(session, done)).is_ok() {
             let _ = finished.recv_timeout(wait);
         }
     }
 }
 
-fn run(host: &str, context: &Context, events: Vec<Lifecycle>, commands: &Receiver<Command>) {
+/// Sends the launch's `events`, in their session, then does as told.
+fn run(
+    host: &str,
+    context: &Context,
+    (session, events): (&str, Vec<Lifecycle>),
+    commands: &Receiver<Command>,
+) {
     let standard = Standard::of(context);
     let client = client(host, standard, crate::CLOSE);
     for lifecycle in &events {
-        client.capture(event(lifecycle, &context.install_id));
+        client.capture(event(lifecycle, &context.install_id, session));
     }
     match commands.recv() {
-        Ok(Command::Close(done)) => {
-            client.capture(event(&Lifecycle::Backgrounded, &context.install_id));
+        Ok(Command::Close(session, done)) => {
+            let backgrounded = event(&Lifecycle::Backgrounded, &context.install_id, &session);
+            client.capture(backgrounded);
             client.shutdown();
             let _ = done.send(());
         }
@@ -101,9 +119,10 @@ fn client(host: &str, standard: Standard, close: Duration) -> Client {
     }
 }
 
-/// The event for `lifecycle`, from this installation.
-fn event(lifecycle: &Lifecycle, install_id: &str) -> Event {
+/// The event for `lifecycle`, from this installation, in `session`.
+fn event(lifecycle: &Lifecycle, install_id: &str, session: &str) -> Event {
     let mut event = Event::new(lifecycle.name(), install_id);
+    let _ = event.insert_prop("$session_id", session);
     if let Lifecycle::Updated { previous_version } = lifecycle {
         let _ = event.insert_prop("previous_version", previous_version);
     }
@@ -172,6 +191,8 @@ mod tests {
     use std::net::TcpListener;
 
     const ID: &str = "6f1c2b7e-3a4d-4e8f-9b0a-1c2d3e4f5a6b";
+    const SESSION: &str = "0199b0a4-5c00-7000-8000-000000000000";
+    const NEXT_SESSION: &str = "0199b0a4-5c01-7000-8000-000000000000";
 
     fn standard() -> Standard {
         Standard {
@@ -200,7 +221,7 @@ mod tests {
 
     #[test]
     fn events_are_the_install_ids_and_personless() {
-        let mut e = event(&Lifecycle::Opened, ID);
+        let mut e = event(&Lifecycle::Opened, ID, SESSION);
         standard().apply(&mut e);
         assert_eq!(e.event_name(), "Application Opened");
         assert_eq!(e.distinct_id(), ID);
@@ -209,9 +230,10 @@ mod tests {
 
     #[test]
     fn every_event_carries_the_standard_properties() {
-        let mut e = event(&Lifecycle::Installed, ID);
+        let mut e = event(&Lifecycle::Installed, ID, SESSION);
         standard().apply(&mut e);
         let expected = json!({
+            "$session_id": SESSION,
             "$process_person_profile": false,
             "$app_name": "parterre",
             "$app_version": "0.6.0",
@@ -228,7 +250,7 @@ mod tests {
 
     #[test]
     fn what_is_unknown_is_left_out() {
-        let mut e = event(&Lifecycle::Opened, ID);
+        let mut e = event(&Lifecycle::Opened, ID, SESSION);
         let unknown = Standard {
             app_version: "0.6.0".into(),
             channel: "cargo",
@@ -243,9 +265,21 @@ mod tests {
                 "$app_name",
                 "$app_version",
                 "$process_person_profile",
+                "$session_id",
                 "channel"
             ]
         );
+    }
+
+    #[test]
+    fn only_usage_events_carry_the_session() {
+        // What else the client sends, such as a crash report, gets the standard properties
+        // in `before_send`, but no session to tie it to the install ID's events.
+        let mut crash = Event::new_anon("$exception");
+        standard().apply(&mut crash);
+        assert!(!crash.properties().contains_key("$session_id"));
+        let e = event(&Lifecycle::Opened, ID, SESSION);
+        assert_eq!(e.properties()["$session_id"], json!(SESSION));
     }
 
     #[test]
@@ -253,7 +287,7 @@ mod tests {
         let updated = Lifecycle::Updated {
             previous_version: "0.5.1".into(),
         };
-        let e = event(&updated, ID);
+        let e = event(&updated, ID, SESSION);
         assert_eq!(e.event_name(), "Application Updated");
         assert_eq!(e.properties()["previous_version"], json!("0.5.1"));
     }
@@ -318,8 +352,9 @@ mod tests {
     fn a_launch_and_its_close_reach_posthog() {
         let (host, received) = posthog_here();
         let events = crate::launch(false, Some("0.5.1"), "0.6.0 (a1b2c3d)");
-        let sender = Sender::start(&host, context(), events);
-        sender.close(Duration::from_secs(10));
+        let sender = Sender::start(&host, context(), SESSION.into(), events);
+        // Idle since the launch: the close is in a session of its own.
+        sender.close(NEXT_SESSION.into(), Duration::from_secs(10));
         let mut sent = Vec::new();
         while let Ok(body) = received.recv_timeout(Duration::from_millis(500)) {
             assert_eq!(body["api_key"], TOKEN);
@@ -350,5 +385,10 @@ mod tests {
             assert!(p.get("$geoip_disable").is_none(), "{p}");
         }
         assert_eq!(sent[0]["properties"]["previous_version"], "0.5.1");
+        let sessions: Vec<_> = sent
+            .iter()
+            .map(|e| &e["properties"]["$session_id"])
+            .collect();
+        assert_eq!(sessions, [SESSION, SESSION, NEXT_SESSION]);
     }
 }
