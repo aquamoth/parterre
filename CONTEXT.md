@@ -190,7 +190,7 @@ _Avoid_: log pane, commit list
 
 **Update check**:
 Asking GitHub whether a newer release is out, at start and then once a day. It sends nothing of
-parterre's own. When a newer version is out, the menu icon turns blue and offers *Update now*.
+parterre's own. When a newer version is out, the menu icon turns blue and offers *Download*.
 _Avoid_: ping, heartbeat, telemetry
 
 **Install ID**:
@@ -203,6 +203,12 @@ _Avoid_: user ID, machine ID, device ID
 What parterre sends to PostHog as it is used (installs, updates, launches, features, settings),
 with the install ID, unless the user unticks them. They never contain personal information.
 _Avoid_: analytics, telemetry, metrics
+
+**First-run prompt**:
+The dialog at parterre's first start that asks whether to send usage statistics and crash
+reports. Only *Continue* closes it, and nothing is sent, the update check included, before it is
+answered.
+_Avoid_: consent dialog, opt-in screen, telemetry prompt
 
 **Crash report**:
 What parterre sends to PostHog the moment it crashes, if the user has ticked crash reports. It

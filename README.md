@@ -53,8 +53,9 @@ greyed out. Hover a label for the title, author and branches, and click it to op
 request in your browser. The node's menu opens it too.
 
 parterre asks GitHub only about the branches you have fetched, at most once a minute per
-repository, and keeps well inside your hourly API budget. Nothing is sent without signing in,
-and apart from this, parterre doesn't use the network.
+repository, and keeps well inside your hourly API budget. Nothing is sent without signing in.
+The update check, usage statistics and crash reports are in
+[What parterre sends](docs/privacy.md).
 
 ## Upstreams, ahead and behind, and rebases
 
@@ -179,11 +180,14 @@ filters, the log, diff, blame and compare windows, and settings you can share wi
 - [docs/usage.md](docs/usage.md): the user guide.
 - [docs/automation.md](docs/automation.md): drive parterre from scripts, for screenshots,
   recordings and checks without a human. All the images above were made that way.
+- [docs/privacy.md](docs/privacy.md): what parterre sends, where it goes and how to turn it
+  off.
 - [docs/building.md](docs/building.md): build it yourself (`cargo build --release`).
 - [docs/architecture.md](docs/architecture.md): how it works. `crates/parterre-core` holds
   the git loading, graph reduction, layout and physics, free of any GUI; `parterre-forge` the
-  pull requests and `parterre-highlight` the syntax colour, each with its own dependencies;
-  `parterre-util` what they share; `crates/parterre` is the egui window.
+  pull requests, `parterre-highlight` the syntax colour and `parterre-telemetry` the update
+  check and usage statistics, each with its own dependencies; `parterre-util` what they share;
+  `crates/parterre` is the egui window.
 - [docs/research/](docs/research/): how TortoiseGit's revision graph works, with source links.
 
 Ideas, questions and bugs are welcome in [GitHub issues](https://github.com/aquamoth/parterre/issues).

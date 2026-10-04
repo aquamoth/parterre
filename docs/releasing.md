@@ -19,9 +19,11 @@ release filenames. Tag a clean commit on `main`; the version in the root `Cargo.
    archive holds the binary, the README, `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.html`.
    Windows also gets an installer built from the same files,
    `parterre-0.5.0-rc1-x86_64-pc-windows-msvc.msi` (see
-   [building.md](building.md#windows-installer)), and Linux a `.deb` and an `.rpm` from the same
-   binary, `parterre_0.5.0-rc1_amd64.deb` and `parterre-0.5.0-rc1-1.x86_64.rpm` (see
-   [building.md](building.md#linux-packages)). Before the release is published they are
+   [building.md](building.md#windows-installer)), and Linux a `.deb` and an `.rpm`,
+   `parterre_0.5.0-rc1_amd64.deb` and `parterre-0.5.0-rc1-1.x86_64.rpm` (see
+   [building.md](building.md#linux-packages)). The installer and each package get a binary of
+   their own, stamped with their channel for the update check
+   ([distribution.md](distribution.md#update-check)). Before the release is published they are
    installed, run and removed: the `.deb` and `.rpm` on Debian 12, Ubuntu 22.04 and 24.04,
    Fedora and openSUSE Leap 15.6, and the MSI on Windows per user and machine-wide. If any of
    that fails, nothing is published. A tag with a pre-release part goes through all of it and
@@ -54,15 +56,15 @@ at the commit being built, or the sources have local changes. In that case delet
 ## crates.io
 
 Cargo requires a package version in `Cargo.toml` and an equal version on each internal
-dependency (`parterre-util`, `parterre-core`, `parterre-forge`, `parterre-highlight`).
-`scripts/prepare-crates-release.py` (Python 3.11 or newer) generates a separate checkout of a
-tag with those versions:
+dependency (`parterre-util`, `parterre-core`, `parterre-forge`, `parterre-highlight`,
+`parterre-telemetry`). `scripts/prepare-crates-release.py` (Python 3.11 or newer) generates a
+separate checkout of a tag with those versions:
 
 ```sh
 scripts/prepare-crates-release.py v0.5.0-rc1
 ```
 
-The script prints the checkout path and publish command. It updates the versions and the five
+The script prints the checkout path and publish command. It updates the versions and the six
 workspace entries in `Cargo.lock`, verifies them with `cargo metadata --locked`, and makes a
 local commit so `cargo publish` sees clean sources. The commit exists only in that disposable
 checkout; the pushed tag and `main` still point at the same original commit. The published

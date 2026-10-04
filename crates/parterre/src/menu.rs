@@ -5,7 +5,8 @@
 //! with a rounded highlight under the pointer, and shortcuts right-aligned in a weaker colour.
 
 use eframe::egui::{
-    self, Atom, Button, Color32, CornerRadius, Id, Margin, Response, Shadow, Style, Ui, Vec2, vec2,
+    self, Atom, Button, Color32, CornerRadius, Id, Margin, Response, Shadow, Style, Ui, Vec2,
+    WidgetText, vec2,
 };
 use parterre_core::glyphs;
 
@@ -107,9 +108,9 @@ const MARK: f32 = 16.0;
 
 /// A menu item: room on the left for a check mark or radio dot, so that the labels of a menu
 /// line up, and `shortcut` on the right.
-pub fn item(ui: &mut Ui, label: &str, shortcut: &str, mark: Mark) -> Response {
+pub fn item(ui: &mut Ui, label: impl Into<WidgetText>, shortcut: &str, mark: Mark) -> Response {
     let id = Id::new("menu-mark");
-    let laid_out = Button::new((Atom::custom(id, Vec2::splat(MARK)), label))
+    let laid_out = Button::new((Atom::custom(id, Vec2::splat(MARK)), label.into()))
         .shortcut_text(shortcut)
         .atom_ui(ui);
     if let Some(rect) = laid_out.rect(id) {

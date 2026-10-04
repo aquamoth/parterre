@@ -64,7 +64,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # Stamped with the archive's channel. The installer and the packages are built again
+      # below, each stamped with its own, so that the update check offers each the same kind of
+      # file (#258). Only parterre-telemetry and parterre compile again.
       - name: Build
+        env:
+          PARTERRE_CHANNEL: ${{ runner.os == 'Windows' && 'zip' || 'tarball' }}
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Check version
         if: ${{ !matrix.cross && github.event_name == 'push' }}
@@ -108,16 +113,23 @@ jobs:
             cp "target/${{ matrix.target }}/release/parterre" "$name/"
             tar czf "dist/$name.tar.gz" "$name"
           fi
-      # The .deb and .rpm, from the same binary as the tarball
+      # The .deb and .rpm, each from a build stamped with its channel
       # (packaging/linux/build-packages.sh).
       - name: Linux packages
         if: runner.os == 'Linux'
-        run: packaging/linux/build-packages.sh --target ${{ matrix.target }} dist
-      # The installer, from the same files as the zip (packaging/windows/build-msi.ps1).
+        run: |
+          for channel in deb rpm; do
+            PARTERRE_CHANNEL=$channel cargo build --release --locked --target ${{ matrix.target }}
+            packaging/linux/build-packages.sh --target ${{ matrix.target }} --only $channel dist
+          done
+      # The installer, from the zip's files with a build stamped msi
+      # (packaging/windows/build-msi.ps1).
       - name: Windows installer
         if: runner.os == 'Windows'
         shell: bash
         run: |
+          PARTERRE_CHANNEL=msi cargo build --release --locked --target ${{ matrix.target }}
+          cp "target/${{ matrix.target }}/release/parterre.exe" "$NAME/"
           dotnet tool install --global wix --version 7.0.0
           PATH="$USERPROFILE/.dotnet/tools:$PATH" \
             pwsh packaging/windows/build-msi.ps1 -Stage "$NAME" -Out "dist/$NAME.msi"

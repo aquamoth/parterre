@@ -17,6 +17,7 @@ use parterre_core::revgraph::Simplification;
 use super::{ParterreApp, SettingsPage};
 use crate::export::Format;
 use crate::menu::{self, Mark};
+use crate::usage::{self, Menu};
 use crate::widgets::{self, tip, tip_explained};
 
 const SHOW: [(Simplification, Glyph, &str); 3] = [
@@ -69,8 +70,8 @@ impl ParterreApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let menu_button =
-                widgets::popover_button(ui, Id::new(MENU_ID), Some(glyphs::MENU), false);
+            let newer = self.newer_release().is_some();
+            let menu_button = widgets::menu_button(ui, Id::new(MENU_ID), newer);
             let menu_button = tip(menu_button, "Menu", "");
             Popup::menu(&menu_button).style(menu::style).show(|ui| {
                 menu::fit_window(ui, |ui| {
@@ -136,6 +137,7 @@ impl ParterreApp {
                 }
                 let response = widgets::icon_button(ui, glyphs::HEAD, false);
                 if tip(response, "Go to HEAD", "Home").clicked() {
+                    usage::action(usage::Action::GoToHead);
                     self.go_to_head();
                 }
                 let response =
@@ -208,8 +210,13 @@ impl ParterreApp {
             focus: std::mem::take(&mut self.search.request_focus),
             select: false,
         };
+        let searching = !self.search.query.trim().is_empty();
         let found = widgets::find_field(ui, &find, &mut self.search.query);
         if found.changed {
+            // Counted once per search: as its first character is typed.
+            if !searching && !self.search.query.trim().is_empty() {
+                usage::action(usage::Action::Find);
+            }
             self.update_search();
             if !self.search.hits.is_empty() {
                 self.goto_search_hit(true);
@@ -228,6 +235,7 @@ impl ParterreApp {
     }
 
     fn filter_popover(&mut self, ui: &mut Ui) {
+        usage::menu(ui.ctx(), Menu::Filter);
         ui.set_width(270.0);
         ui.weak("Filter")
             .on_hover_text("Each repository keeps its own filters.");
@@ -257,6 +265,7 @@ impl ParterreApp {
     }
 
     fn zoom_popover(&mut self, ui: &mut Ui) {
+        usage::menu(ui.ctx(), Menu::Zoom);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             self.zoom_field(ui);
@@ -279,6 +288,7 @@ impl ParterreApp {
                 self.zoom_by(1.0 / 0.8);
             }
             if tip(widgets::text_button(ui, "Fit"), "Fit the whole graph", "F").clicked() {
+                usage::action(usage::Action::Fit);
                 self.fit();
             }
             if tip(widgets::text_button(ui, "Reset"), "Zoom to 100%", "0").clicked() {
@@ -288,6 +298,7 @@ impl ParterreApp {
     }
 
     fn drag_popover(&mut self, ui: &mut Ui) {
+        usage::menu(ui.ctx(), Menu::Drag);
         ui.set_width(250.0);
         ui.weak("Dragging");
         let mut remember = self.settings.remember_moves;
@@ -306,6 +317,7 @@ impl ParterreApp {
     }
 
     fn main_menu(&mut self, ui: &mut Ui) {
+        usage::menu(ui.ctx(), Menu::Main);
         if menu::item(ui, "Open folder…", "Ctrl+O", Mark::None).clicked() {
             self.pick_folder = true;
         }
@@ -373,6 +385,7 @@ impl ParterreApp {
         let has_repo = open.is_some();
         let reload = ui.add_enabled_ui(has_repo, |ui| menu::item(ui, "Reload", "F5", Mark::None));
         if reload.inner.clicked() {
+            usage::action(usage::Action::Reload);
             self.reload();
         }
         let auto = self.settings.auto_reload;
@@ -454,10 +467,12 @@ impl ParterreApp {
                 self.zoom_by(1.0 / self.view.zoom);
             }
             if menu::item(ui, "Fit the whole graph", "F", Mark::None).clicked() {
+                usage::action(usage::Action::Fit);
                 self.fit();
             }
         });
         if menu::item(ui, "Go to HEAD", "Home", Mark::None).clicked() {
+            usage::action(usage::Action::GoToHead);
             self.go_to_head();
         }
         let overview = &mut self.settings.show_overview;
@@ -512,6 +527,16 @@ impl ParterreApp {
         }
         if menu::item(ui, "About parterre", "", Mark::None).clicked() {
             self.show_about = true;
+        }
+        // While a newer release is out (#258), just above this build's version.
+        if let Some(update) = self.newer_release() {
+            menu::separator(ui);
+            let label = RichText::new(format!("Download {}", update.version))
+                .color(widgets::tones(ui).accent)
+                .strong();
+            if menu::item(ui, label, "", Mark::None).clicked() {
+                self.download(ui.ctx(), &update.download);
+            }
         }
         // For users who start parterre from a file manager or Start menu (#68).
         ui.add_space(4.0);

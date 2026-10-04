@@ -27,7 +27,9 @@ approval (#20). Not planned for now:
   if at all. An Ubuntu PPA isn't possible yet: Launchpad builds with Ubuntu's Rust, and no
   Ubuntu release has 1.95, which egui needs.
 - **Debian, Fedora and Arch official repositories**: left to distribution volunteers. Debian
-  alone would need about 28 new Rust packages for the egui stack.
+  alone would need about 28 new Rust packages for the egui stack. Their builds can leave out
+  the update check, usage statistics and crash reports with the
+  [`send` feature](building.md#features).
 - **Homebrew**: homebrew-core wants 225 stars for an author's own submission and doesn't take
   GUI apps as formulae.
 - **AppImage**: no name registry, so it claims nothing.
@@ -75,6 +77,48 @@ Bundling git on Windows (MinGit) was rejected. It unpacks to about 90 MB, it is 
 its source would have to ship alongside, and every git security fix would need a parterre
 release. Switching to a git library (gitoxide) would be a large rewrite; see
 `crates/parterre-core/src/git.rs` for why parterre uses the CLI.
+
+## Update check
+
+parterre asks GitHub's releases API at start and then once a day whether a newer release is out
+(#226, #258). It sends nothing of its own. A newer one turns the ☰ icon bold blue and ends the
+menu with *Download X.Y.Z*, which does what fits the channel parterre came through:
+
+| Channel | *Download* |
+|---|---|
+| MSI (also winget and Chocolatey, which install it), zip, tarballs, .deb, .rpm | opens that channel's own file of the release in the browser |
+| crates.io (`cargo install`), and any build without a channel | copies `cargo install --locked parterre` |
+| Snap, Flathub | nothing: their stores update parterre, and there is no check |
+
+- **The channel is stamped at build time.** Each packaging job in `release.yml` builds with
+  `PARTERRE_CHANNEL` set to `msi`, `zip`, `tarball`, `deb` or `rpm`, so the installer and the
+  packages each get a build of their own. Snap and Flatpak are told at run time by
+  `SNAP_NAME=parterre` and `FLATPAK_ID=se.trustfall.parterre`.
+- **Pre-releases:** a release build compares with the latest release, a release candidate (or
+  a dev build) with the newest of any kind, so it hears of the next candidate and the final.
+- **Not before the first-run prompt:** on the first start, the check waits until the user has
+  answered the prompt about usage statistics (#223, #261); later starts check at once.
+- **Off switches:** *Check for updates* in Settings › Privacy, for users. For packagers, the
+  `send` feature: built without it, parterre makes no requests of its own at all
+  ([building.md](building.md#features)).
+
+## Usage statistics
+
+At its first start parterre asks, in a dialog that only *Continue* closes, whether to send usage
+statistics (ticked) and crash reports (unticked) to PostHog in the EU (#223, #225, #227, #261).
+Nothing is sent before *Continue*. With usage statistics ticked, a release build sends
+`Application Installed` (first run), `Application Updated` (a new version), `Application Opened`
+(every start) and `Application Backgrounded` (on close), with a random install ID made at the
+first run. The channel above goes with them, as `channel`.
+
+With crash reports ticked, a release build sends a panic to PostHog as a `$exception` the moment
+it happens (#263), through posthog-rs's panic capture. A crash report never carries the install
+ID, and the user's home folder in it becomes `~`. Ticking or unticking them takes effect at the
+next start; ticking them in the first-run prompt, at once.
+
+- **Off switches:** the switches in Settings › Privacy; `DO_NOT_TRACK` set (to anything but
+  `0`), which also skips the prompt; and for packagers the `send` feature.
+- What is sent, and how to have it deleted: [What parterre sends](privacy.md).
 
 ## Windows
 

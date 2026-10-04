@@ -13,6 +13,34 @@ scripts. No development packages of system libraries are needed. At runtime the 
 the usual desktop libraries: Wayland or X11, libxkbcommon, and OpenGL (EGL/GLX), all of which
 are present on any desktop.
 
+## Features
+
+All three are on by default. Leave one out with `--no-default-features --features …`.
+
+| Feature | Brings |
+|---|---|
+| `github` | open pull requests from GitHub (`parterre-forge`) |
+| `send` | the update check, the usage statistics and crash reports sent to PostHog, and anything else parterre asks or sends over the network (`parterre-telemetry`) |
+| `syntax` | syntax colour in the diff and blame windows (`parterre-highlight`) |
+
+**Packagers:** `send` is your switch. Built without it, parterre makes no requests of its own:
+it has no update check, so it never tells users of your package about releases you haven't
+packaged yet, and sends no usage statistics or crash reports, so it doesn't ask about them at
+first start either. Settings › Privacy shows those switches greyed out. Pull requests from
+GitHub (`github`) are asked for only when the user shows them. Without `send`, neither
+PostHog's SDK nor its HTTP client (reqwest) is built.
+
+Debug builds never send usage statistics or crash reports, `send` or not.
+
+```sh
+cargo build --release --locked --no-default-features --features github,syntax
+```
+
+A release build stamps where it is published in `PARTERRE_CHANNEL` (`msi`, `zip`, `tarball`,
+`deb` or `rpm`), so that *Download* offers the same kind of file
+([distribution.md](distribution.md#update-check)). Leave it unset in any other build: unset is
+`cargo install`.
+
 ## Windows
 
 Native build on Windows with the MSVC toolchain. Prerequisites:
@@ -58,8 +86,8 @@ tools. Its bundled `dlltool` needs an assembler (`as.exe`) that the toolchain do
 `windows-link` always uses `raw-dylib`, so the build fails with
 `error calling dlltool` / `CreateProcess` unless a full MinGW-w64 is on `PATH`.
 
-Cross-checking from Linux works without extra tools once the `github` feature is left out:
-its TLS library, ring, compiles C for the target, which needs MinGW-w64's headers
+Cross-checking from Linux works without extra tools once the `github` and `send` features are
+left out: their TLS library, ring, compiles C for the target, which needs MinGW-w64's headers
 (`sudo apt install mingw-w64` for a check with it).
 
 ```sh
@@ -90,7 +118,8 @@ packaging\windows\build-msi.ps1   # → target\msi\parterre-<version>-x86_64-pc-
 
 The script gathers `parterre.exe`, `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.html` in
 `target\msi\stage`. With `-Stage DIR` it takes them from `DIR` instead, as the release
-workflow does; `-Out FILE` names the MSI. It passes `-acceptEula wix7` on every run, which
+workflow does, with a `parterre.exe` built with `PARTERRE_CHANNEL=msi` (see
+[Features](#features)); `-Out FILE` names the MSI. It passes `-acceptEula wix7` on every run, which
 accepts WiX's Open Source Maintenance Fee EULA for that run only; don't run `wix eula accept`,
 which leaves an acceptance file behind. The MSI version is the release tag's version in the
 release workflow (`PARTERRE_RELEASE_TAG`), otherwise the version `parterre.exe` carries (from
@@ -147,7 +176,14 @@ Then:
 ```sh
 cargo build --release
 packaging/linux/build-packages.sh              # → target/packages/parterre_<version>_amd64.deb, .rpm
-packaging/linux/build-packages.sh --target x86_64-unknown-linux-gnu dist   # as the release does
+```
+
+The release builds each package from a build stamped with its channel (see
+[Features](#features)), and the same again with `rpm`:
+
+```sh
+PARTERRE_CHANNEL=deb cargo build --release --target x86_64-unknown-linux-gnu
+packaging/linux/build-packages.sh --target x86_64-unknown-linux-gnu --only deb dist
 ```
 
 The packages take their version from `parterre --version`, with a pre-release's `-` turned into

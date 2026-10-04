@@ -1,0 +1,44 @@
+[package]
+name = "parterre-telemetry"
+description = "Internal to parterre: what it asks and sends over the network, the update check, the usage statistics and the crash reports. No stability promises."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[features]
+# Requests (`send`): the HTTPS client and reading GitHub's answers, for the update check
+# (#258); PostHog's SDK and the system's locale and time zone, for the usage statistics (#261)
+# and the crash reports (#263). Without it the crate asks and sends nothing: no update check, no
+# usage statistics and no crash reports. The switch for packagers.
+send = [
+    "dep:serde",
+    "dep:serde_json",
+    "dep:ureq",
+    "dep:posthog-rs",
+    "dep:sys-locale",
+    "dep:iana-time-zone",
+]
+
+[dependencies]
+# The install ID, a random (version 4) UUID, and the session ID, a version 7 one (#262).
+uuid = { version = "1", features = ["v4", "v7"] }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
+# PostHog's official SDK, its blocking client: no async runtime of parterre's own. Its error
+# tracking captures panics for the crash reports (#263). It brings reqwest, beside ureq (#225).
+posthog-rs = { version = "0.27", default-features = false, features = [
+    "error-tracking",
+], optional = true }
+# `$locale` and `$timezone`, as PostHog's mobile SDKs send them.
+sys-locale = { version = "0.3", optional = true }
+iana-time-zone = { version = "0.1", optional = true }
+
+[lints]
+workspace = true

@@ -1,8 +1,8 @@
 # Architecture
 
-parterre is a Cargo workspace with five crates: the domain library, two adapters over external
+parterre is a Cargo workspace with six crates: the domain library, three adapters over external
 stacks, the handles they share, and the binary (#214). Forge depends on core; core and
-highlight on util; the binary on all four; nothing on the binary.
+highlight on util; telemetry on none of ours; the binary on all five; nothing on the binary.
 
 ```
 crates/parterre-util   the cancellation handles: `Cancel` holds the one child process running
@@ -69,12 +69,40 @@ crates/parterre-highlight
                        the child process the app runs them in, with a budget and a Cancel
   proto_highlights.scm the Protocol Buffers query, which its crate doesn't export
 
+crates/parterre-telemetry
+                       what parterre asks and sends over the network (#175): the update
+                       check (#258), the usage statistics (#261, #262, #264) and the crash
+                       reports (#263)
+  lib.rs               the update check's thread, at start and then every 24 h; the channel,
+                       stamped at build time (`PARTERRE_CHANNEL`), or Snap and Flatpak at
+                       run time; `Usage`, the usage statistics from start to close
+  update.rs            versions and their order, which release a build hears of, and where
+                       *Download* goes on each channel; no network
+  usage.rs             whether anything may go to PostHog (the first-run prompt's answer,
+                       `DO_NOT_TRACK`, debug builds), the install ID, and which lifecycle
+                       events a launch sends; no network
+  session.rs           the `$session_id` (#262): a new UUIDv7 after 30 min idle, 24 h, or
+                       on opening another repository; the caller's clock, no network
+  feature.rs           feature events (#264): `record` a window, dialog, menu or action
+                       from fixed enums, and `register` the settings every event carries;
+                       a test sink (`recording`); no network
+  crash.rs             whether panics go to PostHog, and the home folder in them made `~`;
+                       no network
+  github.rs            GitHub's releases API through ureq, behind the `send` feature
+  posthog.rs           all of the PostHog code: posthog-rs's client on a thread of its own,
+                       the events, their standard properties and the registered ones, and
+                       the SDK's global client that sends panics, behind the `send` feature
+
 crates/parterre        the binary (eframe/egui)
   build.rs             asks git for the commit and sets the version string
   main.rs              CLI (clap), window setup
   version.rs           release/dev version strings (runs in build.rs; see docs/releasing.md)
   app.rs               canvas interaction, search, status bar, windows, opening folders
     toolbar.rs         the toolbar, its popovers and the ☰ menu
+    updates.rs         the update check as the settings say, and *Download* in the ☰ menu
+    privacy.rs         the first-run prompt, and the usage statistics and crash reports as
+                       the user's choices say, told of input and repositories opened;
+                       Settings › Privacy shows them
     settings_window.rs the settings: pages of rows, applied as you change them
     auto_reload.rs     a worker thread that reloads when the refs change
     pull_requests.rs   loads open pull requests on a worker thread while they are shown, cached
@@ -115,8 +143,12 @@ crates/parterre        the binary (eframe/egui)
                        terminal there
   widgets.rs           icon buttons, segmented buttons, switches, text fields
   settings.rs          persisted settings, each repository's (the filters), and the
-                       Classic/Modern looks
+                       Classic/Modern looks; apart from them, what is sent to PostHog (the
+                       first-run prompt's answer and the install ID), never exported or reset
   settings_file.rs     settings as versioned JSON: stored, exported and imported
+  usage.rs             feature events as the app records them: a window, dialog or menu
+                       counted once per opening, and the settings as the properties every
+                       event carries
   automation.rs        scripted runs (--script, --screenshot): steps fed to the window as
                        input, frame by frame; see docs/automation.md
   script.rs            workflow scripts (--script): click, type, screenshot, … one step a line

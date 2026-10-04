@@ -11,7 +11,7 @@ use rfd::AsyncFileDialog;
 
 use super::log_window::layout_picker;
 use super::toolbar::{HIDE_TIP, REF_FILTER_TIP, REMEMBER_TIP};
-use super::{ParterreApp, Picked};
+use super::{ParterreApp, Picked, privacy};
 use crate::dialogs;
 use crate::settings::{Arrows, EdgeStyle, Look, RepoSettings, Settings};
 use crate::settings_file::{self, Imported};
@@ -27,17 +27,19 @@ pub enum SettingsPage {
     Graph,
     Filters,
     Dragging,
+    Privacy,
     Advanced,
     Manage,
 }
 
 impl SettingsPage {
-    const ALL: [SettingsPage; 7] = [
+    const ALL: [SettingsPage; 8] = [
         SettingsPage::Appearance,
         SettingsPage::BranchColours,
         SettingsPage::Graph,
         SettingsPage::Filters,
         SettingsPage::Dragging,
+        SettingsPage::Privacy,
         SettingsPage::Advanced,
         SettingsPage::Manage,
     ];
@@ -57,6 +59,7 @@ impl SettingsPage {
             SettingsPage::Graph => "Graph",
             SettingsPage::Filters => "Filters",
             SettingsPage::Dragging => "Dragging",
+            SettingsPage::Privacy => "Privacy",
             SettingsPage::Advanced => "Advanced",
             SettingsPage::Manage => "Manage",
         }
@@ -91,6 +94,14 @@ const IMPORT_SETTINGS_TIP: &str = "Every setting but the filters and window size
     file lacks go back to their defaults.";
 const IMPORT_FILTERS_TIP: &str = "The filters in the file, for the repository shown.";
 const RESET_TIP: &str = "Every setting back to its default, and every repository's filters.";
+const UPDATES_TIP: &str = "Ask GitHub once a day whether a newer release is out. Sends nothing \
+    of parterre's own.";
+const NO_UPDATES_TIP: &str = "Not in this build: its package manager updates parterre.";
+const NO_POSTHOG_TIP: &str = "Not in this build: it sends nothing.";
+const INSTALL_ID_TIP: &str = "Sent with the usage statistics, never with a crash report. Quote \
+    it to have its data deleted.";
+/// The "What parterre sends" page (#260).
+const WHAT_PARTERRE_SENDS: &str = "https://github.com/aquamoth/parterre/blob/main/docs/privacy.md";
 const PAGE: f32 = 440.0;
 
 impl ParterreApp {
@@ -129,6 +140,7 @@ impl ParterreApp {
             .with_minimize_button(false)
             .with_maximize_button(false);
         let id = egui::ViewportId::from_hash_of("settings");
+        crate::usage::screen(ctx, id.0, crate::usage::Screen::Settings);
         // A new window is created after this frame and painted in the next; don't wait for
         // input to bring that about.
         if self.settings_window_theme.is_none() && !ctx.embed_viewports() {
@@ -362,6 +374,24 @@ impl ParterreApp {
                 });
                 self.set_remember_moves(remember);
             }
+            SettingsPage::Privacy => {
+                group(ui, |rows| {
+                    // Without `send`, and on Snap and Flatpak, there is nothing to turn on.
+                    let available = parterre_telemetry::has_update_check();
+                    let tip = if available {
+                        UPDATES_TIP
+                    } else {
+                        NO_UPDATES_TIP
+                    };
+                    rows.row("Check for updates", tip, |ui| {
+                        locked_switch(ui, &mut s.check_for_updates, available);
+                    });
+                });
+                ui.add_space(14.0);
+                if let Some(error) = privacy_page(ui, &mut self.telemetry) {
+                    self.status = Some((error, true));
+                }
+            }
             SettingsPage::Manage => self.manage_page(ui),
             SettingsPage::Advanced => {
                 title(ui, "Upstreams");
@@ -528,6 +558,7 @@ impl ParterreApp {
     }
 
     pub(super) fn export_settings(&mut self, mut path: PathBuf) {
+        crate::usage::action(crate::usage::Action::ExportSettings);
         // A name typed without the extension gets it added.
         if path.extension().is_none() {
             path.set_extension("json");
@@ -571,6 +602,7 @@ impl ParterreApp {
             return;
         };
         let shown = dialogs::Dialog::new("import-settings", "Import settings")
+            .screen(crate::usage::Screen::ImportSettings)
             .width(380.0)
             .modal()
             .opener(egui::ViewportId::from_hash_of("settings"))
@@ -620,6 +652,7 @@ impl ParterreApp {
     }
 
     fn apply_import(&mut self, import: Import) {
+        crate::usage::action(crate::usage::Action::ImportSettings);
         let mut parts = Vec::new();
         if import.settings
             && let Some(mut settings) = import.imported.settings
@@ -648,6 +681,7 @@ impl ParterreApp {
             return;
         }
         let shown = dialogs::Dialog::new("reset-settings", "Reset all settings?")
+            .screen(crate::usage::Screen::ResetSettings)
             .icon(glyphs::RESET, true)
             .width(380.0)
             .modal()
@@ -655,7 +689,7 @@ impl ParterreApp {
             .show(ctx, |ui| {
                 ui.label(
                     "Every setting goes back to its default, in every repository. Recent \
-                     repositories and remembered moves are kept.",
+                     repositories, remembered moves and what is sent to PostHog are kept.",
                 );
                 ui.add_space(12.0);
                 ui.separator();
@@ -664,6 +698,7 @@ impl ParterreApp {
         match shown.inner {
             dialogs::Answer::Primary => {
                 self.confirm_reset_settings = false;
+                crate::usage::action(crate::usage::Action::ResetSettings);
                 self.reset_settings();
             }
             dialogs::Answer::Cancel => self.confirm_reset_settings = false,
@@ -724,6 +759,86 @@ fn filters(ui: &mut Ui, s: &mut Settings) {
             text_field(ui, &mut g.hide_branches, "e.g. pipeline/*, release/*");
         });
     });
+}
+
+/// A switch for `on`, shown off and greyed out unless `available`.
+fn locked_switch(ui: &mut Ui, on: &mut bool, available: bool) {
+    let mut off = false;
+    let on = if available { on } else { &mut off };
+    ui.add_enabled_ui(available, |ui| widgets::switch(ui, on));
+}
+
+/// Settings › Privacy's *Sent to PostHog* (#227): the two switches, the install ID with
+/// *Copy*, and the "What parterre sends" page. Returns why that page didn't open.
+fn privacy_page(ui: &mut Ui, telemetry: &mut privacy::Telemetry) -> Option<String> {
+    title(ui, "Sent to PostHog");
+    let in_build = parterre_telemetry::has_usage_statistics();
+    let dnt = telemetry.do_not_track;
+    let at_start = telemetry.crash_reports_at_start;
+    let tip = |text| if in_build { text } else { NO_POSTHOG_TIP };
+    group(ui, |rows| {
+        let answer = telemetry.privacy.answer.as_mut();
+        // Without an answer (DO_NOT_TRACK has given it, or a build without `send`), off.
+        let (mut usage, mut crashes) = (false, false);
+        let (usage, crashes, id, available) = match answer {
+            Some(a) if in_build && !dnt => (
+                &mut a.usage_statistics,
+                &mut a.crash_reports,
+                Some(a.install_id.clone()),
+                true,
+            ),
+            a => (
+                &mut usage,
+                &mut crashes,
+                a.map(|a| a.install_id.clone()),
+                false,
+            ),
+        };
+        rows.row(privacy::USAGE, tip(privacy::USAGE_TEXT), |ui| {
+            locked_switch(ui, usage, available);
+        });
+        let changed = available && *crashes != at_start;
+        rows.row(privacy::CRASHES, tip(privacy::CRASHES_TEXT), |ui| {
+            locked_switch(ui, crashes, available);
+            if changed {
+                ui.label(RichText::new("from the next start").weak());
+            }
+        });
+        if let Some(id) = id.filter(|_| in_build) {
+            rows.row("Install ID", INSTALL_ID_TIP, |ui| {
+                // "Copied" for a moment after a click.
+                let copied_id = egui::Id::new("copied-install-id");
+                let now = ui.input(|i| i.time);
+                let at: Option<f64> = ui.data(|d| d.get_temp(copied_id));
+                let copied = at.is_some_and(|at| now - at < 1.5);
+                if copied {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(300));
+                }
+                let label = if copied { "Copied" } else { "Copy" };
+                if widgets::text_button(ui, label).clicked() {
+                    ui.ctx().copy_text(id.clone());
+                    ui.data_mut(|d| d.insert_temp(copied_id, now));
+                }
+                ui.label(RichText::new(id).monospace().weak());
+            });
+        }
+    });
+    ui.add_space(8.0);
+    if in_build && dnt {
+        ui.label(RichText::new("Off: DO_NOT_TRACK is set.").weak());
+    }
+    let link =
+        egui::Button::new(RichText::new("What parterre sends").color(ui.visuals().hyperlink_color))
+            .frame(false);
+    let link = ui
+        .add(link)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(WHAT_PARTERRE_SENDS);
+    if link.clicked() {
+        return crate::browser::open(WHAT_PARTERRE_SENDS).err();
+    }
+    None
 }
 
 fn title(ui: &mut Ui, text: &str) {

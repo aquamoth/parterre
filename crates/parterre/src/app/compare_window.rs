@@ -315,6 +315,9 @@ impl ParterreApp {
     pub(super) fn compare_request(&mut self, request: CompareRequest) {
         match request {
             CompareRequest::Mark(oid) => {
+                if oid.is_some() {
+                    crate::usage::action(crate::usage::Action::MarkForComparison);
+                }
                 self.marked = oid.map(|oid| (oid, self.commit_label(oid)));
                 self.status = Some(match &self.marked {
                     Some((_, name)) => (format!("Marked {name} for comparison"), false),
@@ -381,6 +384,7 @@ impl ParterreApp {
             .with_inner_size(self.compare.size)
             .with_min_inner_size([480.0, 300.0]);
         let id = viewport_id();
+        crate::usage::screen(ctx, id.0, crate::usage::Screen::Compare);
         if self.compare.title_theme.is_none() && !ctx.embed_viewports() {
             ctx.request_repaint();
         }

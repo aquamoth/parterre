@@ -12,7 +12,7 @@ import tomllib
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?")
 # The workspace's crates, all published at parterre's version.
-CRATES = ["parterre", "parterre-util", "parterre-core", "parterre-forge", "parterre-highlight"]
+CRATES = ["parterre", "parterre-util", "parterre-core", "parterre-forge", "parterre-highlight", "parterre-telemetry"]
 LOCK_PACKAGE = re.compile(r'(?m)^(\[\[package\]\]\nname = "(?:' + "|".join(CRATES) + r')"\nversion = ")([^"]+)(")')
 
 

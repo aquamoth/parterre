@@ -135,6 +135,7 @@ impl RebaseDialog {
         );
         let width = (ctx.content_rect().width() - 80.0).clamp(420.0, 780.0);
         let shown = dialogs::Dialog::new("rebase-branch", &title)
+            .screen(crate::usage::Screen::Rebase)
             .width(width)
             .opener(self.opener)
             .raise(self.fresh)

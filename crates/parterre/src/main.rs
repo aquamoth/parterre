@@ -25,6 +25,7 @@ mod system_theme;
 mod text_size;
 mod theme;
 mod upstreams;
+mod usage;
 // Runs in build.rs; compiled here only for its tests.
 #[cfg(test)]
 mod version;
@@ -119,6 +120,11 @@ struct Cli {
     /// being branches of origin (see docs/automation.md). Implies --pull-requests.
     #[arg(long, value_name = "FILE", hide = true)]
     pull_requests_from: Option<PathBuf>,
+
+    /// Offer VERSION as a newer release instead of asking GitHub: the menu's update marker and
+    /// its Download entry, for screenshots and tests (see docs/automation.md).
+    #[arg(long, value_name = "VERSION", hide = true)]
+    newer_release: Option<String>,
 
     /// Show the other worktrees, even if turned off in the settings.
     #[arg(long)]
@@ -320,6 +326,12 @@ fn main() -> ExitCode {
         },
         None => None,
     };
+    if let Some(version) = &cli.newer_release
+        && parterre_telemetry::Version::parse(version).is_none()
+    {
+        eprintln!("parterre: --newer-release {version}: not a version");
+        return ExitCode::FAILURE;
+    }
     let scripted = cli.screenshot.is_some() || script.is_some();
     // Why the repository named on the command line didn't open, when the window says so.
     let mut open_error = None;
@@ -384,6 +396,10 @@ fn main() -> ExitCode {
     automation.fit = cli.fit;
     automation.zoom = cli.zoom;
     automation.pull_requests = canned_pull_requests;
+    automation.newer_release = cli
+        .newer_release
+        .as_deref()
+        .and_then(parterre_telemetry::Update::to);
     // `--screenshot` alone is a script of one step.
     if script.is_some() || cli.screenshot.is_some() {
         let mut runner = automation::Runner::new(script.unwrap_or_default());
