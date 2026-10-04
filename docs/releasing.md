@@ -46,10 +46,6 @@ It builds, packages and installs as a release does, but publishes nothing: the p
 left as artifacts of the run. Their version follows the nearest tag, as in any build
 ([Version strings](#version-strings)).
 
-Add the release to the `<releases>` of `packaging/linux/se.trustfall.parterre.metainfo.xml`
-afterwards, with its date. Until then the packages get an entry of their own, dated the day
-they were built.
-
 The build fails if the tag is not `vX.Y.Z` with an optional pre-release suffix, does not point
 at the commit being built, or the sources have local changes. In that case delete the tag
 (`git push origin :refs/tags/v0.5.0-rc1`), fix things and tag again.

@@ -51,10 +51,11 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends build-essential ca-certificates curl git
+      # The whole history with its tags: the AppStream metadata lists the releases
+      # (packaging/linux/metainfo.sh), and by hand the version follows the nearest release tag.
       - uses: actions/checkout@v6
-        # By hand, the whole history with its tags: the version follows the nearest release tag.
         with:
-          fetch-depth: ${{ github.event_name == 'push' && 1 || 0 }}
+          fetch-depth: 0
       # The checkout belongs to the runner's user and the container runs as root; git ignores
       # such repositories unless they are marked safe.
       - name: Trust the checkout
