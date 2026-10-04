@@ -22,6 +22,7 @@ use super::rebase::{RebaseDialog, stuck_color};
 use super::reset::ResetDialog;
 use super::revert::{RestoreDialog, RevertDialog};
 use crate::theme::Palette;
+use crate::usage::{self, Screen};
 use crate::{dialogs, menu, widgets};
 use parterre_core::cherry_pick;
 use parterre_core::merge;
@@ -1065,12 +1066,13 @@ impl Form {
         self.browsed();
         let mut log = false;
         let adding = self.worktree.is_some();
-        let (id, title) = if adding {
-            ("add-worktree", "Add a worktree")
+        let (id, title, screen) = if adding {
+            ("add-worktree", "Add a worktree", Screen::AddWorktree)
         } else {
-            ("create-branch", "Create branch")
+            ("create-branch", "Create branch", Screen::CreateBranch)
         };
         let shown = dialogs::Dialog::new(id, title)
+            .screen(screen)
             .opener(self.opener)
             .raise(self.fresh)
             .resizable()
@@ -1505,6 +1507,24 @@ struct Notice {
     /// Done, but needing the user's attention: orange, and it stays until closed. `error`
     /// holds its message.
     attention: bool,
+}
+
+/// What the usage statistics call `action` (#264): its kind, nothing of what it names.
+fn operation(action: &Action) -> usage::Action {
+    match action {
+        Action::Create(_) => usage::Action::CreateBranch,
+        Action::Switch(_) => usage::Action::SwitchBranch,
+        Action::Detach(_) => usage::Action::SwitchDetached,
+        Action::DeleteBranches(_) => usage::Action::DeleteBranch,
+        Action::AddWorktree(_) => usage::Action::AddWorktree,
+        Action::DeleteWorktrees(_) => usage::Action::DeleteWorktree,
+        Action::Reset(_) => usage::Action::Reset,
+        Action::Rebase(_) => usage::Action::Rebase,
+        Action::Merge(_) => usage::Action::Merge,
+        Action::CherryPick(_) => usage::Action::CherryPick,
+        Action::Revert(_) => usage::Action::Revert,
+        Action::RestoreStash(_) => usage::Action::RestoreStash,
+    }
 }
 
 /// A warning before losing work, waiting for an answer.
@@ -2030,6 +2050,10 @@ impl Tool {
         approval: Option<Warning>,
         opener: ViewportId,
     ) {
+        // Counted when the user starts it, not again when they agree to lose work.
+        if approval.is_none() {
+            usage::action(operation(&action));
+        }
         let (tx, rx) = mpsc::channel();
         let cancel = CancelTree::default();
         let worker_cancel = cancel.clone();
@@ -2309,6 +2333,7 @@ impl Tool {
         let mut show_log = None;
         let busy = self.busy();
         let mut dialog = dialogs::Dialog::new("branch-loss", &title)
+            .screen(crate::usage::Screen::LostWork)
             .opener(loss.opener)
             .raise(loss.fresh)
             .resizable();
@@ -2481,6 +2506,7 @@ impl Tool {
             });
         if let Some(n) = self.notices.iter().find(|n| Some(n.id) == self.details) {
             let shown = dialogs::Dialog::new("git-operation-details", &n.title)
+                .screen(crate::usage::Screen::OperationDetails)
                 .width(600.0)
                 .resizable()
                 .show(ctx, |ui| {

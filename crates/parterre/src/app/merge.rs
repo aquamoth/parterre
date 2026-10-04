@@ -119,6 +119,7 @@ impl MergeDialog {
         let title = format!("Merge {name} into {}", self.preview.branch);
         let width = (ctx.content_rect().width() - 80.0).clamp(420.0, 780.0);
         let shown = dialogs::Dialog::new("merge-branch", &title)
+            .screen(crate::usage::Screen::Merge)
             .width(width)
             .opener(self.opener)
             .raise(self.fresh)

@@ -1584,6 +1584,7 @@ impl DiffWindow {
             .with_inner_size(self.size)
             .with_min_inner_size([520.0, 320.0]);
         let id = self.viewport_id();
+        crate::usage::screen(ctx, id.0, crate::usage::Screen::Diff);
         if self.title_theme.is_none() && !ctx.embed_viewports() {
             ctx.request_repaint();
         }
