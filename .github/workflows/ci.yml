@@ -17,9 +17,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Whether the PR changes anything but Markdown, and anything the packages are built from: only
-  # then does it build the release, the packages and the installer, which nothing waits for in a PR
-  # (#243). Pushes to main always build and package; a release publishes only once that passed.
+  # Whether the PR changes anything but Markdown. CI builds no release and no packages: the release
+  # workflow builds and checks those, and can be run by hand on a branch to try a fix (#246).
   changes:
     name: Changes
     runs-on: ubuntu-latest
@@ -27,19 +26,17 @@ jobs:
       pull-requests: read
     outputs:
       code: ${{ steps.files.outputs.code }}
-      package: ${{ steps.files.outputs.package }}
     steps:
       - id: files
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-          PACKAGING: '^(packaging/|\.github/workflows/|LICENSE$|NOTICE$|(.*/)?Cargo\.(toml|lock)$|crates/[^/]+/build\.rs$)'
         run: |
-          # When the file list can't be had, build and package.
+          # When the file list can't be had, build.
           if [ "$GITHUB_EVENT_NAME" != pull_request ] ||
             ! files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename')
           then
-            printf 'code=true\npackage=true\n' >> "$GITHUB_OUTPUT"
+            echo code=true >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if printf '%s\n' "$files" | grep -qv '\.md$'; then
@@ -47,12 +44,6 @@ jobs:
           else
             echo "Only Markdown changed:"; printf '%s\n' "$files"
             echo code=false >> "$GITHUB_OUTPUT"
-          fi
-          if printf '%s\n' "$files" | grep -qE "$PACKAGING"; then
-            echo package=true >> "$GITHUB_OUTPUT"
-          else
-            echo "Nothing the packages are built from changed"
-            echo package=false >> "$GITHUB_OUTPUT"
           fi
 
   # main's ruleset requires the three Test checks, so a Markdown-only PR still runs this job, but on
@@ -72,10 +63,6 @@ jobs:
     container: ${{ needs.changes.outputs.code == 'true' && matrix.container || '' }}
     env:
       BUILD: ${{ needs.changes.outputs.code }}
-      PACKAGE: ${{ needs.changes.outputs.package }}
-      # The release the Git 3.0 preview is built from, and its tarball's checksum.
-      GIT3: 2.56.0
-      GIT3_SHA256: 26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3
     steps:
       - name: Prepare container
         if: env.BUILD == 'true' && matrix.container
@@ -118,71 +105,3 @@ jobs:
       - name: Test with core.autocrlf
         if: env.BUILD == 'true' && runner.os == 'Linux'
         run: GIT_CONFIG_SYSTEM="$GITHUB_WORKSPACE/.github/autocrlf.gitconfig" cargo test --workspace --no-fail-fast
-      # Again with the Git 3.0 preview: git built with its breaking changes, which refuses bare
-      # repositories it isn't told about and makes new ones reftable (#228). Built once, cached
-      # (#166).
-      - uses: actions/cache@v6
-        if: env.BUILD == 'true' && matrix.container
-        id: git3
-        with:
-          path: /opt/git3
-          key: git-${{ env.GIT3 }}-breaking-${{ matrix.container }}-v1
-      - name: Build the Git 3.0 preview
-        if: env.BUILD == 'true' && matrix.container && steps.git3.outputs.cache-hit != 'true'
-        run: |
-          apt-get install -y --no-install-recommends zlib1g-dev xz-utils
-          curl -fsSLO "https://mirrors.edge.kernel.org/pub/software/scm/git/git-$GIT3.tar.xz"
-          echo "$GIT3_SHA256  git-$GIT3.tar.xz" | sha256sum -c
-          tar xJf "git-$GIT3.tar.xz"
-          make -C "git-$GIT3" -j"$(nproc)" prefix=/opt/git3 WITH_BREAKING_CHANGES=YesPlease \
-            NO_OPENSSL=1 NO_CURL=1 NO_EXPAT=1 NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 \
-            NO_RUST=1 INSTALL_STRIP=-s install
-          rm -rf "git-$GIT3" "git-$GIT3.tar.xz"
-      - name: Test with the Git 3.0 preview
-        if: env.BUILD == 'true' && matrix.container
-        run: |
-          PATH="/opt/git3/bin:$PATH" git --version
-          PATH="/opt/git3/bin:$PATH" cargo test --workspace --no-fail-fast
-      - name: Build release
-        if: env.PACKAGE == 'true'
-        run: cargo build --release
-      - uses: taiki-e/install-action@v2
-        if: env.PACKAGE == 'true'
-        with:
-          tool: ${{ runner.os == 'Linux' && 'cargo-about,cargo-deb,cargo-generate-rpm' || 'cargo-about' }}
-      # The binary with its license, NOTICE and the licenses of the crates built into it.
-      - name: Package
-        if: env.PACKAGE == 'true'
-        shell: bash
-        run: |
-          mkdir dist
-          cp target/release/parterre${{ runner.os == 'Windows' && '.exe' || '' }} LICENSE NOTICE dist/
-          cargo about generate --locked -c packaging/about.toml packaging/about.hbs \
-            -o dist/THIRD-PARTY-NOTICES.html
-      # The .deb and .rpm from the same binary (packaging/linux/build-packages.sh). The
-      # linux-packages job installs them.
-      - name: Linux packages
-        if: env.PACKAGE == 'true' && runner.os == 'Linux'
-        run: packaging/linux/build-packages.sh dist
-      # The installer from the same files (packaging/windows/build-msi.ps1).
-      - name: Windows installer
-        if: env.PACKAGE == 'true' && runner.os == 'Windows'
-        shell: bash
-        run: |
-          dotnet tool install --global wix --version 7.0.0
-          PATH="$USERPROFILE/.dotnet/tools:$PATH" \
-            pwsh packaging/windows/build-msi.ps1 -Stage dist -Out dist/parterre.msi
-      - uses: actions/upload-artifact@v7
-        if: env.PACKAGE == 'true'
-        with:
-          name: parterre-${{ matrix.os }}
-          path: dist/
-
-  # Installs the Linux leg's .deb and .rpm on Debian, Ubuntu, Fedora and openSUSE.
-  linux-packages:
-    name: Linux packages
-    needs: [changes, test]
-    if: needs.changes.outputs.package == 'true'
-    uses: ./.github/workflows/linux-packages.yml
-    with:
-      artifact: parterre-ubuntu-latest
