@@ -2,12 +2,13 @@
 //! set to `explicit`, which Git 3.0 makes the default (#228).
 mod common;
 
+use std::path::Path;
 use std::process::Command;
 
 use common::TestRepo;
 use parterre_core::Oid;
 use parterre_core::branches::{Action, Branches, Catalog, Create, Outcome};
-use parterre_core::git::{Git, load_repo};
+use parterre_core::git::{Git, GitError, load_repo};
 use parterre_util::CancelTree;
 
 /// Set for git through the environment, in command-line scope: git ignores the setting in a
@@ -92,4 +93,33 @@ fn a_bare_repository_opens_and_changes_when_git_only_takes_explicit_ones() {
     let catalog = Catalog::load(&wt).unwrap();
     assert!(catalog.has_working_tree);
     assert_eq!(catalog.current.as_deref(), Some("topic"));
+}
+
+#[test]
+fn a_bare_repository_git_refuses_names_the_folder_to_open() {
+    if !explicit("a_bare_repository_git_refuses_names_the_folder_to_open") {
+        return;
+    }
+    let mut r = TestRepo::new();
+    r.commit("only commit");
+    let dir = tempfile::tempdir().unwrap();
+    let bare = dir.path().join("bare.git");
+    r.git(&["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
+    let same =
+        |a: &Path, b: &Path| std::fs::canonicalize(a).unwrap() == std::fs::canonicalize(b).unwrap();
+
+    // From a folder inside it, git finds it and stops.
+    match load_repo(&bare.join("refs")).err() {
+        Some(GitError::BareRepositoryRefused { found, open }) => {
+            assert!(same(&found, &bare));
+            assert!(same(&open, &bare));
+        }
+        other => panic!("{other:?}"),
+    }
+    // A work tree's `.git`: git 2.45 and later take it, older ones point at the work tree.
+    match load_repo(&r.path().join(".git")) {
+        Ok(_) => {}
+        Err(GitError::BareRepositoryRefused { open, .. }) => assert!(same(&open, r.path())),
+        Err(e) => panic!("{e}"),
+    }
 }

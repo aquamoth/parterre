@@ -820,8 +820,11 @@ impl ParterreApp {
                 self.show_repo(Some(repo));
             }
             Err(e) => {
-                // A recent folder that is gone, or no longer a repository, leaves the list.
-                self.recent.remove(dir);
+                // A recent folder that is gone, or no longer a repository, leaves the list. One
+                // git won't open now, such as a bare repository it refuses, stays.
+                if matches!(e, parterre_core::git::GitError::NotARepository(_)) {
+                    self.recent.remove(dir);
+                }
                 self.status = Some((format!("Could not open {}: {e}", dir.display()), true));
             }
         }
