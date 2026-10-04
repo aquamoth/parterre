@@ -411,7 +411,9 @@ mod tests {
         let node = |at: &str, click: Option<&str>| {
             let (repo, catalog, commit) = (&repo, &catalog, rev(p, at));
             menu(
-                move |ui| branches::node_menu(ui, repo, commit, Some(catalog), false, false),
+                move |ui| {
+                    branches::node_menu(ui, repo, commit, &[commit], Some(catalog), false, false)
+                },
                 click,
             )
         };
@@ -627,7 +629,7 @@ mod tests {
         let (repo, catalog) = load(p);
         let up = rev(p, "up");
         let (texts, asked) = menu(
-            |ui| branches::node_menu(ui, &repo, up, Some(&catalog), false, false),
+            |ui| branches::node_menu(ui, &repo, up, &[up], Some(&catalog), false, false),
             Some("Cherry-pick up onto main…"),
         );
         assert!(

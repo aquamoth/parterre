@@ -283,7 +283,7 @@ mod tests {
                         false,
                     )
                 } else {
-                    branches::node_menu(ui, &repo, commit, Some(&catalog), false, false)
+                    branches::node_menu(ui, &repo, commit, &[commit], Some(&catalog), false, false)
                 }
             },
             None,

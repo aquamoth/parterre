@@ -3,7 +3,9 @@ mod common;
 
 use common::TestRepo;
 use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Catalog, Create, CreateDraft, Outcome, Warning};
+use parterre_core::branches::{
+    Action, BranchTip, Branches, Catalog, Create, CreateDraft, Outcome, Warning,
+};
 use parterre_util::CancelTree;
 
 fn oid(s: &str) -> Oid {
@@ -22,10 +24,25 @@ fn warning(out: Outcome) -> Warning {
     }
 }
 fn deletion(r: &TestRepo, name: &str) -> Action {
-    Action::Delete {
-        name: name.into(),
-        tip: oid(&r.git(&["rev-parse", &format!("refs/heads/{name}")])),
-    }
+    deletions(r, &[name])
+}
+fn deletions(r: &TestRepo, names: &[&str]) -> Action {
+    Action::DeleteBranches(
+        names
+            .iter()
+            .map(|name| BranchTip {
+                name: (*name).into(),
+                tip: oid(&r.git(&["rev-parse", &format!("refs/heads/{name}")])),
+            })
+            .collect(),
+    )
+}
+fn exists(r: &TestRepo, name: &str) -> bool {
+    Catalog::load(r.path())
+        .unwrap()
+        .locals
+        .iter()
+        .any(|b| b.name == name)
 }
 fn unique_branch() -> (TestRepo, Action, Oid) {
     let mut r = TestRepo::new();
@@ -609,6 +626,68 @@ fn changing_the_lost_set_with_the_same_count_requires_another_warning() {
 }
 
 #[test]
+fn several_merged_branches_go_at_once_without_a_question() {
+    let mut r = TestRepo::new();
+    r.commit("base");
+    r.git(&["branch", "one"]);
+    r.commit("more");
+    r.git(&["branch", "two"]);
+    match execute(&r, deletions(&r, &["one", "two"])) {
+        Outcome::Done(report) => assert_eq!(report.steps.len(), 1, "one git branch -d"),
+        out => panic!("{out:?}"),
+    }
+    assert!(!exists(&r, "one") && !exists(&r, "two"));
+}
+
+#[test]
+fn branches_deleted_together_warn_about_each_ones_commits_before_any_goes() {
+    let mut r = TestRepo::new();
+    r.commit("base");
+    r.git(&["branch", "merged"]);
+    r.branch("a");
+    let a = oid(&r.commit("only on a"));
+    r.branch("b");
+    let b = oid(&r.commit("only on b"));
+    r.checkout("main");
+    let action = deletions(&r, &["merged", "a", "b"]);
+    let w = warning(execute(&r, action.clone()));
+    let mut lost = vec![a, b];
+    lost.sort_by_key(|o| o.to_hex());
+    assert_eq!(w.commits, lost);
+    assert!(w.deletions[0].commits.is_empty());
+    // b reaches a's commit too: alone, a would lose nothing, as b keeps it.
+    assert_eq!(w.deletions[1].commits, [a]);
+    assert_eq!(w.deletions[2].commits.len(), 2);
+    assert!(exists(&r, "merged") && exists(&r, "a") && exists(&r, "b"));
+    done(Branches::new(r.path()).execute(action, Some(&w), &CancelTree::default()));
+    assert_eq!(Catalog::load(r.path()).unwrap().locals.len(), 1);
+}
+
+#[test]
+fn a_branch_kept_by_another_is_lost_once_both_are_deleted() {
+    let (r, _, tip) = unique_branch();
+    r.git(&["branch", "keep", &tip.to_hex()]);
+    done(execute(&r, deletion(&r, "topic")));
+    r.git(&["branch", "topic", &tip.to_hex()]);
+    let w = warning(execute(&r, deletions(&r, &["topic", "keep"])));
+    assert_eq!(w.commits, [tip]);
+}
+
+#[test]
+fn one_branch_that_cannot_go_keeps_them_all() {
+    let mut r = TestRepo::new();
+    r.commit("base");
+    r.git(&["branch", "free"]);
+    for names in [&["free", "main"][..], &["free", "free"]] {
+        assert!(matches!(
+            execute(&r, deletions(&r, names)),
+            Outcome::Failed { .. }
+        ));
+    }
+    assert!(exists(&r, "free"));
+}
+
+#[test]
 fn departing_detached_head_warns_before_switch_and_create_and_switch() {
     for create in [false, true] {
         let mut r = TestRepo::new();
@@ -820,10 +899,10 @@ fn bare_current_branch_cannot_be_deleted_even_when_git_would_allow_it() {
     assert!(!catalog.has_working_tree);
     assert_eq!(catalog.current.as_deref(), Some("main"));
     let outcome = Branches::new(bare.path()).execute(
-        Action::Delete {
+        Action::DeleteBranches(vec![BranchTip {
             name: "main".into(),
             tip,
-        },
+        }]),
         None,
         &CancelTree::default(),
     );

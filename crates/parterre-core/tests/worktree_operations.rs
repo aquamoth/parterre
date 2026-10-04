@@ -99,9 +99,11 @@ fn listed(r: &TestRepo, name: &str) -> PathBuf {
 }
 
 fn deletion(r: &TestRepo, name: &str) -> Action {
-    Action::DeleteWorktree {
-        path: listed(r, name),
-    }
+    deletions(r, &[name])
+}
+
+fn deletions(r: &TestRepo, names: &[&str]) -> Action {
+    Action::DeleteWorktrees(names.iter().map(|n| listed(r, n)).collect())
 }
 
 fn registered(r: &TestRepo, name: &str) -> bool {
@@ -207,7 +209,11 @@ fn deleting_a_worktree_with_a_rebase_in_progress_warns_then_ends_it() {
     assert!(!out.status.success());
     // The conflicted file is lost work, so it asks first.
     let w = warning(execute(&r, deletion(&r, "rebasing"), None));
-    assert!(w.files.iter().any(|f| f == "file"), "{:?}", w.files);
+    assert!(
+        w.deletions[0].files.iter().any(|f| f == "file"),
+        "{:?}",
+        w.deletions[0].files
+    );
     assert!(wt.join("file").exists());
     done(execute(&r, deletion(&r, "rebasing"), Some(&w)));
     assert!(!wt.exists());
@@ -471,7 +477,7 @@ fn changed_staged_and_untracked_files_are_listed_and_only_then_forced() {
     std::fs::write(path.join("dir/loose"), "untracked\n").unwrap();
     let action = deletion(&r, "dirty");
     let w = warning(execute(&r, action.clone(), None));
-    assert_eq!(w.files, ["dir/loose", "file", "staged"]);
+    assert_eq!(w.deletions[0].files, ["dir/loose", "file", "staged"]);
     assert!(w.commits.is_empty());
     assert!(!w.is_confirmation());
     assert!(w.commands[0].contains(&"--force".to_owned()));
@@ -491,7 +497,11 @@ fn ignored_files_are_never_lost_work() {
     std::fs::write(path.join(".env"), "SECRET=1").unwrap();
     let action = deletion(&r, "ignoring");
     let confirm = warning(execute(&r, action.clone(), None));
-    assert!(confirm.is_confirmation(), "{:?}", confirm.files);
+    assert!(
+        confirm.is_confirmation(),
+        "{:?}",
+        confirm.deletions[0].files
+    );
     done(execute(&r, action, Some(&confirm)));
     assert!(!path.exists());
 }
@@ -505,7 +515,7 @@ fn a_detached_head_with_commits_nothing_else_reaches_is_a_warning() {
     let action = deletion(&r, "detached");
     let w = warning(execute(&r, action.clone(), None));
     assert_eq!(w.commits, [only]);
-    assert!(w.files.is_empty());
+    assert!(w.deletions[0].files.is_empty());
     // Git itself would delete a clean detached worktree without a word: nothing to force.
     assert!(!w.commands[0].contains(&"--force".to_owned()));
     done(execute(&r, action, Some(&w)));
@@ -544,11 +554,11 @@ fn an_approval_is_void_once_more_would_be_lost() {
     assert!(confirm.is_confirmation());
     std::fs::write(path.join("new"), "written after the confirmation").unwrap();
     let w = warning(execute(&r, action.clone(), Some(&confirm)));
-    assert_eq!(w.files, ["new"]);
+    assert_eq!(w.deletions[0].files, ["new"]);
     assert!(path.join("new").exists());
     std::fs::write(path.join("newer"), "and more").unwrap();
     let again = warning(execute(&r, action.clone(), Some(&w)));
-    assert_eq!(again.files, ["new", "newer"]);
+    assert_eq!(again.deletions[0].files, ["new", "newer"]);
     assert!(path.join("newer").exists());
     done(execute(&r, action, Some(&again)));
     assert!(!path.exists());
@@ -574,14 +584,14 @@ fn the_main_open_and_locked_worktrees_are_never_deleted() {
     // From the linked worktree, the main one isn't the open one.
     let main = Catalog::load(&linked).unwrap().main;
     let error = failed(Branches::new(&linked).execute(
-        Action::DeleteWorktree { path: main },
+        Action::DeleteWorktrees(vec![main]),
         None,
         &CancelTree::default(),
     ));
     assert!(error.contains("main worktree"), "{error}");
     let open = Catalog::load(&linked).unwrap().root;
     let error = failed(Branches::new(&linked).execute(
-        Action::DeleteWorktree { path: open },
+        Action::DeleteWorktrees(vec![open]),
         None,
         &CancelTree::default(),
     ));
@@ -613,7 +623,7 @@ fn a_gone_detached_worktree_still_warns_about_its_commits() {
     std::fs::remove_dir_all(&path).unwrap();
     let w = warning(execute(&r, deletion(&r, "gone"), None));
     assert_eq!(w.commits.len(), 1);
-    assert!(w.files.is_empty());
+    assert!(w.deletions[0].files.is_empty());
 }
 
 #[test]
@@ -657,10 +667,10 @@ fn when_git_refuses_anyway_parterre_asks_again_before_forcing() {
     git_in(&path, &["commit", "-qm", "add a submodule"]);
     let action = deletion(&r, "w");
     let fresh = warning(execute(&r, action.clone(), None));
-    assert!(fresh.is_confirmation(), "{:?}", fresh.files);
+    assert!(fresh.is_confirmation(), "{:?}", fresh.deletions[0].files);
     match execute(&r, action.clone(), Some(&fresh)) {
         Outcome::Warning(again) => {
-            assert!(again.refusal.is_some());
+            assert!(again.deletions[0].refusal.is_some());
             assert!(!again.is_confirmation());
             assert!(again.commands[0].contains(&"--force".to_owned()));
             assert!(path.exists());
@@ -669,6 +679,106 @@ fn when_git_refuses_anyway_parterre_asks_again_before_forcing() {
         }
         // Git versions that remove such worktrees without --force.
         Outcome::Done(_) => assert!(!path.exists()),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn several_worktrees_are_asked_about_once_each_with_its_own_loss() {
+    let (r, others, _) = repository();
+    let clean = worktree(&r, others.path(), "clean", &["-b", "clean"]);
+    let dirty = worktree(&r, others.path(), "dirty", &["-b", "dirty"]);
+    std::fs::write(dirty.join("file"), "changed\n").unwrap();
+    let detached = worktree(&r, others.path(), "detached", &["--detach"]);
+    git_in(
+        &detached,
+        &["commit", "-q", "--allow-empty", "-m", "only here"],
+    );
+    let only = oid(&git_in(&detached, &["rev-parse", "HEAD"]));
+    let action = deletions(&r, &["clean", "dirty", "detached"]);
+    let w = warning(execute(&r, action.clone(), None));
+    assert!(!w.is_confirmation());
+    let names: Vec<_> = w.deletions.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, ["clean", "dirty", "detached"]);
+    assert!(w.deletions[0].files.is_empty() && w.deletions[0].commits.is_empty());
+    assert_eq!(w.deletions[1].files, ["file"]);
+    assert_eq!(w.deletions[2].commits, [only]);
+    assert_eq!(w.commits, [only]);
+    let forced: Vec<bool> = w
+        .commands
+        .iter()
+        .map(|c| c.contains(&"--force".to_owned()))
+        .collect();
+    assert_eq!(forced, [false, true, false]);
+    assert!(clean.exists() && dirty.exists() && detached.exists());
+    done(execute(&r, action, Some(&w)));
+    assert!(!clean.exists() && !dirty.exists() && !detached.exists());
+    assert_eq!(
+        r.git(&["branch", "--list", "clean", "dirty"]),
+        "clean\n  dirty"
+    );
+}
+
+#[test]
+fn detached_worktrees_deleted_together_lose_the_commits_they_share() {
+    let (r, others, _) = repository();
+    let path = worktree(&r, others.path(), "one", &["--detach"]);
+    git_in(&path, &["commit", "-q", "--allow-empty", "-m", "shared"]);
+    let head = git_in(&path, &["rev-parse", "HEAD"]);
+    worktree(&r, others.path(), "two", &["--detach", &head]);
+    let w = warning(execute(&r, deletions(&r, &["one", "two"]), None));
+    assert_eq!(w.commits, [oid(&head)]);
+    assert_eq!(w.deletions[0].commits, [oid(&head)]);
+    assert_eq!(w.deletions[1].commits, [oid(&head)]);
+}
+
+#[test]
+fn one_worktree_that_cannot_go_stops_them_all_before_anything_is_deleted() {
+    let (r, others, _) = repository();
+    let free = worktree(&r, others.path(), "free", &["-b", "free"]);
+    let locked = worktree(&r, others.path(), "locked", &["-b", "locked"]);
+    r.git(&["worktree", "lock", &locked.to_string_lossy()]);
+    let error = failed(execute(&r, deletions(&r, &["free", "locked"]), None));
+    assert!(error.contains("locked"), "{error}");
+    let error = failed(execute(&r, deletions(&r, &["free", "free"]), None));
+    assert!(error.contains("twice"), "{error}");
+    assert!(free.exists() && locked.exists());
+}
+
+#[test]
+fn the_worktrees_git_refuses_are_asked_about_again_and_the_rest_deleted() {
+    let (r, others, _) = repository();
+    let plain = worktree(&r, others.path(), "plain", &["-b", "plain"]);
+    let path = worktree(&r, others.path(), "w", &["-b", "w"]);
+    let sub = TestRepo::new();
+    sub.git(&["commit", "-q", "--allow-empty", "-m", "sub"]);
+    git_in(
+        &path,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &sub.path().to_string_lossy(),
+            "sub",
+        ],
+    );
+    git_in(&path, &["commit", "-qm", "add a submodule"]);
+    let action = deletions(&r, &["w", "plain"]);
+    let fresh = warning(execute(&r, action.clone(), None));
+    assert!(fresh.is_confirmation());
+    match execute(&r, action, Some(&fresh)) {
+        Outcome::Warning(again) => {
+            assert!(!plain.exists(), "the one git agreed to went");
+            assert_eq!(again.action, deletion(&r, "w"));
+            assert_eq!(again.deletions.len(), 1);
+            assert!(again.deletions[0].refusal.is_some());
+            done(execute(&r, again.action.clone(), Some(&again)));
+            assert!(!path.exists());
+        }
+        // Git versions that remove such worktrees without --force.
+        Outcome::Done(_) => assert!(!path.exists() && !plain.exists()),
         other => panic!("{other:?}"),
     }
 }

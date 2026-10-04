@@ -322,8 +322,8 @@ impl Preview {
             &git,
             catalog,
             head,
-            Some(&format!("refs/heads/{branch}")),
-            Some(&catalog.root),
+            &[format!("refs/heads/{branch}")],
+            &[catalog.root.as_path()],
             Some(target),
         )?;
         let entries = entries(&git, &catalog.root, &h, &t)?;

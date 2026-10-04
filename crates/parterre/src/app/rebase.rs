@@ -742,7 +742,9 @@ mod tests {
         let node = |at: &str, click: Option<&str>| {
             let (repo, catalog, commit) = (&repo, &catalog, rev(p, at));
             menu(
-                move |ui| branches::node_menu(ui, repo, commit, Some(catalog), false, false),
+                move |ui| {
+                    branches::node_menu(ui, repo, commit, &[commit], Some(catalog), false, false)
+                },
                 click,
             )
         };
@@ -801,7 +803,7 @@ mod tests {
         let (repo, catalog) = load(p);
         let main = rev(p, "main");
         let (texts, asked) = menu(
-            |ui| branches::node_menu(ui, &repo, main, Some(&catalog), false, false),
+            |ui| branches::node_menu(ui, &repo, main, &[main], Some(&catalog), false, false),
             Some("Switch to"),
         );
         // main, other and the commit detached: one greyed-out item for all of them.
@@ -834,7 +836,7 @@ mod tests {
         let node = |click: Option<&str>| {
             let (repo, catalog) = (&repo, &catalog);
             menu(
-                move |ui| branches::node_menu(ui, repo, up, Some(catalog), false, false),
+                move |ui| branches::node_menu(ui, repo, up, &[up], Some(catalog), false, false),
                 click,
             )
         };

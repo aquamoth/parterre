@@ -30,7 +30,7 @@ The package installs parterre for all users, into `C:\Program Files\parterre`, w
 ]]></description>
     <releaseNotes>https://github.com/aquamoth/parterre/releases/tag/__TAG__</releaseNotes>
     <dependencies>
-      <!-- git log's diff-merges option, which parterre uses, is from git 2.31. -->
+      <!-- parterre_core::git::MINIMUM_VERSION; crates/parterre/tests/packaging.rs checks it. -->
       <dependency id="git" version="2.31.0" />
     </dependencies>
   </metadata>

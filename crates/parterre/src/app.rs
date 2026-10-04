@@ -993,7 +993,7 @@ impl ParterreApp {
     }
 
     /// Automation: opens the branch or worktree form (`create-branch:REF`, `add-worktree:REF`),
-    /// asks to delete a worktree (`delete-worktree:FOLDER`, its name), or opens the reset
+    /// asks to delete worktrees (`delete-worktree:FOLDER`, by name, or several: `A,B`), or opens the reset
     /// dialog (`reset:REF`, or `reset:REF:MODE`), the rebase's (`rebase:REF`), the merge
     /// dialog (`merge:REF`), the cherry-pick's (`cherry-pick:REF`, the commits of REF the
     /// current branch lacks) or the revert's (`revert:REF`), once the branch information is in.
@@ -1014,14 +1014,18 @@ impl ParterreApp {
         };
         let request = match kind {
             "delete-worktree" => {
-                let w = catalog
-                    .worktrees
-                    .iter()
-                    .find(|w| w.name() == name)
-                    .ok_or_else(|| format!("no worktree named {name}"))?;
-                branches::Request::Run(parterre_core::branches::Action::DeleteWorktree {
-                    path: w.path.clone(),
-                })
+                let paths = name
+                    .split(',')
+                    .map(|name| {
+                        catalog
+                            .worktrees
+                            .iter()
+                            .find(|w| w.name() == name)
+                            .map(|w| w.path.clone())
+                            .ok_or_else(|| format!("no worktree named {name}"))
+                    })
+                    .collect::<Result<_, _>>()?;
+                branches::Request::Run(parterre_core::branches::Action::DeleteWorktrees(paths))
             }
             "merge" => branches::Request::Merge {
                 theirs: oid(name)?,
@@ -2094,10 +2098,12 @@ impl ParterreApp {
                             ui.close();
                         }
                     });
+                    let group_oids: Vec<Oid> = group.iter().map(|&n| oid_of(n)).collect();
                     if let Some(request) = branches::node_menu(
                         ui,
                         &scene.repo,
                         oid,
+                        &group_oids,
                         self.branches.catalog.as_deref(),
                         self.branches.busy(),
                         worktrees_shown,

@@ -57,12 +57,19 @@ parterre runs the `git` command-line tool, so every package needs git:
 
 | Channel | How |
 |---|---|
-| winget | `PackageDependencies: Git.Git`, installed automatically since winget 1.6. Must be in the first version: a dependency added later isn't installed on upgrade. TortoiseGit's manifest does the same. |
-| Chocolatey | dependency on the `git` package |
-| .deb / .rpm | `Depends: git` / `Requires: git-core` (git without Perl and the GUIs, on Fedora and openSUSE) |
+| winget | `PackageDependencies: Git.Git` with `MinimumVersion: 2.31.0`, installed automatically since winget 1.6. Must be in the first version: a dependency added later isn't installed on upgrade. TortoiseGit's manifest does the same. |
+| Chocolatey | dependency on the `git` package, version 2.31.0 or newer |
+| .deb / .rpm | `Depends: git (>= 1:2.31)` / `Requires: git-core >= 2.31` (git without Perl and the GUIs, on Fedora and openSUSE) |
 | Snap | git bundled (the sandbox can't reach the host's git) |
 | Flathub | git bundled; the freedesktop runtime has none |
 | crates.io, zip, tarballs | documented in the README |
+
+The minimum is git 2.31 (`parterre_core::git::MINIMUM_VERSION`,
+[research](research/git-version-support.md)). Every channel declares it, so that raising it
+later is gated everywhere; `crates/parterre/tests/packaging.rs` fails until they agree. A
+channel that bundles git must bundle one at least that new. parterre also checks `git --version`
+before it opens a repository, for the MSI, the zip, `cargo install` and a git changed after
+installing (#233).
 
 Bundling git on Windows (MinGit) was rejected. It unpacks to about 90 MB, it is GPLv2-only so
 its source would have to ship alongside, and every git security fix would need a parterre
