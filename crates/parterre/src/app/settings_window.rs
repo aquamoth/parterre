@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Align, Layout, RichText, ScrollArea, Stroke, Ui, vec2};
 use parterre_core::glyphs;
-use parterre_core::layout::{Direction, LayoutOptions, Ranking};
+use parterre_core::layout::{Direction, LayoutOptions, Ranking, Trunk};
 use rfd::AsyncFileDialog;
 
 use super::log_window::layout_picker;
@@ -385,6 +385,15 @@ impl ParterreApp {
                             combo(ui, "ranking", &mut l.ranking, &Ranking::ALL, Ranking::label);
                         },
                     );
+                    rows.row(
+                        "Default branch",
+                        "Where the first-parent line of origin/HEAD goes: one straight line \
+                         with each branch on the side that stays narrowest, the same with \
+                         branches taking turns, or leftmost and bending like the others.",
+                        |ui| {
+                            combo(ui, "trunk", &mut l.trunk, &Trunk::ALL, Trunk::label);
+                        },
+                    );
                     rows.slider(
                         "Between layers",
                         LAYER_GAP_TIP,
@@ -413,6 +422,7 @@ impl ParterreApp {
                     *l = LayoutOptions {
                         direction: l.direction,
                         ranking: l.ranking,
+                        trunk: l.trunk,
                         ..LayoutOptions::default()
                     };
                 }

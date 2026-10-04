@@ -103,6 +103,9 @@ fn perturb(g: &mut LayeredGraph, rng: &mut XorShift) {
         }
         for _ in 0..n.div_ceil(3) {
             let i = (rng.next() % (n as u64 - 1)) as usize;
+            if !g.side.is_empty() && g.side[layer[i] as usize] != g.side[layer[i + 1] as usize] {
+                continue;
+            }
             layer.swap(i, i + 1);
         }
     }
@@ -119,6 +122,9 @@ fn transpose_all(g: &mut LayeredGraph) {
         for l in 0..g.layers.len() {
             for i in 0..g.layers[l].len().saturating_sub(1) {
                 let (a, b) = (g.layers[l][i] as usize, g.layers[l][i + 1] as usize);
+                if !g.side.is_empty() && g.side[a] != g.side[b] {
+                    continue;
+                }
                 let mut keep = 0;
                 let mut swap = 0;
                 for up in [true, false] {
@@ -213,8 +219,21 @@ fn initial_order(g: &mut LayeredGraph, input: &LayoutInput) {
             }
         }
     }
-    for layer in &mut g.layers {
-        layer.sort_by_key(|&i| seq[i as usize]);
+    if g.side.is_empty() {
+        for layer in &mut g.layers {
+            layer.sort_by_key(|&i| seq[i as usize]);
+        }
+    } else {
+        // Left | trunk | right, the left side mirrored so that the first-visited branches sit
+        // next to the trunk on both sides.
+        let side = &g.side;
+        for layer in &mut g.layers {
+            layer.sort_by_key(|&i| {
+                let s = side[i as usize];
+                let k = seq[i as usize] as i64;
+                (s, if s < 0 { -k } else { k })
+            });
+        }
     }
     g.update_positions();
 }
@@ -271,6 +290,11 @@ fn reorder_layer(
         if key.is_some() {
             layer[slot] = movable.next().expect("one movable item per keyed slot").2;
         }
+    }
+    // Each side of the trunk stays on its side.
+    if !g.side.is_empty() {
+        let side = &g.side;
+        layer.sort_by_key(|&i| side[i as usize]);
     }
     for (i, &item) in layer.iter().enumerate() {
         g.pos[item as usize] = i as u32;
