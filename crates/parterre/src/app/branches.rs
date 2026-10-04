@@ -7,8 +7,8 @@ use std::sync::{Arc, mpsc};
 
 use eframe::egui::{self, Color32, Id, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::{
-    Action, AddWorktree, Branches, Catalog, Checkout, Create, CreateDraft, Outcome, Report,
-    Warning, command_text,
+    Action, AddWorktree, BranchTip, Branches, Catalog, Checkout, Create, CreateDraft, Outcome,
+    Report, Warning, command_text,
 };
 use parterre_core::file_diff::FileDiffSpec;
 use parterre_core::reset::{Mode, Preview};
@@ -128,7 +128,7 @@ fn menu_for(
     busy: bool,
     worktrees: bool,
 ) -> Option<Request> {
-    let branch = branch_section(ui, repo, commit, selection, catalog, busy);
+    let branch = branch_section(ui, repo, commit, group, selection, catalog, busy);
     let worktree = worktrees
         .then(|| worktree_section(ui, commit, group, catalog, busy))
         .flatten();
@@ -147,6 +147,7 @@ fn branch_section(
     ui: &mut Ui,
     repo: &Repo,
     commit: Oid,
+    group: &[Oid],
     selection: Option<&[Oid]>,
     catalog: Option<&Catalog>,
     busy: bool,
@@ -253,25 +254,48 @@ fn branch_section(
         }
     }
     target_menu(ui, "Switch to", &switches, busy, &mut request);
-    let deletions: Vec<_> = refs
-        .iter()
-        .filter(|r| {
-            r.kind == RefKind::LocalBranch
-                && catalog.current.as_ref() != Some(&r.name)
-                && !catalog.occupied.contains_key(&r.name)
-        })
-        .map(|r| {
-            (
-                r.name.clone(),
-                Request::Run(Action::Delete {
-                    name: r.name.clone(),
-                    tip: commit,
-                }),
-                None,
-            )
-        })
-        .collect();
-    target_menu(ui, "Delete branch", &deletions, busy, &mut request);
+    // The local branches at a commit that are checked out nowhere.
+    let deletable = |commit: Oid| {
+        let mut found: Vec<BranchTip> = repo
+            .refs
+            .iter()
+            .filter(|r| {
+                r.kind == RefKind::LocalBranch
+                    && repo.commit(r.target).oid == commit
+                    && catalog
+                        .locals
+                        .iter()
+                        .any(|b| b.name == r.name && b.tip == commit)
+                    && catalog.current.as_ref() != Some(&r.name)
+                    && !catalog.occupied.contains_key(&r.name)
+            })
+            .map(|r| BranchTip {
+                name: r.name.clone(),
+                tip: commit,
+            })
+            .collect();
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        found
+    };
+    if group.len() > 1 && group.iter().all(|&c| !deletable(c).is_empty()) {
+        let all: Vec<BranchTip> = group.iter().flat_map(|&c| deletable(c)).collect();
+        let names: Vec<String> = all.iter().map(|b| b.name.clone()).collect();
+        let label = format!("Delete {} branches", all.len());
+        let delete = Request::Run(Action::DeleteBranches(all));
+        all_item(ui, label, &names, delete, None, busy, &mut request);
+    } else {
+        let deletions: Vec<Target> = deletable(commit)
+            .into_iter()
+            .map(|b| {
+                (
+                    b.name.clone(),
+                    Request::Run(Action::DeleteBranches(vec![b])),
+                    None,
+                )
+            })
+            .collect();
+        target_menu(ui, "Delete branch", &deletions, busy, &mut request);
+    }
     rebase_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
     merge_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
     merge_into_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
@@ -2236,10 +2260,16 @@ impl Tool {
         let refused = warning.deletions.iter().any(|d| d.refusal.is_some());
         let several = warning.deletions.len() > 1;
         let (title, button) = match &warning.action {
-            Action::Delete { name, .. } => (
-                format!("Delete branch {name} and lose {commits}?"),
-                "Delete anyway",
-            ),
+            Action::DeleteBranches(_) => {
+                let what = match warning.deletions.as_slice() {
+                    [one] => format!("branch {}", one.name),
+                    many => format!("{} branches", many.len()),
+                };
+                (
+                    format!("Delete {what} and lose {commits}?"),
+                    "Delete anyway",
+                )
+            }
             Action::DeleteWorktrees(_) => {
                 let what = match warning.deletions.as_slice() {
                     [one] => format!("worktree {}", one.name),
@@ -2493,8 +2523,9 @@ impl Drop for Tool {
 mod tests {
     use std::path::Path;
 
+    use eframe::egui;
     use parterre_core::Oid;
-    use parterre_core::branches::Action;
+    use parterre_core::branches::{Action, BranchTip};
 
     use super::super::tool_harness::{Harness, git, load, menu, write};
     use super::Request;
@@ -2663,5 +2694,99 @@ mod tests {
         h.until("both are gone", |_| {
             !a.exists() && !others.path().join("b").exists()
         });
+    }
+
+    /// main: base → tip; `one` and `two` at base, `three` at a commit of its own on base,
+    /// `merged` at the tip.
+    fn branches() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(p, &["branch", "one"]);
+        git(p, &["branch", "two"]);
+        git(p, &["switch", "-q", "-c", "three"]);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "only three"]);
+        git(p, &["switch", "-q", "main"]);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "tip"]);
+        git(p, &["branch", "merged"]);
+        dir
+    }
+
+    fn branch_names(request: &Option<Request>) -> Vec<String> {
+        match request {
+            Some(Request::Run(Action::DeleteBranches(branches))) => {
+                branches.iter().map(|b| b.name.clone()).collect()
+            }
+            other => panic!("not a deletion: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_group_of_branch_nodes_deletes_them_all_with_one_item() {
+        let dir = branches();
+        let (repo, catalog) = load(dir.path());
+        let p = dir.path();
+        let (base, three, tip) = (rev(p, "one"), rev(p, "three"), rev(p, "main"));
+        let item = |commit, group: &[Oid], click| {
+            menu(
+                |ui| super::node_menu(ui, &repo, commit, group, Some(&catalog), false, false),
+                click,
+            )
+        };
+        let (_, asked) = item(three, &[three, base, tip], Some("Delete 4 branches"));
+        assert_eq!(branch_names(&asked), ["three", "one", "two", "merged"]);
+        let (texts, _) = item(base, &[base], None);
+        assert!(texts.iter().any(|t| t == "Delete branch"), "{texts:?}");
+        // A node with no branch in the group: only the clicked node's.
+        let none = Oid::from_hex(&git(p, &["commit-tree", "-m", "x", "HEAD^{tree}"])).unwrap();
+        let (texts, _) = item(three, &[three, none], Some("Delete branch three"));
+        assert!(
+            !texts.iter().any(|t| t.starts_with("Delete 2")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn deleting_several_branches_warns_with_each_ones_commits_then_deletes_them_all() {
+        let dir = branches();
+        let mut h = Harness::new(dir);
+        let three = h.rev("three");
+        let tip = |name: &str| BranchTip {
+            name: name.into(),
+            tip: h.rev(name),
+        };
+        let action = Action::DeleteBranches(vec![tip("one"), tip("three"), tip("merged")]);
+        h.ask(Request::Run(action), "Delete 3 branches and lose 1 commit?");
+        for name in ["one", "three", "merged", "1 commit"] {
+            assert!(h.shows(name), "{name}: {:?}", h.texts);
+        }
+        h.click("Show in log");
+        let (_, commits, _) = h.tool.log_request.take().expect("the log is asked for");
+        assert_eq!(commits, [three]);
+        h.click("Delete anyway");
+        h.until("all three are gone", |h| {
+            git(h.path(), &["branch", "--format=%(refname:short)"]) == "main\ntwo"
+        });
+    }
+
+    #[test]
+    fn several_branches_that_lose_nothing_go_without_a_question() {
+        let mut h = Harness::new(branches());
+        let tip = |name: &str| BranchTip {
+            name: name.into(),
+            tip: h.rev(name),
+        };
+        let action = Action::DeleteBranches(vec![tip("one"), tip("merged")]);
+        let ctx = h.ctx.clone();
+        h.tool
+            .request(&ctx, Request::Run(action), egui::ViewportId::ROOT);
+        h.until("both are gone", |h| {
+            git(h.path(), &["branch", "--format=%(refname:short)"]) == "main\nthree\ntwo"
+        });
+        h.until("the notification", |h| {
+            h.shows("Delete 2 branches") && !h.shows("Cancel")
+        });
+        assert!(!h.shows("Delete anyway"));
     }
 }

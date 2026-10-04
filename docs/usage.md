@@ -107,7 +107,9 @@ whose folder is gone gets a crossed-out folder. From a node's menu:
 - *Open* › *File system* / *Terminal* opens its folder; *Copy* copies the folder's path.
 
 **Branches:** *Create branch here…* (optionally switching to it), *Switch to* a branch or a
-commit (detached), and *Delete branch*.
+commit (detached), and *Delete branch*. With several nodes selected that all have local
+branches, *Delete N branches* deletes them all. It asks first only when that loses commits,
+and then it lists each branch's.
 
 **The open worktree's branch**, from the graph and the log:
 
