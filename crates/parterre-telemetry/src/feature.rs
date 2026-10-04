@@ -138,6 +138,7 @@ names! {
     /// `graph_mode`: which commits the graph keeps as nodes.
     GraphMode {
         LabelledCommits => "labelled_commits",
+        LabelledForks => "labelled_forks",
         BranchingsAndMerges => "branchings_and_merges",
         AllCommits => "all_commits",
     }

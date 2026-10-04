@@ -20,7 +20,7 @@ window.
 ```sh
 parterre [PATH]                    # open the repository containing PATH (default: the
                                    # current directory's, or none: the window asks for one)
-parterre --mode branches           # also show every fork point and merge
+parterre --mode forks              # also show where labelled histories fork apart
 parterre --mode all --no-remotes   # every commit, local branches and tags only
 parterre --look classic            # straight, unbundled edges like TortoiseGit
 parterre --hide 'pipeline/*,release/*'        # leave out build and release branches
@@ -38,9 +38,12 @@ and Nemo. `Ctrl+O` opens another folder, and the ☰ menu lists the recent ones.
 ## The graph
 
 parterre shows the commits that have a branch, a tag or a worktree on them, and leaves out the
-commits in between, as TortoiseGit's revision graph does. *Branchings and merges* adds every
-fork point and merge, and *All commits* shows everything. Hover an edge to list the commits
-collapsed into it; click it to keep it highlighted while you look around.
+commits in between, as TortoiseGit's revision graph does. *Labelled forks* adds the commits
+where their histories fork apart: a branch that merged its base back in forks off at the latest
+such merge, as if rebased. *Branchings and merges* (in the ☰ menu) adds every fork point and
+merge, as TortoiseGit's "Show branchings and merges" does, and *All commits* shows everything.
+Hover an edge to list the commits collapsed into it; click it to keep it highlighted while you
+look around.
 
 | Do | To |
 |---|---|

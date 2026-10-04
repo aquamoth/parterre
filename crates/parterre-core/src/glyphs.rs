@@ -108,7 +108,8 @@ pub const LABELLED: Glyph = &[
     rect(11.0, 3.5, 10.0, 4.0, 2.0, false),
     rect(11.0, 16.5, 7.0, 4.0, 2.0, false),
 ];
-/// Branchings and merges: a fork point and the merge that joins its two sides.
+/// Labelled forks (and the log's "Branchings and merges only"): a fork point and the merge that
+/// joins its two sides.
 pub const BRANCHINGS: Glyph = &[
     dot(12.0, 4.5, 2.2),
     dot(12.0, 19.5, 2.2),

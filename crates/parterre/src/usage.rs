@@ -63,6 +63,7 @@ pub fn properties(
         text_size: text_size(settings.text_size),
         graph_mode: match settings.graph.simplification {
             Simplification::Decorated => telemetry::GraphMode::LabelledCommits,
+            Simplification::Forks => telemetry::GraphMode::LabelledForks,
             Simplification::BranchesAndMerges => telemetry::GraphMode::BranchingsAndMerges,
             Simplification::AllCommits => telemetry::GraphMode::AllCommits,
         },
