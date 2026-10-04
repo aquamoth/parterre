@@ -165,7 +165,7 @@ parterre ~/src/other --worktrees   # another one, with its worktrees shown
 A few command-line options:
 
 ```sh
-parterre --mode branches           # also show every fork point and merge
+parterre --mode forks              # also show where labelled histories fork apart
 parterre --hide 'pipeline/*'       # leave out build branches
 parterre --branch-color 'feature/*=#9b59b6'   # colour branches by name
 parterre --export graph.svg        # write the graph as SVG (or .png, .webp), no window

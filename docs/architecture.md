@@ -180,6 +180,11 @@ crates/parterre        the binary (eframe/egui)
      repositories, and the edges match on 300 of them.
      - One deliberate exception: git hides an empty-tree root even when it carries a label;
        parterre shows it.
+   - *Labelled forks* (not in TortoiseGit) runs the decorated reduction on the reversed graph
+     to find where labelled histories fork apart, keeps those too, and leaves merges out: a
+     hidden commit stands for all its nearest kept ancestors, so the nodes above a merge reach
+     both sides. On the Apps repository it is 126 nodes against 89 labelled and 2467 for
+     TortoiseGit's branchings and merges.
    - *Branchings and merges* reproduces TortoiseGit's chain collapse.
 3. **Measure** (`scene.rs`): node boxes use TortoiseGit's geometry: one row per ref, or the
    short hash where there is none, then one row per pull request; 20 px side margins and 5 px

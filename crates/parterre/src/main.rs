@@ -253,6 +253,8 @@ enum LogLayoutArg {
 enum Mode {
     /// Commits with refs, and merges joining them (TortoiseGit default).
     Labelled,
+    /// Also where labelled commits' histories fork apart.
+    Forks,
     /// Also every fork point and merge (TortoiseGit "Show branchings and merges").
     Branches,
     /// Every commit.
@@ -445,6 +447,7 @@ fn apply_cli(cli: &Cli, s: &mut settings::Settings) {
     if let Some(mode) = cli.mode {
         s.graph.simplification = match mode {
             Mode::Labelled => Simplification::Decorated,
+            Mode::Forks => Simplification::Forks,
             Mode::Branches => Simplification::BranchesAndMerges,
             Mode::All => Simplification::AllCommits,
         };

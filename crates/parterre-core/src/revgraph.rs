@@ -7,6 +7,11 @@
 //!   `git log --simplify-by-decoration` keeps: commits with refs, roots, and merges that still
 //!   join two independent kept lines. Parents are rewritten to their nearest kept ancestor and,
 //!   as git's `simplify_merges` does, a parent that is an ancestor of another parent is dropped.
+//! * [`Simplification::Forks`] keeps labelled commits and the commits where their histories
+//!   fork apart: the same reduction run from the tips down (a fork is a merge, seen backwards).
+//!   Merges are not nodes: a hidden commit stands for all its nearest kept ancestors, so a
+//!   branch that merged its base back in forks off at its latest such merge, as if rebased.
+//!   Not in TortoiseGit.
 //! * [`Simplification::BranchesAndMerges`] is TortoiseGit's "Show branchings and merges": also
 //!   keeps every merge, fork point and tip, and every commit whose only child is a merge.
 //! * [`Simplification::AllCommits`] keeps everything.
@@ -31,6 +36,8 @@ pub enum Simplification {
     /// Commits with refs, roots and merges joining independent lines (TortoiseGit default).
     #[default]
     Decorated,
+    /// Additionally the commits where labelled commits' histories fork apart.
+    Forks,
     /// Additionally every merge, fork point and merge source ("Show branchings and merges").
     BranchesAndMerges,
     /// Every commit is a node.
@@ -38,8 +45,9 @@ pub enum Simplification {
 }
 
 impl Simplification {
-    pub const ALL: [Simplification; 3] = [
+    pub const ALL: [Simplification; 4] = [
         Simplification::Decorated,
+        Simplification::Forks,
         Simplification::BranchesAndMerges,
         Simplification::AllCommits,
     ];
@@ -47,6 +55,7 @@ impl Simplification {
     pub fn label(self) -> &'static str {
         match self {
             Simplification::Decorated => "Labelled commits",
+            Simplification::Forks => "Labelled forks",
             Simplification::BranchesAndMerges => "Branchings and merges",
             Simplification::AllCommits => "All commits",
         }
@@ -424,30 +433,75 @@ pub fn build_with_pull_requests(
     }
     let order = parents_first_order(n, &visible, &children, &parents_of);
 
-    // Kept commits and representatives, in one parents-first pass.
+    // In the forks mode, the commits where labelled histories fork apart: the decorated
+    // reduction of the reversed graph, children first.
     let mode = options.simplification;
+    let simplified = matches!(mode, Simplification::Decorated | Simplification::Forks);
+    let mut fork = vec![false; n];
+    if mode == Simplification::Forks {
+        let mut kids: Vec<Vec<u32>> = vec![Vec::new(); n];
+        for &c in &order {
+            for p in parents_of(c) {
+                kids[p.ix()].push(c as u32);
+            }
+        }
+        let mut rep = vec![NO_REP; n];
+        let mut kept_edges: Vec<Vec<(u32, u32, bool)>> = vec![Vec::new(); n];
+        let mut ancestry = Ancestry::new(n);
+        let mut candidates: Vec<(u32, u32, bool)> = Vec::new();
+        for &c in order.iter().rev() {
+            candidates.clear();
+            for &k in &kids[c] {
+                let target = rep[k as usize];
+                if !candidates.iter().any(|&(t, _, _)| t == target) {
+                    candidates.push((target, 0, false));
+                }
+            }
+            if candidates.len() > 1 {
+                ancestry.drop_redundant(&mut candidates, &kept_edges);
+            }
+            fork[c] = candidates.len() > 1;
+            if fork[c] || decorated[c] || candidates.is_empty() {
+                rep[c] = c as u32;
+                ancestry.add(c, &candidates);
+                kept_edges[c] = candidates.clone();
+            } else {
+                rep[c] = candidates[0].0;
+            }
+        }
+    }
+
+    // Kept commits and representatives, in one parents-first pass.
     let treesame_root = |c: usize| {
-        mode == Simplification::Decorated
-            && parents_of(c).is_empty()
-            && repo.commits[c].empty_tree
-            && !decorated[c]
+        simplified && parents_of(c).is_empty() && repo.commits[c].empty_tree && !decorated[c]
     };
     let mut rep = vec![NO_REP; n];
     let mut depth = vec![0u32; n];
     let mut kept_edges: Vec<Vec<(u32, u32, bool)>> = vec![Vec::new(); n];
     let mut ancestry = Ancestry::new(n);
     let mut candidates: Vec<(u32, u32, bool)> = Vec::new();
+    // In the forks mode merges are not nodes: a hidden commit stands for all its nearest kept
+    // ancestors, so the nodes above a merge reach both sides.
+    let mut reach: Vec<Vec<(u32, u32, bool)>> = vec![Vec::new(); n];
     for &c in &order {
         let ps = parents_of(c);
         candidates.clear();
         for (k, p) in ps.iter().enumerate() {
             let p = p.ix();
+            if mode == Simplification::Forks && rep[p] != p as u32 {
+                for &(t, d, first) in &reach[p] {
+                    if !candidates.iter().any(|&(x, _, _)| x == t) {
+                        candidates.push((t, d, k == 0 && first));
+                    }
+                }
+                continue;
+            }
             let target = rep[p];
             if target != NO_REP && !candidates.iter().any(|&(t, _, _)| t == target) {
                 candidates.push((target, depth[p], k == 0));
             }
         }
-        if mode == Simplification::Decorated && candidates.len() > 1 {
+        if simplified && candidates.len() > 1 {
             ancestry.drop_redundant(&mut candidates, &kept_edges);
             // git's mark_treesame_root_parents, keeping one if that would leave none.
             if candidates
@@ -465,6 +519,7 @@ pub fn build_with_pull_requests(
                 decorated[c] || ps.len() != 1 || children[c] != 1 || child_is_merge[c]
             }
             Simplification::Decorated => decorated[c] || ps.is_empty() || candidates.len() > 1,
+            Simplification::Forks => decorated[c] || fork[c] || ps.is_empty(),
         };
         if kept || candidates.is_empty() {
             rep[c] = c as u32;
@@ -475,6 +530,9 @@ pub fn build_with_pull_requests(
             let (target, d, _) = candidates[0];
             rep[c] = target;
             depth[c] = d + 1;
+            if mode == Simplification::Forks {
+                reach[c] = candidates.iter().map(|&(t, d, f)| (t, d + 1, f)).collect();
+            }
         }
     }
 

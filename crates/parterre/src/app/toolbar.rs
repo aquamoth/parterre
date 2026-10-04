@@ -26,10 +26,11 @@ const SHOW: [(Simplification, Glyph, &str); 3] = [
         glyphs::LABELLED,
         "Only commits with a branch or tag, and the merges joining them (TortoiseGit's default)",
     ),
+    // "Branchings and merges" is in the menu only.
     (
-        Simplification::BranchesAndMerges,
+        Simplification::Forks,
         glyphs::BRANCHINGS,
-        "Also every fork point and merge",
+        "Also the commits where their histories fork apart",
     ),
     (
         Simplification::AllCommits,

@@ -168,6 +168,133 @@ fn branches_and_merges_mode_matches_tortoisegit_collapse() {
     );
 }
 
+/// main:  A - B - C - D - E - F ----- M - G
+///             \       \       \     /
+/// side:        S1 ---- S2 ---- S3 -
+///
+/// The side branch merged main in twice, was merged back, and is deleted.
+#[test]
+fn forks_mode_leaves_out_unlabelled_merged_branches() {
+    let mut r = TestRepo::new();
+    for c in ["A", "B"] {
+        r.commit(c);
+    }
+    r.branch("side");
+    r.commit("S1");
+    r.checkout("main");
+    r.commit("C");
+    r.commit("D");
+    r.checkout("side");
+    r.merge("main", "S2");
+    r.checkout("main");
+    r.commit("E");
+    r.commit("F");
+    r.checkout("side");
+    r.merge("main", "S3");
+    r.checkout("main");
+    r.merge("side", "M");
+    r.git(&["branch", "-D", "side"]);
+    r.commit("G");
+    let repo = r.load();
+    let g = revgraph::build(&repo, &with_mode(Simplification::Forks));
+    assert_eq!(node_subjects(&repo, &g), ["A", "G"]);
+}
+
+/// main:  A - B - C - D - E    (tag v1 on A, main on E)
+///             \       \
+///              X       Y      (branches x and y)
+///
+/// Labelled commits hang x and y off A; their forks stay apart here.
+#[test]
+fn forks_mode_keeps_forks_of_labelled_branches() {
+    let mut r = TestRepo::new();
+    r.commit("A");
+    r.git(&["tag", "v1"]);
+    r.commit("B");
+    r.branch("x");
+    r.commit("X");
+    r.checkout("main");
+    r.commit("C");
+    r.commit("D");
+    r.branch("y");
+    r.commit("Y");
+    r.checkout("main");
+    r.commit("E");
+    let repo = r.load();
+    let g = revgraph::build(&repo, &with_mode(Simplification::Forks));
+    assert_eq!(node_subjects(&repo, &g), ["A", "B", "D", "E", "X", "Y"]);
+}
+
+/// main:     A - B - C - D - E
+///                \   \   \
+/// feature:        F1 - F2 - F3    (F2 and F3 merge main in; branch f on F3)
+#[test]
+fn forks_mode_forks_a_branch_off_where_it_last_merged_its_base() {
+    let mut r = TestRepo::new();
+    r.commit("A");
+    r.commit("B");
+    r.branch("f");
+    r.commit("F1");
+    r.checkout("main");
+    r.commit("C");
+    r.checkout("f");
+    r.merge("main", "F2");
+    r.checkout("main");
+    r.commit("D");
+    r.checkout("f");
+    r.merge("main", "F3");
+    r.checkout("main");
+    r.commit("E");
+    let repo = r.load();
+    let g = revgraph::build(&repo, &with_mode(Simplification::Forks));
+    // As if f were rebased onto D: its older merges and B, where it forked, are left out.
+    assert_eq!(
+        edge_list(&repo, &g),
+        [
+            edge("D", "A", true, 2),
+            edge("E", "D", true, 0),
+            edge("F3", "D", false, 0),
+        ]
+    );
+}
+
+/// main:     A - B - C - D - E
+///                \   \   \
+/// feature:        F1 - F2 - F3    (tag t1 on F1, branch f on F3)
+#[test]
+fn forks_mode_leaves_out_merges_between_the_same_lines() {
+    let mut r = TestRepo::new();
+    r.commit("A");
+    r.commit("B");
+    r.branch("f");
+    r.commit("F1");
+    r.git(&["tag", "t1"]);
+    r.checkout("main");
+    r.commit("C");
+    r.checkout("f");
+    r.merge("main", "F2");
+    r.checkout("main");
+    r.commit("D");
+    r.checkout("f");
+    r.merge("main", "F3");
+    r.checkout("main");
+    r.commit("E");
+    let repo = r.load();
+    let g = revgraph::build(&repo, &with_mode(Simplification::Forks));
+    // F2 joins the same two lines as F3 does, later: F3 reaches t1 and D without it.
+    assert_eq!(
+        edge_list(&repo, &g),
+        [
+            edge("B", "A", true, 0),
+            edge("D", "B", true, 1),
+            edge("E", "D", true, 0),
+            edge("F1", "B", true, 0),
+            edge("F3", "D", false, 0),
+            edge("F3", "F1", true, 1),
+        ]
+    );
+}
+
 #[test]
 fn all_commits_mode_keeps_everything() {
     let r = feature_merge();

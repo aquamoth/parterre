@@ -1,7 +1,7 @@
 //! Loads a repository and reports graph sizes and timings for every simplification mode.
 //!
 //! Usage: `cargo run --release -p parterre-core --example stats -- <repo> [--dump-nodes <mode>]
-//! [--bundle] [--trunk centred|alternating|leftmost]`
+//! [--bundle] [--trunk centred|alternating|leftmost] [--hide PATTERNS]`
 
 use std::time::Instant;
 
@@ -11,6 +11,12 @@ use parterre_core::revgraph::{self, GraphOptions, Simplification};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let path = args.get(1).map(String::as_str).unwrap_or(".");
+    let hide_branches = args
+        .iter()
+        .position(|a| a == "--hide")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_default();
     let t = Instant::now();
     let repo = parterre_core::git::load_repo(path.as_ref()).expect("load");
     eprintln!(
@@ -29,6 +35,7 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--dump-nodes") {
         let mode = match args.get(i + 1).map(String::as_str) {
             Some("branches") => Simplification::BranchesAndMerges,
+            Some("forks") => Simplification::Forks,
             Some("all") => Simplification::AllCommits,
             _ => Simplification::Decorated,
         };
@@ -36,6 +43,7 @@ fn main() {
             &repo,
             &GraphOptions {
                 simplification: mode,
+                hide_branches: hide_branches.clone(),
                 ..Default::default()
             },
         );
@@ -61,6 +69,7 @@ fn main() {
             &repo,
             &GraphOptions {
                 simplification: mode,
+                hide_branches: hide_branches.clone(),
                 ..Default::default()
             },
         );
