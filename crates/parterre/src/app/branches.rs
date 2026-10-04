@@ -79,16 +79,19 @@ pub enum Request {
 }
 
 /// One target gets a direct named item; several get the existing app's submenu treatment.
-/// The worktree section follows the branch section while `worktrees` are shown.
+/// The worktree section follows the branch section while `worktrees` are shown. `group` is the
+/// selection the node is in: when every node of several has worktrees to delete, one item
+/// deletes them all.
 pub fn node_menu(
     ui: &mut Ui,
     repo: &Repo,
     commit: Oid,
+    group: &[Oid],
     catalog: Option<&Catalog>,
     busy: bool,
     worktrees: bool,
 ) -> Option<Request> {
-    menu_for(ui, repo, commit, None, catalog, busy, worktrees)
+    menu_for(ui, repo, commit, group, None, catalog, busy, worktrees)
 }
 
 /// [`node_menu`] for a row of the log, where *Cherry-pick* takes the `selection`, as listed,
@@ -102,13 +105,24 @@ pub fn row_node_menu(
     busy: bool,
     worktrees: bool,
 ) -> Option<Request> {
-    menu_for(ui, repo, commit, Some(selection), catalog, busy, worktrees)
+    menu_for(
+        ui,
+        repo,
+        commit,
+        selection,
+        Some(selection),
+        catalog,
+        busy,
+        worktrees,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn menu_for(
     ui: &mut Ui,
     repo: &Repo,
     commit: Oid,
+    group: &[Oid],
     selection: Option<&[Oid]>,
     catalog: Option<&Catalog>,
     busy: bool,
@@ -116,7 +130,7 @@ fn menu_for(
 ) -> Option<Request> {
     let branch = branch_section(ui, repo, commit, selection, catalog, busy);
     let worktree = worktrees
-        .then(|| worktree_section(ui, commit, catalog, busy))
+        .then(|| worktree_section(ui, commit, group, catalog, busy))
         .flatten();
     branch.or(worktree)
 }
@@ -529,10 +543,12 @@ fn stuck_branch(catalog: &Catalog) -> String {
         .unwrap_or_else(|| "HEAD".into())
 }
 
-/// *Add worktree here…*, and going to or deleting the other worktrees at the commit.
+/// *Add worktree here…*, and going to or deleting the other worktrees at the commit, or at
+/// every commit of the `group` it's in.
 fn worktree_section(
     ui: &mut Ui,
     commit: Oid,
+    group: &[Oid],
     catalog: Option<&Catalog>,
     busy: bool,
 ) -> Option<Request> {
@@ -569,27 +585,75 @@ fn worktree_section(
         })
         .collect();
     target_menu(ui, "Go to worktree", &go_to, false, &mut request);
-    let deletions: Vec<Target> = others
-        .iter()
-        .filter(|w| !w.main)
+    // An operation in progress there doesn't keep one: deleting it ends that too.
+    let locked = |w: &parterre_core::branches::Worktree| match &w.locked {
+        Some(reason) if reason.is_empty() => Some("Locked".to_owned()),
+        Some(reason) => Some(format!("Locked: {reason}")),
+        None => None,
+    };
+    let deletable = |commit: Oid| {
+        let mut found: Vec<_> = catalog
+            .worktrees
+            .iter()
+            .filter(|w| !w.open && !w.main && w.head == Some(commit))
+            .collect();
+        found.sort_by_key(|w| w.name());
+        found
+    };
+    if group.len() > 1 && group.iter().all(|&c| !deletable(c).is_empty()) {
+        let all: Vec<_> = group.iter().flat_map(|&c| deletable(c)).collect();
+        let blocked = all.iter().find_map(|w| {
+            let reason = w.locked.as_ref()?;
+            Some(if reason.is_empty() {
+                format!("{} is locked", w.name())
+            } else {
+                format!("{} is locked: {reason}", w.name())
+            })
+        });
+        let names: Vec<String> = all.iter().map(|w| w.name()).collect();
+        let delete = Request::Run(Action::DeleteWorktrees(
+            all.iter().map(|w| w.path.clone()).collect(),
+        ));
+        let label = format!("Delete {} worktrees", all.len());
+        all_item(ui, label, &names, delete, blocked, busy, &mut request);
+        return request;
+    }
+    let deletions: Vec<Target> = deletable(commit)
+        .into_iter()
         .map(|w| {
-            // An operation in progress there doesn't keep it: deleting it ends that too.
-            let blocked = match &w.locked {
-                Some(reason) if reason.is_empty() => Some("Locked".to_owned()),
-                Some(reason) => Some(format!("Locked: {reason}")),
-                None => None,
-            };
             (
                 w.name(),
-                Request::Run(Action::DeleteWorktree {
-                    path: w.path.clone(),
-                }),
-                blocked,
+                Request::Run(Action::DeleteWorktrees(vec![w.path.clone()])),
+                locked(w),
             )
         })
         .collect();
     target_menu(ui, "Delete worktree", &deletions, busy, &mut request);
     request
+}
+
+/// One item for what every node of a group has, such as *Delete 3 worktrees*, naming them on
+/// hover.
+fn all_item(
+    ui: &mut Ui,
+    label: String,
+    names: &[String],
+    value: Request,
+    blocked: Option<String>,
+    busy: bool,
+    request: &mut Option<Request>,
+) {
+    let response = ui
+        .add_enabled(!busy && blocked.is_none(), egui::Button::new(label))
+        .on_hover_text(names.join(", "));
+    let response = match blocked {
+        Some(reason) => response.on_disabled_hover_text(reason),
+        None => response.on_disabled_hover_text(loading_reason(true)),
+    };
+    if response.clicked() {
+        *request = Some(value);
+        ui.close();
+    }
 }
 
 /// *Reset `<branch>` to here…*: only the open worktree's branch, and only where there's a
@@ -1425,8 +1489,8 @@ struct Loss {
     warning: Warning,
     fresh: bool,
     opener: ViewportId,
-    /// The changed files are listed.
-    show_files: bool,
+    /// The deletions whose changed files are listed, by index.
+    show_files: std::collections::HashSet<usize>,
 }
 
 /// A reset's preview, being read for the dialog.
@@ -1628,7 +1692,7 @@ impl Tool {
                         warning,
                         fresh: true,
                         opener: job.opener,
-                        show_files: false,
+                        show_files: Default::default(),
                     });
                 }
                 Outcome::Warning(_) => self.notice(
@@ -2166,23 +2230,26 @@ impl Tool {
         let warning = &loss.warning;
         let plural = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
         let commits = plural(warning.commits.len(), "commit");
-        let files = plural(warning.files.len(), "changed file");
+        let changed: usize = warning.deletions.iter().map(|d| d.files.len()).sum();
+        let files = plural(changed, "changed file");
         let confirmation = warning.is_confirmation();
+        let refused = warning.deletions.iter().any(|d| d.refusal.is_some());
+        let several = warning.deletions.len() > 1;
         let (title, button) = match &warning.action {
             Action::Delete { name, .. } => (
                 format!("Delete branch {name} and lose {commits}?"),
                 "Delete anyway",
             ),
-            Action::DeleteWorktree { path } => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let cost = match (warning.files.is_empty(), warning.commits.is_empty()) {
+            Action::DeleteWorktrees(_) => {
+                let what = match warning.deletions.as_slice() {
+                    [one] => format!("worktree {}", one.name),
+                    many => format!("{} worktrees", many.len()),
+                };
+                let cost = match (changed == 0, warning.commits.is_empty()) {
                     (false, false) => format!(" and lose {files} and {commits}"),
                     (false, true) => format!(" and lose {files}"),
                     (true, false) => format!(" and lose {commits}"),
-                    (true, true) if warning.refusal.is_some() => " anyway".to_owned(),
+                    (true, true) if refused => " anyway".to_owned(),
                     (true, true) => String::new(),
                 };
                 let button = if confirmation {
@@ -2190,7 +2257,7 @@ impl Tool {
                 } else {
                     "Delete anyway"
                 };
-                (format!("Delete worktree {name}{cost}?"), button)
+                (format!("Delete {what}{cost}?"), button)
             }
             _ => (
                 format!(
@@ -2208,7 +2275,7 @@ impl Tool {
         const TRIANGLE: parterre_core::glyphs::Glyph = &[parterre_core::glyphs::Part::Path(
             "M12 3 2 21h20ZM12 9v5m0 3v1",
         )];
-        let mut show_log = false;
+        let mut show_log = None;
         let busy = self.busy();
         let mut dialog = dialogs::Dialog::new("branch-loss", &title)
             .opener(loss.opener)
@@ -2219,16 +2286,23 @@ impl Tool {
         let show_files = &mut loss.show_files;
         let shown = dialog.show(ctx, |ui| {
             dialogs::fields(ui, |ui| {
-                if let Action::DeleteWorktree { path } = &warning.action {
-                    ui.label(format!(
-                        "The folder {} and everything in it will be deleted.",
-                        path.display()
-                    ));
+                let worktrees = matches!(warning.action, Action::DeleteWorktrees(_));
+                match warning.deletions.as_slice() {
+                    [one] if worktrees => {
+                        if let Some(path) = &one.path {
+                            ui.label(format!(
+                                "The folder {} and everything in it will be deleted.",
+                                path.display()
+                            ));
+                        }
+                    }
+                    _ if worktrees => {
+                        ui.label("These folders and everything in them will be deleted.");
+                    }
+                    _ => {}
                 }
-                if let Some(refusal) = &warning.refusal {
-                    ui.label("Git refused to delete it:");
-                    ui.label(RichText::new(refusal).monospace());
-                }
+                let unreachable =
+                    "These commits are not reachable from any surviving branch, tag or worktree.";
                 let row = |ui: &mut Ui, content: &mut dyn FnMut(&mut Ui)| {
                     egui::Frame::new()
                         .fill(widgets::tones(ui).seg_bg)
@@ -2236,27 +2310,63 @@ impl Tool {
                         .inner_margin(egui::Margin::symmetric(12, 8))
                         .show(ui, |ui| ui.horizontal(|ui| content(ui)));
                 };
-                if !warning.files.is_empty() {
-                    row(ui, &mut |ui| {
-                        ui.label(&files);
-                        let label = if *show_files { "Hide" } else { "Show" };
-                        if ui.link(label).clicked() {
-                            *show_files = !*show_files;
-                        }
-                    });
-                    if *show_files {
-                        for file in &warning.files {
-                            ui.label(RichText::new(file).monospace());
+                // What one deletion loses: one row each for its files and its commits.
+                let mut losses = |ui: &mut Ui, i: usize, d: &parterre_core::branches::Deletion| {
+                    if let Some(refusal) = &d.refusal {
+                        ui.label("Git refused to delete it:");
+                        ui.label(RichText::new(refusal).monospace());
+                    }
+                    if !d.files.is_empty() {
+                        let shown = show_files.contains(&i);
+                        row(ui, &mut |ui| {
+                            ui.label(plural(d.files.len(), "changed file"));
+                            if ui.link(if shown { "Hide" } else { "Show" }).clicked()
+                                && !show_files.remove(&i)
+                            {
+                                show_files.insert(i);
+                            }
+                        });
+                        if shown {
+                            for file in &d.files {
+                                ui.label(RichText::new(file).monospace());
+                            }
                         }
                     }
-                }
-                if !warning.commits.is_empty() {
-                    ui.label(
-                        "These commits are not reachable from any surviving branch, tag or worktree.",
-                    );
+                    if !d.commits.is_empty() {
+                        if !several {
+                            ui.label(unreachable);
+                        }
+                        row(ui, &mut |ui| {
+                            ui.label(plural(d.commits.len(), "commit"));
+                            if ui.link("Show in log").clicked() {
+                                show_log = Some(d.commits.clone());
+                            }
+                        });
+                    }
+                };
+                if several {
+                    for (i, d) in warning.deletions.iter().enumerate() {
+                        ui.separator();
+                        let name = d
+                            .path
+                            .as_ref()
+                            .map_or(d.name.clone(), |p| p.display().to_string());
+                        ui.label(RichText::new(name).strong());
+                        losses(ui, i, d);
+                    }
+                    if !warning.commits.is_empty() {
+                        ui.separator();
+                        ui.label("The commits are not reachable from any surviving branch, tag or worktree.");
+                    }
+                } else if let [one] = warning.deletions.as_slice() {
+                    losses(ui, 0, one);
+                } else if !warning.commits.is_empty() {
+                    ui.label(unreachable);
                     row(ui, &mut |ui| {
                         ui.label(&commits);
-                        show_log = ui.link("Show in log").clicked();
+                        if ui.link("Show in log").clicked() {
+                            show_log = Some(warning.commits.clone());
+                        }
                     });
                 }
             });
@@ -2264,8 +2374,8 @@ impl Tool {
             dialogs::command_box(ui, &commands);
             dialogs::actions(ui, button, !busy, !confirmation, loss.fresh && !confirmation)
         });
-        if show_log {
-            self.log_request = Some((warning.repo.clone(), warning.commits.clone(), true));
+        if let Some(commits) = show_log {
+            self.log_request = Some((warning.repo.clone(), commits, true));
         }
         match shown.inner {
             dialogs::Answer::Primary => {
@@ -2376,5 +2486,182 @@ impl Drop for Tool {
         if let Some(job) = &self.job {
             job.cancel.cancel();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use parterre_core::Oid;
+    use parterre_core::branches::Action;
+
+    use super::super::tool_harness::{Harness, git, load, menu, write};
+    use super::Request;
+
+    /// main: base → tip. Worktrees in `others`: `a` at base with a changed file, `b` at the
+    /// tip, and `c` detached at a commit of its own on base.
+    fn repository() -> (tempfile::TempDir, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let others = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        write(p, "file", "base\n");
+        git(p, &["add", "file"]);
+        git(p, &["commit", "-q", "-m", "base"]);
+        let add = |name: &str, extra: &[&str]| {
+            let path = others.path().join(name);
+            let mut args = vec!["worktree", "add", "-q"];
+            args.extend(extra);
+            let path = path.to_string_lossy().into_owned();
+            args.push(&path);
+            args.push("HEAD");
+            git(p, &args);
+        };
+        add("a", &["-b", "a"]);
+        write(&others.path().join("a"), "file", "changed\n");
+        add("c", &["--detach"]);
+        git(
+            &others.path().join("c"),
+            &["commit", "-q", "--allow-empty", "-m", "only c"],
+        );
+        git(p, &["commit", "-q", "--allow-empty", "-m", "tip"]);
+        add("b", &["-b", "b"]);
+        (dir, others)
+    }
+
+    fn rev(dir: &Path, r: &str) -> Oid {
+        Oid::from_hex(&git(dir, &["rev-parse", r])).unwrap()
+    }
+
+    fn names(request: &Option<Request>) -> Vec<String> {
+        match request {
+            Some(Request::Run(Action::DeleteWorktrees(paths))) => paths
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect(),
+            other => panic!("not a deletion: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_group_of_worktree_nodes_deletes_them_all_with_one_item() {
+        let (dir, others) = repository();
+        let (repo, catalog) = load(dir.path());
+        let (base, tip) = (rev(dir.path(), "HEAD~1"), rev(dir.path(), "HEAD"));
+        let c = rev(&others.path().join("c"), "HEAD");
+        let item = |commit, group: &[Oid], click| {
+            menu(
+                |ui| super::node_menu(ui, &repo, commit, group, Some(&catalog), false, true),
+                click,
+            )
+        };
+        let (_, asked) = item(tip, &[tip, base, c], Some("Delete 3 worktrees"));
+        assert_eq!(names(&asked), ["b", "a", "c"]);
+        // One node alone: its own worktrees, as before.
+        let (texts, _) = item(base, &[base], None);
+        assert!(texts.iter().any(|t| t == "Delete worktree a"), "{texts:?}");
+        // A node with no worktree to delete in the group: only the clicked node's.
+        let none =
+            Oid::from_hex(&git(dir.path(), &["commit-tree", "-m", "x", "HEAD^{tree}"])).unwrap();
+        let (texts, _) = item(base, &[base, none], None);
+        assert!(
+            !texts.iter().any(|t| t.starts_with("Delete 2")),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|t| t == "Delete worktree a"), "{texts:?}");
+        // The open, main worktree at the tip is never among them.
+        let (_, asked) = item(tip, &[tip, base], Some("Delete 2 worktrees"));
+        assert_eq!(names(&asked), ["b", "a"]);
+    }
+
+    #[test]
+    fn a_locked_worktree_greys_the_group_item() {
+        let (dir, others) = repository();
+        git(
+            dir.path(),
+            &[
+                "worktree",
+                "lock",
+                &others.path().join("a").to_string_lossy(),
+            ],
+        );
+        let (repo, catalog) = load(dir.path());
+        let (base, tip) = (rev(dir.path(), "HEAD~1"), rev(dir.path(), "HEAD"));
+        let (texts, asked) = menu(
+            |ui| super::node_menu(ui, &repo, tip, &[tip, base], Some(&catalog), false, true),
+            Some("Delete 2 worktrees"),
+        );
+        assert!(texts.iter().any(|t| t == "Delete 2 worktrees"), "{texts:?}");
+        assert!(asked.is_none(), "greyed out");
+    }
+
+    #[test]
+    fn deleting_several_shows_what_each_loses_then_deletes_them_all() {
+        let (dir, others) = repository();
+        let mut h = Harness::new(dir);
+        let paths: Vec<_> = ["a", "b", "c"]
+            .iter()
+            .map(|n| others.path().join(n))
+            .collect();
+        let catalog = load(h.path()).1;
+        let listed: Vec<_> = paths
+            .iter()
+            .map(|p| {
+                catalog
+                    .worktrees
+                    .iter()
+                    .find(|w| parterre_core::worktree_folder::same_path(&w.path, p))
+                    .unwrap()
+                    .path
+                    .clone()
+            })
+            .collect();
+        let c = rev(&paths[2], "HEAD");
+        h.ask(
+            Request::Run(Action::DeleteWorktrees(listed)),
+            "Delete 3 worktrees and lose 1 changed file and 1 commit?",
+        );
+        assert!(h.shows("These folders and everything in them will be deleted."));
+        for p in &paths {
+            assert!(h.shows_part(&p.file_name().unwrap().to_string_lossy()));
+        }
+        assert!(
+            h.shows("1 changed file") && h.shows("1 commit"),
+            "{:?}",
+            h.texts
+        );
+        h.click("Show");
+        assert!(h.shows("file") && h.shows("Hide"), "{:?}", h.texts);
+        h.click("Show in log");
+        let (_, commits, exact) = h.tool.log_request.take().expect("the log is asked for");
+        assert_eq!((commits, exact), (vec![c], true));
+        assert!(paths.iter().all(|p| p.exists()), "asking deletes nothing");
+        h.click("Delete anyway");
+        h.until("all three are gone", |_| paths.iter().all(|p| !p.exists()));
+    }
+
+    #[test]
+    fn deleting_several_that_lose_nothing_is_a_confirmation() {
+        let (dir, others) = repository();
+        let a = others.path().join("a");
+        git(&a, &["checkout", "--", "file"]);
+        let mut h = Harness::new(dir);
+        let catalog = load(h.path()).1;
+        let listed: Vec<_> = catalog
+            .worktrees
+            .iter()
+            .filter(|w| w.name() == "a" || w.name() == "b")
+            .map(|w| w.path.clone())
+            .collect();
+        h.ask(
+            Request::Run(Action::DeleteWorktrees(listed)),
+            "Delete 2 worktrees?",
+        );
+        assert!(!h.shows("Delete anyway") && h.shows("Delete"));
+        h.click("Delete");
+        h.until("both are gone", |_| {
+            !a.exists() && !others.path().join("b").exists()
+        });
     }
 }

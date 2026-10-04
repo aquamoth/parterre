@@ -135,7 +135,7 @@ takes a branch, a tag or a hash prefix. A name that doesn't exist fails the run.
 | `diff:COMMIT:PATH` | The diff of a file as the commit changed it, against its first parent |
 | `blame:COMMIT:PATH[:LINE]` | The blame of a file at a commit (or `WORKING_TREE`), with a line chosen |
 | `create-branch:REF`, `add-worktree:REF` | The branch or worktree form, starting at a commit |
-| `delete-worktree:FOLDER` | The question before deleting a worktree, by its folder's name |
+| `delete-worktree:FOLDER[,FOLDER…]` | The question before deleting worktrees, by their folders' names |
 | `reset:REF[:MODE]` | The reset dialog, optionally with a mode (`soft`, `mixed`, `keep`, `hard`) chosen |
 | `rebase:REF`, `merge:REF` | The rebase onto a commit, or the merge of one, into the current branch |
 | `revert:REF` | The revert of a commit on the current branch |

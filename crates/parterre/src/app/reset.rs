@@ -561,7 +561,15 @@ mod tests {
         let mut texts = Vec::new();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let base = rev("HEAD~1");
-            super::super::branches::node_menu(ui, &repo, base, Some(&catalog), false, false);
+            super::super::branches::node_menu(
+                ui,
+                &repo,
+                base,
+                &[base],
+                Some(&catalog),
+                false,
+                false,
+            );
         });
         output.textures_delta.clear();
         for clipped in &output.shapes {

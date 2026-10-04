@@ -101,7 +101,9 @@ whose folder is gone gets a crossed-out folder. From a node's menu:
   another). Tick *Go to new worktree* to make it the open one.
 - *Go to worktree* makes another worktree the open one. The layout, the view, moved nodes and
   open windows stay: it is the same history.
-- *Delete worktree* deletes one, with its folder, after asking.
+- *Delete worktree* deletes one, with its folder, after asking. With several nodes selected
+  that all have worktrees, *Delete N worktrees* deletes them all after one question, which
+  lists what each would lose.
 - *Open* › *File system* / *Terminal* opens its folder; *Copy* copies the folder's path.
 
 **Branches:** *Create branch here…* (optionally switching to it), *Switch to* a branch or a

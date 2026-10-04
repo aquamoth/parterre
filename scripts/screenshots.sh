@@ -98,6 +98,11 @@ shot revert window $'open revert:v0.3.0\nwait 0.5'
 git -C "$repo" worktree add -q "$work/demo-dark-mode" feature/dark-mode
 SHOT_REPO=$work/demo-dark-mode shot merge-into window \
     $'right-click node:main\nclick "Merge feature/dark-mode into main…"\nwait 0.5'
+# Several worktrees at once, one of them with a commit nothing else reaches; last, as it adds
+# a node to the graph.
+git -C "$repo" worktree add -q --detach "$work/demo-idea" v0.3.0
+git -C "$work/demo-idea" commit -q --allow-empty -m "Try an idea"
+shot delete-worktrees window $'open delete-worktree:demo-login,demo-idea\nwait 0.5'
 
 echo "screenshots in $out"
 if ((${#failed[@]})); then
