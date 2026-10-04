@@ -35,8 +35,9 @@ release filenames. Tag a clean commit on `main`; the version in the root `Cargo.
    commit on `main` has passed, and waits for it if it's still running (#236). A commit
    without one, not pushed to `main`, fails the release.
 
-3. The workflow then builds the [Chocolatey](#chocolatey) package from that MSI and pushes it
-   unless the tag is a pre-release.
+3. The workflow then publishes the [crates](#cratesio), and builds the
+   [Chocolatey](#chocolatey) package from that MSI and pushes it. A pre-release goes to
+   neither: its Chocolatey package is built but not pushed.
 
 To try a packaging change without tagging, run the release workflow by hand on its branch:
 
@@ -48,10 +49,6 @@ It builds, packages and installs as a release does, but publishes nothing: the p
 left as artifacts of the run. Their version follows the nearest tag, as in any build
 ([Version strings](#version-strings)).
 
-Add the release to the `<releases>` of `packaging/linux/se.trustfall.parterre.metainfo.xml`
-afterwards, with its date. Until then the packages get an entry of their own, dated the day
-they were built.
-
 The build fails if the tag is not `vX.Y.Z` with an optional pre-release suffix, does not point
 at the commit being built, or the sources have local changes. In that case delete the tag
 (`git push origin :refs/tags/v0.5.0-rc1`), fix things and tag again.
@@ -60,8 +57,8 @@ at the commit being built, or the sources have local changes. In that case delet
 
 Cargo requires a package version in `Cargo.toml` and an equal version on each internal
 dependency (`parterre-util`, `parterre-core`, `parterre-forge`, `parterre-highlight`,
-`parterre-telemetry`). After the GitHub release workflow passes, use Python 3.11 or newer to
-generate a separate checkout from the tag:
+`parterre-telemetry`). `scripts/prepare-crates-release.py` (Python 3.11 or newer) generates a
+separate checkout of a tag with those versions:
 
 ```sh
 scripts/prepare-crates-release.py v0.5.0-rc1
@@ -70,12 +67,26 @@ scripts/prepare-crates-release.py v0.5.0-rc1
 The script prints the checkout path and publish command. It updates the versions and the six
 workspace entries in `Cargo.lock`, verifies them with `cargo metadata --locked`, and makes a
 local commit so `cargo publish` sees clean sources. The commit exists only in that disposable
-checkout; the pushed tag and `main` still point at the same original commit. From the generated
-checkout, run `cargo publish --workspace` with a crates.io API token (`cargo login`). Until the
-publish job of #20 exists this is done by hand. The first publish of each crate always is.
-A version on crates.io can be yanked but never replaced, so check the generated versions before
-publishing. The published crate's recorded commit is the local packaging commit; the GitHub
-binary reports the tagged source commit.
+checkout; the pushed tag and `main` still point at the same original commit. The published
+crate's recorded commit is the local packaging commit; the GitHub binary reports the tagged
+source commit.
+
+Once the GitHub release is published, the release workflow's `crates.io` job runs the script
+and `cargo publish --workspace` from the checkout it makes. Pre-releases aren't published. It
+signs in with [Trusted Publishing](https://crates.io/docs/trusted-publishing): crates.io gives
+`release.yml`, running in the `crates-io` environment, a token for that run only, so none is
+stored. Crates already published at the tag's version are skipped, so a failed job is simply
+rerun.
+
+Trusted Publishing can't create a crate, so a new crate's first version is published by hand.
+The job stops before publishing anything when a crate is new, and names it. Run the script,
+then `cargo publish --workspace` from the checkout it prints, with an API token
+(`cargo login`). Then add a trusted publisher to each new crate's settings on crates.io: owner
+`aquamoth`, repository `parterre`, workflow file `release.yml`, environment `crates-io`.
+Rerunning the job publishes any crates left.
+
+A version on crates.io can be yanked but never replaced, so a broken one is fixed with a new
+release.
 
 ## Chocolatey
 
