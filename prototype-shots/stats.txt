@@ -1,0 +1,36 @@
+A 1 Labelled commits       nodes   1892 edges   1902 build    1.86ms | Compact (tree-like)  layers    750 dummies    3420 crossings      0 size    4644x59255   layout    2.76ms
+A 1 Branchings and merges  nodes   3022 edges   3330 build    1.37ms | Compact (tree-like)  layers   1149 dummies    3642 crossings    137 size    3629x72042   layout   25.93ms
+A 1 All commits            nodes  23037 edges  23345 build    3.82ms | Compact (tree-like)  layers   5762 dummies   17973 crossings    268 size    3345x316262  layout   84.24ms
+A 2 Labelled commits       nodes   1892 edges   1902 build    1.73ms | Compact (tree-like)  layers    750 dummies    3420 crossings      0 size    4644x59255   layout    2.55ms
+A 2 Branchings and merges  nodes   3022 edges   3330 build    1.42ms | Compact (tree-like)  layers   1149 dummies    3642 crossings    137 size    3629x72042   layout   24.57ms
+A 2 All commits            nodes  23037 edges  23345 build    2.93ms | Compact (tree-like)  layers   5762 dummies   17973 crossings    268 size    3345x316262  layout   81.92ms
+A 3 Labelled commits       nodes   1892 edges   1902 build    1.94ms | Compact (tree-like)  layers    750 dummies    3420 crossings      0 size    4644x59255   layout    2.49ms
+A 3 Branchings and merges  nodes   3022 edges   3330 build    1.90ms | Compact (tree-like)  layers   1149 dummies    3642 crossings    137 size    3629x72042   layout   24.09ms
+A 3 All commits            nodes  23037 edges  23345 build    2.92ms | Compact (tree-like)  layers   5762 dummies   17973 crossings    268 size    3345x316262  layout   82.75ms
+B 1 Labelled commits       nodes   1892 edges   1902 build    1.63ms | Compact (tree-like)  layers    750 dummies    3420 crossings      0 size    3128x64385   layout    2.46ms
+B 1 Branchings and merges  nodes   3022 edges   3330 build    1.22ms | Compact (tree-like)  layers   1149 dummies    3642 crossings    245 size    2844x83665   layout   27.22ms
+B 1 All commits            nodes  23037 edges  23345 build    2.66ms | Compact (tree-like)  layers   5762 dummies   17973 crossings    404 size    2431x324070  layout   79.74ms
+B 2 Labelled commits       nodes   1892 edges   1902 build    1.61ms | Compact (tree-like)  layers    750 dummies    3420 crossings      0 size    3128x64385   layout    2.47ms
+B 2 Branchings and merges  nodes   3022 edges   3330 build    1.19ms | Compact (tree-like)  layers   1149 dummies    3642 crossings    245 size    2844x83665   layout   27.14ms
+B 2 All commits            nodes  23037 edges  23345 build    2.64ms | Compact (tree-like)  layers   5762 dummies   17973 crossings    404 size    2431x324070  layout   79.84ms
+B 3 Labelled commits       nodes   1892 edges   1902 build    1.43ms | Compact (tree-like)  layers    750 dummies    3420 crossings      0 size    3128x64385   layout    2.47ms
+B 3 Branchings and merges  nodes   3022 edges   3330 build    1.03ms | Compact (tree-like)  layers   1149 dummies    3642 crossings    245 size    2844x83665   layout   26.83ms
+B 3 All commits            nodes  23037 edges  23345 build    2.71ms | Compact (tree-like)  layers   5762 dummies   17973 crossings    404 size    2431x324070  layout   79.16ms
+C 1 Labelled commits       nodes   1892 edges   1902 build    1.45ms | Compact (tree-like)  layers    750 dummies    3420 crossings      0 size    5137x53777   layout    2.58ms
+C 1 Branchings and merges  nodes   3022 edges   3330 build    1.21ms | Compact (tree-like)  layers   1149 dummies    3642 crossings     85 size    4810x72001   layout   21.79ms
+C 1 All commits            nodes  23037 edges  23345 build    2.61ms | Compact (tree-like)  layers   5762 dummies   17973 crossings    150 size    3632x317530  layout   84.24ms
+C 2 Labelled commits       nodes   1892 edges   1902 build    1.65ms | Compact (tree-like)  layers    750 dummies    3420 crossings      0 size    5137x53777   layout    2.60ms
+C 2 Branchings and merges  nodes   3022 edges   3330 build    1.18ms | Compact (tree-like)  layers   1149 dummies    3642 crossings     85 size    4810x72001   layout   21.59ms
+C 2 All commits            nodes  23037 edges  23345 build    2.63ms | Compact (tree-like)  layers   5762 dummies   17973 crossings    150 size    3632x317530  layout   84.32ms
+C 3 Labelled commits       nodes   1892 edges   1902 build    1.43ms | Compact (tree-like)  layers    750 dummies    3420 crossings      0 size    5137x53777   layout    2.57ms
+C 3 Branchings and merges  nodes   3022 edges   3330 build    1.20ms | Compact (tree-like)  layers   1149 dummies    3642 crossings     85 size    4810x72001   layout   21.75ms
+C 3 All commits            nodes  23037 edges  23345 build    2.18ms | Compact (tree-like)  layers   5762 dummies   17973 crossings    150 size    3632x317530  layout   84.14ms
+D 1 Labelled commits       nodes   1892 edges   1902 build    1.58ms | Compact (tree-like)  layers    750 dummies    3420 crossings      0 size    4575x53742   layout    2.53ms
+D 1 Branchings and merges  nodes   3022 edges   3330 build    1.25ms | Compact (tree-like)  layers   1149 dummies    3642 crossings    117 size    3861x72844   layout   20.34ms
+D 1 All commits            nodes  23037 edges  23345 build    2.08ms | Compact (tree-like)  layers   5762 dummies   17973 crossings    206 size    3861x317203  layout   83.83ms
+D 2 Labelled commits       nodes   1892 edges   1902 build    1.73ms | Compact (tree-like)  layers    750 dummies    3420 crossings      0 size    4575x53742   layout    2.53ms
+D 2 Branchings and merges  nodes   3022 edges   3330 build    1.05ms | Compact (tree-like)  layers   1149 dummies    3642 crossings    117 size    3861x72844   layout   20.24ms
+D 2 All commits            nodes  23037 edges  23345 build    2.64ms | Compact (tree-like)  layers   5762 dummies   17973 crossings    206 size    3861x317203  layout   81.16ms
+D 3 Labelled commits       nodes   1892 edges   1902 build    1.92ms | Compact (tree-like)  layers    750 dummies    3420 crossings      0 size    4575x53742   layout    2.53ms
+D 3 Branchings and merges  nodes   3022 edges   3330 build    1.52ms | Compact (tree-like)  layers   1149 dummies    3642 crossings    117 size    3861x72844   layout   20.40ms
+D 3 All commits            nodes  23037 edges  23345 build    2.65ms | Compact (tree-like)  layers   5762 dummies   17973 crossings    206 size    3861x317203  layout   82.59ms
