@@ -71,7 +71,7 @@ crates/parterre-highlight
 
 crates/parterre-telemetry
                        what parterre asks and sends over the network (#175): the update
-                       check (#258) and the usage statistics (#261)
+                       check (#258), the usage statistics (#261) and the crash reports (#263)
   lib.rs               the update check's thread, at start and then every 24 h; the channel,
                        stamped at build time (`PARTERRE_CHANNEL`), or Snap and Flatpak at
                        run time; `Usage`, the usage statistics from start to close
@@ -82,9 +82,12 @@ crates/parterre-telemetry
                        events a launch sends; no network
   session.rs           the `$session_id` (#262): a new UUIDv7 after 30 min idle, 24 h, or
                        on opening another repository; the caller's clock, no network
+  crash.rs             whether panics go to PostHog, and the home folder in them made `~`;
+                       no network
   github.rs            GitHub's releases API through ureq, behind the `send` feature
   posthog.rs           all of the PostHog code: posthog-rs's client on a thread of its own,
-                       the events and their standard properties, behind the `send` feature
+                       the events and their standard properties, and the SDK's global client
+                       that sends panics, behind the `send` feature
 
 crates/parterre        the binary (eframe/egui)
   build.rs             asks git for the commit and sets the version string
@@ -93,9 +96,9 @@ crates/parterre        the binary (eframe/egui)
   app.rs               canvas interaction, search, status bar, windows, opening folders
     toolbar.rs         the toolbar, its popovers and the ☰ menu
     updates.rs         the update check as the settings say, and *Download* in the ☰ menu
-    privacy.rs         the first-run prompt, and the usage statistics as the user's choices
-                       say, told of input and repositories opened; Settings › Privacy shows
-                       them
+    privacy.rs         the first-run prompt, and the usage statistics and crash reports as
+                       the user's choices say, told of input and repositories opened;
+                       Settings › Privacy shows them
     settings_window.rs the settings: pages of rows, applied as you change them
     auto_reload.rs     a worker thread that reloads when the refs change
     pull_requests.rs   loads open pull requests on a worker thread while they are shown, cached

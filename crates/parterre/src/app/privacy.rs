@@ -1,6 +1,6 @@
-//! Usage statistics and crash reports (#261): the first-run prompt, and the usage statistics
-//! sent as the user's choices say. Decided in #223, #225 and #227; Settings › Privacy shows and
-//! changes the choices (`settings_window.rs`).
+//! Usage statistics and crash reports (#261, #263): the first-run prompt, and the usage
+//! statistics and crash reports sent as the user's choices say. Decided in #223, #225 and #227;
+//! Settings › Privacy shows and changes the choices (`settings_window.rs`).
 //!
 //! Nothing is sent before the prompt is answered, the update check included. Scripted runs never
 //! send, and show the prompt only when a script opens it (`open first-run`).
@@ -74,7 +74,7 @@ impl Telemetry {
         }
         let answered = privacy.answer.is_some();
         let asks = parterre_telemetry::asks(Build::THIS, answered, do_not_track) && !scripted;
-        Telemetry {
+        let telemetry = Telemetry {
             crash_reports_at_start: privacy.choices().is_some_and(|c| c.crash_reports),
             privacy,
             prompt: asks.then(Choices::default),
@@ -86,6 +86,21 @@ impl Telemetry {
             first_run: false,
             screen: None,
             repository: None,
+        };
+        telemetry.start_crash_reports();
+        telemetry
+    }
+
+    /// Crash reports (#263), if ticked at start or in the first-run prompt: from then on, a
+    /// panic is sent the moment it happens, until parterre ends. Scripted runs and tests never
+    /// send.
+    fn start_crash_reports(&self) {
+        if !self.scripted && !cfg!(test) {
+            parterre_telemetry::start_crash_reports(
+                self.privacy.choices(),
+                crate::VERSION,
+                parterre_core::git::version,
+            );
         }
     }
 
@@ -155,11 +170,13 @@ impl Telemetry {
         }
     }
 
-    /// The prompt answered: the install ID is made, and the launch is told as a first run.
+    /// The prompt answered: the install ID is made, the launch is told as a first run, and
+    /// crash reports start if ticked.
     fn answer(&mut self, choices: Choices) {
         self.privacy.answer(choices);
         self.prompt = None;
         self.crash_reports_at_start = choices.crash_reports;
+        self.start_crash_reports();
         self.first_run = true;
         self.launching = Some(0);
     }
