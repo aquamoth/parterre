@@ -16,6 +16,8 @@ const MIN_SWEEPS: usize = 12;
 const STRAIGHT: f32 = 1.0;
 /// Pull of an item towards its previous position, relative to its edge weights.
 const INERTIA: f32 = 0.02;
+/// Weight pinning the trunk to `u = 0`, keeping it one straight line.
+const PIN: f32 = 1.0e6;
 
 /// Returns the along-layer centre coordinate of every item.
 pub fn assign(g: &LayeredGraph, node_gap: f32) -> Vec<f32> {
@@ -50,7 +52,12 @@ pub fn assign(g: &LayeredGraph, node_gap: f32) -> Vec<f32> {
         };
         for l in order {
             let layer = &g.layers[l];
+            let pinned = |i: u32| g.side.get(i as usize) == Some(&super::trunk::TRUNK);
             if let [single] = layer[..] {
+                if pinned(single) {
+                    u[single as usize] = 0.0;
+                    continue;
+                }
                 // Nothing to separate: move straight to the (weighted) target.
                 let x = u[single as usize];
                 let (mut sum_w, mut sum_wx) = (0.0, 0.0);
@@ -87,8 +94,13 @@ pub fn assign(g: &LayeredGraph, node_gap: f32) -> Vec<f32> {
                     sum_wx += w * nx;
                 }
                 let inertia = INERTIA * sum_w.max(1.0);
-                targets.push((sum_wx + inertia * x) / (sum_w + inertia));
-                weights.push(sum_w + inertia);
+                if pinned(i) {
+                    targets.push(0.0);
+                    weights.push(PIN);
+                } else {
+                    targets.push((sum_wx + inertia * x) / (sum_w + inertia));
+                    weights.push(sum_w + inertia);
+                }
                 if k > 0 {
                     seps.push(separation(g, layer[k - 1], i, node_gap));
                 }

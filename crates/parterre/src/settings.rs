@@ -218,6 +218,24 @@ pub struct Settings {
     pub diff_window: DiffWindowSettings,
     pub compare_window: CompareWindowSettings,
     pub blame_window: BlameWindowSettings,
+    pub settings_window: SettingsWindowSettings,
+}
+
+/// What the settings window remembers across runs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SettingsWindowSettings {
+    /// Inner size in points.
+    pub size: [f32; 2],
+}
+
+impl Default for SettingsWindowSettings {
+    fn default() -> Self {
+        // The sidebar, a page and the margins.
+        SettingsWindowSettings {
+            size: [646.0, 480.0],
+        }
+    }
 }
 
 /// What the compare window remembers across runs.
@@ -359,6 +377,7 @@ impl Default for Settings {
             diff_window: DiffWindowSettings::default(),
             compare_window: CompareWindowSettings::default(),
             blame_window: BlameWindowSettings::default(),
+            settings_window: SettingsWindowSettings::default(),
         };
         Look::Modern.apply(&mut s);
         s
