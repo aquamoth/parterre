@@ -436,6 +436,13 @@ fn apply_cli(cli: &Cli, s: &mut settings::Settings) {
     if let Some(w) = cli.max_row_width {
         s.layout.max_layer_width = w;
     }
+    // PROTOTYPE (centred trunk): PARTERRE_TRUNK=A|B|C|D picks the trunk layout.
+    if let Some(t) = std::env::var("PARTERRE_TRUNK")
+        .ok()
+        .and_then(|v| parterre_core::layout::Trunk::from_letter(&v))
+    {
+        s.layout.trunk = t;
+    }
     if cli.overview {
         s.show_overview = true;
     }

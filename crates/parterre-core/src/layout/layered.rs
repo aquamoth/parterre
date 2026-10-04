@@ -46,6 +46,9 @@ pub struct LayeredGraph {
     pub pos: Vec<u32>,
     /// For every input edge, the dummy items it passes through, from child to parent.
     pub chains: Vec<Vec<u32>>,
+    /// PROTOTYPE (centred trunk): side of the trunk of every item, -1, 0 (trunk) or 1; empty
+    /// for no trunk.
+    pub side: Vec<i8>,
     /// Neighbours in the layer above (newer) and below (older).
     up: Adjacency,
     down: Adjacency,
@@ -178,6 +181,7 @@ impl LayeredGraph {
             node_count: n,
             layers: by_layer,
             chains,
+            side: Vec::new(),
             up,
             down,
         };

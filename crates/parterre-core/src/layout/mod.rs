@@ -16,6 +16,7 @@ mod layered;
 mod order;
 mod position;
 pub mod rank;
+mod trunk;
 
 use serde::{Deserialize, Serialize};
 
@@ -106,6 +107,44 @@ impl Ranking {
     }
 }
 
+/// PROTOTYPE (centred trunk, throwaway): how the default branch's first-parent line is laid out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Trunk {
+    /// As before: the trunk starts leftmost and bends towards its side branches.
+    #[default]
+    Current,
+    /// One straight line, every side branch to its right.
+    StraightLeft,
+    /// One straight line, side branches on both sides, each where its rows stay narrowest.
+    CentredBalanced,
+    /// One straight line, side branches alternating right and left down the trunk.
+    CentredAlternating,
+}
+
+impl Trunk {
+    pub const ALL: [Trunk; 4] = [
+        Trunk::Current,
+        Trunk::StraightLeft,
+        Trunk::CentredBalanced,
+        Trunk::CentredAlternating,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Trunk::Current => "A — current",
+            Trunk::StraightLeft => "B — straight trunk, branches right",
+            Trunk::CentredBalanced => "C — centred trunk, balanced sides",
+            Trunk::CentredAlternating => "D — centred trunk, alternating sides",
+        }
+    }
+
+    /// `A`–`D`, for `PARTERRE_TRUNK`.
+    pub fn from_letter(s: &str) -> Option<Trunk> {
+        let i = "ABCD".find(s.trim().to_ascii_uppercase().as_str())?;
+        Trunk::ALL.get(i).copied()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayoutOptions {
@@ -126,6 +165,8 @@ pub struct LayoutOptions {
     pub max_layer_width: f32,
     /// Merge edges that run into the same parent into one trunk.
     pub concentrate_edges: bool,
+    /// PROTOTYPE (centred trunk).
+    pub trunk: Trunk,
 }
 
 impl Default for LayoutOptions {
@@ -140,6 +181,7 @@ impl Default for LayoutOptions {
             max_layer_gap: 300.0,
             max_layer_width: 1800.0,
             concentrate_edges: false,
+            trunk: Trunk::Current,
         }
     }
 }
@@ -225,6 +267,7 @@ pub fn layout(input: &LayoutInput, options: &LayoutOptions) -> Layout {
         options.edge_gap,
         options.concentrate_edges,
     );
+    graph.side = trunk::sides(&graph, input, options.trunk, options.node_gap);
     let crossings = order::minimize_crossings(&mut graph, input);
     let u = position::assign(&graph, options.node_gap);
 

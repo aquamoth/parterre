@@ -84,7 +84,7 @@ fn main() {
                     first_parent: e.first_parent,
                 })
                 .collect(),
-            priority: Vec::new(),
+            priority: g.layout_anchor(&repo).into_iter().collect(),
         };
         for ranking in Ranking::ALL {
             let t = Instant::now();
@@ -93,6 +93,11 @@ fn main() {
                 &LayoutOptions {
                     ranking,
                     concentrate_edges: args.iter().any(|a| a == "--bundle"),
+                    // PROTOTYPE (centred trunk).
+                    trunk: std::env::var("PARTERRE_TRUNK")
+                        .ok()
+                        .and_then(|v| layout::Trunk::from_letter(&v))
+                        .unwrap_or_default(),
                     ..Default::default()
                 },
             );

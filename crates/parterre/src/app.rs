@@ -374,6 +374,67 @@ impl std::fmt::Debug for ParterreApp {
 }
 
 impl ParterreApp {
+    /// PROTOTYPE (centred trunk, throwaway): a floating bar flipping between trunk layouts,
+    /// also on Alt+← and Alt+→.
+    fn trunk_switcher(&mut self, ctx: &egui::Context) {
+        use parterre_core::layout::Trunk;
+        let all = Trunk::ALL;
+        let at = all
+            .iter()
+            .position(|&t| t == self.settings.layout.trunk)
+            .unwrap_or(0);
+        let mut step = 0isize;
+        ctx.input_mut(|i| {
+            if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft) {
+                step = -1;
+            }
+            if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowRight) {
+                step = 1;
+            }
+        });
+        egui::Area::new(egui::Id::new("prototype-trunk-switcher"))
+            .anchor(egui::Align2::CENTER_BOTTOM, vec2(0.0, -36.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(30, 30, 30))
+                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(255, 200, 0)))
+                    .corner_radius(16.0)
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 2],
+                        blur: 8,
+                        spread: 0,
+                        color: Color32::from_black_alpha(90),
+                    })
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let arrow = |ui: &mut Ui, t: &str| {
+                                ui.add(egui::Button::new(
+                                    egui::RichText::new(t).color(Color32::WHITE),
+                                ))
+                                .clicked()
+                            };
+                            if arrow(ui, "◀") {
+                                step = -1;
+                            }
+                            ui.label(
+                                egui::RichText::new(format!("PROTOTYPE  {}", all[at].label()))
+                                    .color(Color32::WHITE)
+                                    .monospace(),
+                            );
+                            if arrow(ui, "▶") {
+                                step = 1;
+                            }
+                        });
+                    });
+            });
+        if step != 0 {
+            let n = all.len() as isize;
+            self.settings.layout.trunk = all[((at as isize + step).rem_euclid(n)) as usize];
+        }
+    }
+
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         repo: Option<Repo>,
@@ -2791,6 +2852,9 @@ impl eframe::App for ParterreApp {
         }
         if !self.graph_hovered {
             text_size::read_input(ui, &mut self.settings.text_size, false);
+        }
+        if self.repo.is_some() {
+            self.trunk_switcher(&ctx);
         }
         self.shortcuts_window(&ctx);
         self.pull_requests_dialog(&ctx);
