@@ -17,7 +17,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Whether the PR changes anything but Markdown. Pushes to main always build.
+  # Whether the PR changes anything but Markdown, and anything the packages are built from: only
+  # then does it build the release, the packages and the installer, which nothing waits for in a PR
+  # (#243). Pushes to main always build and package; a release publishes only once that passed.
   changes:
     name: Changes
     runs-on: ubuntu-latest
@@ -25,22 +27,32 @@ jobs:
       pull-requests: read
     outputs:
       code: ${{ steps.files.outputs.code }}
+      package: ${{ steps.files.outputs.package }}
     steps:
       - id: files
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          PACKAGING: '^(packaging/|\.github/workflows/|LICENSE$|NOTICE$|(.*/)?Cargo\.(toml|lock)$|crates/[^/]+/build\.rs$)'
         run: |
-          # When the file list can't be had, build.
+          # When the file list can't be had, build and package.
           if [ "$GITHUB_EVENT_NAME" != pull_request ] ||
             ! files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename')
           then
-            echo code=true >> "$GITHUB_OUTPUT"
-          elif printf '%s\n' "$files" | grep -qv '\.md$'; then
+            printf 'code=true\npackage=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if printf '%s\n' "$files" | grep -qv '\.md$'; then
             echo code=true >> "$GITHUB_OUTPUT"
           else
             echo "Only Markdown changed:"; printf '%s\n' "$files"
             echo code=false >> "$GITHUB_OUTPUT"
+          fi
+          if printf '%s\n' "$files" | grep -qE "$PACKAGING"; then
+            echo package=true >> "$GITHUB_OUTPUT"
+          else
+            echo "Nothing the packages are built from changed"
+            echo package=false >> "$GITHUB_OUTPUT"
           fi
 
   # main's ruleset requires the three Test checks, so a Markdown-only PR still runs this job, but on
@@ -60,6 +72,7 @@ jobs:
     container: ${{ needs.changes.outputs.code == 'true' && matrix.container || '' }}
     env:
       BUILD: ${{ needs.changes.outputs.code }}
+      PACKAGE: ${{ needs.changes.outputs.package }}
       # The release the Git 3.0 preview is built from, and its tarball's checksum.
       GIT3: 2.56.0
       GIT3_SHA256: 26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3
@@ -131,37 +144,36 @@ jobs:
           PATH="/opt/git3/bin:$PATH" git --version
           PATH="/opt/git3/bin:$PATH" cargo test --workspace --no-fail-fast
       - name: Build release
-        if: env.BUILD == 'true'
+        if: env.PACKAGE == 'true'
         run: cargo build --release
       - uses: taiki-e/install-action@v2
-        if: env.BUILD == 'true'
+        if: env.PACKAGE == 'true'
         with:
           tool: ${{ runner.os == 'Linux' && 'cargo-about,cargo-deb,cargo-generate-rpm' || 'cargo-about' }}
       # The binary with its license, NOTICE and the licenses of the crates built into it.
       - name: Package
-        if: env.BUILD == 'true'
+        if: env.PACKAGE == 'true'
         shell: bash
         run: |
           mkdir dist
           cp target/release/parterre${{ runner.os == 'Windows' && '.exe' || '' }} LICENSE NOTICE dist/
           cargo about generate --locked -c packaging/about.toml packaging/about.hbs \
             -o dist/THIRD-PARTY-NOTICES.html
-      # The .deb and .rpm from the same binary, so every PR has them to try
-      # (packaging/linux/build-packages.sh). The linux-packages job installs them.
+      # The .deb and .rpm from the same binary (packaging/linux/build-packages.sh). The
+      # linux-packages job installs them.
       - name: Linux packages
-        if: env.BUILD == 'true' && runner.os == 'Linux'
+        if: env.PACKAGE == 'true' && runner.os == 'Linux'
         run: packaging/linux/build-packages.sh dist
-      # The installer from the same files, so every PR has one to try
-      # (packaging/windows/build-msi.ps1).
+      # The installer from the same files (packaging/windows/build-msi.ps1).
       - name: Windows installer
-        if: env.BUILD == 'true' && runner.os == 'Windows'
+        if: env.PACKAGE == 'true' && runner.os == 'Windows'
         shell: bash
         run: |
           dotnet tool install --global wix --version 7.0.0
           PATH="$USERPROFILE/.dotnet/tools:$PATH" \
             pwsh packaging/windows/build-msi.ps1 -Stage dist -Out dist/parterre.msi
       - uses: actions/upload-artifact@v7
-        if: env.BUILD == 'true'
+        if: env.PACKAGE == 'true'
         with:
           name: parterre-${{ matrix.os }}
           path: dist/
@@ -170,7 +182,7 @@ jobs:
   linux-packages:
     name: Linux packages
     needs: [changes, test]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.package == 'true'
     uses: ./.github/workflows/linux-packages.yml
     with:
       artifact: parterre-ubuntu-latest
