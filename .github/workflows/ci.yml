@@ -60,6 +60,9 @@ jobs:
     container: ${{ needs.changes.outputs.code == 'true' && matrix.container || '' }}
     env:
       BUILD: ${{ needs.changes.outputs.code }}
+      # The release the Git 3.0 preview is built from, and its tarball's checksum.
+      GIT3: 2.56.0
+      GIT3_SHA256: 26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3
     steps:
       - name: Prepare container
         if: env.BUILD == 'true' && matrix.container
@@ -110,18 +113,18 @@ jobs:
         id: git3
         with:
           path: /opt/git3
-          key: git-2.56.0-breaking-ubuntu22.04-v1
+          key: git-${{ env.GIT3 }}-breaking-${{ matrix.container }}-v1
       - name: Build the Git 3.0 preview
         if: env.BUILD == 'true' && matrix.container && steps.git3.outputs.cache-hit != 'true'
         run: |
           apt-get install -y --no-install-recommends zlib1g-dev xz-utils
-          curl -fsSLO https://mirrors.edge.kernel.org/pub/software/scm/git/git-2.56.0.tar.xz
-          echo "26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3  git-2.56.0.tar.xz" | sha256sum -c
-          tar xJf git-2.56.0.tar.xz
-          make -C git-2.56.0 -j"$(nproc)" prefix=/opt/git3 WITH_BREAKING_CHANGES=YesPlease \
+          curl -fsSLO "https://mirrors.edge.kernel.org/pub/software/scm/git/git-$GIT3.tar.xz"
+          echo "$GIT3_SHA256  git-$GIT3.tar.xz" | sha256sum -c
+          tar xJf "git-$GIT3.tar.xz"
+          make -C "git-$GIT3" -j"$(nproc)" prefix=/opt/git3 WITH_BREAKING_CHANGES=YesPlease \
             NO_OPENSSL=1 NO_CURL=1 NO_EXPAT=1 NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 \
             NO_RUST=1 INSTALL_STRIP=-s install
-          rm -rf git-2.56.0 git-2.56.0.tar.xz
+          rm -rf "git-$GIT3" "git-$GIT3.tar.xz"
       - name: Test with the Git 3.0 preview
         if: env.BUILD == 'true' && matrix.container
         run: |

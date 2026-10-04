@@ -66,7 +66,7 @@ fn check(cancel: &Cancel) -> Result<(), GitError> {
 pub struct Git {
     dir: PathBuf,
     /// Named with `--git-dir`: a bare repository git would not discover (#228).
-    explicit: bool,
+    pass_git_dir: bool,
 }
 
 /// Separator for `for-each-ref` fields (ref names cannot contain control characters).
@@ -99,23 +99,29 @@ fn git_command() -> Command {
 /// itself, which `safe.bareRepository=explicit` (Git 3.0's default) forbids. That is any but a
 /// work tree's `.git`, or a linked worktree's or a submodule's git dir inside one: git lets
 /// those through (`is_implicit_bare_repo` in setup.c), and `--git-dir` would make a `.git`
-/// folder its own work tree.
+/// folder its own work tree. Judged by the real path, as git does, so `.` inside a `.git` counts.
 fn is_implicit_bare(dir: &Path) -> bool {
-    let git_dir =
+    let looks_like_git_dir =
         dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir();
-    let names: Vec<_> = dir.components().map(|c| c.as_os_str()).collect();
+    if !looks_like_git_dir {
+        return false;
+    }
+    let Ok(real) = std::fs::canonicalize(dir) else {
+        return false;
+    };
+    let names: Vec<_> = real.components().map(|c| c.as_os_str()).collect();
     let inside_dot_git = names.last() == Some(&OsStr::new(".git"))
         || names
             .windows(2)
             .any(|w| w[0] == ".git" && (w[1] == "worktrees" || w[1] == "modules"));
-    git_dir && !inside_dot_git
+    !inside_dot_git
 }
 
 impl Git {
     pub fn new(dir: impl Into<PathBuf>) -> Git {
         let dir = dir.into();
-        let explicit = is_implicit_bare(&dir);
-        Git { dir, explicit }
+        let pass_git_dir = is_implicit_bare(&dir);
+        Git { dir, pass_git_dir }
     }
 
     /// The folder git runs in.
@@ -130,7 +136,7 @@ impl Git {
     {
         let mut cmd = git_command();
         cmd.arg("-C").arg(&self.dir);
-        if self.explicit {
+        if self.pass_git_dir {
             cmd.arg("--git-dir=.");
         }
         cmd.args(["-c", "core.quotepath=off"])
@@ -1156,6 +1162,8 @@ mod tests {
             let out = git_command()
                 .current_dir(tmp.path())
                 .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .output()
                 .unwrap();
             assert!(
@@ -1191,6 +1199,7 @@ mod tests {
         // the folder its own work tree.
         assert!(!is_implicit_bare(&dir("work")));
         assert!(!is_implicit_bare(&dir("work/.git")));
+        assert!(!is_implicit_bare(&dir("work/.git/hooks/..")));
         assert!(!is_implicit_bare(&dir("work/.git/worktrees/linked")));
         assert!(!is_implicit_bare(&dir("work/.git/modules/sub")));
         assert!(!is_implicit_bare(&dir("linked")));

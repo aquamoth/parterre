@@ -33,10 +33,11 @@ fn explicit(test: &str) -> bool {
         .envs(EXPLICIT)
         .output()
         .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // A name that matches no test would run none, and pass.
     assert!(
-        out.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
+        out.status.success() && stdout.contains("1 passed"),
+        "{stdout}{}",
         String::from_utf8_lossy(&out.stderr)
     );
     false
