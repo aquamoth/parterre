@@ -3,21 +3,25 @@
 //! - the update check (#226, #258): GitHub's releases API, asked at start and then once a day,
 //!   and nothing of parterre's own sent with it;
 //! - the usage statistics (#261): installs, updates and launches, sent to PostHog with the
-//!   install ID while the user leaves them ticked, through [`Usage`].
+//!   install ID while the user leaves them ticked, through [`Usage`], in sessions (#262).
 //!
 //! The requests sit behind the `send` feature. Without it nothing is asked or sent: there is no
 //! update check ([`UpdateCheck::start`] gives `None`) and no usage statistics
 //! ([`Usage::start`] gives `None`).
 
+use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 mod channel;
 #[cfg(feature = "send")]
 mod github;
 #[cfg(feature = "send")]
 mod posthog;
+// Without `send` there is no usage statistics, so no session is started.
+#[cfg_attr(not(feature = "send"), allow(dead_code))]
+mod session;
 mod update;
 mod usage;
 
@@ -47,11 +51,18 @@ pub struct Context {
 /// Usage statistics on their way to PostHog, from start until the window closes ([`close`]) or
 /// the user unticks them (drop it).
 ///
+/// Every event carries the session it is part of, as `$session_id`. One starts with the usage
+/// statistics, and a new one after 30 minutes without the user's [`input`], 24 hours after the
+/// last one started, and when the user [`opened`] another repository.
+///
 /// [`close`]: Usage::close
+/// [`input`]: Usage::input
+/// [`opened`]: Usage::opened
 #[derive(Debug)]
 pub struct Usage {
     #[cfg(feature = "send")]
     sender: posthog::Sender,
+    session: session::Session,
 }
 
 impl Usage {
@@ -68,9 +79,11 @@ impl Usage {
             return None;
         }
         #[cfg(feature = "send")]
-        return Some(Usage {
-            sender: posthog::Sender::start(posthog::HOST, context, events),
-        });
+        {
+            let session = session::Session::new(SystemTime::now());
+            let sender = posthog::Sender::start(posthog::HOST, context, session.id(), events);
+            Some(Usage { sender, session })
+        }
         #[cfg(not(feature = "send"))]
         {
             let _ = (context, events);
@@ -80,9 +93,24 @@ impl Usage {
 
     /// The window closes: `Application Backgrounded`, and what is queued is sent, waiting at
     /// most [`CLOSE`].
-    pub fn close(self) {
+    pub fn close(mut self) {
+        let session = self.session.active(SystemTime::now());
         #[cfg(feature = "send")]
-        self.sender.close(CLOSE);
+        self.sender.close(session, CLOSE);
+        #[cfg(not(feature = "send"))]
+        let _ = session;
+    }
+
+    /// The user gave input: a key, the pointer or the wheel, in any of parterre's windows.
+    /// Cheap: call it for every frame that has some.
+    pub fn input(&mut self) {
+        self.session.active(SystemTime::now());
+    }
+
+    /// The user opened `repository`, named by a folder all its worktrees share: a new session
+    /// if it is another than the one opened last. The folder is never sent.
+    pub fn opened(&mut self, repository: &Path) {
+        self.session.opened(repository, SystemTime::now());
     }
 }
 

@@ -423,7 +423,10 @@ impl ParterreApp {
             .filter(|_| persist)
             .map(Privacy::load)
             .unwrap_or_default();
-        let telemetry = privacy::Telemetry::new(privacy, automation.is_active());
+        let mut telemetry = privacy::Telemetry::new(privacy, automation.is_active());
+        if let Some(repo) = &repo {
+            telemetry.opened(repo);
+        }
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         // One screenshot shows everything: the settings in the main window. So does a
         // recording.
@@ -433,6 +436,8 @@ impl ParterreApp {
             cc.egui_ctx
                 .add_plugin(crate::automation::TextCollector(automation.texts.clone()));
         }
+        // Before the lock: a click on a locked window is the user's input too.
+        cc.egui_ctx.add_plugin(privacy::UserInput::default());
         cc.egui_ctx.add_plugin(crate::dialogs::ModalLock::default());
         // Automated runs are short and show one window (viewports are embedded), so they neither
         // freeze nor need their frame rate capped: they run as fast as they can.
@@ -834,6 +839,7 @@ impl ParterreApp {
         match parterre_core::git::load_repo(dir) {
             Ok(repo) => {
                 self.recent.add(&repo.path);
+                self.telemetry.opened(&repo);
                 self.show_repo(Some(repo));
             }
             Err(e) => {

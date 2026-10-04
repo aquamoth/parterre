@@ -26,8 +26,8 @@ send = [
 ]
 
 [dependencies]
-# The install ID: a random (version 4) UUID.
-uuid = { version = "1", features = ["v4"] }
+# The install ID, a random (version 4) UUID, and the session ID, a version 7 one (#262).
+uuid = { version = "1", features = ["v4", "v7"] }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
