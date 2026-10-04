@@ -6,8 +6,9 @@ mod common;
 
 use common::TestRepo;
 use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Cancel, Catalog, Outcome, Report, Stuck};
+use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck};
 use parterre_core::cherry_pick::{self, CherryPick, Picks, Preview, Skipped};
+use parterre_util::CancelTree;
 
 fn oid(s: &str) -> Oid {
     Oid::from_hex(s).unwrap()
@@ -27,7 +28,11 @@ fn chosen(r: &TestRepo, commits: &[&str]) -> Preview {
 }
 
 fn execute(r: &TestRepo, pick: CherryPick) -> Outcome {
-    Branches::new(r.path()).execute(Action::CherryPick(Box::new(pick)), None, &Cancel::default())
+    Branches::new(r.path()).execute(
+        Action::CherryPick(Box::new(pick)),
+        None,
+        &CancelTree::default(),
+    )
 }
 
 fn done(out: Outcome) -> Report {

@@ -1,4 +1,5 @@
-//! Syntax colour for the diff and blame windows (#209).
+//! Syntax colour for the diff and blame windows (#209), in a crate of its own so that the
+//! engine's dependencies live here alone (#214).
 //!
 //! Behind the `syntax` feature, tree-sitter parses a whole version of a file and hands back
 //! language-neutral spans: what each piece of a line is ([`Kind`]), never a colour. The app
@@ -12,7 +13,7 @@
 //! `text.title`, …), each in its own dialect; [`engine::NAMES`] maps those names onto the
 //! dozen kinds here.
 
-use crate::git::Cancel;
+use parterre_util::{Cancel, Poll};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::ops::Range;
@@ -313,8 +314,8 @@ pub fn in_child(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let pipes = cancel.spawn(&mut cmd).ok().flatten()?;
-    let mut stdin = pipes.stdin.expect("stdin is piped");
-    let mut stdout = pipes.stdout.expect("stdout is piped");
+    let mut stdin = pipes.stdin?;
+    let mut stdout = pipes.stdout?;
     let start = Instant::now();
     let mut out = Vec::new();
     let finished = std::thread::scope(|s| {
@@ -337,26 +338,14 @@ pub fn in_child(
 /// it when cancelled. True if it exited well.
 fn watch(cancel: &Cancel, start: Instant, budget: Duration) -> bool {
     loop {
-        {
-            let mut running = cancel.lock();
-            let waited = match running.child.as_mut() {
-                // Taken, killed and waited for by `cancel()`.
-                None => return false,
-                Some(child) => child.try_wait(),
-            };
-            match waited {
-                Ok(Some(status)) => {
-                    running.child = None;
-                    return status.success();
-                }
-                Ok(None) if start.elapsed() <= budget => {}
-                _ => {
-                    if let Some(mut child) = running.child.take() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                    return false;
-                }
+        match cancel.poll() {
+            // Killed by `cancel()`, or unreadable and killed.
+            Poll::Gone => return false,
+            Poll::Exited(status) => return status.success(),
+            Poll::Running if start.elapsed() <= budget => {}
+            Poll::Running => {
+                cancel.kill();
+                return false;
             }
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -409,7 +398,7 @@ mod engine {
     use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
     /// The Protocol Buffers highlight query, which its crate doesn't export.
-    const PROTO_HIGHLIGHTS: &str = include_str!("highlight/proto_highlights.scm");
+    const PROTO_HIGHLIGHTS: &str = include_str!("proto_highlights.scm");
 
     /// The capture names recognised, and what each means. `configure` maps a grammar's
     /// capture to the longest recognised dotted prefix, so `keyword.operator` counts as

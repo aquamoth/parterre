@@ -39,15 +39,16 @@ at the commit being built, or the sources have local changes. In that case delet
 
 ## crates.io
 
-Cargo requires a package version in `Cargo.toml` and an equal version on the `parterre-core`
-dependency. After the GitHub release workflow passes, use Python 3.11 or newer to generate a
-separate checkout from the tag:
+Cargo requires a package version in `Cargo.toml` and an equal version on each internal
+dependency (`parterre-util`, `parterre-core`, `parterre-forge`, `parterre-highlight`). After
+the GitHub release workflow passes, use Python 3.11 or newer to generate a separate checkout
+from the tag:
 
 ```sh
 scripts/prepare-crates-release.py v0.5.0-rc1
 ```
 
-The script prints the checkout path and publish command. It updates both versions and the two
+The script prints the checkout path and publish command. It updates the versions and the five
 workspace entries in `Cargo.lock`, verifies them with `cargo metadata --locked`, and makes a
 local commit so `cargo publish` sees clean sources. The commit exists only in that disposable
 checkout; the pushed tag and `main` still point at the same original commit. From the generated

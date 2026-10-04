@@ -8,16 +8,15 @@ use std::process::Command;
 
 use common::TestRepo;
 use parterre_core::Oid;
-use parterre_core::branches::{
-    Action, AddWorktree, Branches, Cancel, Catalog, Checkout, Outcome, Warning,
-};
+use parterre_core::branches::{Action, AddWorktree, Branches, Catalog, Checkout, Outcome, Warning};
+use parterre_util::CancelTree;
 
 fn oid(s: &str) -> Oid {
     Oid::from_hex(s).unwrap()
 }
 
 fn execute(r: &TestRepo, a: Action, approval: Option<&Warning>) -> Outcome {
-    Branches::new(r.path()).execute(a, approval, &Cancel::default())
+    Branches::new(r.path()).execute(a, approval, &CancelTree::default())
 }
 
 fn done(out: Outcome) {
@@ -577,14 +576,14 @@ fn the_main_open_and_locked_worktrees_are_never_deleted() {
     let error = failed(Branches::new(&linked).execute(
         Action::DeleteWorktree { path: main },
         None,
-        &Cancel::default(),
+        &CancelTree::default(),
     ));
     assert!(error.contains("main worktree"), "{error}");
     let open = Catalog::load(&linked).unwrap().root;
     let error = failed(Branches::new(&linked).execute(
         Action::DeleteWorktree { path: open },
         None,
-        &Cancel::default(),
+        &CancelTree::default(),
     ));
     assert!(error.contains("open worktree"), "{error}");
     r.git(&["worktree", "lock", &linked.to_string_lossy()]);

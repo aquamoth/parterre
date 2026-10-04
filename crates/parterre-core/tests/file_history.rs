@@ -7,7 +7,8 @@ use parterre_core::Oid;
 use parterre_core::blame::{BlameOptions, BlameSpec, Moves};
 use parterre_core::file_diff::Rev;
 use parterre_core::file_history::{FileHistory, Source};
-use parterre_core::git::{Cancel, Git};
+use parterre_core::git::Git;
+use parterre_util::Cancel;
 
 fn at(hash: &str, path: &str) -> BlameSpec {
     BlameSpec {

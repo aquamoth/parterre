@@ -7,10 +7,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::git::{Git, GitError};
-use crate::oid::Oid;
-use crate::repo::{RefKind, Repo};
-use crate::revgraph::PullRequestHead;
+use parterre_core::git::{Git, GitError};
+use parterre_core::oid::Oid;
+use parterre_core::repo::{RefKind, Repo};
+use parterre_core::revgraph::PullRequestHead;
 
 pub mod github;
 
@@ -296,7 +296,7 @@ pub fn upstreams(git: &Git) -> Result<HashMap<String, String>, GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::{Commit, CommitIx, GitRef, Head};
+    use parterre_core::repo::{Commit, CommitIx, GitRef, Head};
 
     fn oid(n: u8) -> Oid {
         Oid::from_hex(&format!("{n:02x}").repeat(20)).unwrap()
@@ -318,7 +318,7 @@ mod tests {
     }
 
     fn git_ref(full_name: &str, target: u32) -> GitRef {
-        let (kind, name) = crate::git::classify_ref(full_name);
+        let (kind, name) = parterre_core::git::classify_ref(full_name);
         GitRef {
             full_name: full_name.to_owned(),
             name,

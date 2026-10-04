@@ -51,14 +51,15 @@ use parterre_core::changed_files::FileStatus;
 use parterre_core::file_diff::{FileDiffSpec, Rev, Version, display_column, raw_offset};
 use parterre_core::file_history::{FileHistory, FileLog, HistoryRow, Source};
 use parterre_core::find;
-use parterre_core::git::{Cancel, CommitDetails, Git};
+use parterre_core::git::{CommitDetails, Git};
 use parterre_core::glyphs;
-use parterre_core::highlight::{self, Engine, Spans};
 use parterre_core::log_graph::LogGraph;
 use parterre_core::repo::cmp_refs_for_display;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{line_number, thousands, word_at};
 use parterre_core::{CommitIx, Oid, Repo};
+use parterre_highlight::{self as highlight, Engine, Spans};
+use parterre_util::Cancel;
 
 use super::commit_table::{CommitList, CommitTable, ROW, Row, Select};
 use super::diff_window::{

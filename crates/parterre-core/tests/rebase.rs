@@ -5,8 +5,9 @@ mod common;
 
 use common::TestRepo;
 use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Cancel, Catalog, Outcome, Report, Stuck};
+use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck};
 use parterre_core::rebase::{self, Preview, Skipped, Todo};
+use parterre_util::CancelTree;
 
 fn oid(s: &str) -> Oid {
     Oid::from_hex(s).unwrap()
@@ -21,7 +22,11 @@ fn preview(r: &TestRepo, onto: &str) -> Preview {
 }
 
 fn execute(r: &TestRepo, rebase: rebase::Rebase) -> Outcome {
-    Branches::new(r.path()).execute(Action::Rebase(Box::new(rebase)), None, &Cancel::default())
+    Branches::new(r.path()).execute(
+        Action::Rebase(Box::new(rebase)),
+        None,
+        &CancelTree::default(),
+    )
 }
 
 fn done(out: Outcome) -> Report {

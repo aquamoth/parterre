@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Output, Stdio};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::process::{Command, Output, Stdio};
+
+use parterre_util::Cancel;
 
 use crate::blame::{Blame, BlameOptions, BlameSpec};
 use crate::changed_files::{ChangedFile, parse_diff_tree};
@@ -42,76 +43,12 @@ pub enum GitError {
     Cancelled,
 }
 
-/// Stops git commands running on another thread, one at a time. [`Cancel::cancel`] kills the
-/// one running, and those started after it with the same handle stop at once. Closing git's
-/// output would not do: git notices only when it next writes, which can be after walking the
-/// whole history.
-#[derive(Clone, Debug, Default)]
-pub struct Cancel(Arc<Mutex<Running>>);
-
-#[derive(Debug, Default)]
-pub(crate) struct Running {
-    pub(crate) cancelled: bool,
-    /// The git command, or the syntax colouring's child process, running with this handle.
-    pub(crate) child: Option<Child>,
-}
-
-/// The pipes of a child [`Cancel::spawn`] started: `None` for those its command didn't pipe.
-pub(crate) struct Pipes {
-    pub(crate) stdin: Option<ChildStdin>,
-    pub(crate) stdout: Option<ChildStdout>,
-    pub(crate) stderr: Option<ChildStderr>,
-}
-
-impl Cancel {
-    pub fn new() -> Cancel {
-        Cancel::default()
+/// Fails with [`GitError::Cancelled`] once `cancel` is.
+fn check(cancel: &Cancel) -> Result<(), GitError> {
+    if cancel.is_cancelled() {
+        return Err(GitError::Cancelled);
     }
-
-    /// Kills the git command running with this handle, if any, and waits for it to exit.
-    pub fn cancel(&self) {
-        let mut running = self.lock();
-        running.cancelled = true;
-        if let Some(mut child) = running.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.lock().cancelled
-    }
-
-    /// Starts `cmd` with this handle holding the child, and hands back its pipes; `None`,
-    /// without starting it, once cancelled. It starts under the lock, so a
-    /// [`cancel`](Cancel::cancel) meanwhile waits for the child and kills it, rather than
-    /// returning while it runs.
-    pub(crate) fn spawn(&self, cmd: &mut Command) -> std::io::Result<Option<Pipes>> {
-        let mut running = self.lock();
-        if running.cancelled {
-            return Ok(None);
-        }
-        let mut child = cmd.spawn()?;
-        let pipes = Pipes {
-            stdin: child.stdin.take(),
-            stdout: child.stdout.take(),
-            stderr: child.stderr.take(),
-        };
-        running.child = Some(child);
-        Ok(Some(pipes))
-    }
-
-    /// Fails with [`GitError::Cancelled`] once cancelled.
-    fn check(&self) -> Result<(), GitError> {
-        if self.is_cancelled() {
-            return Err(GitError::Cancelled);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn lock(&self) -> MutexGuard<'_, Running> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
-    }
+    Ok(())
 }
 
 /// A handle for running git commands against one repository.
@@ -184,16 +121,12 @@ impl Git {
         } else {
             cmd.env_remove("LC_ALL");
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
         cmd
     }
 
-    /// Runs git and returns stdout, failing on a non-zero exit status.
-    pub(crate) fn run(&self, args: &[&str]) -> Result<String, GitError> {
+    /// Runs git and returns stdout, failing on a non-zero exit status. Public for the crates
+    /// built on this one (the forge client); the app goes through the methods below.
+    pub fn run(&self, args: &[&str]) -> Result<String, GitError> {
         let out = self.output(args)?;
         if !out.status.success() {
             return Err(GitError::Failed {
@@ -264,7 +197,7 @@ impl Git {
         let read = stdout.read_to_end(&mut out);
         let stderr = errors.join().unwrap_or_default();
         // Gone if `cancel` killed it (and waited for it).
-        let Some(mut child) = cancel.lock().child.take() else {
+        let Some(mut child) = cancel.release() else {
             return Err(GitError::Cancelled);
         };
         let status = child.wait().map_err(GitError::Spawn)?;
@@ -279,8 +212,8 @@ impl Git {
     }
 
     /// Runs git and returns trimmed stdout, or `None` on a non-zero exit status (for queries
-    /// such as `symbolic-ref -q` that signal "no" through the exit code).
-    pub(crate) fn query(&self, args: &[&str]) -> Result<Option<String>, GitError> {
+    /// such as `symbolic-ref -q` that signal "no" through the exit code). Public as [`Git::run`].
+    pub fn query(&self, args: &[&str]) -> Result<Option<String>, GitError> {
         let out = self.output(args)?;
         Ok(out
             .status
@@ -778,11 +711,11 @@ impl Git {
                 let mut revs = vec!["HEAD".to_owned()];
                 revs.extend(self.query(&["rev-parse", "-q", "--verify", "MERGE_HEAD^{commit}"])?);
                 let changed = self.differs_from_head(&spec.path)?;
-                cancel.check()?;
+                check(cancel)?;
                 (revs, self.path_in_head(&spec.path)?, changed)
             }
         };
-        cancel.check()?;
+        check(cancel)?;
         let mut args = vec![
             "--literal-pathspecs",
             "log",

@@ -1,0 +1,30 @@
+[package]
+name = "parterre-forge"
+description = "Internal to parterre: open pull requests from GitHub, shown on their head commits. No stability promises."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[features]
+# Open pull requests from GitHub's API (`github`): the HTTPS client. Without it, loading them
+# fails.
+github = ["dep:ureq"]
+
+[dependencies]
+parterre-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

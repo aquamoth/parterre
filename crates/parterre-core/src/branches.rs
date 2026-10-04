@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::git::{Git, GitError};
 use crate::{Oid, Repo};
@@ -892,59 +892,7 @@ pub enum Error {
     Cancelled,
 }
 
-/// Cancels the whole Git process group on Unix, or process tree on Windows, including hooks.
-#[derive(Clone, Debug, Default)]
-pub struct Cancel(Arc<Mutex<(bool, Option<u32>)>>);
-
-impl Cancel {
-    pub fn cancel(&self) {
-        let mut state = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.0 {
-            return;
-        }
-        state.0 = true;
-        if let Some(pid) = state.1 {
-            #[cfg(unix)]
-            {
-                signal_group(pid, "-TERM");
-                let pending = self.0.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                    let state = pending
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    // Keep the group registered until its output pipes close, even if Git
-                    // has already exited. Hooks can ignore TERM and keep those pipes open.
-                    if state.1 == Some(pid) {
-                        signal_group(pid, "-KILL");
-                    }
-                });
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/T", "/PID", &pid.to_string()])
-                    .creation_flags(0x0800_0000)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn signal_group(pid: u32, signal: &str) {
-    let _ = std::process::Command::new("kill")
-        .args([signal, "--", &format!("-{pid}")])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
+use parterre_util::CancelTree;
 
 #[derive(Clone, Debug, Default)]
 pub struct Report {
@@ -1090,7 +1038,12 @@ impl Branches {
         }
     }
 
-    pub fn execute(&self, action: Action, approval: Option<&Warning>, cancel: &Cancel) -> Outcome {
+    pub fn execute(
+        &self,
+        action: Action,
+        approval: Option<&Warning>,
+        cancel: &CancelTree,
+    ) -> Outcome {
         let mut report = Report::default();
         let requested = action.clone();
         match self.execute_inner(action, approval, cancel, &mut report) {
@@ -1144,7 +1097,7 @@ impl Branches {
         &self,
         action: Action,
         approval: Option<&Warning>,
-        cancel: &Cancel,
+        cancel: &CancelTree,
         report: &mut Report,
     ) -> Result<Option<Warning>, Error> {
         let git = Git::new(&self.path);
@@ -1357,7 +1310,7 @@ impl Branches {
         path: &Path,
         action: &Action,
         approval: Option<&Warning>,
-        cancel: &Cancel,
+        cancel: &CancelTree,
         report: &mut Report,
     ) -> Result<Option<Warning>, Error> {
         let git = Git::new(&self.path);
@@ -1638,7 +1591,7 @@ pub(crate) fn lost_commits(
 pub(crate) fn run(
     git: &Git,
     args: Vec<String>,
-    cancel: &Cancel,
+    cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<bool, Error> {
     run_with(git, args, &[], cancel, report)
@@ -1649,23 +1602,15 @@ pub(crate) fn run_with(
     git: &Git,
     args: Vec<String>,
     env: &[(&str, &str)],
-    cancel: &Cancel,
+    cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<bool, Error> {
-    let mut state = cancel
-        .0
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if state.0 {
-        return Err(Error::Cancelled);
-    }
-    let mut child = git
-        .operation_command(&args)
-        .envs(env.iter().copied())
-        .spawn()
-        .map_err(GitError::Spawn)?;
-    state.1 = Some(child.id());
-    drop(state);
+    let mut child = cancel
+        .start(git.operation_command(&args).envs(env.iter().copied()))
+        .map_err(|e| match e {
+            parterre_util::Start::Cancelled => Error::Cancelled,
+            parterre_util::Start::Spawn(e) => GitError::Spawn(e).into(),
+        })?;
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
     let errors = std::thread::spawn(move || {
@@ -1677,11 +1622,7 @@ pub(crate) fn run_with(
     let read_result = stdout.read_to_end(&mut output);
     let error = errors.join().unwrap_or_default();
     let status = child.wait();
-    let mut state = cancel
-        .0
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    state.1 = None;
+    let cancelled = cancel.finish();
     let status = status.map_err(GitError::Spawn)?;
     output.extend(error);
     report.steps.push(Step {
@@ -1689,7 +1630,7 @@ pub(crate) fn run_with(
         output: String::from_utf8_lossy(&output).trim().to_owned(),
         success: status.success(),
     });
-    if state.0 {
+    if cancelled {
         return Err(Error::Cancelled);
     }
     read_result.map_err(GitError::Spawn)?;

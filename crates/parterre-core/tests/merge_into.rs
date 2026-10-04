@@ -9,8 +9,9 @@ use std::process::Command;
 
 use common::{TestRepo, read_text};
 use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Cancel, Catalog, Outcome, Report, Stuck};
+use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck};
 use parterre_core::merge::{self, Method, Preview};
+use parterre_util::CancelTree;
 
 /// `main`, checked out in the main worktree, with a commit of its own; `feature`, checked out
 /// in a linked worktree, the open one, with two; both from `base`.
@@ -73,7 +74,11 @@ impl Pr {
     }
 
     fn execute(&self, merge: merge::Merge) -> Outcome {
-        Branches::new(&self.wt).execute(Action::Merge(Box::new(merge)), None, &Cancel::default())
+        Branches::new(&self.wt).execute(
+            Action::Merge(Box::new(merge)),
+            None,
+            &CancelTree::default(),
+        )
     }
 
     fn offered(&self, at: &str) -> Option<String> {

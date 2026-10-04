@@ -36,11 +36,11 @@ use parterre_core::file_diff::{
     fold_lines,
 };
 use parterre_core::find;
-use parterre_core::git::Cancel;
 use parterre_core::glyphs;
-use parterre_core::highlight::{self, Engine, Spans};
 use parterre_core::text::word_at;
 use parterre_core::{Oid, Repo};
+use parterre_highlight::{self as highlight, Engine, Spans};
+use parterre_util::Cancel;
 
 use super::ParterreApp;
 use crate::settings::{DiffForm, DiffWindowSettings};

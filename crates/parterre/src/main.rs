@@ -280,7 +280,7 @@ fn main() -> ExitCode {
     console::attach_parent();
     let mut cli = Cli::parse();
     if let Some(id) = cli.highlight.as_deref() {
-        return ExitCode::from(parterre_core::highlight::serve(id));
+        return ExitCode::from(parterre_highlight::serve(id));
     }
     cli.path = cli.path.take().map(repair_quoted_root);
     let script = match cli.script.as_deref().map(read_script).transpose() {

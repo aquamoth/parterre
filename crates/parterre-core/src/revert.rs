@@ -6,10 +6,11 @@
 
 use std::path::Path;
 
-use crate::branches::{Attention, Cancel, Catalog, Error, Report, Stashed, Stuck, run, run_with};
+use crate::branches::{Attention, Catalog, Error, Report, Stashed, Stuck, run, run_with};
 use crate::git::Git;
 use crate::log::is_ancestor;
 use crate::{Oid, Repo};
+use parterre_util::CancelTree;
 
 /// A revert the user agreed to. It runs only while the branch is still where it was.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -370,7 +371,7 @@ fn stash_top(git: &Git) -> Option<String> {
 pub(crate) fn execute(
     catalog: &Catalog,
     revert: &Revert,
-    cancel: &Cancel,
+    cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<(), Error> {
     let name = revert.name();
@@ -516,7 +517,7 @@ fn index_clean(git: &Git) -> Result<bool, Error> {
 pub(crate) fn restore(
     catalog: &Catalog,
     stash: Oid,
-    cancel: &Cancel,
+    cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<(), Error> {
     if let Some(stuck) = catalog.stuck() {

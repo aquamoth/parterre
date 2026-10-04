@@ -15,10 +15,10 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Instant;
 
 use eframe::egui;
-use parterre_core::forge::github::{self, GithubRepo};
-use parterre_core::forge::{self, ForgeError, PullRequests};
 use parterre_core::git::Git;
 use parterre_core::glyphs;
+use parterre_forge::github::{self, GithubRepo};
+use parterre_forge::{self as forge, ForgeError, PullRequests};
 
 use crate::widgets;
 
