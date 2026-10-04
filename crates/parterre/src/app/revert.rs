@@ -409,11 +409,12 @@ mod tests {
         assert!(h.shows("other"), "{:?}", h.texts);
         assert_eq!(read(h.path(), "other"), "other\n");
         h.click("Restore");
-        h.until("restored", |h| read(h.path(), "other") == "also mine\n");
-        // The file the revert changed conflicts: git says so, and keeps the entry.
+        // The file the revert changed conflicts: git says so, and keeps the entry. The notice
+        // waits for git, which removes each file it writes back before writing it (#217).
         h.until("the orange notice", |h| {
             h.shows("Restoring stashed changes conflicted in 1 file")
         });
+        assert_eq!(read(h.path(), "other"), "also mine\n");
         assert_eq!(git(h.path(), &["stash", "list"]).lines().count(), 1);
     }
 
