@@ -111,6 +111,11 @@ Nothing is sent before *Continue*. With usage statistics ticked, a release build
 (every start) and `Application Backgrounded` (on close), with a random install ID made at the
 first run. The channel above goes with them, as `channel`.
 
+With crash reports ticked, a release build sends a panic to PostHog as a `$exception` the moment
+it happens (#263), through posthog-rs's panic capture. A crash report never carries the install
+ID, and the user's home folder in it becomes `~`. Ticking or unticking them takes effect at the
+next start; ticking them in the first-run prompt, at once.
+
 - **Off switches:** the switches in Settings › Privacy; `DO_NOT_TRACK` set (to anything but
   `0`), which also skips the prompt; and for packagers the `send` feature.
 - What is sent, and how to have it deleted: [What parterre sends](privacy.md).

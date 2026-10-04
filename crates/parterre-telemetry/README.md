@@ -2,8 +2,8 @@
 
 What [parterre](https://crates.io/crates/parterre), a TortoiseGit-style revision graph viewer,
 asks and sends over the network: the update check, which asks GitHub whether a newer release is
-out and where this build's channel gets it, and the usage statistics, which go to PostHog once
-the user has answered the first-run prompt and as long as they leave them ticked. The HTTPS
+out and where this build's channel gets it, and the usage statistics and crash reports, which go
+to PostHog once the user has answered the first-run prompt, each while it is ticked. The HTTPS
 clients and PostHog's SDK sit behind the `send` feature; without it the crate makes no requests
 at all, and the rest of parterre never sees them.
 

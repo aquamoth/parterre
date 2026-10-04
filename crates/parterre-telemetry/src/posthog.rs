@@ -10,13 +10,20 @@
 //! The session (`$session_id`, #262) goes on each usage event as it is made, not in
 //! `before_send`: nothing else this client sends, such as a crash report (`$exception`), carries
 //! it, as a session would tie it to the install ID's events.
+//!
+//! Crash reports (#263) go through a client of their own, the SDK's global one, whose panic
+//! capture sends a `$exception` the moment a panic happens. They carry the standard properties
+//! but never the install ID: the SDK makes them personless with a random ID. Home folders in
+//! them become `~` in `before_send`, PostHog's way to keep personal data out of exceptions.
 
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use posthog_rs::{Client, ClientOptionsBuilder, Event};
+use posthog_rs::{Client, ClientOptionsBuilder, ErrorTrackingOptionsBuilder, Event};
+use serde_json::Value;
 
-use crate::{Channel, Context, Lifecycle, app_version};
+use crate::{Channel, Context, Lifecycle, app_version, crash};
 
 /// The parterre project's token. Public by design: it can only send events (#275).
 const TOKEN: &str = "phc_rdXXhGJLnbhdtA6tJ5bAXiNzntnob2krZCevNBz5GSES";
@@ -119,6 +126,76 @@ fn client(host: &str, standard: Standard, close: Duration) -> Client {
     }
 }
 
+/// Turns on the SDK's panic capture for the rest of the process: from now on a panic is sent to
+/// `host` as a `$exception` the moment it happens, waiting at most the SDK's 2 seconds. The
+/// panic hook installed before it is still called, after it. False if it couldn't be turned
+/// on, as when it already is.
+pub(crate) fn capture_panics(
+    host: &str,
+    version: &str,
+    git_version: fn() -> Option<String>,
+    homes: Vec<String>,
+) -> bool {
+    let mut standard = Standard::crash(version);
+    // Asked on a thread of its own, so that the start doesn't wait for git; a panic before it
+    // has answered goes without its version.
+    let git = Arc::new(OnceLock::new());
+    let asked = Arc::clone(&git);
+    let _ = std::thread::Builder::new()
+        .name("crash reports".into())
+        .spawn(move || asked.set(git_version()));
+    let Ok(error_tracking) = ErrorTrackingOptionsBuilder::default()
+        .capture_panics(true)
+        .build()
+    else {
+        return false;
+    };
+    let mut options = ClientOptionsBuilder::default();
+    options
+        .api_key(TOKEN.to_owned())
+        .host(host)
+        .is_server(false)
+        .request_timeout_seconds(REQUEST_TIMEOUT.as_secs())
+        .error_tracking(error_tracking)
+        .before_send(move |mut event| {
+            if standard.git_version.is_none() {
+                standard.git_version = git.get().cloned().flatten();
+            }
+            crash_report(&mut event, &standard, &homes);
+            Some(event)
+        });
+    let Ok(options) = options.build() else {
+        return false;
+    };
+    posthog_rs::init_global(options).is_ok()
+}
+
+/// A panic, as it is sent: with the standard properties, never anything that ties it to this
+/// installation, and the `homes` scrubbed from every text in it ([`crash::scrub`]): the panic's
+/// message and file, the stack frames' files and `$debug_images[].code_file`.
+fn crash_report(event: &mut Event, standard: &Standard, homes: &[String]) {
+    standard.apply(event);
+    // Sessions belong to the usage statistics, which carry the install ID (#262).
+    let _ = event.remove_prop("$session_id");
+    let keys: Vec<String> = event.properties().keys().cloned().collect();
+    for key in keys {
+        if let Some(mut value) = event.remove_prop(&key) {
+            scrub(&mut value, homes);
+            let _ = event.insert_prop(key, value);
+        }
+    }
+}
+
+/// Every text in `value`, through [`crash::scrub`].
+fn scrub(value: &mut Value, homes: &[String]) {
+    match value {
+        Value::String(text) => *text = crash::scrub(text, homes),
+        Value::Array(values) => values.iter_mut().for_each(|v| scrub(v, homes)),
+        Value::Object(map) => map.values_mut().for_each(|v| scrub(v, homes)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
 /// The event for `lifecycle`, from this installation, in `session`.
 fn event(lifecycle: &Lifecycle, install_id: &str, session: &str) -> Event {
     let mut event = Event::new(lifecycle.name(), install_id);
@@ -157,6 +234,18 @@ impl Standard {
                 .screen
                 .filter(|s| s.iter().all(|x| x.is_finite() && *x > 0.0))
                 .map(|s| s.map(|x| x.round() as u32)),
+        }
+    }
+
+    /// A crash report's, known at start: not the screen's size, and git's version only later.
+    fn crash(version: &str) -> Standard {
+        Standard {
+            app_version: app_version(version),
+            channel: Channel::current().name(),
+            git_version: None,
+            locale: sys_locale::get_locale(),
+            timezone: iana_time_zone::get_timezone().ok(),
+            screen: None,
         }
     }
 
@@ -390,5 +479,150 @@ mod tests {
             .map(|e| &e["properties"]["$session_id"])
             .collect();
         assert_eq!(sessions, [SESSION, SESSION, NEXT_SESSION]);
+    }
+
+    /// Every text in `value`.
+    fn texts(value: &Value) -> Vec<&str> {
+        match value {
+            Value::String(text) => vec![text],
+            Value::Array(values) => values.iter().flat_map(texts).collect(),
+            Value::Object(map) => map.values().flat_map(texts).collect(),
+            Value::Null | Value::Bool(_) | Value::Number(_) => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn crash_reports_have_the_home_folder_scrubbed_and_no_session() {
+        let mut e = Event::new_anon("$exception");
+        let frames = json!([
+            {"filename": "/home/x/.cargo/registry/src/egui-0.36.0/src/context.rs", "lineno": 1},
+            {"filename": "crates/parterre/src/app.rs", "function": "parterre::app::update"},
+            {"filename": "C:\\Users\\x\\.cargo\\registry\\src\\egui\\src\\ui.rs"},
+        ]);
+        let exception = json!([{
+            "type": "Panic",
+            "value": "cannot open /home/x/repos/app/.git/index",
+            "stacktrace": {"type": "raw", "frames": frames},
+        }]);
+        e.insert_prop("$exception_list", exception).unwrap();
+        let images = json!([{"debug_id": ID, "code_file": "/home/x/.cargo/bin/parterre"}]);
+        e.insert_prop("$debug_images", images).unwrap();
+        e.insert_prop("$exception_panic_file", "/home/x/.cargo/registry/src/a.rs")
+            .unwrap();
+        e.insert_prop("$session_id", "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b")
+            .unwrap();
+        let random = e.distinct_id().to_owned();
+        let homes = vec!["/home/x".to_owned(), r"C:\Users\x".to_owned()];
+        crash_report(&mut e, &standard(), &homes);
+        let p = serde_json::to_value(e.properties()).unwrap();
+        let exception = &p["$exception_list"][0];
+        assert_eq!(exception["value"], "cannot open ~/repos/app/.git/index");
+        let files: Vec<_> = exception["stacktrace"]["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["filename"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            files,
+            [
+                "~/.cargo/registry/src/egui-0.36.0/src/context.rs",
+                "crates/parterre/src/app.rs",
+                r"~\.cargo\registry\src\egui\src\ui.rs"
+            ]
+        );
+        assert_eq!(p["$debug_images"][0]["code_file"], "~/.cargo/bin/parterre");
+        assert_eq!(p["$debug_images"][0]["debug_id"], ID);
+        assert_eq!(p["$exception_panic_file"], "~/.cargo/registry/src/a.rs");
+        // Personless, under the SDK's random ID, and with the standard properties.
+        assert!(p.get("$session_id").is_none(), "{p}");
+        assert_eq!(e.distinct_id(), random);
+        assert_eq!(p["$process_person_profile"], false);
+        assert_eq!(p["$app_version"], "0.6.0");
+        assert_eq!(p["channel"], "deb");
+    }
+
+    #[test]
+    fn a_crash_reports_standard_properties_are_known_at_start() {
+        let s = Standard::crash("0.6.0 (a1b2c3d)");
+        assert_eq!(s.app_version, "0.6.0");
+        assert_eq!(s.channel, Channel::current().name());
+        assert_eq!((s.git_version, s.screen), (None, None));
+    }
+
+    /// Set for the child process [`a_panic_reaches_posthog_without_the_install_id`] starts:
+    /// where PostHog's stand-in listens.
+    const CRASH_HOST: &str = "PARTERRE_TEST_CRASH_HOST";
+
+    /// What the child process's panic hook, installed before the crash reports, prints.
+    const HOOK_BEFORE: &str = "the panic hook from before";
+
+    /// A panic in a process of its own, as the SDK's panic capture is for the whole process
+    /// and can be turned on only once.
+    #[test]
+    fn a_panic_reaches_posthog_without_the_install_id() {
+        let exe = std::env::current_exe().unwrap();
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let exe_folder = exe.parent().unwrap().to_string_lossy().into_owned();
+        // Stand-ins for the home folder: one in the panic's message, and where the test and
+        // its sources are, which the stack frames and `$debug_images` name.
+        let homes = vec!["/home/x".to_owned(), workspace.clone(), exe_folder.clone()];
+        if let Ok(host) = std::env::var(CRASH_HOST) {
+            std::panic::set_hook(Box::new(|_| eprintln!("{HOOK_BEFORE}")));
+            assert!(capture_panics(&host, "0.6.0 (a1b2c3d)", || None, homes));
+            assert!(!capture_panics(&host, "0.6.0", || None, Vec::new()));
+            panic!("cannot open /home/x/repos/app/.git/index");
+        }
+        let (host, received) = posthog_here();
+        let name = "posthog::tests::a_panic_reaches_posthog_without_the_install_id";
+        let child = std::process::Command::new(&exe)
+            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CRASH_HOST, &host)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&child.stderr);
+        assert!(!child.status.success(), "{stderr}");
+        // The hook from before still ran, after the report was sent.
+        assert!(stderr.contains(HOOK_BEFORE), "{stderr}");
+        let body = received
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("nothing sent: {stderr}"));
+        assert_eq!(body["api_key"], TOKEN);
+        let sent = body["batch"].as_array().unwrap();
+        assert_eq!(sent.len(), 1, "{body}");
+        let e = &sent[0];
+        let p = &e["properties"];
+        assert_eq!(e["event"], "$exception");
+        // Personless, with a random ID: not the install ID, nor a session.
+        assert_ne!(e["distinct_id"], ID);
+        assert!(uuid::Uuid::parse_str(e["distinct_id"].as_str().unwrap()).is_ok());
+        assert_eq!(p["$process_person_profile"], false);
+        assert!(p.get("$session_id").is_none(), "{p}");
+        assert_eq!(p["$exception_level"], "fatal");
+        let exception = &p["$exception_list"][0];
+        assert_eq!(exception["type"], "Panic");
+        assert_eq!(exception["value"], "cannot open ~/repos/app/.git/index");
+        assert_eq!(p["$app_version"], "0.6.0");
+        assert_eq!(p["$app_name"], "parterre");
+        assert!(p["$os"].is_string(), "{p}");
+        assert!(p.get("$is_server").is_none(), "{p}");
+        for text in texts(p) {
+            assert!(!text.contains(&workspace), "{text}");
+            assert!(!text.contains(&exe_folder), "{text}");
+            assert!(!text.contains("/home/x"), "{text}");
+        }
+        if let Some(images) = p["$debug_images"].as_array() {
+            for image in images {
+                let file = image["code_file"].as_str().unwrap_or("~");
+                assert!(!file.contains(&exe_folder), "{file}");
+            }
+        }
+        // Nothing more: one panic, one report.
+        assert!(received.recv_timeout(Duration::from_millis(500)).is_err());
     }
 }

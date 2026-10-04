@@ -3,11 +3,13 @@
 //! - the update check (#226, #258): GitHub's releases API, asked at start and then once a day,
 //!   and nothing of parterre's own sent with it;
 //! - the usage statistics (#261): installs, updates and launches, sent to PostHog with the
-//!   install ID while the user leaves them ticked, through [`Usage`], in sessions (#262).
+//!   install ID while the user leaves them ticked, through [`Usage`], in sessions (#262);
+//! - the crash reports (#263): panics, sent to PostHog the moment they happen, without the
+//!   install ID, once the user has ticked them ([`start_crash_reports`]).
 //!
 //! The requests sit behind the `send` feature. Without it nothing is asked or sent: there is no
-//! update check ([`UpdateCheck::start`] gives `None`) and no usage statistics
-//! ([`Usage::start`] gives `None`).
+//! update check ([`UpdateCheck::start`] gives `None`), no usage statistics ([`Usage::start`]
+//! gives `None`) and no crash reports.
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -15,6 +17,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, SystemTime};
 
 mod channel;
+mod crash;
 #[cfg(feature = "send")]
 mod github;
 #[cfg(feature = "send")]
@@ -26,6 +29,7 @@ mod update;
 mod usage;
 
 pub use channel::Channel;
+pub use crash::sends_crash_reports;
 pub use update::{CARGO_INSTALL, Download, Release, Update, Version, newer};
 pub use usage::{
     Build, Choices, Lifecycle, app_version, asks, do_not_track, has_usage_statistics, launch,
@@ -111,6 +115,29 @@ impl Usage {
     /// if it is another than the one opened last. The folder is never sent.
     pub fn opened(&mut self, repository: &Path) {
         self.session.opened(repository, SystemTime::now());
+    }
+}
+
+/// Sends every panic from now on as a crash report, if the user's `choices` allow it
+/// ([`sends_crash_reports`]): not while the first-run prompt is unanswered (`choices` `None`),
+/// when crash reports are unticked, `DO_NOT_TRACK` is set, nor in debug builds and builds
+/// without `send`. Decided once: unticking them later takes effect at the next start. The panic
+/// hook already installed is still called after a panic is sent. `version` is this build's
+/// (`0.6.0 (a1b2c3d)`); `git_version` is asked on a thread of its own. True if turned on.
+pub fn start_crash_reports(
+    choices: Option<Choices>,
+    version: &str,
+    git_version: fn() -> Option<String>,
+) -> bool {
+    if !sends_crash_reports(Build::THIS, choices, do_not_track()) {
+        return false;
+    }
+    #[cfg(feature = "send")]
+    return posthog::capture_panics(posthog::HOST, version, git_version, crash::homes());
+    #[cfg(not(feature = "send"))]
+    {
+        let _ = (version, git_version);
+        false
     }
 }
 
