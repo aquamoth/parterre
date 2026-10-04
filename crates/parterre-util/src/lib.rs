@@ -3,7 +3,7 @@
 //! process running under it and kills it when cancelled; [`CancelTree`] for a git operation,
 //! which kills its whole process group or tree, hooks included.
 
-use std::process::{Child, ExitStatus};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// Stops a child process run on another thread, one at a time. [`Cancel::cancel`] kills the
@@ -19,9 +19,13 @@ struct Running {
     child: Option<Child>,
 }
 
-/// The handle was cancelled before the process could be held.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Cancelled;
+/// The pipes of a child [`Cancel::spawn`] started: `None` for those its command didn't pipe.
+#[derive(Debug)]
+pub struct Pipes {
+    pub stdin: Option<ChildStdin>,
+    pub stdout: Option<ChildStdout>,
+    pub stderr: Option<ChildStderr>,
+}
 
 /// What [`Cancel::poll`] found of the held child.
 #[derive(Debug)]
@@ -53,17 +57,23 @@ impl Cancel {
         self.lock().cancelled
     }
 
-    /// Holds `child` as the process running under this handle, for [`Cancel::cancel`] to
-    /// kill. Once cancelled, the child is killed and waited for instead.
-    pub fn hold(&self, mut child: Child) -> Result<(), Cancelled> {
+    /// Starts `cmd` with this handle holding the child, and hands back its pipes; `None`,
+    /// without starting it, once cancelled. It starts under the lock, so a
+    /// [`cancel`](Cancel::cancel) meanwhile waits for the child and kills it, rather than
+    /// returning while it runs (#213).
+    pub fn spawn(&self, cmd: &mut Command) -> std::io::Result<Option<Pipes>> {
         let mut running = self.lock();
         if running.cancelled {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Cancelled);
+            return Ok(None);
         }
+        let mut child = cmd.spawn()?;
+        let pipes = Pipes {
+            stdin: child.stdin.take(),
+            stdout: child.stdout.take(),
+            stderr: child.stderr.take(),
+        };
         running.child = Some(child);
-        Ok(())
+        Ok(Some(pipes))
     }
 
     /// Whether the held child has exited. One that has is released, as is one whose state
@@ -200,9 +210,9 @@ fn signal_group(pid: u32, signal: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    fn sleeper() -> Child {
+    fn sleeper_command() -> Command {
         let mut cmd = if cfg!(windows) {
             let mut c = Command::new("cmd");
             c.args(["/C", "ping -n 30 127.0.0.1 > NUL"]);
@@ -212,20 +222,23 @@ mod tests {
             c.arg("30");
             c
         };
-        cmd.stdout(Stdio::null())
-            .spawn()
-            .expect("a process to hold")
+        cmd.stdout(Stdio::null());
+        cmd
+    }
+
+    fn sleeper() -> std::io::Result<Child> {
+        sleeper_command().spawn()
     }
 
     #[test]
-    fn a_held_child_is_killed_by_cancel_and_none_is_held_after() {
+    fn a_started_child_is_killed_by_cancel_and_none_starts_after() {
         let cancel = Cancel::new();
-        cancel.hold(sleeper()).unwrap();
+        assert!(cancel.spawn(&mut sleeper_command()).unwrap().is_some());
         assert!(matches!(cancel.poll(), Poll::Running));
         cancel.cancel();
         assert!(matches!(cancel.poll(), Poll::Gone));
         assert!(cancel.is_cancelled());
-        assert_eq!(cancel.hold(sleeper()), Err(Cancelled));
+        assert!(cancel.spawn(&mut sleeper_command()).unwrap().is_none());
         assert!(cancel.release().is_none());
     }
 
@@ -236,7 +249,7 @@ mod tests {
         if cfg!(windows) {
             child.args(["/C", "exit 0"]);
         }
-        cancel.hold(child.spawn().unwrap()).unwrap();
+        assert!(cancel.spawn(&mut child).unwrap().is_some());
         let status = loop {
             match cancel.poll() {
                 Poll::Running => std::thread::sleep(std::time::Duration::from_millis(5)),
@@ -253,15 +266,11 @@ mod tests {
     fn a_tree_refuses_to_start_once_cancelled() {
         let tree = CancelTree::new();
         tree.cancel();
-        assert!(matches!(tree.start(sleeper_result), Err(Start::Cancelled)));
+        assert!(matches!(tree.start(sleeper), Err(Start::Cancelled)));
         let tree = CancelTree::new();
-        let mut child = tree.start(sleeper_result).unwrap();
+        let mut child = tree.start(sleeper).unwrap();
         assert!(!tree.finish());
         let _ = child.kill();
         let _ = child.wait();
-    }
-
-    fn sleeper_result() -> std::io::Result<Child> {
-        Ok(sleeper())
     }
 }

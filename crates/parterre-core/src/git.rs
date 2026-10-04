@@ -186,10 +186,12 @@ impl Git {
     /// Runs git and returns stdout as bytes, failing on a non-zero exit status, unless `cancel`
     /// kills it first.
     fn run_cancellable(&self, args: &[&str], cancel: &Cancel) -> Result<Vec<u8>, GitError> {
-        let mut child = self.command(args).spawn().map_err(GitError::Spawn)?;
-        let mut stdout = child.stdout.take().expect("stdout is piped");
-        let mut stderr = child.stderr.take().expect("stderr is piped");
-        cancel.hold(child).map_err(|_| GitError::Cancelled)?;
+        let pipes = cancel
+            .spawn(&mut self.command(args))
+            .map_err(GitError::Spawn)?
+            .ok_or(GitError::Cancelled)?;
+        let mut stdout = pipes.stdout.expect("stdout is piped");
+        let mut stderr = pipes.stderr.expect("stderr is piped");
         // Read stderr alongside, so that neither pipe can fill up and stall git.
         let errors = std::thread::spawn(move || {
             let mut buf = Vec::new();
