@@ -106,6 +106,21 @@ Chocolatey's automated validator and verifier; the first ones also by a human mo
 can take weeks. A version on Chocolatey can't be replaced once approved, so a broken one is
 fixed with a new release.
 
+## PostHog
+
+parterre's usage statistics and crash reports go to the PostHog project *parterre* of the
+organisation Trustfall AB, in PostHog's EU region (<https://eu.posthog.com>). The release
+workflow is to upload each build's debug symbols there with `posthog-cli symbol-sets upload`
+(#265), with `POSTHOG_CLI_HOST=https://eu.posthog.com` and two repository secrets:
+
+- `POSTHOG_CLI_API_KEY`, a personal API key with the *Source map upload* preset (scopes
+  `error_tracking:write` and `organization:read`), owned by the maintainer
+- `POSTHOG_CLI_PROJECT_ID`, the project's ID
+
+`scripts/posthog-setup.sh` walks through setting up the project, these secrets included. Run it
+again to replace the key: it offers only the steps not done yet, and `r` redoes a finished one.
+The project token in the app is public by design and needs no secret.
+
 ## Screenshots
 
 The README, the crates.io README and the AppStream metadata
