@@ -6,8 +6,9 @@
 //! [`ModalLock`] drops their input, so a click or a close there brings the dialog forward.
 //!
 //! A dialog is as big as its content. A resizable one opens that big, up to most of the screen,
-//! and then the user sizes it: one part of it, such as a list, takes what the rest leaves (see
-//! [`growing`]).
+//! and then the user sizes it: one part of it, such as a list or the [`fields`], takes what the
+//! rest leaves (see [`growing`]). Its width is remembered; its height follows its content until
+//! the user sizes it otherwise.
 
 use std::sync::Arc;
 
@@ -45,10 +46,14 @@ pub fn set_look(ctx: &egui::Context, look: Look) {
     ctx.data_mut(|d| d.insert_temp(look_id(), look));
 }
 
+/// The least height of a resizable dialog's [`fields`]: they scroll below it.
+const MIN_FIELDS: f32 = 70.0;
+
 /// One dialog window, kept from frame to frame while it is shown.
 #[derive(Clone, Copy, Debug, Default)]
 struct Window {
-    /// Measured in the frame before; `None` until the content was laid out once.
+    /// Measured in the frame before; `None` until the content was laid out once. A resizable
+    /// one's is the size its window was last told to be.
     size: Option<Vec2>,
     /// Where it opened, over the window that opened it. Left alone after: the user moves it.
     position: Option<Pos2>,
@@ -61,6 +66,58 @@ struct Window {
     frame: u64,
     /// When a resizable one's window was told its size: the user sizes it from a moment later.
     opened: f64,
+    /// A resizable one's size as the user left it, once they could size it.
+    user: Option<Vec2>,
+    /// A resizable one is as tall as its content wants (or most of the screen), as it opened,
+    /// until the user sizes it otherwise.
+    fit: bool,
+    /// A resizable one's height as tall as its content wants, in the frame before.
+    natural: Option<f32>,
+    /// The least size a resizable one's window was told.
+    least: Option<Vec2>,
+    /// What a resizable one's width is remembered by.
+    remembered: Option<Id>,
+}
+
+/// A resizable dialog's size as laid out in its window: the least the window can be, and the
+/// height the content wants. `settled` once laid out with what the frame before learned.
+#[derive(Clone, Copy, Debug)]
+struct Fit {
+    least: Vec2,
+    natural: f32,
+    settled: bool,
+}
+
+/// The dialog whose content is being laid out, for [`growing`] and [`fields`].
+#[derive(Clone, Copy, Debug)]
+struct Current {
+    id: Id,
+    resizable: bool,
+    /// Its growing part is being laid out.
+    growing: bool,
+}
+
+fn current_id() -> Id {
+    Id::new("dialog-current")
+}
+
+/// What a resizable dialog's growing part learned, kept from frame to frame.
+#[derive(Clone, Copy, Debug, Default)]
+struct Growth {
+    /// The height of the content after it.
+    rest: Option<f32>,
+    /// Its height as tall as it wants.
+    natural: Option<f32>,
+}
+
+/// The growing part as laid out this frame.
+#[derive(Clone, Copy, Debug, Default)]
+struct Part {
+    /// Where it ends.
+    end: f32,
+    height: f32,
+    min: f32,
+    natural: f32,
 }
 
 #[derive(Debug)]
@@ -74,6 +131,7 @@ pub struct Dialog<'a> {
     opener: ViewportId,
     raise: bool,
     resizable: bool,
+    remember: Option<Id>,
 }
 
 /// A dialog's answer for this frame. Closing the window (or Esc in [`actions`]) means cancel.
@@ -102,6 +160,7 @@ impl<'a> Dialog<'a> {
             opener: ViewportId::ROOT,
             raise: false,
             resizable: false,
+            remember: None,
         }
     }
 
@@ -125,10 +184,16 @@ impl<'a> Dialog<'a> {
         self
     }
     /// The user can size it, from at least `width`'s narrower self, with one part of its content
-    /// taking up the difference (see [`growing`]). It opens as big as its content, up to most of
-    /// the screen.
+    /// taking up the difference (see [`growing`]). It opens as wide as the user left it last
+    /// time, or `width`, and as tall as its content, up to most of the screen.
     pub fn resizable(mut self) -> Self {
         self.resizable = true;
+        self
+    }
+    /// A resizable one's width is remembered by `key` rather than by its id, e.g. one width
+    /// with a pane and another without. A new key while it is open sizes it anew.
+    pub fn remember_as(mut self, key: impl std::hash::Hash + std::fmt::Debug) -> Self {
+        self.remember = Some(Id::new(key));
         self
     }
     /// Brings it forward, e.g. when asked for again while it is open.
@@ -139,6 +204,11 @@ impl<'a> Dialog<'a> {
 
     fn viewport(&self) -> ViewportId {
         ViewportId::from_hash_of(("dialog", self.id))
+    }
+
+    /// Where a resizable one's window width is kept, across runs.
+    fn width_id(&self) -> Id {
+        Id::new("dialog-width").with(self.remember.unwrap_or(self.id))
     }
 
     /// Shows the dialog in its own window, sized to its content. Call every frame while it is
@@ -159,7 +229,24 @@ impl<'a> Dialog<'a> {
             .as_ref()
             .and_then(|o| o.monitor_size)
             .unwrap_or(vec2(1280.0, 800.0));
-        let width = self.width.min(monitor.x - 72.0).max(200.0);
+        let remembered: Option<f32> = if self.resizable {
+            ctx.data_mut(|d| d.get_persisted(self.width_id()))
+        } else {
+            None
+        };
+        let width = remembered
+            .map_or(self.width, |w| w - 2.0 * MARGIN)
+            .min(monitor.x - 72.0)
+            .max(200.0);
+        // Remembered by another key now: sized anew, as it opens.
+        let rekeyed = self.resizable && window.remembered.is_some_and(|k| k != self.width_id());
+        if rekeyed || window.size.is_none() {
+            window.size = None;
+            window.user = None;
+            window.least = None;
+            window.fit = true;
+        }
+        window.remembered = Some(self.width_id());
         let mut style = (*ctx.global_style()).clone();
         menu::popover_style(&mut style);
         // A new window opens in its size and place, rather than moving and growing in view.
@@ -189,11 +276,12 @@ impl<'a> Dialog<'a> {
         // out of them; the compositor then holds the window to the hints, with the bar outside
         // its frame (above the screen, at the top) and the content cut short by its height.
         // Embedded in a screenshot, a window that size is cut short by its title bar.
-        let min = vec2(MIN_WIDTH.min(size.x), 200.0);
+        let min = vec2(MIN_WIDTH.min(width + 2.0 * MARGIN), 200.0);
         if self.resizable {
             // Its content raises the height as it learns what it needs (see `growing`). On
             // Wayland, the least size too is told once the window exists, as below.
-            builder = builder.with_resizable(true);
+            // Embedded in a screenshot, it is the size it was told and its window fits it.
+            builder = builder.with_resizable(!ctx.embed_viewports());
             if !wayland() {
                 builder = builder.with_min_inner_size(min);
             }
@@ -233,6 +321,9 @@ impl<'a> Dialog<'a> {
                     // Once the window exists (its title bar with it): its size, and to keep
                     // it. Asked for again whenever the content changes size.
                     let now = ui.input(|i| i.time);
+                    if rekeyed {
+                        window.opened = now;
+                    }
                     if self.resizable && window.hinted.is_none() {
                         if wayland() {
                             for command in [
@@ -293,7 +384,25 @@ impl<'a> Dialog<'a> {
                 } else {
                     width
                 };
-                let (inner, measured) = self.body(ui, width, &style, &mut content);
+                let fill = match (self.resizable, embedded) {
+                    (false, _) => None,
+                    (true, false) => Some(ui.max_rect().height() - 2.0 * MARGIN),
+                    (true, true) => Some(size.y - 2.0 * MARGIN),
+                };
+                let (inner, measured, fit) = self.body(ui, width, fill, &style, &mut content);
+                let cap = (monitor.y * 0.85).round();
+                match fit {
+                    Some(fit) if !embedded => self.follow(ui.ctx(), &mut window, fit, cap),
+                    // Embedded, no one sizes it: it is as tall as its content wants.
+                    Some(fit) if fit.settled => {
+                        let wanted = fit.natural.min(cap).max(fit.least.y).round();
+                        if (size.y - wanted).abs() > 1.0 {
+                            window.size = Some(vec2(size.x, wanted));
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                    _ => {}
+                }
                 (inner, close, measured)
             });
         if !self.resizable {
@@ -301,6 +410,46 @@ impl<'a> Dialog<'a> {
         }
         ctx.data_mut(|d| d.insert_temp(key, window));
         Shown { inner, close }
+    }
+
+    /// A resizable one's window, once the user can size it: the size they give it is theirs,
+    /// and its width is remembered. Its height follows the content while it fits the content,
+    /// and grows when the content does (more shown) and doesn't fit.
+    fn follow(&self, ctx: &egui::Context, window: &mut Window, fit: Fit, cap: f32) {
+        if fit.settled && window.least != Some(fit.least) {
+            window.least = Some(fit.least);
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(fit.least));
+        }
+        let now = ctx.input(|i| i.time);
+        let natural = window.natural.replace(fit.natural);
+        let actual = ctx.content_rect().size();
+        let told = window.size.unwrap_or(actual);
+        let wanted = fit.natural.min(cap).max(fit.least.y).round();
+        // Just told a size, the window may not have it yet: that is no user's.
+        let keep = now - window.opened < KEEP_OPENING_SIZE;
+        if keep {
+            window.user = None;
+        } else {
+            let before = window.user.unwrap_or(told);
+            if (actual - before).abs().max_elem() > 1.0 {
+                // Sized by the user.
+                if (actual.x - before.x).abs() > 1.0 {
+                    ctx.data_mut(|d| d.insert_persisted(self.width_id(), actual.x));
+                }
+                window.user = Some(actual);
+                window.fit = (actual.y - wanted).abs() <= 1.0;
+                return;
+            }
+        }
+        let size = if keep { told } else { actual };
+        let grew = natural.is_some_and(|n| fit.natural > n + 0.5) && size.y < wanted;
+        if fit.settled && (window.fit || grew) && (size.y - wanted).abs() > 1.0 {
+            // Told through the builder's size, in the next frame.
+            window.size = Some(vec2(size.x, wanted));
+            window.user = None;
+            window.opened = now;
+            window.fit = true;
+        }
     }
 
     /// The dialog's size, laid out before its window exists: in a context of its own with no
@@ -339,23 +488,30 @@ impl<'a> Dialog<'a> {
         };
         let mut size = Vec2::ZERO;
         let mut output = sizer.run_ui(input, |ui| {
-            size = self.body(ui, width, style, content).1;
+            size = self.body(ui, width, None, style, content).1;
         });
         // Nothing is painted.
         output.textures_delta.clear();
+        // What follows a resizable one's growing part, for its first frame in the window.
+        let key = self.id.with("growth");
+        if let Some(growth) = sizer.data(|d| d.get_temp::<Growth>(key)) {
+            ctx.data_mut(|d| d.insert_temp(key, growth));
+        }
         size
     }
 
     /// The dialog's content, as tall as it wants (not the window: a window still too short
-    /// would squeeze the fields, and be measured too short again). Returns its answer and the
-    /// window size it needs.
+    /// would squeeze the fields, and be measured too short again), or a resizable one `fill`
+    /// high. Returns its answer, the window size it needs, and a resizable one's fit in its
+    /// window.
     fn body<R>(
         &self,
         ui: &mut Ui,
         width: f32,
+        fill: Option<f32>,
         style: &egui::Style,
         content: &mut impl FnMut(&mut Ui) -> R,
-    ) -> (R, Vec2) {
+    ) -> (R, Vec2, Option<Fit>) {
         let frame = egui::Frame::new()
             .fill(style.visuals.window_fill)
             .inner_margin(egui::Margin::same(MARGIN as i8));
@@ -363,27 +519,72 @@ impl<'a> Dialog<'a> {
             .frame(frame)
             .show(ui, |ui| {
                 ui.set_style(style.clone());
-                // A resizable one in its window has only the window's height.
-                let height = if self.resizable && ui.max_rect().height() < UNBOUNDED / 2.0 {
-                    ui.max_rect().height()
-                } else {
-                    UNBOUNDED
-                };
+                // A resizable one fills its window, the `fill` high.
+                let height = fill.unwrap_or(UNBOUNDED);
                 let room = egui::Rect::from_min_size(ui.max_rect().min, vec2(width, height));
                 let builder = egui::UiBuilder::new()
                     .max_rect(room)
                     .layout(Layout::top_down(Align::Min));
+                let current = Current {
+                    id: self.id,
+                    resizable: self.resizable,
+                    growing: false,
+                };
+                ui.data_mut(|d| {
+                    d.insert_temp(current_id(), current);
+                    d.remove_temp::<Part>(self.id.with("part"));
+                });
                 let shown = ui.scope_builder(builder, |ui| {
                     ui.set_width(width);
                     ui.spacing_mut().item_spacing.y = 10.0;
                     self.heading(ui);
                     content(ui)
                 });
-                let height = shown.response.rect.height();
-                let size = (vec2(width, height) + Vec2::splat(2.0 * MARGIN)).round();
-                (shown.inner, size)
+                let content = shown.response.rect.height();
+                let size = (vec2(width, content) + Vec2::splat(2.0 * MARGIN)).round();
+                let fit = self
+                    .resizable
+                    .then(|| self.fit(ui, &shown.response, width))
+                    .filter(|_| fill.is_some());
+                (shown.inner, size, fit)
             })
             .inner
+    }
+
+    /// A resizable one's fit in its window, from its content as laid out, with its growing
+    /// part's height, if it has one, learned for the next frame.
+    fn fit(&self, ui: &Ui, content: &egui::Response, width: f32) -> Fit {
+        let part: Option<Part> = ui.data_mut(|d| d.remove_temp(self.id.with("part")));
+        let height = content.rect.height();
+        let (least, natural, settled) = match part {
+            Some(part) => {
+                let rest = (content.rect.bottom() - part.end).max(0.0);
+                let key = self.id.with("growth");
+                let mut growth: Growth = ui.data(|d| d.get_temp(key)).unwrap_or_default();
+                let settled = growth.rest.is_some_and(|r| (r - rest).abs() <= 0.5);
+                growth.rest = Some(rest);
+                growth.natural = Some(part.natural);
+                ui.data_mut(|d| d.insert_temp(key, growth));
+                if !settled {
+                    // Laid out with the old figure: again, with this one.
+                    ui.ctx().request_repaint();
+                }
+                (
+                    height - (part.height - part.min),
+                    height - (part.height - part.natural),
+                    settled,
+                )
+            }
+            None => (height, height, true),
+        };
+        Fit {
+            least: vec2(
+                MIN_WIDTH.min(width + 2.0 * MARGIN),
+                (least + 2.0 * MARGIN).round(),
+            ),
+            natural: (natural + 2.0 * MARGIN).round(),
+            settled,
+        }
     }
 
     /// A title with an icon is a question the dialog asks, shown big inside too.
@@ -506,57 +707,78 @@ impl egui::Plugin for ModalLock {
     }
 }
 
-/// The height of a resizable dialog's growing part, such as a list, laid out next: all of
-/// `natural` while the dialog is measured, and in its window what the window has left once the
-/// rest of the content (as laid out the frame before) is in, but at least `min`. Call [`grown`]
-/// with `id` after the rest of the content.
-pub fn growing(ui: &Ui, id: Id, natural: f32, min: f32) -> f32 {
+/// A resizable dialog's growing part, such as a list, laid out by `part`. In its window, it is
+/// given the height to fill: what the window has left once the rest of the content (as laid out
+/// the frame before) is in, but at least `min`, or all of its own height when that is less.
+/// Otherwise, while the dialog is measured or in a dialog of fixed size, it is given `None`, to
+/// be as tall as it wants. `part` returns that height of its own either way. One per dialog.
+pub fn growing<R>(ui: &mut Ui, min: f32, part: impl FnOnce(&mut Ui, Option<f32>) -> (R, f32)) -> R {
+    let current: Option<Current> = ui.data(|d| d.get_temp(current_id()));
     let room = ui.max_rect().bottom() - ui.cursor().top();
-    if room > UNBOUNDED / 2.0 {
-        return natural;
-    }
-    let rest: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(0.0);
-    (room - rest).max(min)
-}
-
-/// After a resizable dialog's content: notes how much of it follows the growing part, which
-/// ended at `after`, for [`growing`] in the next frame, and keeps the window tall enough for the
-/// content with that part at `min` rather than the `height` it was given.
-pub fn grown(ui: &Ui, id: Id, after: f32, height: f32, min: f32) {
-    if ui.max_rect().height() > UNBOUNDED / 2.0 {
-        return;
-    }
-    // To the content's end, not the cursor, which is past the space after it.
-    let end = ui.min_rect().bottom();
-    let rest = end - after;
-    let before: Option<f32> = ui.data(|d| d.get_temp(id));
-    if before.is_none_or(|b| (b - rest).abs() > 0.5) {
-        ui.data_mut(|d| d.insert_temp(id, rest));
-        // Laid out with the old figure: again, with this one.
-        ui.ctx().request_repaint();
-        return;
-    }
-    // Laid out with this figure, the content fits: the window can be as short as it would be
-    // with the growing part at `min`.
-    if ui.ctx().embed_viewports() {
-        return;
-    }
-    let content = end - ui.max_rect().top();
-    let least = vec2(
-        MIN_WIDTH.min(ui.max_rect().width() + 2.0 * MARGIN),
-        (content - (height - min) + 2.0 * MARGIN).round(),
-    );
-    let sent: Option<Vec2> = ui.data(|d| d.get_temp(id.with("least")));
-    if sent != Some(least) {
-        ui.data_mut(|d| d.insert_temp(id.with("least"), least));
-        ui.ctx()
-            .send_viewport_cmd(egui::ViewportCommand::MinInnerSize(least));
-    }
+    // Not inside another, nor laid out unseen for a widget's size.
+    let grows = |c: &Current| c.resizable && !c.growing;
+    let Some(current) = current.filter(grows).filter(|_| !ui.is_sizing_pass()) else {
+        return part(ui, None).0;
+    };
+    let inside = Current {
+        growing: true,
+        ..current
+    };
+    ui.data_mut(|d| d.insert_temp(current_id(), inside));
+    let growth: Growth = ui
+        .data(|d| d.get_temp(current.id.with("growth")))
+        .unwrap_or_default();
+    let min = growth.natural.map_or(min, |n| min.min(n));
+    // Measured, it is as tall as it wants, and what follows it is learned for the window.
+    let height = (room < UNBOUNDED / 2.0).then(|| (room - growth.rest.unwrap_or(0.0)).max(min));
+    let (inner, natural) = part(ui, height);
+    ui.data_mut(|d| d.insert_temp(current_id(), current));
+    let laid = Part {
+        // Its end: the cursor is past the space after it.
+        end: ui.cursor().top() - ui.spacing().item_spacing.y,
+        height: height.unwrap_or(natural),
+        min,
+        natural,
+    };
+    ui.data_mut(|d| d.insert_temp(current.id.with("part"), laid));
+    inner
 }
 
 /// The dialog's fields, scrolling once the window would be taller than most of the screen.
-/// Callers keep the actions outside it, always in view.
+/// Callers keep the actions outside it, always in view. In a resizable dialog they are its
+/// growing part, unless it has another.
 pub fn fields<R>(ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> R {
+    let current: Option<Current> = ui.data(|d| d.get_temp(current_id()));
+    if current.is_some_and(|c| c.resizable) {
+        return growing(ui, MIN_FIELDS, |ui, height| {
+            ui.scope(|ui| {
+                let inside = visible_scroll_bars(ui);
+                let area = egui::ScrollArea::vertical().id_salt("dialog-fields");
+                let area = match height {
+                    Some(h) => area
+                        .min_scrolled_height(h)
+                        .max_height(h)
+                        .auto_shrink([false, false]),
+                    // No taller than the window can open (most of the screen); embedded in a
+                    // screenshot, it isn't filled.
+                    None => {
+                        let used = ui.cursor().top() - ui.min_rect().top();
+                        let screen = ui
+                            .input(|i| i.viewport().monitor_size)
+                            .map_or(800.0, |s| s.y);
+                        area.max_height((screen * 0.85 - used).max(MIN_FIELDS))
+                            .auto_shrink([false, true])
+                    }
+                };
+                let shown = area.show(ui, |ui| {
+                    *ui.visuals_mut() = inside;
+                    content(ui)
+                });
+                (shown.inner, shown.content_size.y)
+            })
+            .inner
+        });
+    }
     let used = ui.cursor().top() - ui.min_rect().top();
     // The window grows with its content up to most of the screen; the fields scroll after that.
     let screen = ui
@@ -1040,5 +1262,192 @@ mod tests {
         lock.lock(&ctx, &mut main);
         assert_eq!(main.events, vec![key(egui::Key::Enter, true)]);
         assert!(main.viewport().close_requested());
+    }
+
+    /// A window manager for dialogs in windows of their own: it opens a window in the size
+    /// asked, then takes the sizes it is told (no less than the least), as a platform would.
+    #[derive(Default)]
+    struct Windows {
+        size: Option<Vec2>,
+        least: Vec2,
+        time: f64,
+        builder: Option<egui::ViewportBuilder>,
+    }
+
+    impl Windows {
+        fn obey(&mut self, commands: Vec<egui::ViewportCommand>) {
+            for command in commands {
+                match command {
+                    egui::ViewportCommand::InnerSize(size) => self.size = Some(size),
+                    egui::ViewportCommand::MinInnerSize(least) => self.least = least,
+                    _ => {}
+                }
+            }
+            self.size = self.size.map(|s| s.max(self.least));
+        }
+    }
+
+    const MONITOR: Vec2 = vec2(1600.0, 1000.0);
+
+    /// A context whose dialogs open in windows of their own, kept by `windows`.
+    fn windowed(windows: &std::rc::Rc<std::cell::RefCell<Windows>>) -> egui::Context {
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let windows = windows.clone();
+        egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
+            let (size, time) = {
+                let mut w = windows.borrow_mut();
+                let created = viewport.builder.inner_size.unwrap();
+                let size = *w.size.get_or_insert(created);
+                let patched = match &mut w.builder {
+                    Some(old) => old.patch(viewport.builder.clone()).0,
+                    None => {
+                        w.builder = Some(viewport.builder.clone());
+                        Vec::new()
+                    }
+                };
+                w.obey(patched);
+                (w.size.unwrap_or(size), w.time)
+            };
+            let id = viewport.ids.this;
+            let rect = egui::Rect::from_min_size(Pos2::ZERO, size);
+            let info = egui::ViewportInfo {
+                inner_rect: Some(rect),
+                monitor_size: Some(MONITOR),
+                ..Default::default()
+            };
+            let input = egui::RawInput {
+                viewport_id: id,
+                screen_rect: Some(rect),
+                time: Some(time),
+                viewports: std::iter::once((id, info)).collect(),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| (viewport.viewport_ui_cb)(ui));
+            output.textures_delta.clear();
+            let commands = output
+                .viewport_output
+                .get(&id)
+                .map(|o| o.commands.clone())
+                .unwrap_or_default();
+            windows.borrow_mut().obey(commands);
+        });
+        ctx
+    }
+
+    /// One frame of the main window, showing a resizable dialog of `rows` rows in its fields,
+    /// or none.
+    fn frame(
+        ctx: &egui::Context,
+        windows: &std::rc::Rc<std::cell::RefCell<Windows>>,
+        rows: Option<usize>,
+    ) {
+        let time = {
+            let mut w = windows.borrow_mut();
+            w.time += 1.0 / 60.0;
+            w.time
+        };
+        let info = egui::ViewportInfo {
+            monitor_size: Some(MONITOR),
+            outer_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, MONITOR)),
+            ..Default::default()
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, MONITOR)),
+            time: Some(time),
+            viewports: std::iter::once((ViewportId::ROOT, info)).collect(),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            let Some(rows) = rows else { return };
+            Dialog::new("test", "Test")
+                .width(400.0)
+                .resizable()
+                .show(ui.ctx(), |ui| {
+                    fields(ui, |ui| {
+                        for i in 0..rows {
+                            ui.label(format!("row {i}"));
+                        }
+                    });
+                    actions(ui, "OK", true, false, false)
+                });
+        });
+        output.textures_delta.clear();
+        if rows.is_none() {
+            // Its window is gone.
+            *windows.borrow_mut() = Windows {
+                time,
+                ..Default::default()
+            };
+        }
+    }
+
+    fn frames(
+        ctx: &egui::Context,
+        windows: &std::rc::Rc<std::cell::RefCell<Windows>>,
+        rows: Option<usize>,
+        n: usize,
+    ) -> Vec2 {
+        for _ in 0..n {
+            frame(ctx, windows, rows);
+        }
+        windows.borrow().size.unwrap_or_default()
+    }
+
+    /// More than a second: past the moment a dialog keeps the size it opened in.
+    const SETTLE: usize = 90;
+
+    #[test]
+    fn a_resizable_dialog_opens_as_tall_as_its_content_up_to_most_of_the_screen() {
+        let windows = Default::default();
+        let ctx = windowed(&windows);
+        let short = frames(&ctx, &windows, Some(3), SETTLE);
+        assert_eq!(short.x, 400.0 + 2.0 * MARGIN);
+        assert!(short.y < 300.0, "{short:?}");
+        frames(&ctx, &windows, None, 2);
+        let long = frames(&ctx, &windows, Some(200), SETTLE);
+        assert_eq!(long.y, (MONITOR.y * 0.85).round(), "{long:?}");
+        // The fields scroll down to their least; the buttons stay.
+        let least = windows.borrow().least;
+        assert!(least.y < short.y + MIN_FIELDS, "{least:?} {short:?}");
+    }
+
+    #[test]
+    fn the_width_the_user_gives_it_is_remembered() {
+        let windows = Default::default();
+        let ctx = windowed(&windows);
+        let opened = frames(&ctx, &windows, Some(3), SETTLE);
+        windows.borrow_mut().size = Some(vec2(700.0, opened.y + 100.0));
+        let sized = frames(&ctx, &windows, Some(3), 5);
+        assert_eq!(
+            sized,
+            vec2(700.0, opened.y + 100.0),
+            "the user's size stays"
+        );
+        frames(&ctx, &windows, None, 2);
+        let again = frames(&ctx, &windows, Some(3), SETTLE);
+        assert_eq!(
+            again,
+            vec2(700.0, opened.y),
+            "its width, and its content's height"
+        );
+    }
+
+    #[test]
+    fn its_height_follows_its_content_until_the_user_sizes_it() {
+        let windows = Default::default();
+        let ctx = windowed(&windows);
+        let three = frames(&ctx, &windows, Some(3), SETTLE);
+        let six = frames(&ctx, &windows, Some(6), 10);
+        assert!(six.y > three.y, "grows with its content: {three:?} {six:?}");
+        let back = frames(&ctx, &windows, Some(3), SETTLE);
+        assert_eq!(back, three, "and shrinks with it");
+        // Taller than its content, by the user: it keeps that, and grows only when the
+        // content needs more.
+        windows.borrow_mut().size = Some(vec2(three.x, six.y + 50.0));
+        frames(&ctx, &windows, Some(3), 5);
+        assert_eq!(frames(&ctx, &windows, Some(6), 10).y, six.y + 50.0);
+        let many = frames(&ctx, &windows, Some(12), 10);
+        assert!(many.y > six.y + 50.0, "{many:?}");
     }
 }

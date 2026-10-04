@@ -68,9 +68,11 @@ A fast, native git viewer inspired by TortoiseGit's Revision Graph: a compact, t
 of how the branches and tags of a repository relate, every branch at once."""
 section = "vcs"
 priority = "optional"
+# git as parterre_core::git::MINIMUM_VERSION, with the epoch Debian and Ubuntu give their git
+# (1:2.39.5-…): without it, every git would pass. tests/packaging.rs checks it.
 # python3-nautilus loads the Revision Graph item in Nautilus's context menu.
 recommends = "python3-nautilus"
-depends = "$auto, git, libegl1, libgl1, libwayland-client0, libwayland-egl1, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxrender1, libxkbcommon0, libxkbcommon-x11-0"
+depends = "$auto, git (>= 1:2.31), libegl1, libgl1, libwayland-client0, libwayland-egl1, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxrender1, libxkbcommon0, libxkbcommon-x11-0"
 assets = [
     ["target/release/parterre", "usr/bin/", "755"],
     ["../../packaging/linux/se.trustfall.parterre.desktop", "usr/share/applications/", "644"],
@@ -98,7 +100,7 @@ name = "parterre"
 summary = "TortoiseGit-style revision graph viewer for git repositories"
 url = "https://github.com/aquamoth/parterre"
 # Fedora and openSUSE: git-core is git without Perl, Python and the GUIs.
-requires = { git-core = "*", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*", "libwayland-client.so.0()(64bit)" = "*", "libwayland-egl.so.1()(64bit)" = "*", "libX11.so.6()(64bit)" = "*", "libX11-xcb.so.1()(64bit)" = "*", "libXcursor.so.1()(64bit)" = "*", "libXi.so.6()(64bit)" = "*", "libXrender.so.1()(64bit)" = "*", "libxkbcommon.so.0()(64bit)" = "*", "libxkbcommon-x11.so.0()(64bit)" = "*" }
+requires = { git-core = ">= 2.31", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(64bit)" = "*", "libwayland-client.so.0()(64bit)" = "*", "libwayland-egl.so.1()(64bit)" = "*", "libX11.so.6()(64bit)" = "*", "libX11-xcb.so.1()(64bit)" = "*", "libXcursor.so.1()(64bit)" = "*", "libXi.so.6()(64bit)" = "*", "libXrender.so.1()(64bit)" = "*", "libxkbcommon.so.0()(64bit)" = "*", "libxkbcommon-x11.so.0()(64bit)" = "*" }
 # nautilus-python (Fedora) or python3-nautilus (openSUSE) loads the item in Nautilus's menu.
 recommends = { nautilus-python = "*", python3-nautilus = "*" }
 assets = [

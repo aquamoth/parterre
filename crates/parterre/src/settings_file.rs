@@ -29,13 +29,14 @@ pub const VERSION: u64 = 1;
 pub const STORAGE_KEY: &str = "parterre-settings";
 
 /// Settings that belong to the computer, not exported: window sizes and dividers.
-const MACHINE: [&[&str]; 6] = [
+const MACHINE: [&[&str]; 7] = [
     &["log_window", "size"],
     &["log_window", "dividers"],
     &["diff_window", "size"],
     &["compare_window", "size"],
     &["blame_window", "size"],
     &["blame_window", "history_height"],
+    &["settings_window", "size"],
 ];
 
 /// The stored settings of every repository, and what the stored document had that this version

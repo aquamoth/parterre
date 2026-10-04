@@ -141,7 +141,6 @@ impl RebaseDialog {
             .resizable()
             .show(ctx, |ui| {
                 // Only the commits scroll: everything else stays in view.
-                let grow = Id::new("rebase-commits-rest");
                 if let Some(ix) = self.repo.lookup(&self.preview.onto)
                     && dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len)
                 {
@@ -149,11 +148,14 @@ impl RebaseDialog {
                 }
                 let n = self.commits.len();
                 let min = list_height(n.min(MIN_ROWS));
-                let height = dialogs::growing(ui, grow, list_height(n), min);
-                if let Some(oid) = self.commits_table(ui, palette, options, height) {
+                let natural = list_height(n);
+                let picked = dialogs::growing(ui, min, |ui, height| {
+                    let height = height.unwrap_or(natural);
+                    (self.commits_table(ui, palette, options, height), natural)
+                });
+                if let Some(oid) = picked {
                     asked.log = Some(oid);
                 }
-                let after = ui.cursor().top();
                 self.todo_buttons(ui);
                 if self.preview.dirty {
                     ui.checkbox(&mut self.stash, "Stash changes").on_hover_text(
@@ -166,9 +168,7 @@ impl RebaseDialog {
                 }
                 dialogs::command_box(ui, &[command_text(&rebase::command(&self.rebase()))]);
                 let enabled = self.preview.blocked(self.stash).is_none() && !busy;
-                let answer = dialogs::actions(ui, "Rebase", enabled, false, false);
-                dialogs::grown(ui, grow, after, height, min);
-                answer
+                dialogs::actions(ui, "Rebase", enabled, false, false)
             });
         self.fresh = false;
         asked.answer = Some(if shown.should_close() {
@@ -742,7 +742,9 @@ mod tests {
         let node = |at: &str, click: Option<&str>| {
             let (repo, catalog, commit) = (&repo, &catalog, rev(p, at));
             menu(
-                move |ui| branches::node_menu(ui, repo, commit, Some(catalog), false, false),
+                move |ui| {
+                    branches::node_menu(ui, repo, commit, &[commit], Some(catalog), false, false)
+                },
                 click,
             )
         };
@@ -801,7 +803,7 @@ mod tests {
         let (repo, catalog) = load(p);
         let main = rev(p, "main");
         let (texts, asked) = menu(
-            |ui| branches::node_menu(ui, &repo, main, Some(&catalog), false, false),
+            |ui| branches::node_menu(ui, &repo, main, &[main], Some(&catalog), false, false),
             Some("Switch to"),
         );
         // main, other and the commit detached: one greyed-out item for all of them.
@@ -834,7 +836,7 @@ mod tests {
         let node = |click: Option<&str>| {
             let (repo, catalog) = (&repo, &catalog);
             menu(
-                move |ui| branches::node_menu(ui, repo, up, Some(catalog), false, false),
+                move |ui| branches::node_menu(ui, repo, up, &[up], Some(catalog), false, false),
                 click,
             )
         };

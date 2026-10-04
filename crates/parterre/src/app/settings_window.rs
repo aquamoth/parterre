@@ -105,22 +105,27 @@ impl ParterreApp {
         if !self.show_settings {
             self.settings_window_theme = None;
             self.settings_window_text_size = None;
+            self.settings_window_size = None;
             return;
         }
-        // No larger than the screen, at a large text size: the page scrolls.
-        let screen = ctx.input(|i| i.viewport().monitor_size);
-        let size = vec2(SIDEBAR + PAGE + 56.0, 480.0);
-        let size = screen.map_or(size, |s| size.min(s * 0.9));
+        // As the user left it last time, no larger than the screen: the page scrolls.
+        let least = vec2(SIDEBAR + PAGE + 56.0, 320.0);
+        let size = *self.settings_window_size.get_or_insert_with(|| {
+            let [w, h] = self.settings.settings_window.size;
+            let screen = ctx.input(|i| i.viewport().monitor_size);
+            let size = vec2(w, h).max(least);
+            screen.map_or(size, |s| size.min(s * 0.9))
+        });
         let builder = egui::ViewportBuilder::default()
             .with_title("Settings – parterre")
             .with_app_id(crate::settings::APP_ID)
             .with_icon(self.window_icon.clone())
             .with_inner_size(size)
-            .with_resizable(false)
-            // A dialog: nothing to minimize or maximize (maximizing broke its layout). winit
-            // 0.30 does this on Windows and macOS only; on Linux (X11 and Wayland) it ignores
-            // the buttons, and only the window being fixed in size takes away maximize (winit's
-            // own Wayland title bar leaves it out, X11 gets a hint). Minimize stays there.
+            .with_min_inner_size(least)
+            // A dialog: nothing to minimize or maximize. winit 0.30 does this on Windows and
+            // macOS only; on Linux (X11 and Wayland) it ignores the buttons, and only a window
+            // fixed in size has no maximize. The page takes the window's width, so maximized it
+            // is just wide.
             .with_minimize_button(false)
             .with_maximize_button(false);
         let id = egui::ViewportId::from_hash_of("settings");
@@ -139,15 +144,21 @@ impl ParterreApp {
                             .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
                     }
                 }
-                // Fixed in size, so it grows and shrinks with the text size.
+                // Its size in points: it grows and shrinks with the text size.
                 let text_size = ui.ctx().zoom_factor();
                 if self
                     .settings_window_text_size
                     .replace(text_size)
                     .is_some_and(|shown| shown != text_size)
                 {
+                    let [w, h] = self.settings.settings_window.size;
                     ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(w, h)));
+                } else if let Some(size) = ui.input(|i| i.viewport().inner_rect.map(|r| r.size()))
+                    && size.x > 0.0
+                    && size.y > 0.0
+                {
+                    self.settings.settings_window.size = [size.x, size.y];
                 }
                 let closing = ui
                     .input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape));
@@ -190,7 +201,7 @@ impl ParterreApp {
             ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 // (The scroll area would take the row's horizontal layout.)
                 ui.vertical(|ui| {
-                    ui.set_width(PAGE);
+                    ui.set_width(ui.available_width().max(PAGE));
                     self.settings_page_ui(ui);
                 });
             });

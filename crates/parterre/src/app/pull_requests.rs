@@ -249,9 +249,10 @@ pub fn dialog(ctx: &egui::Context, error: &ForgeError) -> DialogAnswer {
         .icon(glyphs::PULL_REQUEST, false)
         .width(380.0)
         .modal()
+        .resizable()
         .show(ctx, |ui| {
             let mut answer = DialogAnswer::Open;
-            ui.label(&explanation.body);
+            crate::dialogs::fields(ui, |ui| ui.label(&explanation.body));
             if let Some(command) = explanation.command {
                 command_box(ui, command);
             }

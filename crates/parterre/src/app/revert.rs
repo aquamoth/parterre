@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use eframe::egui::{self, Id, RichText, ViewportId};
+use eframe::egui::{self, Id, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::{Stashed, command_text};
 use parterre_core::revert::{self, Preview};
 use parterre_core::{Oid, Repo};
@@ -16,6 +16,43 @@ use crate::dialogs;
 fn message_id() -> Id {
     Id::new("revert-message")
 }
+
+/// The message's rows as the dialog opens, and the fewest it shrinks to.
+const MESSAGE_ROWS: usize = 4;
+const MIN_MESSAGE_ROWS: usize = 2;
+
+/// The message field's height for `rows` lines, with its margins.
+fn message_height(ui: &Ui, rows: usize) -> f32 {
+    rows as f32 * ui.text_style_height(&egui::TextStyle::Body) + 4.0
+}
+
+/// The message field, the dialog's growing part: `height` tall, scrolling past it, or as tall as
+/// its lines. Returns that height of its own.
+fn message_box(ui: &mut Ui, message: &mut String, height: Option<f32>) -> ((), f32) {
+    let natural = message_height(ui, message.lines().count().max(MESSAGE_ROWS));
+    let edit = egui::TextEdit::multiline(message)
+        .id(message_id())
+        .desired_rows(MESSAGE_ROWS)
+        .desired_width(f32::INFINITY);
+    match height {
+        None => {
+            let height = ui.add(edit).rect.height();
+            ((), height)
+        }
+        Some(height) => {
+            egui::ScrollArea::vertical()
+                .id_salt("revert-message-lines")
+                .min_scrolled_height(height)
+                .max_height(height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| ui.add(edit.min_size(vec2(0.0, height))));
+            ((), natural)
+        }
+    }
+}
+
+/// The most the refused files take before they scroll: the message keeps the room.
+const MAX_REFUSED: f32 = 120.0;
 
 #[derive(Debug)]
 pub struct RevertDialog {
@@ -65,55 +102,56 @@ impl RevertDialog {
             .width(520.0)
             .opener(self.opener)
             .raise(self.fresh)
+            .resizable()
             .show(ctx, |ui| {
                 let p = &self.preview;
-                dialogs::fields(ui, |ui| {
-                    if let Some(ix) = self.repo.lookup(&p.commit)
-                        && dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len)
-                    {
-                        asked.log = Some(p.commit);
-                    }
-                    ui.label("Message");
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.message)
-                            .id(message_id())
-                            .desired_rows(4)
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.add_enabled_ui(p.stashable(), |ui| {
-                        ui.checkbox(&mut self.stash, "Stash before revert")
-                            .on_hover_text(
-                                "Set your uncommitted changes aside in a stash entry first. \
+                if let Some(ix) = self.repo.lookup(&p.commit)
+                    && dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len)
+                {
+                    asked.log = Some(p.commit);
+                }
+                ui.label("Message");
+                let message = &mut self.message;
+                let min = message_height(ui, MIN_MESSAGE_ROWS);
+                dialogs::growing(ui, min, |ui, height| message_box(ui, message, height));
+                ui.add_enabled_ui(p.stashable(), |ui| {
+                    ui.checkbox(&mut self.stash, "Stash before revert")
+                        .on_hover_text(
+                            "Set your uncommitted changes aside in a stash entry first. \
                                  Afterwards parterre asks whether to put them back.",
-                            );
-                    })
-                    .response
-                    .on_disabled_hover_text("There are no uncommitted changes");
-                    let stash = self.stash && p.stashable();
-                    if let Some(refusal) = p.refusal(stash) {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.colored_label(ui.visuals().error_fg_color, refusal);
-                            let label = if self.show_files { "Hide" } else { "Show" };
-                            if ui.link(label).clicked() {
-                                self.show_files = !self.show_files;
-                            }
-                        });
-                        if self.show_files {
-                            for file in p.refused(stash) {
-                                ui.label(RichText::new(file).monospace().small());
-                            }
+                        );
+                })
+                .response
+                .on_disabled_hover_text("There are no uncommitted changes");
+                let stash = self.stash && p.stashable();
+                if let Some(refusal) = p.refusal(stash) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(ui.visuals().error_fg_color, refusal);
+                        let label = if self.show_files { "Hide" } else { "Show" };
+                        if ui.link(label).clicked() {
+                            self.show_files = !self.show_files;
                         }
-                    } else if let Some(caution_text) = p.caution(stash) {
-                        caution(ui, |ui| {
-                            ui.label(caution_text);
-                        });
+                    });
+                    if self.show_files {
+                        egui::ScrollArea::vertical()
+                            .id_salt("revert-refused")
+                            .max_height(MAX_REFUSED)
+                            .show(ui, |ui| {
+                                for file in p.refused(stash) {
+                                    ui.label(RichText::new(file).monospace().small());
+                                }
+                            });
                     }
-                    if let Some(why) = p.blocked(stash, &self.message)
-                        && p.refusal(stash).is_none()
-                    {
-                        ui.colored_label(ui.visuals().error_fg_color, why);
-                    }
-                });
+                } else if let Some(caution_text) = p.caution(stash) {
+                    caution(ui, |ui| {
+                        ui.label(caution_text);
+                    });
+                }
+                if let Some(why) = p.blocked(stash, &self.message)
+                    && p.refusal(stash).is_none()
+                {
+                    ui.colored_label(ui.visuals().error_fg_color, why);
+                }
                 let revert = self.revert();
                 let commands: Vec<String> = revert::commands(&revert)
                     .iter()
@@ -163,6 +201,7 @@ impl RestoreDialog {
     pub fn show(&mut self, ctx: &egui::Context, busy: bool) -> dialogs::Answer {
         let shown = dialogs::Dialog::new("restore-stash", "Restore stashed changes?")
             .modal()
+            .resizable()
             .opener(self.opener)
             .raise(self.fresh)
             .show(ctx, |ui| {
@@ -283,7 +322,7 @@ mod tests {
                         false,
                     )
                 } else {
-                    branches::node_menu(ui, &repo, commit, Some(&catalog), false, false)
+                    branches::node_menu(ui, &repo, commit, &[commit], Some(&catalog), false, false)
                 }
             },
             None,
@@ -430,7 +469,7 @@ mod tests {
         for _ in 0..5 {
             h.frame();
         }
-        assert!(!h.shows("Restore stashed changes?"));
+        assert!(!h.shows("Restore stashed changes?"), "{:?}", h.texts);
         assert_eq!(read(h.path(), "other"), "other\n");
         assert!(git(h.path(), &["stash", "list"]).contains("autostash for reverting"));
     }
