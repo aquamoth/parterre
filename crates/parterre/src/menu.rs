@@ -125,6 +125,16 @@ pub fn item(ui: &mut Ui, label: &str, shortcut: &str, mark: Mark) -> Response {
     laid_out.response
 }
 
+/// PROTOTYPE #227: an [`item`] with a coloured label.
+pub fn item_rich(ui: &mut Ui, label: egui::RichText, shortcut: &str, mark: Mark) -> Response {
+    let id = Id::new("menu-mark");
+    let laid_out = Button::new((Atom::custom(id, Vec2::splat(MARK)), label))
+        .shortcut_text(shortcut)
+        .atom_ui(ui);
+    let _ = mark;
+    laid_out.response
+}
+
 /// An item opening a submenu, lined up with [`item`]s, with a chevron on the right.
 pub fn submenu(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui)) {
     let button = Button::new((Atom::custom(Id::new("menu-mark"), Vec2::splat(MARK)), label));

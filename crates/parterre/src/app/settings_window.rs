@@ -27,17 +27,19 @@ pub enum SettingsPage {
     Graph,
     Filters,
     Dragging,
+    Privacy,
     Advanced,
     Manage,
 }
 
 impl SettingsPage {
-    const ALL: [SettingsPage; 7] = [
+    const ALL: [SettingsPage; 8] = [
         SettingsPage::Appearance,
         SettingsPage::BranchColours,
         SettingsPage::Graph,
         SettingsPage::Filters,
         SettingsPage::Dragging,
+        SettingsPage::Privacy,
         SettingsPage::Advanced,
         SettingsPage::Manage,
     ];
@@ -57,6 +59,7 @@ impl SettingsPage {
             SettingsPage::Graph => "Graph",
             SettingsPage::Filters => "Filters",
             SettingsPage::Dragging => "Dragging",
+            SettingsPage::Privacy => "Privacy",
             SettingsPage::Advanced => "Advanced",
             SettingsPage::Manage => "Manage",
         }
@@ -363,6 +366,7 @@ impl ParterreApp {
                 self.set_remember_moves(remember);
             }
             SettingsPage::Manage => self.manage_page(ui),
+            SettingsPage::Privacy => ParterreApp::privacy_page(&mut self.prototype, ui),
             SettingsPage::Advanced => {
                 title(ui, "Upstreams");
                 group(ui, |rows| {
@@ -726,14 +730,14 @@ fn filters(ui: &mut Ui, s: &mut Settings) {
     });
 }
 
-fn title(ui: &mut Ui, text: &str) {
+pub(super) fn title(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
     ui.label(RichText::new(text).strong().size(15.0));
     ui.add_space(6.0);
 }
 
 /// Rows of a [`group`].
-struct Rows<'a> {
+pub(super) struct Rows<'a> {
     ui: &'a mut Ui,
     count: usize,
 }
@@ -741,7 +745,7 @@ struct Rows<'a> {
 impl Rows<'_> {
     /// `label` on the left, explained by `tip` on hover if it isn't empty, and `control` on
     /// the right.
-    fn row(&mut self, label: &str, tip: &str, control: impl FnOnce(&mut Ui)) {
+    pub(super) fn row(&mut self, label: &str, tip: &str, control: impl FnOnce(&mut Ui)) {
         if self.count > 0 {
             let rect = self.ui.available_rect_before_wrap();
             let stroke = self.ui.visuals().widgets.noninteractive.bg_stroke;
@@ -764,7 +768,7 @@ impl Rows<'_> {
         });
     }
 
-    fn switch(&mut self, label: &str, tip: &str, on: &mut bool) {
+    pub(super) fn switch(&mut self, label: &str, tip: &str, on: &mut bool) {
         self.row(label, tip, |ui| {
             widgets::switch(ui, on);
         });
@@ -784,7 +788,7 @@ impl Rows<'_> {
 }
 
 /// Rows on a rounded background.
-fn group(ui: &mut Ui, add_rows: impl FnOnce(&mut Rows)) {
+pub(super) fn group(ui: &mut Ui, add_rows: impl FnOnce(&mut Rows)) {
     let t = widgets::tones(ui);
     let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
     egui::Frame::new()

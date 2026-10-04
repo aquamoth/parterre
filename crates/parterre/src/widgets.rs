@@ -62,9 +62,20 @@ pub fn tones(ui: &Ui) -> Tones {
 
 /// Paints `glyph` scaled into `rect`.
 pub fn paint_glyph(painter: &Painter, rect: Rect, glyph: Glyph, color: Color32) {
+    paint_glyph_weight(painter, rect, glyph, color, 1.0);
+}
+
+/// PROTOTYPE #227: [`paint_glyph`] with its lines `weight` times as thick.
+pub fn paint_glyph_weight(
+    painter: &Painter,
+    rect: Rect,
+    glyph: Glyph,
+    color: Color32,
+    weight: f32,
+) {
     let scale = rect.width() / glyphs::SIZE;
     let at = |p: [f32; 2]| rect.min + vec2(p[0], p[1]) * scale;
-    let stroke = Stroke::new(glyphs::STROKE * scale, color);
+    let stroke = Stroke::new(glyphs::STROKE * scale * weight, color);
     for part in glyph {
         match *part {
             Part::Path(d) => {

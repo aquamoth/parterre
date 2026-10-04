@@ -26,6 +26,7 @@ mod diff_window;
 mod file_table;
 mod log_window;
 mod merge;
+mod prototype_telemetry;
 mod pull_requests;
 mod rebase;
 mod reset;
@@ -309,6 +310,8 @@ pub struct ParterreApp {
     show_settings: bool,
     settings_page: SettingsPage,
     show_about: bool,
+    /// PROTOTYPE #227.
+    prototype: prototype_telemetry::Prototype,
     /// Show the save dialog for exporting in this format at the end of this frame.
     export: Option<Format>,
     /// The folder exported to last, where the save dialog starts next time.
@@ -461,6 +464,7 @@ impl ParterreApp {
             show_settings: false,
             settings_page: SettingsPage::default(),
             show_about: false,
+            prototype: Default::default(),
             export: None,
             export_dir: None,
             settings_file: None,
@@ -944,6 +948,7 @@ impl ParterreApp {
         match what {
             "menu" | "filter" | "zoom" | "drag" => egui::Popup::open_id(ctx, popup_id(what)),
             "about" => self.show_about = true,
+            "first-run" => self.prototype.answered = false,
             "shortcuts" => self.show_shortcuts = true,
             "legend" => self.show_legend = true,
             "settings" => self.open_settings(self.settings_page),
@@ -2832,6 +2837,7 @@ impl eframe::App for ParterreApp {
                     .inner_margin(egui::Margin::symmetric(8, 6)),
             )
             .show(ui, |ui| self.toolbar(ui));
+        self.prototype_bar(ui);
         if self.settings.show_status_bar {
             egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         }
@@ -2859,6 +2865,7 @@ impl eframe::App for ParterreApp {
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         self.about_window(&ctx);
+        self.prototype_windows(&ctx);
         let palette = Palette::new(
             ctx.global_style().visuals.dark_mode,
             &self.settings.branch_colors,

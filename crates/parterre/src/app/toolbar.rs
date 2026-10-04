@@ -71,6 +71,17 @@ impl ParterreApp {
             ui.spacing_mut().item_spacing.x = 4.0;
             let menu_button =
                 widgets::popover_button(ui, Id::new(MENU_ID), Some(glyphs::MENU), false);
+            // PROTOTYPE #227: a newer release turns the menu icon bold blue (#226).
+            if self.prototype.latest.is_some() && self.prototype.update_check {
+                let icon = egui::Rect::from_center_size(
+                    menu_button.rect.center(),
+                    egui::Vec2::splat(widgets::ICON),
+                );
+                let t = widgets::tones(ui);
+                ui.painter()
+                    .rect_filled(icon.expand(3.0), 4, ui.visuals().panel_fill);
+                widgets::paint_glyph_weight(ui.painter(), icon, glyphs::MENU, t.accent, 1.8);
+            }
             let menu_button = tip(menu_button, "Menu", "");
             Popup::menu(&menu_button).style(menu::style).show(|ui| {
                 menu::fit_window(ui, |ui| {
@@ -512,6 +523,19 @@ impl ParterreApp {
         }
         if menu::item(ui, "About parterre", "", Mark::None).clicked() {
             self.show_about = true;
+        }
+        // PROTOTYPE #227: Update now, while a newer release is out (#226).
+        if let Some(latest) = self
+            .prototype
+            .latest
+            .filter(|_| self.prototype.update_check)
+        {
+            menu::separator(ui);
+            let accent = widgets::tones(ui).accent;
+            let label = RichText::new("Update now").color(accent).strong();
+            if menu::item_rich(ui, label, latest, Mark::None).clicked() {
+                self.status = Some((format!("PROTOTYPE: would update to {latest} (#252)"), false));
+            }
         }
         // For users who start parterre from a file manager or Start menu (#68).
         ui.add_space(4.0);
