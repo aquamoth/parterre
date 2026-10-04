@@ -1,9 +1,9 @@
 name: Release
 
 # Pushing a tag vX.Y.Z[-prerelease] publishes a GitHub Release with binaries for Linux, Windows
-# and macOS, the Windows installer, and .deb and .rpm packages. PARTERRE_RELEASE_TAG supplies
-# the binary's version; build.rs checks that the tag points at the clean commit being built.
-# See docs/releasing.md.
+# and macOS, the Windows installer, and .deb and .rpm packages, then the crates and the
+# Chocolatey package. PARTERRE_RELEASE_TAG supplies the binary's version; build.rs checks that
+# the tag points at the clean commit being built. See docs/releasing.md.
 on:
   push:
     tags: ["v*"]
@@ -190,3 +190,48 @@ jobs:
       tag: ${{ github.ref_name }}
       push: ${{ !contains(github.ref_name, '-') }}
     secrets: inherit
+
+  # The crates, at the tag's version, from the same commit (docs/releasing.md#cratesio).
+  # Trusted Publishing: crates.io trusts this workflow in the crates-io environment and hands
+  # out a token for this run only. A crate already at this version is skipped, so rerunning
+  # the job publishes the rest.
+  crates:
+    name: crates.io
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      # A checkout of the tag with the versions written into Cargo.toml and Cargo.lock.
+      - name: Prepare
+        run: python3 scripts/prepare-crates-release.py "$GITHUB_REF_NAME" --output "$RUNNER_TEMP/crates"
+      - name: Already published
+        id: published
+        working-directory: ${{ runner.temp }}/crates
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          exclude= todo=
+          for crate in $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[].name'); do
+            status=$(curl -s -o /dev/null -w '%{http_code}' -A "parterre release ($GITHUB_REPOSITORY)" \
+              "https://crates.io/api/v1/crates/$crate/$version")
+            case $status in
+              200) echo "$crate $version is published"; exclude="$exclude --exclude $crate" ;;
+              404) todo=true ;;
+              *) echo "::error::crates.io answered $status for $crate $version"; exit 1 ;;
+            esac
+          done
+          echo "exclude=$exclude" >> "$GITHUB_OUTPUT"
+          echo "todo=$todo" >> "$GITHUB_OUTPUT"
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        if: steps.published.outputs.todo
+        id: auth
+      - name: Publish
+        if: steps.published.outputs.todo
+        working-directory: ${{ runner.temp }}/crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --workspace ${{ steps.published.outputs.exclude }}

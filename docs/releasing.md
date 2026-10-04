@@ -30,8 +30,9 @@ release filenames. Tag a clean commit on `main`; the version in the root `Cargo.
    commit on `main` has passed, and waits for it if it's still running (#236). A commit
    without one, not pushed to `main`, fails the release.
 
-3. The workflow then builds the [Chocolatey](#chocolatey) package from that MSI, tests it, and
-   pushes it unless the tag is a pre-release.
+3. The workflow then publishes the [crates](#cratesio), pre-releases too, and builds the
+   [Chocolatey](#chocolatey) package from that MSI, tests it, and pushes it unless the tag is
+   a pre-release.
 
 Add the release to the `<releases>` of `packaging/linux/se.trustfall.parterre.metainfo.xml`
 afterwards, with its date. Until then the packages get an entry of their own, dated the day
@@ -44,9 +45,9 @@ at the commit being built, or the sources have local changes. In that case delet
 ## crates.io
 
 Cargo requires a package version in `Cargo.toml` and an equal version on each internal
-dependency (`parterre-util`, `parterre-core`, `parterre-forge`, `parterre-highlight`). After
-the GitHub release workflow passes, use Python 3.11 or newer to generate a separate checkout
-from the tag:
+dependency (`parterre-util`, `parterre-core`, `parterre-forge`, `parterre-highlight`).
+`scripts/prepare-crates-release.py` (Python 3.11 or newer) generates a separate checkout of a
+tag with those versions:
 
 ```sh
 scripts/prepare-crates-release.py v0.5.0-rc1
@@ -55,12 +56,24 @@ scripts/prepare-crates-release.py v0.5.0-rc1
 The script prints the checkout path and publish command. It updates the versions and the five
 workspace entries in `Cargo.lock`, verifies them with `cargo metadata --locked`, and makes a
 local commit so `cargo publish` sees clean sources. The commit exists only in that disposable
-checkout; the pushed tag and `main` still point at the same original commit. From the generated
-checkout, run `cargo publish --workspace` with a crates.io API token (`cargo login`). Until the
-publish job of #20 exists this is done by hand. The first publish of each crate always is.
-A version on crates.io can be yanked but never replaced, so check the generated versions before
-publishing. The published crate's recorded commit is the local packaging commit; the GitHub
-binary reports the tagged source commit.
+checkout; the pushed tag and `main` still point at the same original commit. The published
+crate's recorded commit is the local packaging commit; the GitHub binary reports the tagged
+source commit.
+
+Once the GitHub release is published, the release workflow's `crates.io` job runs the script
+and `cargo publish --workspace` from the checkout it makes. It signs in with
+[Trusted Publishing](https://crates.io/docs/trusted-publishing): crates.io gives `release.yml`,
+running in the `crates-io` environment, a token for that run only, so none is stored. Crates
+already published at the tag's version are skipped, so a failed job is simply rerun.
+
+crates.io sets up Trusted Publishing only for a crate that exists, so a new crate's first
+version is published by hand: run the script, then `cargo publish --workspace` from the
+checkout it prints, with an API token (`cargo login`). Then add a trusted publisher to each
+crate's settings on crates.io: owner `aquamoth`, repository `parterre`, workflow file
+`release.yml`, environment `crates-io`.
+
+A version on crates.io can be yanked but never replaced, so a broken one is fixed with a new
+release.
 
 ## Chocolatey
 
