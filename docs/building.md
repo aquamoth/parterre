@@ -89,8 +89,8 @@ packaging\windows\build-msi.ps1   # → target\msi\parterre-<version>-x86_64-pc-
 ```
 
 The script gathers `parterre.exe`, `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.html` in
-`target\msi\stage`. With `-Stage DIR` it takes them from `DIR` instead, as CI and the release
-workflow do; `-Out FILE` names the MSI. It passes `-acceptEula wix7` on every run, which
+`target\msi\stage`. With `-Stage DIR` it takes them from `DIR` instead, as the release
+workflow does; `-Out FILE` names the MSI. It passes `-acceptEula wix7` on every run, which
 accepts WiX's Open Source Maintenance Fee EULA for that run only; don't run `wix eula accept`,
 which leaves an acceptance file behind. The MSI version is the release tag's version in the
 release workflow (`PARTERRE_RELEASE_TAG`), otherwise the version `parterre.exe` carries (from
@@ -126,6 +126,11 @@ uninstall from there or with `msiexec /x`. Add `/qn` for a silent install and
 version; an older one is refused. That only works within one scope: Windows Installer looks
 for the installed version in the scope being installed, so a per-user install followed by a
 machine-wide one leaves two entries.
+
+`packaging\windows\test-msi.ps1 -Msi FILE -Scope user|machine` installs the MSI in one scope,
+checks that `parterre --version` runs and that the folder is on that scope's `PATH`, and
+uninstalls it again. The release workflow runs it in both scopes before publishing; the machine
+scope needs an elevated prompt.
 
 ## Linux packages
 
@@ -175,8 +180,8 @@ alike.
 
 `packaging/linux/test-package.sh PACKAGE` installs a package with the system's package manager,
 checks that `parterre --version` runs and the desktop files are in place, and removes it again.
-CI runs it on Debian 12, Ubuntu 22.04 and 24.04, Fedora and openSUSE Leap 15.6
-(`.github/workflows/linux-packages.yml`), as root in their containers:
+The release workflow runs it on Debian 12, Ubuntu 22.04 and 24.04, Fedora and openSUSE Leap
+15.6 (`.github/workflows/linux-packages.yml`), as root in their containers:
 
 ```sh
 docker run --rm -v "$PWD:/src" -w /src debian:12 \
