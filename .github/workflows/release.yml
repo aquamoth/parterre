@@ -191,13 +191,15 @@ jobs:
       push: ${{ !contains(github.ref_name, '-') }}
     secrets: inherit
 
-  # The crates, at the tag's version, from the same commit (docs/releasing.md#cratesio).
-  # Trusted Publishing: crates.io trusts this workflow in the crates-io environment and hands
-  # out a token for this run only. A crate already at this version is skipped, so rerunning
-  # the job publishes the rest.
+  # The crates, at the tag's version, from the same commit; not for pre-releases
+  # (docs/releasing.md#cratesio). Trusted Publishing: crates.io trusts this workflow in the
+  # crates-io environment and hands out a token for this run only. It can't create a crate, so
+  # a new one is published by hand first. A crate already at this version is skipped, so
+  # rerunning the job publishes the rest.
   crates:
     name: crates.io
     needs: publish
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -214,16 +216,30 @@ jobs:
         working-directory: ${{ runner.temp }}/crates
         run: |
           version=${GITHUB_REF_NAME#v}
-          exclude= todo=
-          for crate in $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[].name'); do
+          exists() {
             status=$(curl -s -o /dev/null -w '%{http_code}' -A "parterre release ($GITHUB_REPOSITORY)" \
-              "https://crates.io/api/v1/crates/$crate/$version")
+              "https://crates.io/api/v1/crates/$1")
             case $status in
-              200) echo "$crate $version is published"; exclude="$exclude --exclude $crate" ;;
-              404) todo=true ;;
-              *) echo "::error::crates.io answered $status for $crate $version"; exit 1 ;;
+              200) return 0 ;;
+              404) return 1 ;;
+              *) echo "::error::crates.io answered $status for $1"; exit 1 ;;
             esac
+          }
+          exclude= todo= new=
+          for crate in $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[].name'); do
+            if exists "$crate/$version"; then
+              echo "$crate $version is published"
+              exclude="$exclude --exclude $crate"
+            elif exists "$crate"; then
+              todo=true
+            else
+              new="$new $crate"
+            fi
           done
+          if [ -n "$new" ]; then
+            echo "::error::New on crates.io:$new. Publish $version by hand, add the trusted publisher and rerun this job (docs/releasing.md#cratesio)."
+            exit 1
+          fi
           echo "exclude=$exclude" >> "$GITHUB_OUTPUT"
           echo "todo=$todo" >> "$GITHUB_OUTPUT"
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5

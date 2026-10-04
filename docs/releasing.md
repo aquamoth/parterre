@@ -30,9 +30,9 @@ release filenames. Tag a clean commit on `main`; the version in the root `Cargo.
    commit on `main` has passed, and waits for it if it's still running (#236). A commit
    without one, not pushed to `main`, fails the release.
 
-3. The workflow then publishes the [crates](#cratesio), pre-releases too, and builds the
-   [Chocolatey](#chocolatey) package from that MSI, tests it, and pushes it unless the tag is
-   a pre-release.
+3. The workflow then publishes the [crates](#cratesio), and builds the
+   [Chocolatey](#chocolatey) package from that MSI, tests it, and pushes it. A pre-release goes
+   to neither: its Chocolatey package is built and tested but not pushed.
 
 Add the release to the `<releases>` of `packaging/linux/se.trustfall.parterre.metainfo.xml`
 afterwards, with its date. Until then the packages get an entry of their own, dated the day
@@ -61,16 +61,18 @@ crate's recorded commit is the local packaging commit; the GitHub binary reports
 source commit.
 
 Once the GitHub release is published, the release workflow's `crates.io` job runs the script
-and `cargo publish --workspace` from the checkout it makes. It signs in with
-[Trusted Publishing](https://crates.io/docs/trusted-publishing): crates.io gives `release.yml`,
-running in the `crates-io` environment, a token for that run only, so none is stored. Crates
-already published at the tag's version are skipped, so a failed job is simply rerun.
+and `cargo publish --workspace` from the checkout it makes. Pre-releases aren't published. It
+signs in with [Trusted Publishing](https://crates.io/docs/trusted-publishing): crates.io gives
+`release.yml`, running in the `crates-io` environment, a token for that run only, so none is
+stored. Crates already published at the tag's version are skipped, so a failed job is simply
+rerun.
 
-crates.io sets up Trusted Publishing only for a crate that exists, so a new crate's first
-version is published by hand: run the script, then `cargo publish --workspace` from the
-checkout it prints, with an API token (`cargo login`). Then add a trusted publisher to each
-crate's settings on crates.io: owner `aquamoth`, repository `parterre`, workflow file
-`release.yml`, environment `crates-io`.
+Trusted Publishing can't create a crate, so a new crate's first version is published by hand.
+The job stops before publishing anything when a crate is new, and names it. Run the script,
+then `cargo publish --workspace` from the checkout it prints, with an API token
+(`cargo login`). Then add a trusted publisher to each new crate's settings on crates.io: owner
+`aquamoth`, repository `parterre`, workflow file `release.yml`, environment `crates-io`.
+Rerunning the job publishes any crates left.
 
 A version on crates.io can be yanked but never replaced, so a broken one is fixed with a new
 release.
