@@ -65,6 +65,8 @@ fn check(cancel: &Cancel) -> Result<(), GitError> {
 #[derive(Clone, Debug)]
 pub struct Git {
     dir: PathBuf,
+    /// Named with `--git-dir`: a bare repository git would not discover (#228).
+    explicit: bool,
 }
 
 /// Separator for `for-each-ref` fields (ref names cannot contain control characters).
@@ -93,9 +95,27 @@ fn git_command() -> Command {
     cmd
 }
 
+/// Whether `dir` is a git dir that git would take for a bare repository if it found it by
+/// itself, which `safe.bareRepository=explicit` (Git 3.0's default) forbids. That is any but a
+/// work tree's `.git`, or a linked worktree's or a submodule's git dir inside one: git lets
+/// those through (`is_implicit_bare_repo` in setup.c), and `--git-dir` would make a `.git`
+/// folder its own work tree.
+fn is_implicit_bare(dir: &Path) -> bool {
+    let git_dir =
+        dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir();
+    let names: Vec<_> = dir.components().map(|c| c.as_os_str()).collect();
+    let inside_dot_git = names.last() == Some(&OsStr::new(".git"))
+        || names
+            .windows(2)
+            .any(|w| w[0] == ".git" && (w[1] == "worktrees" || w[1] == "modules"));
+    git_dir && !inside_dot_git
+}
+
 impl Git {
     pub fn new(dir: impl Into<PathBuf>) -> Git {
-        Git { dir: dir.into() }
+        let dir = dir.into();
+        let explicit = is_implicit_bare(&dir);
+        Git { dir, explicit }
     }
 
     /// The folder git runs in.
@@ -109,9 +129,11 @@ impl Git {
         S: AsRef<OsStr>,
     {
         let mut cmd = git_command();
-        cmd.arg("-C")
-            .arg(&self.dir)
-            .args(["-c", "core.quotepath=off"])
+        cmd.arg("-C").arg(&self.dir);
+        if self.explicit {
+            cmd.arg("--git-dir=.");
+        }
+        cmd.args(["-c", "core.quotepath=off"])
             .args(["-c", "log.showSignature=false"])
             .args(["-c", "i18n.logOutputEncoding=UTF-8"])
             .args(["-c", "color.ui=false"])
@@ -1126,6 +1148,54 @@ pub fn classify_ref(full_name: &str) -> (RefKind, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_bare_repositories_git_would_not_discover_are_named_explicitly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = git_command()
+                .current_dir(tmp.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "work"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+            "work",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ]);
+        git(&["-C", "work", "worktree", "add", "-q", "../linked"]);
+        git(&["init", "-q", "--bare", "bare.git"]);
+        git(&["init", "-q", "--bare", "plain"]);
+        git(&["init", "-q", "--bare", "work/.git/modules/sub"]);
+        let dir = |p: &str| tmp.path().join(p);
+        assert!(is_implicit_bare(&dir("bare.git")));
+        assert!(is_implicit_bare(&dir("plain")));
+        // A work tree, and the git dirs git lets through itself, where `--git-dir` would make
+        // the folder its own work tree.
+        assert!(!is_implicit_bare(&dir("work")));
+        assert!(!is_implicit_bare(&dir("work/.git")));
+        assert!(!is_implicit_bare(&dir("work/.git/worktrees/linked")));
+        assert!(!is_implicit_bare(&dir("work/.git/modules/sub")));
+        assert!(!is_implicit_bare(&dir("linked")));
+        assert!(!is_implicit_bare(&dir("bare.git/refs")));
+    }
 
     #[test]
     fn parses_worktree_listings() {

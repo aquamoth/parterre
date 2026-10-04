@@ -761,7 +761,14 @@ fn a_missing_upstream_uses_git_head_fallback_and_a_ref_lock_never_forces_deletio
     let mut merged = TestRepo::new();
     merged.commit("base");
     merged.git(&["branch", "topic"]);
-    std::fs::write(merged.path().join(".git/refs/heads/topic.lock"), "locked").unwrap();
+    // topic's own lock file; under reftable, Git 3.0's default, the lock on every ref (#228).
+    let git_dir = merged.path().join(".git");
+    let lock = if git_dir.join("reftable").is_dir() {
+        git_dir.join("reftable/tables.list.lock")
+    } else {
+        git_dir.join("refs/heads/topic.lock")
+    };
+    std::fs::write(lock, "locked").unwrap();
     match execute(&merged, deletion(&merged, "topic")) {
         Outcome::Failed { report, .. } => assert_eq!(report.steps.len(), 1),
         out => panic!("{out:?}"),

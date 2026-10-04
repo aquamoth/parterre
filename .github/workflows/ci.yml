@@ -102,6 +102,31 @@ jobs:
       - name: Test with core.autocrlf
         if: env.BUILD == 'true' && runner.os == 'Linux'
         run: GIT_CONFIG_SYSTEM="$GITHUB_WORKSPACE/.github/autocrlf.gitconfig" cargo test --workspace --no-fail-fast
+      # Again with the Git 3.0 preview: git built with its breaking changes, which refuses bare
+      # repositories it isn't told about and makes new ones reftable (#228). Built once, cached
+      # (#166).
+      - uses: actions/cache@v6
+        if: env.BUILD == 'true' && matrix.container
+        id: git3
+        with:
+          path: /opt/git3
+          key: git-2.56.0-breaking-ubuntu22.04-v1
+      - name: Build the Git 3.0 preview
+        if: env.BUILD == 'true' && matrix.container && steps.git3.outputs.cache-hit != 'true'
+        run: |
+          apt-get install -y --no-install-recommends zlib1g-dev xz-utils
+          curl -fsSLO https://mirrors.edge.kernel.org/pub/software/scm/git/git-2.56.0.tar.xz
+          echo "26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3  git-2.56.0.tar.xz" | sha256sum -c
+          tar xJf git-2.56.0.tar.xz
+          make -C git-2.56.0 -j"$(nproc)" prefix=/opt/git3 WITH_BREAKING_CHANGES=YesPlease \
+            NO_OPENSSL=1 NO_CURL=1 NO_EXPAT=1 NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 \
+            NO_RUST=1 INSTALL_STRIP=-s install
+          rm -rf git-2.56.0 git-2.56.0.tar.xz
+      - name: Test with the Git 3.0 preview
+        if: env.BUILD == 'true' && matrix.container
+        run: |
+          PATH="/opt/git3/bin:$PATH" git --version
+          PATH="/opt/git3/bin:$PATH" cargo test --workspace --no-fail-fast
       - name: Build release
         if: env.BUILD == 'true'
         run: cargo build --release
