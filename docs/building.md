@@ -7,8 +7,11 @@ cargo build --release
 ./target/release/parterre ~/some/repo
 ```
 
-Only a Rust toolchain is required. At runtime the window needs the usual desktop libraries:
-Wayland or X11, libxkbcommon, and OpenGL (EGL/GLX), all of which are present on any desktop.
+A Rust toolchain and a C compiler (`gcc` or `clang`, e.g. `build-essential` on Debian and
+Ubuntu) are required: the TLS library and the syntax-colour grammars compile C in their build
+scripts. No development packages of system libraries are needed. At runtime the window needs
+the usual desktop libraries: Wayland or X11, libxkbcommon, and OpenGL (EGL/GLX), all of which
+are present on any desktop.
 
 ## Windows
 

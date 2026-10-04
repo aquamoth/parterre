@@ -221,6 +221,16 @@ pub const WHITESPACE_IGNORE_ALL: Glyph = &[Part::Path(
 
 /// Swap the two sides of a comparison (Lucide's arrow-left-right).
 pub const SWAP: Glyph = &[Part::Path("M8 3 4 7l4 4M4 7h16M16 21l4-4-4-4M20 17H4")];
+/// Syntax colour (Lucide's palette, its dots bigger).
+pub const PALETTE: Glyph = &[
+    Part::Path(
+        "M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z",
+    ),
+    dot(13.5, 6.5, 1.3),
+    dot(17.5, 10.5, 1.3),
+    dot(6.5, 12.5, 1.3),
+    dot(8.5, 7.5, 1.3),
+];
 
 /// The log from every branch: three branch tips fanning out of one commit.
 pub const ALL_BRANCHES: Glyph = &[
@@ -281,7 +291,7 @@ pub const SQUASH: Glyph = &[Part::Path("M12 3v12M7 10l5 5 5-5M5 20h14")];
 pub const DROP: Glyph = CLOSE;
 
 /// Every glyph, for tests.
-pub const ALL: [Glyph; 48] = [
+pub const ALL: [Glyph; 49] = [
     MENU,
     SEARCH,
     PLUS,
@@ -330,6 +340,7 @@ pub const ALL: [Glyph; 48] = [
     MOVES_ACROSS_FILES,
     HISTORY,
     SQUASH,
+    PALETTE,
 ];
 
 /// One stroke of a flattened path.

@@ -162,7 +162,10 @@ the dividers between the panes are remembered for each layout.
 Double-click a changed file, or select some (`Ctrl`+click, `Shift`+click) and press `Enter`, to
 see its diff in a window of its own; several can be open at once. The diff is side by side or
 unified (`Ctrl+D`), with changed words marked, unchanged stretches folded (click a fold to open
-it), an overview of the changes on the right, and long lines that scroll sideways.
+it), an overview of the changes on the right, and long lines that scroll sideways. Code is
+coloured by syntax, as in VS Code, for Markdown, Java, C#, Rust, TypeScript, Python, SQL,
+Protocol Buffers and a dozen more languages, in the blame window too; the palette button in
+either toolbar turns it off, for both, as does *Syntax colour* in *Settings → Appearance*.
 `Ctrl+Down` / `Ctrl+Up` (or `F7` / `Shift+F7`) move between changes, and `Ctrl+F` finds. The
 toolbar also picks how changed words are found and whether whitespace counts.
 

@@ -178,6 +178,15 @@ struct Cli {
     #[arg(long, hide = true)]
     diff_unfolded: bool,
 
+    /// Plain text in the diff and blame windows: no syntax colour (a setting).
+    #[arg(long, hide = true)]
+    no_syntax_colour: bool,
+
+    /// The child process of the syntax colour (#209): highlights stdin as this language and
+    /// writes the spans to stdout.
+    #[arg(long, hide = true, value_name = "LANG")]
+    highlight: Option<String>,
+
     /// The log window's layout: stacked, side-by-side, details-below or
     /// files-right, or a, b, c or d.
     #[arg(long, value_enum, hide = true)]
@@ -270,6 +279,9 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
 fn main() -> ExitCode {
     console::attach_parent();
     let mut cli = Cli::parse();
+    if let Some(id) = cli.highlight.as_deref() {
+        return ExitCode::from(parterre_core::highlight::serve(id));
+    }
     cli.path = cli.path.take().map(repair_quoted_root);
     let script = match cli.script.as_deref().map(read_script).transpose() {
         Ok(script) => script,
@@ -489,6 +501,9 @@ fn apply_cli(cli: &Cli, s: &mut settings::Settings) {
     }
     if cli.diff_unfolded {
         s.diff_window.fold = false;
+    }
+    if cli.no_syntax_colour {
+        s.syntax_colour = false;
     }
     if let Some(size) = cli.text_size {
         s.text_size = size;

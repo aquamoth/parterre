@@ -191,6 +191,7 @@ runs start from the defaults otherwise.
 | `--drag-mode adapt\|free\|subtree` | What moves with a dragged node |
 | `--log-layout a\|b\|c\|d` | The log window's layout: `stacked`, `side-by-side`, `details-below`, `files-right` |
 | `--diff-form side\|unified`, `--diff-words`, `--diff-whitespace`, `--diff-unfolded` | The diff window's settings |
+| `--no-syntax-colour` | Plain text in the diff and blame windows, as their toolbar button gives |
 
 `parterre --help` lists the common ones. The window settings at the bottom are hidden there,
 being of use mainly for automation.

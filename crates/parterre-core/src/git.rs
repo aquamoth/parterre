@@ -50,9 +50,10 @@ pub enum GitError {
 pub struct Cancel(Arc<Mutex<Running>>);
 
 #[derive(Debug, Default)]
-struct Running {
-    cancelled: bool,
-    child: Option<Child>,
+pub(crate) struct Running {
+    pub(crate) cancelled: bool,
+    /// The git command, or the syntax colouring's child process, running with this handle.
+    pub(crate) child: Option<Child>,
 }
 
 impl Cancel {
@@ -82,7 +83,7 @@ impl Cancel {
         Ok(())
     }
 
-    fn lock(&self) -> MutexGuard<'_, Running> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Running> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

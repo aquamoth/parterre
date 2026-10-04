@@ -31,6 +31,7 @@ mod rebase;
 mod reset;
 mod revert;
 mod settings_window;
+mod syntax;
 #[cfg(test)]
 mod tool_harness;
 mod toolbar;
@@ -468,8 +469,8 @@ impl ParterreApp {
             details: Details::default(),
             log: log_window::LogWindow::default(),
             focus_log: false,
-            diffs: diff_window::DiffWindows::default(),
-            blames: blame_window::BlameWindows::default(),
+            diffs: diff_window::DiffWindows::new(highlight_engine()),
+            blames: blame_window::BlameWindows::new(highlight_engine()),
             compare: compare_window::CompareWindow::default(),
             focus_compare: false,
             marked: None,
@@ -2857,4 +2858,12 @@ impl eframe::App for ParterreApp {
             eframe::set_value(storage, RECENT_KEY, &self.recent);
         }
     }
+}
+
+/// Where the diff and blame windows colour code by syntax (#209): in a child process, this
+/// program again, so that a grammar's crash costs the colours and not the window. Not at
+/// all if the program's own path is unknown, rather than in this process.
+fn highlight_engine() -> parterre_core::highlight::Engine {
+    use parterre_core::highlight::Engine;
+    std::env::current_exe().map_or(Engine::Off, Engine::Child)
 }
