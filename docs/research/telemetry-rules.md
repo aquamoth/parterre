@@ -664,9 +664,10 @@ LEK 9:28):
 
 ## Sources not reachable or not checked
 
-- EUR-Lex and InfoCuria pages did not render for the fetch tool. GDPR and ePrivacy wording and
-  the Breyer para 46 phrase are quoted from the official texts as I know them. The Breyer
-  holding is quoted from the CJEU press release, and the SRB holding from its press release.
+- EUR-Lex and InfoCuria pages did not render for the fetch tool. GDPR and ePrivacy wording is
+  quoted from the official texts as I know them, not re-fetched. The Breyer and SRB holdings are
+  quoted from the CJEU press releases. Breyer para 46 was checked against a search index of the
+  judgment, not the page itself.
 - PTS's cookie guidance page (`pts.se/internet-och-telefoni/kakor-cookies/`) was behind a bot
   check. The PTS position is taken from its Tele2 decision.
 - The status of the Digital Omnibus comes from secondary sources. The EDPB/EDPS opinion is
