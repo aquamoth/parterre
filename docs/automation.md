@@ -184,7 +184,7 @@ runs start from the defaults otherwise.
 | `--window-size WxH` | The window's size in points, e.g. `1200x800` |
 | `--theme light\|dark\|system`, `--text-size 1.5` | Colours and the size of all text |
 | `--fit`, `--zoom 0.8` | Start with the whole graph in view, and zoom around the centre |
-| `--mode`, `--direction`, `--look`, `--max-row-width` | What the graph shows and how it is laid out |
+| `--mode`, `--direction`, `--look`, `--max-row-width`, `--trunk` | What the graph shows and how it is laid out |
 | `--current-branch`, `--filter`, `--hide`, `--branch-color` | Which branches show, and their colours |
 | `--no-remotes`, `--no-tags`, `--pull-requests`, `--worktrees` | Which refs show |
 | `--pull-requests-from FILE` | Pull requests from a file instead of GitHub, see [below](#pull-requests-without-github) |

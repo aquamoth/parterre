@@ -2,6 +2,7 @@
 //! chains of dummy items.
 
 use super::LayoutInput;
+use super::trunk::Sides;
 
 /// Upper bound on dummy items; see [`LayeredGraph::build`].
 const MAX_DUMMIES: u64 = 3_000_000;
@@ -46,6 +47,8 @@ pub struct LayeredGraph {
     pub pos: Vec<u32>,
     /// For every input edge, the dummy items it passes through, from child to parent.
     pub chains: Vec<Vec<u32>>,
+    /// Side of the trunk of every item (see [`Sides`]); empty without a trunk.
+    pub side: Vec<i8>,
     /// Neighbours in the layer above (newer) and below (older).
     up: Adjacency,
     down: Adjacency,
@@ -73,13 +76,14 @@ fn segment_weight(first_parent: bool, from_dummy: bool, to_dummy: bool) -> f32 {
 impl LayeredGraph {
     /// Builds the layered graph. With `concentrate`, edges into the same parent share their
     /// dummy items wherever they pass through the same layer, so parallel edges merge into one
-    /// trunk (graphviz's "edge concentration").
+    /// trunk (graphviz's "edge concentration"), one per side of the [`Sides`] trunk.
     pub fn build(
         input: &LayoutInput,
         layers: &[u32],
         breadth: &[f32],
         edge_gap: f32,
         concentrate: bool,
+        sides: Option<&Sides>,
     ) -> Self {
         let n = input.sizes.len();
         let mut items: Vec<Item> = (0..n)
@@ -119,11 +123,13 @@ impl LayeredGraph {
                 limit
             }
         };
-        // (parent, layer) -> shared dummy, when concentrating.
-        let mut shared: std::collections::HashMap<(u32, u32), u32> =
+        // (parent, layer, side) -> shared dummy, when concentrating.
+        let mut shared: std::collections::HashMap<(u32, u32, i8), u32> =
             std::collections::HashMap::new();
+        let mut side = sides.map_or_else(Vec::new, |s| s.nodes.clone());
 
-        for e in &input.edges {
+        for (k, e) in input.edges.iter().enumerate() {
+            let edge_side = sides.map_or(0, |s| s.edges[k]);
             let (c, p) = (e.child as usize, e.parent as usize);
             let mut chain = Vec::new();
             let mut prev = c as u32;
@@ -134,7 +140,7 @@ impl LayeredGraph {
             }
             for layer in layers[c] + 1..layers[p] {
                 let existing = if concentrate {
-                    shared.get(&(p as u32, layer)).copied()
+                    shared.get(&(p as u32, layer, edge_side)).copied()
                 } else {
                     None
                 };
@@ -147,8 +153,11 @@ impl LayeredGraph {
                             breadth: edge_gap,
                             dummy: true,
                         });
+                        if sides.is_some() {
+                            side.push(edge_side);
+                        }
                         if concentrate {
-                            shared.insert((p as u32, layer), d);
+                            shared.insert((p as u32, layer, edge_side), d);
                         }
                         d
                     }
@@ -178,6 +187,7 @@ impl LayeredGraph {
             node_count: n,
             layers: by_layer,
             chains,
+            side,
             up,
             down,
         };

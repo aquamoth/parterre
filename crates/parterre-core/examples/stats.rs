@@ -1,10 +1,11 @@
 //! Loads a repository and reports graph sizes and timings for every simplification mode.
 //!
-//! Usage: `cargo run --release -p parterre-core --example stats -- <repo> [--dump-nodes <mode>]`
+//! Usage: `cargo run --release -p parterre-core --example stats -- <repo> [--dump-nodes <mode>]
+//! [--bundle] [--trunk centred|alternating|leftmost]`
 
 use std::time::Instant;
 
-use parterre_core::layout::{self, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking};
+use parterre_core::layout::{self, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking, Trunk};
 use parterre_core::revgraph::{self, GraphOptions, Simplification};
 
 fn main() {
@@ -44,6 +45,16 @@ fn main() {
         return;
     }
 
+    let trunk = match args
+        .iter()
+        .position(|a| a == "--trunk")
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+    {
+        Some("alternating") => Trunk::Alternating,
+        Some("leftmost") => Trunk::Leftmost,
+        _ => Trunk::Centred,
+    };
     for mode in Simplification::ALL {
         let t = Instant::now();
         let g = revgraph::build(
@@ -84,7 +95,7 @@ fn main() {
                     first_parent: e.first_parent,
                 })
                 .collect(),
-            priority: Vec::new(),
+            priority: g.layout_anchor(&repo).into_iter().collect(),
         };
         for ranking in Ranking::ALL {
             let t = Instant::now();
@@ -93,6 +104,7 @@ fn main() {
                 &LayoutOptions {
                     ranking,
                     concentrate_edges: args.iter().any(|a| a == "--bundle"),
+                    trunk,
                     ..Default::default()
                 },
             );

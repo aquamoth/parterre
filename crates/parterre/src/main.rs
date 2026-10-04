@@ -77,6 +77,12 @@ struct Cli {
     #[arg(long)]
     max_row_width: Option<f32>,
 
+    /// Where the default branch's first-parent line goes: straight down the middle with the
+    /// branches on the side that stays narrowest ("centred"), the same with branches taking
+    /// turns ("alternating"), or leftmost, bending towards its branches ("leftmost").
+    #[arg(long, value_enum)]
+    trunk: Option<TrunkArg>,
+
     /// Show only the history of HEAD.
     #[arg(long)]
     current_branch: bool,
@@ -245,6 +251,13 @@ enum Mode {
     Branches,
     /// Every commit.
     All,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum TrunkArg {
+    Centred,
+    Alternating,
+    Leftmost,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -435,6 +448,14 @@ fn apply_cli(cli: &Cli, s: &mut settings::Settings) {
     }
     if let Some(w) = cli.max_row_width {
         s.layout.max_layer_width = w;
+    }
+    if let Some(trunk) = cli.trunk {
+        use parterre_core::layout::Trunk;
+        s.layout.trunk = match trunk {
+            TrunkArg::Centred => Trunk::Centred,
+            TrunkArg::Alternating => Trunk::Alternating,
+            TrunkArg::Leftmost => Trunk::Leftmost,
+        };
     }
     if cli.overview {
         s.show_overview = true;

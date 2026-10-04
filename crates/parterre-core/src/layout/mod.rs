@@ -16,6 +16,7 @@ mod layered;
 mod order;
 mod position;
 pub mod rank;
+mod trunk;
 
 use serde::{Deserialize, Serialize};
 
@@ -106,6 +107,31 @@ impl Ranking {
     }
 }
 
+/// Where the trunk goes: the first-parent line of the first [`LayoutInput::priority`] node,
+/// i.e. the default branch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Trunk {
+    /// One straight line, each side branch on the side where its layers stay narrowest.
+    #[default]
+    Centred,
+    /// One straight line, side branches taking turns right and left down the line.
+    Alternating,
+    /// Leftmost in its layers, bending towards its side branches like any other line.
+    Leftmost,
+}
+
+impl Trunk {
+    pub const ALL: [Trunk; 3] = [Trunk::Centred, Trunk::Alternating, Trunk::Leftmost];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Trunk::Centred => "Centred",
+            Trunk::Alternating => "Centred, alternating sides",
+            Trunk::Leftmost => "Leftmost",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayoutOptions {
@@ -126,6 +152,8 @@ pub struct LayoutOptions {
     pub max_layer_width: f32,
     /// Merge edges that run into the same parent into one trunk.
     pub concentrate_edges: bool,
+    /// Where the default branch's first-parent line goes.
+    pub trunk: Trunk,
 }
 
 impl Default for LayoutOptions {
@@ -140,6 +168,7 @@ impl Default for LayoutOptions {
             max_layer_gap: 300.0,
             max_layer_width: 1800.0,
             concentrate_edges: false,
+            trunk: Trunk::Centred,
         }
     }
 }
@@ -153,7 +182,8 @@ pub struct LayoutInput {
     pub times: Vec<i64>,
     /// Edges from child (newer) to parent (older).
     pub edges: Vec<LayoutEdge>,
-    /// Nodes to place first (leftmost/topmost within their layers), e.g. the default branch.
+    /// Nodes to place first, e.g. the default branch. The first one's first-parent line is the
+    /// [`Trunk`].
     pub priority: Vec<u32>,
 }
 
@@ -218,12 +248,24 @@ pub fn layout(input: &LayoutInput, options: &LayoutOptions) -> Layout {
             options.node_gap,
         );
     }
+    let sides = trunk::sides(
+        input,
+        options.trunk,
+        &trunk::Room {
+            layers: &layers,
+            breadth: &breadth,
+            node_gap: options.node_gap,
+            edge_gap: options.edge_gap,
+            concentrate: options.concentrate_edges,
+        },
+    );
     let mut graph = LayeredGraph::build(
         input,
         &layers,
         &breadth,
         options.edge_gap,
         options.concentrate_edges,
+        sides.as_ref(),
     );
     let crossings = order::minimize_crossings(&mut graph, input);
     let u = position::assign(&graph, options.node_gap);

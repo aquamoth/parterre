@@ -77,6 +77,8 @@ options (branchings and merges, local and remote branches, tags, arrows towards 
 the overview map and export), there are:
 
 - four directions and three vertical placements;
+- the default branch as one straight line down the middle, its branches on either side
+  (*Settings → Advanced*; or leftmost, bending like the others, as before);
 - edge bundling, row splitting and curved edges;
 - a first-parent-only view, and stashes or other refs;
 - hiding branches by wildcard, e.g. `pipeline/*` (the toolbar's filter button, or *Settings →
