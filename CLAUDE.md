@@ -22,6 +22,8 @@ Commands (Rust from `~/.cargo/bin`):
   Windows sets `core.autocrlf` there, so files parterre checks out end in CRLF on Windows.
   Compare them with `common::read_text`, and check with
   `GIT_CONFIG_SYSTEM="$PWD/.github/autocrlf.gitconfig" cargo test --workspace` (CI does, #182).
+  CI also runs them with git built `WITH_BREAKING_CHANGES` (Git 3.0): new repositories are
+  reftable there, so a test must not write under `.git/refs` by hand (#228).
 - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all` before committing.
 - `cargo run --release -p parterre-core --example stats -- <repo>` – graph sizes and timings.
 - Automation, for checking visuals without a human (`docs/automation.md`):

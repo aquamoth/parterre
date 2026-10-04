@@ -40,6 +40,13 @@ pub enum GitError {
     Failed { args: String, stderr: String },
     #[error("{0} is not inside a git repository")]
     NotARepository(PathBuf),
+    /// git found a bare repository by itself and won't use it: `safe.bareRepository` is
+    /// `explicit`, Git 3.0's default. `open` is the folder that does open (#228).
+    #[error(
+        "git won't use discovered bare repository {found} (safe.bareRepository is 'explicit'); \
+         open {open}"
+    )]
+    BareRepositoryRefused { found: PathBuf, open: PathBuf },
     #[error("unexpected output from git: {0}")]
     Parse(String),
     #[error("could not read {path}: {source}")]
@@ -65,6 +72,8 @@ fn check(cancel: &Cancel) -> Result<(), GitError> {
 #[derive(Clone, Debug)]
 pub struct Git {
     dir: PathBuf,
+    /// Named with `--git-dir`: a bare repository git would not discover (#228).
+    pass_git_dir: bool,
 }
 
 /// Separator for `for-each-ref` fields (ref names cannot contain control characters).
@@ -93,9 +102,59 @@ fn git_command() -> Command {
     cmd
 }
 
+/// Whether `dir` is a git dir that git would take for a bare repository if it found it by
+/// itself, which `safe.bareRepository=explicit` (Git 3.0's default) forbids. That is any but a
+/// work tree's `.git`, or a linked worktree's or a submodule's git dir inside one: git lets
+/// those through (`is_implicit_bare_repo` in setup.c), and `--git-dir` would make a `.git`
+/// folder its own work tree. Judged by the real path, as git does, so `.` inside a `.git` counts.
+fn is_implicit_bare(dir: &Path) -> bool {
+    let looks_like_git_dir =
+        dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir();
+    if !looks_like_git_dir {
+        return false;
+    }
+    let Ok(real) = std::fs::canonicalize(dir) else {
+        return false;
+    };
+    let names: Vec<_> = real.components().map(|c| c.as_os_str()).collect();
+    let inside_dot_git = names.last() == Some(&OsStr::new(".git"))
+        || names
+            .windows(2)
+            .any(|w| w[0] == ".git" && (w[1] == "worktrees" || w[1] == "modules"));
+    !inside_dot_git
+}
+
+/// Why git could not open `dir`, from what it printed.
+fn not_opened(dir: &Path, stderr: &str) -> GitError {
+    let stderr = stderr.trim();
+    let refused = stderr.lines().find_map(|line| {
+        let rest = line.strip_prefix("fatal: cannot use bare repository '")?;
+        Some(PathBuf::from(rest.split_once("' (safe.bareRepository")?.0))
+    });
+    if let Some(found) = refused {
+        // Before 2.45 git refuses a work tree's `.git` too; the work tree opens.
+        let open = match found.parent() {
+            Some(work) if found.file_name() == Some(OsStr::new(".git")) => work.to_owned(),
+            _ => found.clone(),
+        };
+        return GitError::BareRepositoryRefused { found, open };
+    }
+    if stderr.starts_with("fatal: not a git repository")
+        || stderr.starts_with("fatal: cannot change to")
+    {
+        return GitError::NotARepository(dir.to_owned());
+    }
+    GitError::Failed {
+        args: format!("-C {} rev-parse", dir.display()),
+        stderr: stderr.to_owned(),
+    }
+}
+
 impl Git {
     pub fn new(dir: impl Into<PathBuf>) -> Git {
-        Git { dir: dir.into() }
+        let dir = dir.into();
+        let pass_git_dir = is_implicit_bare(&dir);
+        Git { dir, pass_git_dir }
     }
 
     /// The folder git runs in.
@@ -109,9 +168,11 @@ impl Git {
         S: AsRef<OsStr>,
     {
         let mut cmd = git_command();
-        cmd.arg("-C")
-            .arg(&self.dir)
-            .args(["-c", "core.quotepath=off"])
+        cmd.arg("-C").arg(&self.dir);
+        if self.pass_git_dir {
+            cmd.arg("--git-dir=.");
+        }
+        cmd.args(["-c", "core.quotepath=off"])
             .args(["-c", "log.showSignature=false"])
             .args(["-c", "i18n.logOutputEncoding=UTF-8"])
             .args(["-c", "color.ui=false"])
@@ -237,6 +298,15 @@ impl Git {
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned()))
     }
 
+    /// rev-parse about the repository itself: trimmed stdout, or why git couldn't open it.
+    fn rev_parse_repo(&self, args: &[&str]) -> Result<String, GitError> {
+        let out = self.output(args)?;
+        if !out.status.success() {
+            return Err(not_opened(&self.dir, &String::from_utf8_lossy(&out.stderr)));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    }
+
     /// Resolves the repository root: the working tree, or the git dir for a bare repository.
     pub fn repo_root(&self) -> Result<PathBuf, GitError> {
         Ok(self.locate()?.0)
@@ -244,10 +314,8 @@ impl Git {
 
     /// The repository root, and whether it is a working tree.
     fn locate(&self) -> Result<(PathBuf, bool), GitError> {
-        let Some(out) = self.query(&["rev-parse", "--is-bare-repository", "--absolute-git-dir"])?
-        else {
-            return Err(GitError::NotARepository(self.dir.clone()));
-        };
+        let out =
+            self.rev_parse_repo(&["rev-parse", "--is-bare-repository", "--absolute-git-dir"])?;
         let mut lines = out.lines();
         let bare = lines.next() == Some("true");
         let git_dir = lines
@@ -266,10 +334,7 @@ impl Git {
     /// The repository's git dir and common dir: the same directory, except in a linked
     /// worktree, whose own git dir holds its HEAD while the refs are shared.
     pub fn git_dirs(&self) -> Result<(PathBuf, PathBuf), GitError> {
-        let Some(out) = self.query(&["rev-parse", "--absolute-git-dir", "--git-common-dir"])?
-        else {
-            return Err(GitError::NotARepository(self.dir.clone()));
-        };
+        let out = self.rev_parse_repo(&["rev-parse", "--absolute-git-dir", "--git-common-dir"])?;
         let mut lines = out.lines();
         let (Some(git_dir), Some(common)) = (lines.next(), lines.next()) else {
             return Err(GitError::Parse("rev-parse printed no git dir".into()));
@@ -1126,6 +1191,96 @@ pub fn classify_ref(full_name: &str) -> (RefKind, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_git_does_not_open_says_why_in_gits_terms() {
+        let refusal = |found: &str| {
+            format!(
+                "fatal: cannot use bare repository '{found}' (safe.bareRepository is 'explicit')\n"
+            )
+        };
+        let dir = Path::new("/r/bare.git/refs");
+        assert_eq!(
+            not_opened(dir, &refusal("/r/bare.git")).to_string(),
+            "git won't use discovered bare repository /r/bare.git \
+             (safe.bareRepository is 'explicit'); open /r/bare.git"
+        );
+        // Before 2.45 git refuses a work tree's `.git` too; the work tree opens.
+        let dot_git = Path::new("/r/work/.git");
+        assert_eq!(
+            not_opened(dot_git, &refusal("/r/work/.git")).to_string(),
+            "git won't use discovered bare repository /r/work/.git \
+             (safe.bareRepository is 'explicit'); open /r/work"
+        );
+        for missing in [
+            "fatal: not a git repository (or any of the parent directories): .git",
+            "fatal: cannot change to '/r/bare.git/refs': No such file or directory",
+        ] {
+            assert!(matches!(
+                not_opened(dir, missing),
+                GitError::NotARepository(d) if d == dir
+            ));
+        }
+        // Anything else in git's words, such as safe.directory's.
+        let dubious = "fatal: detected dubious ownership in repository at '/r'\n\
+                       To add an exception for this directory, call:";
+        assert!(
+            not_opened(dir, dubious)
+                .to_string()
+                .contains("detected dubious ownership in repository at '/r'")
+        );
+    }
+
+    #[test]
+    fn only_bare_repositories_git_would_not_discover_are_named_explicitly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = git_command()
+                .current_dir(tmp.path())
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "work"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+            "work",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ]);
+        git(&["-C", "work", "worktree", "add", "-q", "../linked"]);
+        git(&["init", "-q", "--bare", "bare.git"]);
+        git(&["init", "-q", "--bare", "plain"]);
+        git(&["init", "-q", "--bare", "work/.git/modules/sub"]);
+        let dir = |p: &str| tmp.path().join(p);
+        assert!(is_implicit_bare(&dir("bare.git")));
+        assert!(is_implicit_bare(&dir("plain")));
+        // A work tree, and the git dirs git lets through itself, where `--git-dir` would make
+        // the folder its own work tree.
+        assert!(!is_implicit_bare(&dir("work")));
+        assert!(!is_implicit_bare(&dir("work/.git")));
+        assert!(!is_implicit_bare(&dir("work/.git/hooks/..")));
+        assert!(!is_implicit_bare(&dir("work/.git/worktrees/linked")));
+        assert!(!is_implicit_bare(&dir("work/.git/modules/sub")));
+        assert!(!is_implicit_bare(&dir("linked")));
+        assert!(!is_implicit_bare(&dir("bare.git/refs")));
+    }
 
     #[test]
     fn parses_worktree_listings() {
