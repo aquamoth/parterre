@@ -33,10 +33,6 @@ release filenames. Tag a clean commit on `main`; the version in the root `Cargo.
 3. The workflow then builds the [Chocolatey](#chocolatey) package from that MSI, tests it, and
    pushes it unless the tag is a pre-release.
 
-Add the release to the `<releases>` of `packaging/linux/se.trustfall.parterre.metainfo.xml`
-afterwards, with its date. Until then the packages get an entry of their own, dated the day
-they were built.
-
 The build fails if the tag is not `vX.Y.Z` with an optional pre-release suffix, does not point
 at the commit being built, or the sources have local changes. In that case delete the tag
 (`git push origin :refs/tags/v0.5.0-rc1`), fix things and tag again.

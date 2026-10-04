@@ -67,12 +67,7 @@
   <requires>
     <display_length compare="ge">768</display_length>
   </requires>
-  <!-- packaging/linux/build-packages.sh adds the version being packaged when it isn't here. -->
+  <!-- packaging/linux/metainfo.sh fills this in from the release tags. -->
   <releases>
-    <release version="0.5.1" date="2026-09-27"/>
-    <release version="0.5.0" date="2026-09-27"/>
-    <release version="0.4.0" date="2026-09-26"/>
-    <release version="0.3.0" date="2026-09-25"/>
-    <release version="0.2.0" date="2026-09-25"/>
   </releases>
 </component>

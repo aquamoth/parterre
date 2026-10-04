@@ -148,9 +148,10 @@ packaging/linux/build-packages.sh --target x86_64-unknown-linux-gnu dist   # as 
 The packages take their version from `parterre --version`, with a pre-release's `-` turned into
 `~` so that `0.5.0~rc1` sorts before `0.5.0` in both dpkg and rpm. The file names keep the `-`,
 since GitHub may rewrite a `~` in a release asset's name. The script also writes
-`THIRD-PARTY-NOTICES.html` and a copy of the AppStream metadata next to the binary, adding an
-entry for the version being packaged when `se.trustfall.parterre.metainfo.xml` has none yet
-(software centres show the newest entry as the version).
+`THIRD-PARTY-NOTICES.html` and the AppStream metadata next to the binary. The metadata's
+releases come from the release tags, newest first and dated by the tag, without pre-releases
+(`packaging/linux/metainfo.sh`); a release built without its tag gets an entry dated the day
+it was built, since software centres show the newest entry as the version.
 
 What they install:
 

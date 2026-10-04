@@ -96,7 +96,8 @@ modules:
       - cargo build --release --locked --offline -p parterre
       - install -Dm755 target/release/parterre -t ${FLATPAK_DEST}/bin
       - install -Dm644 packaging/linux/${FLATPAK_ID}.desktop -t ${FLATPAK_DEST}/share/applications
-      - install -Dm644 packaging/linux/${FLATPAK_ID}.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo
+      # With the releases from the tags, which a tagged `type: git` source has.
+      - packaging/linux/metainfo.sh "$(target/release/parterre --version | cut -d' ' -f2)" ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
       - install -Dm644 packaging/icon/parterre.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
       - for s in 16 24 32 48 64 128 256 512; do install -Dm644 packaging/icon/parterre-$s.png ${FLATPAK_DEST}/share/icons/hicolor/${s}x$s/apps/${FLATPAK_ID}.png; done
       # flatpak-builder puts each module's LICENSE or COPYING in share/licenses/<id>/<module>
