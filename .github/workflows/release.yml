@@ -4,10 +4,12 @@ name: Release
 # and macOS, the Windows installer, and .deb and .rpm packages, then the crates and the
 # Chocolatey package. PARTERRE_RELEASE_TAG supplies the binary's version; build.rs checks that
 # the tag points at the clean commit being built. The packages are installed on Linux and
-# Windows first, and nothing is published unless that passes. See docs/releasing.md.
+# Windows first, and nothing is published unless that passes. The Linux and macOS builds upload
+# their symbols to PostHog, for readable crash reports (#265). See docs/releasing.md.
 #
 # Started by hand on a branch (gh workflow run release.yml --ref BRANCH), it builds, packages and
-# installs the same way but publishes nothing, leaving the packages as artifacts (#246).
+# installs the same way, and uploads the symbols, but publishes nothing, leaving the packages as
+# artifacts (#246).
 on:
   push:
     tags: ["v*"]
@@ -64,6 +66,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # Every build below keeps its line tables (Cargo.toml) for PostHog, which resolves the
+      # stack traces of crash reports with them (docs/releasing.md#crash-report-symbols). On
+      # macOS rustc packs them into a dSYM before it strips the binary. On Windows the linker
+      # writes them to a PDB, which it does only if nothing is stripped. On Linux they stay in
+      # the binary until "Split debug info" moves them out and strips it.
+      - name: Keep debug info
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            echo CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed >> "$GITHUB_ENV"
+          else
+            echo CARGO_PROFILE_RELEASE_STRIP=none >> "$GITHUB_ENV"
+          fi
       # Stamped with the archive's channel. The installer and the packages are built again
       # below, each stamped with its own, so that the update check offers each the same kind of
       # file (#258). Only parterre-telemetry and parterre compile again.
@@ -71,6 +86,17 @@ jobs:
         env:
           PARTERRE_CHANNEL: ${{ runner.os == 'Windows' && 'zip' || 'tarball' }}
         run: cargo build --release --locked --target ${{ matrix.target }}
+      # Each build is a binary of its own, with its own build ID, LC_UUID or PDB, so the debug
+      # info of each is kept under symbols/ or pdb/, by channel.
+      - name: Split debug info
+        shell: bash
+        run: |
+          release=target/${{ matrix.target }}/release
+          case $RUNNER_OS in
+          Linux) packaging/linux/split-debuginfo.sh "$release/parterre" symbols/tarball ;;
+          macOS) mkdir -p symbols/tarball && cp -R "$release/parterre.dSYM" symbols/tarball/ ;;
+          Windows) mkdir -p pdb/zip && cp "$release/parterre.pdb" pdb/zip/ ;;
+          esac
       - name: Check version
         if: ${{ !matrix.cross && github.event_name == 'push' }}
         shell: bash
@@ -95,6 +121,7 @@ jobs:
             version=$(git describe --tags --match 'v[0-9]*' --always)
             version=${version#v}
           fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "NAME=parterre-$version-${{ matrix.target }}" >> "$GITHUB_ENV"
       # The binary with the README, its license, NOTICE and the licenses of the crates built
       # into it.
@@ -120,6 +147,8 @@ jobs:
         run: |
           for channel in deb rpm; do
             PARTERRE_CHANNEL=$channel cargo build --release --locked --target ${{ matrix.target }}
+            packaging/linux/split-debuginfo.sh target/${{ matrix.target }}/release/parterre \
+              symbols/$channel
             packaging/linux/build-packages.sh --target ${{ matrix.target }} --only $channel dist
           done
       # The installer, from the zip's files with a build stamped msi
@@ -130,9 +159,50 @@ jobs:
         run: |
           PARTERRE_CHANNEL=msi cargo build --release --locked --target ${{ matrix.target }}
           cp "target/${{ matrix.target }}/release/parterre.exe" "$NAME/"
+          mkdir -p pdb/msi && cp "target/${{ matrix.target }}/release/parterre.pdb" pdb/msi/
           dotnet tool install --global wix --version 7.0.0
           PATH="$USERPROFILE/.dotnet/tools:$PATH" \
             pwsh packaging/windows/build-msi.ps1 -Stage "$NAME" -Out "dist/$NAME.msi"
+      # PostHog doesn't take PDBs yet, so they are a release asset of their own: the zip's
+      # parterre.exe and the installer's, under zip/ and msi/.
+      - name: Windows debug info
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mv pdb "$NAME-pdb"
+          7z a "dist/$NAME-pdb.zip" "$NAME-pdb"
+      # PostHog matches a crash report's frames to the symbols of the binary it came from, by
+      # build ID on Linux and LC_UUID on macOS. Without the secrets (a fork) there is no upload.
+      - name: Upload symbols to PostHog
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          POSTHOG_CLI_HOST: https://eu.posthog.com
+          POSTHOG_CLI_API_KEY: ${{ secrets.POSTHOG_CLI_API_KEY }}
+          POSTHOG_CLI_PROJECT_ID: ${{ secrets.POSTHOG_CLI_PROJECT_ID }}
+        run: |
+          if [ -z "$POSTHOG_CLI_API_KEY" ] || [ -z "$POSTHOG_CLI_PROJECT_ID" ]; then
+            echo "::warning::No POSTHOG_CLI_API_KEY or POSTHOG_CLI_PROJECT_ID; symbols not uploaded"
+            exit 0
+          fi
+          # posthog-cli 0.18.9, checked against the sha256.sum of its release.
+          case $RUNNER_OS in
+          Linux)
+            cli=posthog-cli-x86_64-unknown-linux-musl
+            sum=d132e0ab56d0afaee10fd37b0870ba1162b09f7dccc8eb92ea391fe081be60a5
+            check="sha256sum -c"
+            ;;
+          macOS)
+            cli=posthog-cli-aarch64-apple-darwin
+            sum=831d3a8f16f95fc7cdbff7c9e83a32f012e8bd5af983646582f52e3ca4221d01
+            check="shasum -a 256 -c"
+            ;;
+          esac
+          curl -fsSLO "https://github.com/PostHog/posthog/releases/download/posthog-cli/v0.18.9/$cli.tar.gz"
+          echo "$sum  $cli.tar.gz" | $check
+          tar xzf "$cli.tar.gz"
+          "$cli/posthog-cli" symbol-sets upload --directory symbols \
+            --release-name parterre --release-version "$VERSION"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}

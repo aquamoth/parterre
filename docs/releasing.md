@@ -17,6 +17,9 @@ release filenames. Tag a clean commit on `main`; the version in the root `Cargo.
    publishes a GitHub Release. The release has one archive per target
    (`parterre-0.5.0-rc1-<target>.tar.gz`, or `.zip` for Windows) and a `SHA256SUMS` file. Each
    archive holds the binary, the README, `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.html`.
+   The Linux and macOS builds upload their symbols to PostHog, and Windows gets its PDBs as
+   `parterre-0.5.0-rc1-x86_64-pc-windows-msvc-pdb.zip` ([Crash report
+   symbols](#crash-report-symbols)).
    Windows also gets an installer built from the same files,
    `parterre-0.5.0-rc1-x86_64-pc-windows-msvc.msi` (see
    [building.md](building.md#windows-installer)), and Linux a `.deb` and an `.rpm`,
@@ -46,12 +49,61 @@ gh workflow run release.yml --ref my-branch
 ```
 
 It builds, packages and installs as a release does, but publishes nothing: the packages are
-left as artifacts of the run. Their version follows the nearest tag, as in any build
+left as artifacts of the run. Only their symbols go to PostHog ([Crash report
+symbols](#crash-report-symbols)). Their version follows the nearest tag, as in any build
 ([Version strings](#version-strings)).
 
 The build fails if the tag is not `vX.Y.Z` with an optional pre-release suffix, does not point
 at the commit being built, or the sources have local changes. In that case delete the tag
 (`git push origin :refs/tags/v0.5.0-rc1`), fix things and tag again.
+
+## Crash report symbols
+
+The shipped binaries are stripped, so the crash reports they send to PostHog (#263) hold bare
+addresses. PostHog resolves them to functions, files and lines with the debug info of the
+binary that crashed, which the release workflow uploads (#265), following [PostHog's Rust
+guide](https://posthog.com/docs/error-tracking/upload-source-maps/rust):
+
+- Release builds have line tables (`debug = "line-tables-only"` in `Cargo.toml`). A local
+  `cargo build --release` strips them with the symbols, as before. The workflow keeps them:
+  - **Linux:** it builds with `CARGO_PROFILE_RELEASE_STRIP=none`, then
+    `packaging/linux/split-debuginfo.sh` moves the debug info to `parterre.debug` (`objcopy
+    --only-keep-debug`) and strips the binary. Both keep the GNU build ID that PostHog matches
+    them by.
+  - **macOS:** with `CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed`, rustc writes
+    `parterre.dSYM` before it strips the binary, which keeps its `LC_UUID`.
+  - **Windows:** with `CARGO_PROFILE_RELEASE_STRIP=none`, the linker writes `parterre.pdb`.
+- The tarball, the `.deb`, the `.rpm`, the zip and the MSI each hold a build of their own
+  (stamped with its channel), so each has its own debug info: `symbols/<channel>/` on Linux
+  and macOS, `zip/` and `msi/` in the PDB archive.
+- **Upload:** each Linux and macOS build job runs `posthog-cli symbol-sets upload` (pinned to a
+  version and its checksum) on its `symbols/`, with `POSTHOG_CLI_HOST=https://eu.posthog.com`.
+  The symbols are filed under the release `parterre` with the version of the file names.
+  A failed upload fails the job, so nothing is published. A run by hand uploads too, so it can
+  be tried without a tag.
+- **Windows:** PostHog doesn't take PDBs yet, so Windows reports show the panic message and its
+  `file:line` only. The PDBs are a release asset instead,
+  `parterre-<version>-x86_64-pc-windows-msvc-pdb.zip`, listed in `SHA256SUMS` like the rest.
+
+The upload uses two repository secrets, set up for PostHog (#272):
+
+| Secret | What |
+|---|---|
+| `POSTHOG_CLI_API_KEY` | A PostHog personal API key with the *Source map upload* preset (error tracking write, organization read) |
+| `POSTHOG_CLI_PROJECT_ID` | The ID of parterre's PostHog project |
+
+Without them, in a fork, the upload is skipped with a warning and the release goes on.
+
+To check that a release's symbols arrived:
+
+1. The log of each build job's *Upload symbols to PostHog* step lists every file with its debug
+   ID and ends with an upload summary: three files on Linux (tarball, deb, rpm), a dSYM on
+   macOS.
+2. In PostHog, *Error tracking › Configuration › Symbol sets* lists them, under the release
+   `parterre` and its version.
+3. A panic from one of the release's builds, with crash reports ticked, shows functions and
+   `file:line` in its stack trace instead of addresses. A rebuild has another build ID, so only
+   the published files count.
 
 ## crates.io
 
