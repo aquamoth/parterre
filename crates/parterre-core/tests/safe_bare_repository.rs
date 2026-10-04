@@ -108,13 +108,20 @@ fn a_bare_repository_git_refuses_names_the_folder_to_open() {
     let same =
         |a: &Path, b: &Path| std::fs::canonicalize(a).unwrap() == std::fs::canonicalize(b).unwrap();
 
-    // From a folder inside it, git finds it and stops.
+    // From a folder inside it, git finds it and stops. Before 2.38 git has no such setting.
+    let version = r.git(&["--version"]);
+    let mut numbers = version
+        .trim_start_matches("git version ")
+        .split('.')
+        .map(|n| n.parse::<u32>().unwrap_or(0));
+    let has_setting = (numbers.next().unwrap(), numbers.next().unwrap()) >= (2, 38);
     match load_repo(&bare.join("refs")).err() {
-        Some(GitError::BareRepositoryRefused { found, open }) => {
+        Some(GitError::BareRepositoryRefused { found, open }) if has_setting => {
             assert!(same(&found, &bare));
             assert!(same(&open, &bare));
         }
-        other => panic!("{other:?}"),
+        None if !has_setting => {}
+        other => panic!("{version}: {other:?}"),
     }
     // A work tree's `.git`: git 2.45 and later take it, older ones point at the work tree.
     match load_repo(&r.path().join(".git")) {
