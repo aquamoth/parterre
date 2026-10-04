@@ -175,23 +175,22 @@ _Avoid_: log pane, commit list
 ### What parterre sends
 
 **Update check**:
-The request parterre makes once a day at most, asking whether a newer version is out. It
-carries the version, channel, OS, architecture, git version, UI language and the install ID, and
-is the one thing sent by default.
+Asking GitHub whether a newer release is out, at start and then once a day. It sends nothing of
+parterre's own. When a newer version is out, the menu icon turns blue and offers *Update now*.
 _Avoid_: ping, heartbeat, telemetry
 
 **Install ID**:
 A random identifier created the first time parterre runs and never changed, so that each
-installation is counted once. It is never tied to anything personal and never sent with a crash
-report.
+installation is counted once. It goes with the usage statistics, is never tied to anything
+personal and is never sent with a crash report.
 _Avoid_: user ID, machine ID, device ID
 
 **Usage statistics**:
-Counts of how parterre is used (sessions, features, settings), sent once a day with the install
-ID unless the user unticks them. They never contain personal information.
+What parterre sends to PostHog as it is used (installs, updates, launches, features, settings),
+with the install ID, unless the user unticks them. They never contain personal information.
 _Avoid_: analytics, telemetry, metrics
 
 **Crash report**:
-What parterre records when it crashes, offered to the user on the next start to send or to open
-as a GitHub issue. Sent only with the user's consent, since it may contain personal information.
+What parterre sends to PostHog the moment it crashes, if the user has ticked crash reports. It
+may contain personal information, so it is off unless the user turns it on.
 _Avoid_: error report, crash dump, bug report
