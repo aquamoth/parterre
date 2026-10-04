@@ -171,3 +171,27 @@ _Avoid_: selected commit, active commit
 **History pane**:
 The list at the bottom of a blame window of the commits that changed the file, one per row.
 _Avoid_: log pane, commit list
+
+### What parterre sends
+
+**Update check**:
+The request parterre makes once a day at most, asking whether a newer version is out. It
+carries the version, channel, OS, architecture, git version, UI language and the install ID, and
+is the one thing sent by default.
+_Avoid_: ping, heartbeat, telemetry
+
+**Install ID**:
+A random identifier created the first time parterre runs and never changed, so that each
+installation is counted once. It is never tied to anything personal and never sent with a crash
+report.
+_Avoid_: user ID, machine ID, device ID
+
+**Usage statistics**:
+Counts of how parterre is used (sessions, features, settings), sent once a day with the install
+ID unless the user unticks them. They never contain personal information.
+_Avoid_: analytics, telemetry, metrics
+
+**Crash report**:
+What parterre records when it crashes, offered to the user on the next start to send or to open
+as a GitHub issue. Sent only with the user's consent, since it may contain personal information.
+_Avoid_: error report, crash dump, bug report
