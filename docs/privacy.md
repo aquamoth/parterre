@@ -37,8 +37,9 @@ On unless you untick them. Sent to PostHog as parterre is used, with the
 | `Application Updated` | the first start of a new version, with the previous version |
 | `Application Opened` | every start |
 | `Application Backgrounded` | closing parterre |
-
-The events for features and settings are listed here once they are added (#264).
+| `$screen` | a window or dialog opens: its name, such as `log`, `diff`, `settings`, `merge` or `reset` |
+| `menu_view` | a menu opens: which one, such as the ☰ menu, a node's context menu or the zoom popover |
+| `action_run` | you start something: what, such as `merge`, `create_branch`, `reload`, `export`, `fit` or `find`; not whether it succeeded |
 
 Every event carries:
 
@@ -46,9 +47,17 @@ Every event carries:
   on), and the version of git it runs
 - the operating system and its version
 - the language and region setting, and the time zone
-- the screen size
-- a session ID, which is new after 30 minutes without input, after 24 hours, and when another
-  repository is opened
+- the screen size and the display's scale
+- your settings for theme, text size, graph mode and direction, log layout, dragging, diff
+  form, automatic reload and pull requests
+- how many repositories your recent list holds (at most 10), and roughly how big the open
+  repository is: its commits and the graph's nodes, as a range such as 1000–9999
+- a random session ID, which changes after 30 minutes without use, after 24 hours at most, and
+  whenever you open another repository; it says nothing about which repository
+
+Feature and setting names come from a fixed list built into parterre; the rest are numbers and
+yes/no answers. None of it includes anything from your repositories or anything you type into
+parterre.
 
 Unticking *Usage statistics* stops all of it, the install ID included.
 
@@ -64,14 +73,23 @@ report.
 ## Crash reports
 
 Off unless you tick them. When parterre panics, PostHog's SDK sends a report at that moment:
-the panic message, where in parterre's code it happened, parterre's version and the operating
-system. Paths in your home folder become `~`. A report may still contain personal information,
+
+- the panic message, and where in parterre's code it happened
+- the stack trace: function names, source file paths and addresses
+- the executable and system libraries loaded, with their paths and build IDs, so that the
+  stack trace can be read
+- parterre's version and channel, the version of git it runs, the operating system and its
+  version, the language and region setting, and the time zone
+
+Paths in your home folder become `~`. A report may still contain personal information,
 such as a file or branch name in the panic message.
 
-Each report has a random ID of its own, never the install ID. There is no local copy, and
-nothing is asked at the next start.
+Each report has a random ID of its own, never the install ID or the session ID. There is no
+local copy, and nothing is asked at the next start. Crash reports have their own switch: they
+are sent even with *Usage statistics* unticked.
 
-A change to *Crash reports* takes effect from the next start. Only panics are reported: aborts,
+Ticking *Crash reports* in the first-run prompt takes effect at once; a change in *Settings →
+Privacy* takes effect from the next start. Only panics are reported: aborts,
 stack overflows and crashes in native code, such as a graphics driver, aren't caught.
 
 ## Never sent
@@ -150,8 +168,8 @@ or to the authority where you live or work.
 - **In parterre:** *Settings → Privacy* has *Check for updates*, *Usage statistics* and *Crash
   reports*.
 - **`DO_NOT_TRACK=1`** in the environment turns usage statistics and crash reports off,
-  whatever the settings say; they show as off and greyed out. The update check keeps its own
-  switch.
+  whatever the settings say; they show as off and greyed out, and the first-run prompt isn't
+  shown. The update check keeps its own switch.
 - **Packagers:** build without the `send` cargo feature, which is on by default. Built that
   way, parterre makes no update check and sends nothing to PostHog
   ([building](building.md#features)).
