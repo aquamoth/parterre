@@ -312,18 +312,9 @@ pub fn in_child(
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = cmd.spawn().ok()?;
-    let mut stdin = child.stdin.take()?;
-    let mut stdout = child.stdout.take()?;
-    {
-        let mut running = cancel.lock();
-        if running.cancelled {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        running.child = Some(child);
-    }
+    let pipes = cancel.spawn(&mut cmd).ok().flatten()?;
+    let mut stdin = pipes.stdin.expect("stdin is piped");
+    let mut stdout = pipes.stdout.expect("stdout is piped");
     let start = Instant::now();
     let mut out = Vec::new();
     let finished = std::thread::scope(|s| {

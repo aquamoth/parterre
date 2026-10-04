@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::blame::{Blame, BlameOptions, BlameSpec};
@@ -56,6 +56,13 @@ pub(crate) struct Running {
     pub(crate) child: Option<Child>,
 }
 
+/// The pipes of a child [`Cancel::spawn`] started: `None` for those its command didn't pipe.
+pub(crate) struct Pipes {
+    pub(crate) stdin: Option<ChildStdin>,
+    pub(crate) stdout: Option<ChildStdout>,
+    pub(crate) stderr: Option<ChildStderr>,
+}
+
 impl Cancel {
     pub fn new() -> Cancel {
         Cancel::default()
@@ -73,6 +80,25 @@ impl Cancel {
 
     pub fn is_cancelled(&self) -> bool {
         self.lock().cancelled
+    }
+
+    /// Starts `cmd` with this handle holding the child, and hands back its pipes; `None`,
+    /// without starting it, once cancelled. It starts under the lock, so a
+    /// [`cancel`](Cancel::cancel) meanwhile waits for the child and kills it, rather than
+    /// returning while it runs.
+    pub(crate) fn spawn(&self, cmd: &mut Command) -> std::io::Result<Option<Pipes>> {
+        let mut running = self.lock();
+        if running.cancelled {
+            return Ok(None);
+        }
+        let mut child = cmd.spawn()?;
+        let pipes = Pipes {
+            stdin: child.stdin.take(),
+            stdout: child.stdout.take(),
+            stderr: child.stderr.take(),
+        };
+        running.child = Some(child);
+        Ok(Some(pipes))
     }
 
     /// Fails with [`GitError::Cancelled`] once cancelled.
@@ -222,18 +248,12 @@ impl Git {
     /// Runs git and returns stdout as bytes, failing on a non-zero exit status, unless `cancel`
     /// kills it first.
     fn run_cancellable(&self, args: &[&str], cancel: &Cancel) -> Result<Vec<u8>, GitError> {
-        let mut child = self.command(args).spawn().map_err(GitError::Spawn)?;
-        let mut stdout = child.stdout.take().expect("stdout is piped");
-        let mut stderr = child.stderr.take().expect("stderr is piped");
-        {
-            let mut running = cancel.lock();
-            if running.cancelled {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(GitError::Cancelled);
-            }
-            running.child = Some(child);
-        }
+        let pipes = cancel
+            .spawn(&mut self.command(args))
+            .map_err(GitError::Spawn)?
+            .ok_or(GitError::Cancelled)?;
+        let mut stdout = pipes.stdout.expect("stdout is piped");
+        let mut stderr = pipes.stderr.expect("stderr is piped");
         // Read stderr alongside, so that neither pipe can fill up and stall git.
         let errors = std::thread::spawn(move || {
             let mut buf = Vec::new();
