@@ -395,6 +395,7 @@ impl FileTable {
                         .style(crate::menu::style)
                         .show(|ui| {
                             crate::menu::fit_window(ui, |ui| {
+                                crate::usage::menu(ui.ctx(), crate::usage::Menu::File);
                                 ui.set_min_width(crate::menu::MIN_WIDTH);
                                 let chosen = selection.paths.len();
                                 let many = chosen > 1 && selection.paths.contains(&file.path);
@@ -591,6 +592,7 @@ impl<T> DiffQueue<T> {
         let Some(pending) = &self.confirm else { return };
         let n = pending.len();
         let shown = crate::dialogs::Dialog::new(id, &format!("Open {n} diff windows?"))
+            .screen(crate::usage::Screen::OpenDiffs)
             .width(340.0)
             .modal()
             .opener(ui.ctx().viewport_id())

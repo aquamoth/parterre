@@ -134,6 +134,8 @@ pub struct Dialog<'a> {
     raise: bool,
     resizable: bool,
     remember: Option<Id>,
+    /// What the usage statistics call it, if they count it (#264).
+    screen: Option<crate::usage::Screen>,
 }
 
 /// A dialog's answer for this frame. Closing the window (or Esc in [`actions`]) means cancel.
@@ -164,7 +166,14 @@ impl<'a> Dialog<'a> {
             raise: false,
             resizable: false,
             remember: None,
+            screen: None,
         }
+    }
+
+    /// Counted in the usage statistics as `screen` each time it opens (#264).
+    pub fn screen(mut self, screen: crate::usage::Screen) -> Self {
+        self.screen = Some(screen);
+        self
     }
 
     pub fn width(mut self, width: f32) -> Self {
@@ -225,6 +234,9 @@ impl<'a> Dialog<'a> {
     /// open; the window goes when the calls stop. `content` may run more than once a frame: the
     /// first time, it is measured before the window opens.
     pub fn show<R>(&self, ctx: &egui::Context, mut content: impl FnMut(&mut Ui) -> R) -> Shown<R> {
+        if let Some(screen) = self.screen {
+            crate::usage::screen(ctx, self.id, screen);
+        }
         let key = self.id.with("window");
         let frame = ctx.cumulative_frame_nr_for(ViewportId::ROOT);
         let mut window = ctx

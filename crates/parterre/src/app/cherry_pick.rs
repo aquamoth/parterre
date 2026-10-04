@@ -117,6 +117,7 @@ impl CherryPickDialog {
         let title = format!("Cherry-pick {} onto {}", pick.name, pick.branch);
         let width = (ctx.content_rect().width() - 80.0).clamp(420.0, 780.0);
         let shown = dialogs::Dialog::new("cherry-pick", &title)
+            .screen(crate::usage::Screen::CherryPick)
             .width(width)
             .opener(self.opener)
             .raise(self.fresh)

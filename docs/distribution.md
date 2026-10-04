@@ -27,7 +27,9 @@ approval (#20). Not planned for now:
   if at all. An Ubuntu PPA isn't possible yet: Launchpad builds with Ubuntu's Rust, and no
   Ubuntu release has 1.95, which egui needs.
 - **Debian, Fedora and Arch official repositories**: left to distribution volunteers. Debian
-  alone would need about 28 new Rust packages for the egui stack.
+  alone would need about 28 new Rust packages for the egui stack. Their builds can leave out
+  the update check, usage statistics and crash reports with the
+  [`send` feature](building.md#features).
 - **Homebrew**: homebrew-core wants 225 stars for an author's own submission and doesn't take
   GUI apps as formulae.
 - **AppImage**: no name registry, so it claims nothing.

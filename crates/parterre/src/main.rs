@@ -25,6 +25,7 @@ mod system_theme;
 mod text_size;
 mod theme;
 mod upstreams;
+mod usage;
 // Runs in build.rs; compiled here only for its tests.
 #[cfg(test)]
 mod version;

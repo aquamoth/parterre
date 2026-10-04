@@ -1554,6 +1554,7 @@ impl BlameWindow {
                     .style(crate::menu::style)
                     .show(|ui| {
                         crate::menu::fit_window(ui, |ui| {
+                            crate::usage::menu(ui.ctx(), crate::usage::Menu::Blame);
                             ui.set_min_width(crate::menu::MIN_WIDTH);
                             let chosen = selection.is_some_and(|s| {
                                 let (a, b) = s.span();
@@ -1979,6 +1980,7 @@ impl BlameWindow {
             .with_inner_size(self.size)
             .with_min_inner_size([560.0, 320.0]);
         let id = self.viewport_id();
+        crate::usage::screen(ctx, id.0, crate::usage::Screen::Blame);
         if self.title_theme.is_none() && !ctx.embed_viewports() {
             ctx.request_repaint();
         }

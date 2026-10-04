@@ -38,6 +38,7 @@ impl ParterreApp {
     /// *Download*: the release's file for this channel in the browser, or on the cargo channel
     /// the command copied.
     pub(super) fn download(&mut self, ctx: &egui::Context, download: &Download) {
+        crate::usage::action(crate::usage::Action::DownloadUpdate);
         match download {
             Download::Open(url) => {
                 if let Err(e) = crate::browser::open(url) {

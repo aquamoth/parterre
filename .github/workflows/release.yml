@@ -1,11 +1,11 @@
 name: Release
 
 # Pushing a tag vX.Y.Z[-prerelease] publishes a GitHub Release with binaries for Linux, Windows
-# and macOS, the Windows installer, and .deb and .rpm packages. PARTERRE_RELEASE_TAG supplies
-# the binary's version; build.rs checks that the tag points at the clean commit being built.
-# The packages are installed on Linux and Windows first, and nothing is published unless that
-# passes. The Linux and macOS builds upload their symbols to PostHog, for readable crash reports
-# (#265). See docs/releasing.md.
+# and macOS, the Windows installer, and .deb and .rpm packages, then the crates and the
+# Chocolatey package. PARTERRE_RELEASE_TAG supplies the binary's version; build.rs checks that
+# the tag points at the clean commit being built. The packages are installed on Linux and
+# Windows first, and nothing is published unless that passes. The Linux and macOS builds upload
+# their symbols to PostHog, for readable crash reports (#265). See docs/releasing.md.
 #
 # Started by hand on a branch (gh workflow run release.yml --ref BRANCH), it builds, packages and
 # installs the same way, and uploads the symbols, but publishes nothing, leaving the packages as
@@ -53,10 +53,11 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends build-essential ca-certificates curl git
+      # The whole history with its tags: the AppStream metadata lists the releases
+      # (packaging/linux/metainfo.sh), and by hand the version follows the nearest release tag.
       - uses: actions/checkout@v6
-        # By hand, the whole history with its tags: the version follows the nearest release tag.
         with:
-          fetch-depth: ${{ github.event_name == 'push' && 1 || 0 }}
+          fetch-depth: 0
       # The checkout belongs to the runner's user and the container runs as root; git ignores
       # such repositories unless they are marked safe.
       - name: Trust the checkout
@@ -316,3 +317,64 @@ jobs:
       tag: ${{ github.ref_name }}
       push: ${{ !contains(github.ref_name, '-') }}
     secrets: inherit
+
+  # The crates, at the tag's version, from the same commit; not for pre-releases
+  # (docs/releasing.md#cratesio). Trusted Publishing: crates.io trusts this workflow in the
+  # crates-io environment and hands out a token for this run only. It can't create a crate, so
+  # a new one is published by hand first. A crate already at this version is skipped, so
+  # rerunning the job publishes the rest.
+  crates:
+    name: crates.io
+    needs: publish
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      # A checkout of the tag with the versions written into Cargo.toml and Cargo.lock.
+      - name: Prepare
+        run: python3 scripts/prepare-crates-release.py "$GITHUB_REF_NAME" --output "$RUNNER_TEMP/crates"
+      - name: Already published
+        id: published
+        working-directory: ${{ runner.temp }}/crates
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          exists() {
+            status=$(curl -s -o /dev/null -w '%{http_code}' -A "parterre release ($GITHUB_REPOSITORY)" \
+              "https://crates.io/api/v1/crates/$1")
+            case $status in
+              200) return 0 ;;
+              404) return 1 ;;
+              *) echo "::error::crates.io answered $status for $1"; exit 1 ;;
+            esac
+          }
+          exclude= todo= new=
+          for crate in $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[].name'); do
+            if exists "$crate/$version"; then
+              echo "$crate $version is published"
+              exclude="$exclude --exclude $crate"
+            elif exists "$crate"; then
+              todo=true
+            else
+              new="$new $crate"
+            fi
+          done
+          if [ -n "$new" ]; then
+            echo "::error::New on crates.io:$new. Publish $version by hand, add the trusted publisher and rerun this job (docs/releasing.md#cratesio)."
+            exit 1
+          fi
+          echo "exclude=$exclude" >> "$GITHUB_OUTPUT"
+          echo "todo=$todo" >> "$GITHUB_OUTPUT"
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        if: steps.published.outputs.todo
+        id: auth
+      - name: Publish
+        if: steps.published.outputs.todo
+        working-directory: ${{ runner.temp }}/crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --workspace ${{ steps.published.outputs.exclude }}

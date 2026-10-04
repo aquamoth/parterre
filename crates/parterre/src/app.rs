@@ -57,6 +57,7 @@ use crate::settings_file::{self, Stored};
 use crate::system_theme::SystemTheme;
 use crate::text_size;
 use crate::theme::{Palette, ThemeChoice};
+use crate::usage;
 use crate::view::View;
 use compare_window::CompareRequest;
 use parterre_core::physics::RestPlace;
@@ -807,6 +808,7 @@ impl ParterreApp {
     /// Writes the whole graph to `path` in `format`. PNG is drawn at the current zoom, as in
     /// TortoiseGit, and with the display's pixels per point, so it looks as on screen.
     fn export(&mut self, format: Format, mut path: PathBuf, ctx: &egui::Context) {
+        usage::action(usage::Action::Export);
         let Some(scene) = &self.scene else { return };
         // A name typed without the extension, or with another one, gets it added.
         if path.extension().is_none() || Format::from_path(&path) != Some(format) {
@@ -836,6 +838,7 @@ impl ParterreApp {
     /// Opens the repository containing `dir` in place of the one shown. On failure the one
     /// shown stays, and the status bar says why.
     fn open_folder(&mut self, dir: &Path) {
+        usage::action(usage::Action::OpenRepository);
         match parterre_core::git::load_repo(dir) {
             Ok(repo) => {
                 self.recent.add(&repo.path);
@@ -854,6 +857,7 @@ impl ParterreApp {
     }
 
     fn close_folder(&mut self) {
+        usage::action(usage::Action::CloseRepository);
         self.show_repo(None);
     }
 
@@ -1110,6 +1114,7 @@ impl ParterreApp {
     /// the layout, the view, moved nodes and the other windows stay; only HEAD and what hangs on
     /// the open worktree change.
     fn go_to_worktree(&mut self, path: &Path) {
+        usage::action(usage::Action::GoToWorktree);
         match parterre_core::git::load_repo(path) {
             Ok(repo) => {
                 self.record_moves();
@@ -1347,16 +1352,19 @@ impl ParterreApp {
     }
 
     fn reset_positions(&mut self) {
+        usage::action(usage::Action::ResetPositions);
         self.rearrange(|net| net.reset());
     }
 
     fn undo(&mut self) {
+        usage::action(usage::Action::Undo);
         self.rearrange(|net| {
             net.undo();
         });
     }
 
     fn redo(&mut self) {
+        usage::action(usage::Action::Redo);
         self.rearrange(|net| {
             net.redo();
         });
@@ -1422,6 +1430,7 @@ impl ParterreApp {
                 .zoom_around(self.canvas, self.canvas.center(), 1.0 / self.view.zoom);
         }
         if pressed(Key::F5) {
+            usage::action(usage::Action::Reload);
             self.reload();
         }
         // One node gives its log, two the range between them; three or more nothing.
@@ -1430,9 +1439,11 @@ impl ParterreApp {
             self.show_log(&nodes);
         }
         if pressed(Key::F) {
+            usage::action(usage::Action::Fit);
             self.fit();
         }
         if pressed(Key::Home) || pressed(Key::H) {
+            usage::action(usage::Action::GoToHead);
             self.go_to_head();
         }
         if pressed(Key::R) {
@@ -1474,6 +1485,7 @@ impl ParterreApp {
 
     fn copy_selected_hash(&self, ctx: &egui::Context) {
         if let Some(oid) = self.selected_commit() {
+            usage::action(usage::Action::Copy);
             ctx.copy_text(oid.to_hex());
         }
     }
@@ -1710,6 +1722,7 @@ impl ParterreApp {
                 Some(Drag::Node { .. }) => {
                     scene.net.release(&self.settings.net);
                     moved = true;
+                    usage::action(usage::Action::DragNode);
                 }
                 Some(Drag::Select { start, end }) => {
                     self.selection
@@ -2014,6 +2027,7 @@ impl ParterreApp {
                 menu::fit_window(ui, |ui| {
                     ui.set_min_width(menu::MIN_WIDTH);
                     let Some(node) = context_node else {
+                        usage::menu(ui.ctx(), usage::Menu::Canvas);
                         if ui.add(item("Fit graph", "F")).clicked() {
                             action = Some(MenuAction::Fit);
                             ui.close();
@@ -2024,6 +2038,7 @@ impl ParterreApp {
                         }
                         return;
                     };
+                    usage::menu(ui.ctx(), usage::Menu::Node);
                     // Greyed out rather than left out, so the menu keeps its shape.
                     let show_log = ui
                         .add_enabled(group.len() <= 2, item("Show log", "L"))
@@ -2233,10 +2248,12 @@ impl ParterreApp {
                         // Right-clicking selects the node, so Ctrl+C would copy the same hash.
                         let copy_hash = if group.len() > 1 { "" } else { "Ctrl+C" };
                         if ui.add(item("Commit hash", copy_hash)).clicked() {
+                            usage::action(usage::Action::Copy);
                             ui.ctx().copy_text(commit.oid.to_hex());
                             ui.close();
                         }
                         if ui.button("Ref names").clicked() {
+                            usage::action(usage::Action::Copy);
                             let names: Vec<&str> = n
                                 .refs
                                 .iter()
@@ -2253,6 +2270,7 @@ impl ParterreApp {
                         let copy_path = |ui: &mut Ui, label: &str, w: &parterre_core::Worktree| {
                             let path = w.path.display().to_string();
                             if ui.button(label).on_hover_text(&path).clicked() {
+                                usage::action(usage::Action::Copy);
                                 ui.ctx().copy_text(path);
                                 ui.close();
                             }
@@ -2303,10 +2321,19 @@ impl ParterreApp {
                 });
             });
         match action {
-            Some(MenuAction::Fit) => self.fit(),
+            Some(MenuAction::Fit) => {
+                usage::action(usage::Action::Fit);
+                self.fit();
+            }
             Some(MenuAction::ResetAll) => self.reset_positions(),
-            Some(MenuAction::ReturnToLayout(nodes)) => self.return_to_layout(&nodes),
-            Some(MenuAction::SelectSubtree(roots)) => self.select_subtree(&roots),
+            Some(MenuAction::ReturnToLayout(nodes)) => {
+                usage::action(usage::Action::ReturnToLayout);
+                self.return_to_layout(&nodes);
+            }
+            Some(MenuAction::SelectSubtree(roots)) => {
+                usage::action(usage::Action::SelectSubtree);
+                self.select_subtree(&roots);
+            }
             Some(MenuAction::Center(node)) => self.center_on(node),
             Some(MenuAction::ShowLog(nodes)) => self.show_log(&nodes),
             Some(MenuAction::Compare(request)) => self.compare_request(request),
@@ -2315,14 +2342,21 @@ impl ParterreApp {
                     .request(&response.ctx, request, egui::ViewportId::ROOT)
             }
             Some(MenuAction::OpenPullRequest(url)) => {
+                usage::action(usage::Action::OpenPullRequest);
                 if let Err(e) = crate::browser::open(&url) {
                     self.status = Some((e, true));
                 }
             }
             Some(MenuAction::Open(opener, dir)) => {
                 let opened = match opener {
-                    Opener::FileManager => crate::file_manager::open(&dir),
-                    Opener::Terminal => crate::file_manager::open_terminal(&dir),
+                    Opener::FileManager => {
+                        usage::action(usage::Action::OpenFileManager);
+                        crate::file_manager::open(&dir)
+                    }
+                    Opener::Terminal => {
+                        usage::action(usage::Action::OpenTerminal);
+                        crate::file_manager::open_terminal(&dir)
+                    }
                 };
                 if let Err(e) = opened {
                     self.status = Some((e, true));
@@ -2378,6 +2412,7 @@ impl ParterreApp {
         let mut open_colours = false;
         let rules = &self.settings.branch_colors;
         let shown = crate::dialogs::Dialog::new("legend", "Legend")
+            .screen(crate::usage::Screen::Legend)
             .width(520.0)
             .resizable()
             .show(ctx, |ui| {
@@ -2398,6 +2433,7 @@ impl ParterreApp {
             return;
         }
         let shown = crate::dialogs::Dialog::new("shortcuts", "Keyboard and mouse")
+            .screen(crate::usage::Screen::Shortcuts)
             .width(760.0)
             .resizable()
             .show(ctx, |ui| {
@@ -2423,6 +2459,7 @@ impl ParterreApp {
         let font = egui::TextStyle::Monospace.resolve(&ctx.global_style());
         let column = ctx.fonts_mut(|f| f.glyph_width(&font, '0'));
         let shown = crate::dialogs::Dialog::new("about", "About parterre")
+            .screen(crate::usage::Screen::About)
             .width((81.0 * column + 16.0).ceil())
             .resizable()
             .show(ctx, |ui| {

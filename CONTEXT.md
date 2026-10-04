@@ -64,6 +64,20 @@ _Avoid_: parent branch, remote counterpart
 A merge, rebase, cherry-pick or revert that git has started and left unfinished in a worktree.
 _Avoid_: running command, pending task
 
+**Stuck worktree**:
+A worktree with an operation in progress or conflicted files. Parterre changes nothing there
+until it's finished or aborted.
+_Avoid_: blocked worktree, error state
+
+**Conflicted file**:
+A file git's index still holds unmerged. It's resolved once staged, whatever its contents.
+_Avoid_: file with conflict markers
+
+**Merge tool**:
+The external program a conflicted file is resolved in: the one the user's git config names, or
+one picked in parterre, which remembers the choice in git's config or only until it closes.
+_Avoid_: diff tool, resolver, editor
+
 **Lost work**:
 Commits no other branch, remote branch, tag or worktree reaches, and uncommitted changes to
 non-ignored files, whether staged, modified or untracked.

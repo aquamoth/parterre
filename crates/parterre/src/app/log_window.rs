@@ -1750,6 +1750,7 @@ impl ParterreApp {
             .with_inner_size(self.log.size)
             .with_min_inner_size([480.0, 360.0]);
         let id = viewport_id();
+        crate::usage::screen(ctx, id.0, crate::usage::Screen::Log);
         if self.log.title_theme.is_none() && !ctx.embed_viewports() {
             ctx.request_repaint();
         }
