@@ -812,21 +812,24 @@ pub struct AddWorktree {
     pub checkout: Checkout,
 }
 
+/// A local branch, at the tip it had when offered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchTip {
+    pub name: String,
+    pub tip: Oid,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Create(Create),
     Switch(String),
     /// Switches the open worktree to a commit, detached.
     Detach(Oid),
-    Delete {
-        name: String,
-        tip: Oid,
-    },
+    /// Deletes local branches, each still at the tip it was offered at.
+    DeleteBranches(Vec<BranchTip>),
     AddWorktree(AddWorktree),
-    /// Removes another worktree from git and deletes its folder.
-    DeleteWorktree {
-        path: PathBuf,
-    },
+    /// Removes other worktrees from git and deletes their folders, one by one.
+    DeleteWorktrees(Vec<PathBuf>),
     /// Moves the open worktree's branch, with what the user agreed to lose.
     Reset(Box<crate::reset::Reset>),
     /// Replays the open worktree's branch onto another commit.
@@ -853,9 +856,15 @@ impl Action {
             }
             Self::Switch(b) => format!("Switch to {b}"),
             Self::Detach(oid) => format!("Switch to {} (detached)", short(*oid)),
-            Self::Delete { name, .. } => format!("Delete branch {name}"),
+            Self::DeleteBranches(branches) => match branches.as_slice() {
+                [one] => format!("Delete branch {}", one.name),
+                branches => format!("Delete {} branches", branches.len()),
+            },
             Self::AddWorktree(a) => format!("Add worktree {}", folder(&a.path)),
-            Self::DeleteWorktree { path } => format!("Delete worktree {}", folder(path)),
+            Self::DeleteWorktrees(paths) => match paths.as_slice() {
+                [path] => format!("Delete worktree {}", folder(path)),
+                paths => format!("Delete {} worktrees", paths.len()),
+            },
             Self::Reset(r) => format!("Reset {} to {}", r.branch, short(r.target)),
             Self::Rebase(r) => format!(
                 "Rebase {} onto {}",
@@ -931,16 +940,16 @@ pub struct Step {
 }
 
 /// What an operation would lose, for the user to approve first. The approval is tied to the
-/// HEAD concerned, the exact endangered commit ids and changed files. Deleting a worktree always
+/// HEADs concerned, the exact endangered commit ids and changed files. Deleting worktrees always
 /// asks: with nothing lost, this is a confirmation.
 #[derive(Clone, Debug)]
 pub struct Warning {
     pub action: Action,
+    /// Every commit lost.
     pub commits: Vec<Oid>,
-    /// Uncommitted changes to files that aren't ignored, by path in their worktree.
-    pub files: Vec<String>,
-    /// Git's own refusal, when it refused after parterre found nothing at risk.
-    pub refusal: Option<String>,
+    /// Each branch or worktree the action deletes, in its order, with what it loses. Empty for
+    /// a switch.
+    pub deletions: Vec<Deletion>,
     pub repo: Arc<Repo>,
     pub commands: Vec<Vec<String>>,
     head: Option<Oid>,
@@ -949,8 +958,49 @@ pub struct Warning {
 impl Warning {
     /// Nothing is lost; it only confirms.
     pub fn is_confirmation(&self) -> bool {
-        self.commits.is_empty() && self.files.is_empty() && self.refusal.is_none()
+        self.commits.is_empty()
+            && self
+                .deletions
+                .iter()
+                .all(|d| d.files.is_empty() && d.refusal.is_none())
     }
+}
+
+/// A branch or worktree an action deletes, and what deleting it loses.
+#[derive(Clone, Debug)]
+pub struct Deletion {
+    /// The branch's name, or the worktree's folder name.
+    pub name: String,
+    /// The worktree's folder.
+    pub path: Option<PathBuf>,
+    /// The lost commits it reaches. Another deletion can reach the same ones.
+    pub commits: Vec<Oid>,
+    /// Uncommitted changes to files that aren't ignored, by path in its worktree.
+    pub files: Vec<String>,
+    /// Git's own refusal, when it refused after parterre found nothing at risk.
+    pub refusal: Option<String>,
+    /// The worktree's HEAD or the branch's tip.
+    head: Option<Oid>,
+}
+
+impl Deletion {
+    /// The same loss, whatever git said before.
+    fn same_loss(&self, other: &Self) -> bool {
+        self.head == other.head && self.commits == other.commits && self.files == other.files
+    }
+}
+
+/// Approved deletions, as loaded again just before running them.
+fn same_losses(approved: &[Deletion], now: &[Deletion]) -> bool {
+    approved.len() == now.len() && approved.iter().zip(now).all(|(a, b)| a.same_loss(b))
+}
+
+/// Every commit the deletions lose, once.
+fn all_commits(deletions: &[Deletion]) -> Vec<Oid> {
+    let mut commits: Vec<Oid> = deletions.iter().flat_map(|d| d.commits.clone()).collect();
+    commits.sort_by_key(|o| o.to_hex());
+    commits.dedup();
+    commits
 }
 
 #[derive(Debug)]
@@ -1020,15 +1070,14 @@ impl Branches {
                     }
                 })
             }
-            Action::DeleteWorktree { path } => Ok(vec![words(&[
-                "worktree",
-                "remove",
-                "--",
-                &path.to_string_lossy(),
-            ])]),
+            Action::DeleteWorktrees(paths) => Ok(paths.iter().map(|p| remove(p, false)).collect()),
             Action::Detach(oid) => Ok(vec![words(&["switch", "--detach", &oid.to_hex()])]),
             Action::Switch(name) => Ok(vec![words(&["switch", "--no-guess", "--", name])]),
-            Action::Delete { name, .. } => Ok(vec![words(&["branch", "-D", "--", name])]),
+            Action::DeleteBranches(branches) => {
+                let mut force = words(&["branch", "-D", "--"]);
+                force.extend(branches.iter().map(|b| b.name.clone()));
+                Ok(vec![force])
+            }
             Action::Reset(r) => Ok(vec![crate::reset::command(r.mode, r.target)]),
             Action::Rebase(r) => Ok(vec![crate::rebase::command(r)]),
             Action::Merge(m) => Ok(crate::merge::commands(m)),
@@ -1101,9 +1150,12 @@ impl Branches {
         report: &mut Report,
     ) -> Result<Option<Warning>, Error> {
         let git = Git::new(&self.path);
-        let mut catalog = Catalog::load(&self.path)?;
-        if let Action::DeleteWorktree { path } = &action {
-            return self.delete_worktree(&catalog, path, &action, approval, cancel, report);
+        let catalog = Catalog::load(&self.path)?;
+        if let Action::DeleteBranches(branches) = &action {
+            return self.delete_branches(&catalog, branches, &action, approval, cancel, report);
+        }
+        if let Action::DeleteWorktrees(paths) = &action {
+            return self.delete_worktrees(&catalog, paths, &action, approval, cancel, report);
         }
         if let Action::Reset(reset) = &action {
             crate::reset::execute(&catalog, reset, cancel, report)?;
@@ -1175,7 +1227,8 @@ impl Branches {
                     Checkout::Detached => {}
                 }
             }
-            Action::DeleteWorktree { .. }
+            Action::DeleteBranches(_)
+            | Action::DeleteWorktrees(_)
             | Action::Reset(_)
             | Action::Rebase(_)
             | Action::Merge(_)
@@ -1195,78 +1248,27 @@ impl Branches {
                 }
                 check_occupied(&catalog, name)?;
             }
-            Action::Delete { name, tip } => {
-                check_occupied(&catalog, name)?;
-                if !catalog
-                    .locals
-                    .iter()
-                    .any(|b| b.name == *name && b.tip == *tip)
-                {
-                    return Err(Error::Invalid(
-                        "The branch changed. Reload and review it before deleting.".into(),
-                    ));
-                }
-                let safe = vec!["branch".into(), "-d".into(), "--".into(), name.clone()];
-                if run(&git, safe, cancel, report)? {
-                    return Ok(None);
-                }
-                // A refusal on a merged branch is unrelated to commit loss (e.g. a lock or
-                // permissions). Check Git's merge predicate instead of parsing its stderr.
-                let refreshed = Catalog::load(&self.path)?;
-                check_occupied(&refreshed, name)?;
-                if !refreshed
-                    .locals
-                    .iter()
-                    .any(|b| b.name == *name && b.tip == *tip)
-                {
-                    return Err(Error::Invalid(
-                        "The branch changed. Reload and review it before deleting.".into(),
-                    ));
-                }
-                let upstream = git.query(&[
-                    "rev-parse",
-                    "--verify",
-                    &format!("refs/heads/{name}@{{upstream}}^{{commit}}"),
-                ])?;
-                let merged_into = upstream
-                    .map(|s| parse_oid(&s))
-                    .transpose()?
-                    .or(refreshed.head);
-                if let Some(into) = merged_into
-                    && git
-                        .query(&["merge-base", "--is-ancestor", &tip.to_hex(), &into.to_hex()])?
-                        .is_some()
-                {
-                    return Err(Error::Failed(report.steps.last().unwrap().output.clone()));
-                }
-                if merged_into.is_none() {
-                    return Err(Error::Failed(report.steps.last().unwrap().output.clone()));
-                }
-                catalog = refreshed;
-            }
             Action::Create(c) => {
                 // Git is the final ref-name authority as well as the namespace collision guard.
                 git.run(&["check-ref-format", &format!("refs/heads/{}", c.name)])?;
             }
         }
-        let (start, excluded_ref, departing) = match &action {
-            Action::Delete { name, tip } => (Some(*tip), Some(format!("refs/heads/{name}")), false),
-            _ if switching && catalog.current.is_none() => (catalog.head, None, true),
-            _ => (None, None, false),
-        };
+        // Leaving a detached HEAD.
+        let start = catalog
+            .head
+            .filter(|_| switching && catalog.current.is_none());
         if let Some(start) = start {
             let future_root = match &action {
                 Action::Create(c) => Some(c.start),
                 Action::Detach(oid) => Some(*oid),
                 _ => None,
             };
-            let leaving = departing.then(|| catalog.root.clone());
             let commits = lost_commits(
                 &git,
                 &catalog,
                 start,
-                excluded_ref.as_deref(),
-                leaving.as_deref(),
+                &[],
+                &[catalog.root.as_path()],
                 future_root,
             )?;
             if !commits.is_empty()
@@ -1284,8 +1286,7 @@ impl Branches {
                 return Ok(Some(Warning {
                     action,
                     commits,
-                    files: Vec::new(),
-                    refusal: None,
+                    deletions: Vec::new(),
                     head: catalog.head,
                     repo,
                     commands: commands.clone(),
@@ -1300,88 +1301,285 @@ impl Branches {
         Ok(None)
     }
 
-    /// Deleting another worktree. Git's own check misses lost work there (it deletes ignored
-    /// files and a clean detached HEAD's commits without a word), so parterre always asks first:
-    /// a confirmation when nothing is lost, a warning listing what is. Only after that, or after
-    /// git refused anyway, does it force.
-    fn delete_worktree(
+    /// Deleting local branches. Git's own check (`branch -d`) only asks whether HEAD or each
+    /// branch's upstream has its commits, so parterre works out what they lose together first,
+    /// and warns before anything is deleted. Git then deletes the ones it agrees to; the rest
+    /// are forced only when that loses nothing, or only what was approved.
+    fn delete_branches(
         &self,
         catalog: &Catalog,
-        path: &Path,
+        branches: &[BranchTip],
         action: &Action,
         approval: Option<&Warning>,
         cancel: &CancelTree,
         report: &mut Report,
     ) -> Result<Option<Warning>, Error> {
         let git = Git::new(&self.path);
-        let wt = find_worktree(catalog, path)?;
-        let (files, commits) = worktree_loss(&git, catalog, wt)?;
-        let approved = approval.filter(|w| {
-            w.action == *action && w.head == wt.head && w.files == files && w.commits == commits
-        });
-        let remove = |force: bool| {
-            let mut args = vec!["worktree".to_owned(), "remove".to_owned()];
-            if force {
-                args.push("--force".to_owned());
-            }
-            args.extend(["--".to_owned(), wt.path.to_string_lossy().into_owned()]);
-            args
+        check_branches(catalog, branches)?;
+        let deletions = branch_losses(&git, catalog, branches)?;
+        let commits = all_commits(&deletions);
+        let approved = |head: Option<Oid>, commits: &[Oid]| {
+            commits.is_empty()
+                || approval
+                    .is_some_and(|w| w.action == *action && w.head == head && w.commits == commits)
         };
+        if !approved(catalog.head, &commits) {
+            return branch_warning(&git, action.clone(), catalog.head, deletions, commits);
+        }
+        let mut safe = vec!["branch".to_owned(), "-d".to_owned(), "--".to_owned()];
+        safe.extend(branches.iter().map(|b| b.name.clone()));
+        if run(&git, safe, cancel, report)? {
+            return Ok(None);
+        }
+        let output = report.steps.last().unwrap().output.clone();
+        // A refusal on a merged branch is unrelated to commit loss (e.g. a lock or
+        // permissions). Check Git's merge predicate instead of parsing its stderr.
+        let refreshed = Catalog::load(&self.path)?;
+        let left: Vec<BranchTip> = branches
+            .iter()
+            .filter(|b| refreshed.locals.iter().any(|l| l.name == b.name))
+            .cloned()
+            .collect();
+        if left.is_empty() {
+            return Err(Error::Failed(output));
+        }
+        check_branches(&refreshed, &left)?;
+        for b in &left {
+            let upstream = git.query(&[
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{}@{{upstream}}^{{commit}}", b.name),
+            ])?;
+            let merged_into = upstream
+                .map(|s| parse_oid(&s))
+                .transpose()?
+                .or(refreshed.head);
+            let Some(into) = merged_into else {
+                return Err(Error::Failed(output));
+            };
+            if git
+                .query(&[
+                    "merge-base",
+                    "--is-ancestor",
+                    &b.tip.to_hex(),
+                    &into.to_hex(),
+                ])?
+                .is_some()
+            {
+                return Err(Error::Failed(output));
+            }
+        }
+        // The ones git deleted were merged: what the rest lose is what was approved.
+        let deletions = branch_losses(&git, &refreshed, &left)?;
+        let commits = all_commits(&deletions);
+        if !approved(refreshed.head, &commits) {
+            let action = Action::DeleteBranches(left);
+            return branch_warning(&git, action, refreshed.head, deletions, commits);
+        }
+        let mut force = vec!["branch".to_owned(), "-D".to_owned(), "--".to_owned()];
+        force.extend(left.into_iter().map(|b| b.name));
+        if !run(&git, force, cancel, report)? {
+            return Err(Error::Failed(report.steps.last().unwrap().output.clone()));
+        }
+        Ok(None)
+    }
+
+    /// Deleting other worktrees. Git's own check misses lost work there (it deletes ignored
+    /// files and a clean detached HEAD's commits without a word), so parterre always asks first:
+    /// a confirmation when nothing is lost, a warning listing what each loses. Only after that,
+    /// or after git refused anyway, does it force. They go one by one; the ones git refuses are
+    /// asked about again, together, and a failure stops the rest.
+    fn delete_worktrees(
+        &self,
+        catalog: &Catalog,
+        paths: &[PathBuf],
+        action: &Action,
+        approval: Option<&Warning>,
+        cancel: &CancelTree,
+        report: &mut Report,
+    ) -> Result<Option<Warning>, Error> {
+        let git = Git::new(&self.path);
+        let wts = find_worktrees(catalog, paths)?;
+        let deletions = worktree_losses(&git, catalog, &wts)?;
+        let commits = all_commits(&deletions);
+        let approved = approval.filter(|w| {
+            w.action == *action && w.commits == commits && same_losses(&w.deletions, &deletions)
+        });
         let Some(approved) = approved else {
             return Ok(Some(Warning {
                 action: action.clone(),
-                head: wt.head,
+                head: catalog.head,
                 repo: Arc::new(git.load()?),
-                commands: vec![remove(!files.is_empty())],
-                files,
+                commands: deletions
+                    .iter()
+                    .map(|d| remove(d.path.as_deref().unwrap(), !d.files.is_empty()))
+                    .collect(),
+                deletions,
                 commits,
-                refusal: None,
             }));
         };
-        let force = !files.is_empty() || approved.refusal.is_some();
-        let removed = run(&git, remove(force), cancel, report)?;
-        let output = report
-            .steps
-            .last()
-            .map(|s| s.output.clone())
-            .unwrap_or_default();
-        let after = Catalog::load(&self.path)?;
-        let registered = after
-            .worktrees
-            .iter()
-            .any(|w| crate::worktree_folder::same_path(&w.path, &wt.path));
-        if !registered {
-            if wt.path.exists() {
-                // Windows: a file in use stops the deletion halfway, after git has let go.
-                return Err(Error::Failed(format!(
-                    "The worktree is gone from git, but its folder was left behind: {}. Delete it yourself.{}",
-                    wt.path.display(),
-                    if output.is_empty() {
-                        String::new()
-                    } else {
-                        format!("\n\n{output}")
-                    }
-                )));
+        let mut refused = Vec::new();
+        for (wt, approved) in wts.iter().zip(&approved.deletions) {
+            let force = !approved.files.is_empty() || approved.refusal.is_some();
+            let removed = run(&git, remove(&wt.path, force), cancel, report)?;
+            let output = report
+                .steps
+                .last()
+                .map(|s| s.output.clone())
+                .unwrap_or_default();
+            let after = Catalog::load(&self.path)?;
+            let registered = after
+                .worktrees
+                .iter()
+                .any(|w| crate::worktree_folder::same_path(&w.path, &wt.path));
+            if !registered {
+                if wt.path.exists() {
+                    // Windows: a file in use stops the deletion halfway, after git has let go.
+                    return Err(Error::Failed(format!(
+                        "The worktree is gone from git, but its folder was left behind: {}. Delete it yourself.{}",
+                        wt.path.display(),
+                        if output.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n\n{output}")
+                        }
+                    )));
+                }
+                continue;
             }
-            return Ok(None);
+            if removed || force {
+                return Err(Error::Failed(output));
+            }
+            refused.push((wt.path.clone(), output));
         }
-        if removed || force {
-            return Err(Error::Failed(output));
+        if refused.is_empty() {
+            return Ok(None);
         }
         // Git refused although nothing was found at risk: it changed since, or git knows of
         // something parterre doesn't (submodules). Ask again, with what's at risk now.
-        let wt = find_worktree(&after, path)?;
-        let (files, commits) = worktree_loss(&git, &after, wt)?;
+        let after = Catalog::load(&self.path)?;
+        let paths: Vec<PathBuf> = refused.iter().map(|(p, _)| p.clone()).collect();
+        let wts = find_worktrees(&after, &paths)?;
+        let mut deletions = worktree_losses(&git, &after, &wts)?;
+        for (d, (_, output)) in deletions.iter_mut().zip(refused) {
+            d.refusal = Some(output);
+        }
         Ok(Some(Warning {
-            action: action.clone(),
-            head: wt.head,
+            action: Action::DeleteWorktrees(paths),
+            head: after.head,
             repo: Arc::new(git.load()?),
-            commands: vec![remove(true)],
-            files,
-            commits,
-            refusal: Some(output),
+            commands: wts.iter().map(|w| remove(&w.path, true)).collect(),
+            commits: all_commits(&deletions),
+            deletions,
         }))
     }
+}
+
+/// The warning before deleting branches loses `commits`.
+fn branch_warning(
+    git: &Git,
+    action: Action,
+    head: Option<Oid>,
+    deletions: Vec<Deletion>,
+    commits: Vec<Oid>,
+) -> Result<Option<Warning>, Error> {
+    let repo = Arc::new(git.load()?);
+    if commits.iter().any(|oid| repo.lookup(oid).is_none()) {
+        return Err(Error::Invalid(
+            "The repository changed while checking lost commits. Reload and try again.".into(),
+        ));
+    }
+    let mut force = vec!["branch".to_owned(), "-D".to_owned(), "--".to_owned()];
+    force.extend(deletions.iter().map(|d| d.name.clone()));
+    Ok(Some(Warning {
+        action,
+        commits,
+        deletions,
+        repo,
+        commands: vec![force],
+        head,
+    }))
+}
+
+/// Each branch may be deleted, and is where it was offered.
+fn check_branches(catalog: &Catalog, branches: &[BranchTip]) -> Result<(), Error> {
+    if branches.is_empty() {
+        return Err(Error::Invalid("Choose a branch to delete.".into()));
+    }
+    for (i, b) in branches.iter().enumerate() {
+        if branches[..i].iter().any(|o| o.name == b.name) {
+            return Err(Error::Invalid(format!(
+                "Branch {} is listed twice.",
+                b.name
+            )));
+        }
+        check_occupied(catalog, &b.name)?;
+        if !catalog
+            .locals
+            .iter()
+            .any(|l| l.name == b.name && l.tip == b.tip)
+        {
+            return Err(Error::Invalid(format!(
+                "Branch {} changed. Reload and review it before deleting.",
+                b.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// What deleting the branches would lose: the commits only each reaches once they're all gone.
+fn branch_losses(
+    git: &Git,
+    catalog: &Catalog,
+    branches: &[BranchTip],
+) -> Result<Vec<Deletion>, Error> {
+    let excluded: Vec<String> = branches
+        .iter()
+        .map(|b| format!("refs/heads/{}", b.name))
+        .collect();
+    branches
+        .iter()
+        .map(|b| {
+            Ok(Deletion {
+                name: b.name.clone(),
+                path: None,
+                commits: lost_commits(git, catalog, b.tip, &excluded, &[], None)?,
+                files: Vec::new(),
+                refusal: None,
+                head: Some(b.tip),
+            })
+        })
+        .collect()
+}
+
+/// `git worktree remove`, forced when it would lose changes.
+fn remove(path: &Path, force: bool) -> Vec<String> {
+    let mut args = vec!["worktree".to_owned(), "remove".to_owned()];
+    if force {
+        args.push("--force".to_owned());
+    }
+    args.extend(["--".to_owned(), path.to_string_lossy().into_owned()]);
+    args
+}
+
+/// The worktrees at `paths`, when each may be deleted.
+fn find_worktrees<'a>(catalog: &'a Catalog, paths: &[PathBuf]) -> Result<Vec<&'a Worktree>, Error> {
+    if paths.is_empty() {
+        return Err(Error::Invalid("Choose a worktree to delete.".into()));
+    }
+    let mut wts: Vec<&Worktree> = Vec::new();
+    for path in paths {
+        let wt = find_worktree(catalog, path)?;
+        if wts.iter().any(|w| std::ptr::eq(*w, wt)) {
+            return Err(Error::Invalid(format!(
+                "Worktree {} is listed twice.",
+                wt.name()
+            )));
+        }
+        wts.push(wt);
+    }
+    Ok(wts)
 }
 
 /// The worktree at `path`, when it may be deleted.
@@ -1415,23 +1613,35 @@ fn find_worktree<'a>(catalog: &'a Catalog, path: &Path) -> Result<&'a Worktree, 
     Ok(wt)
 }
 
-/// What deleting a worktree would lose: its changed files, and the commits only its detached
-/// HEAD reaches. A branch's commits stay with the branch.
-fn worktree_loss(
+/// What deleting the worktrees would lose: each one's changed files, and the commits only its
+/// detached HEAD reaches once they're all gone. A branch's commits stay with the branch.
+fn worktree_losses(
     git: &Git,
     catalog: &Catalog,
-    wt: &Worktree,
-) -> Result<(Vec<String>, Vec<Oid>), Error> {
-    let files = if wt.missing {
-        Vec::new()
-    } else {
-        changed_files(&wt.path)?
-    };
-    let commits = match (&wt.branch, wt.head) {
-        (None, Some(head)) => lost_commits(git, catalog, head, None, Some(&wt.path), None)?,
-        _ => Vec::new(),
-    };
-    Ok((files, commits))
+    wts: &[&Worktree],
+) -> Result<Vec<Deletion>, Error> {
+    let leaving: Vec<&Path> = wts.iter().map(|w| w.path.as_path()).collect();
+    wts.iter()
+        .map(|wt| {
+            let files = if wt.missing {
+                Vec::new()
+            } else {
+                changed_files(&wt.path)?
+            };
+            let commits = match (&wt.branch, wt.head) {
+                (None, Some(head)) => lost_commits(git, catalog, head, &[], &leaving, None)?,
+                _ => Vec::new(),
+            };
+            Ok(Deletion {
+                name: wt.name(),
+                path: Some(wt.path.clone()),
+                commits,
+                files,
+                refusal: None,
+                head: wt.head,
+            })
+        })
+        .collect()
 }
 
 /// Configures a new branch's upstream: one already fetched, or one that doesn't exist yet.
@@ -1549,27 +1759,31 @@ fn check_occupied(catalog: &Catalog, name: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// Commits reachable from `start` that nothing else will reach: no ref but `excluded_ref`, and
-/// no worktree's HEAD but the one at `leaving`.
+/// Commits reachable from `start` that nothing else will reach: no ref but the `excluded`
+/// ones, and no worktree's HEAD but the ones at `leaving`.
 pub(crate) fn lost_commits(
     git: &Git,
     catalog: &Catalog,
     start: Oid,
-    excluded_ref: Option<&str>,
-    leaving: Option<&Path>,
+    excluded: &[String],
+    leaving: &[&Path],
     future_root: Option<Oid>,
 ) -> Result<Vec<Oid>, Error> {
     let mut protected: HashSet<Oid> = catalog
         .roots
         .iter()
-        .filter(|(name, _)| Some(name.as_str()) != excluded_ref)
+        .filter(|(name, _)| !excluded.contains(name))
         .map(|(_, oid)| *oid)
         .collect();
     protected.extend(
         catalog
             .heads
             .iter()
-            .filter(|(p, _)| leaving.is_none_or(|l| !crate::worktree_folder::same_path(p, l)))
+            .filter(|(p, _)| {
+                !leaving
+                    .iter()
+                    .any(|l| crate::worktree_folder::same_path(p, l))
+            })
             .map(|(_, oid)| *oid),
     );
     let mut input = format!("{}\n", start.to_hex());
