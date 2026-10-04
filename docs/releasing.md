@@ -12,7 +12,7 @@ release filenames. Tag a clean commit on `main`; the version in the root `Cargo.
    git push origin v0.5.0-rc1
    ```
 
-2. `.github/workflows/release.yml` tests and builds on Linux (in an Ubuntu 22.04 container, so
+2. `.github/workflows/release.yml` builds on Linux (in an Ubuntu 22.04 container, so
    the binary runs on glibc 2.35 and newer), Windows and macOS (Apple silicon and Intel), then
    publishes a GitHub Release. The release has one archive per target
    (`parterre-0.5.0-rc1-<target>.tar.gz`, or `.zip` for Windows) and a `SHA256SUMS` file. Each
@@ -25,6 +25,10 @@ release filenames. Tag a clean commit on `main`; the version in the root `Cargo.
    installed, run and removed on Debian 12, Ubuntu 22.04 and 24.04, Fedora and openSUSE Leap
    15.6. A tag with a pre-release part publishes a pre-release; its MSI has version `0.5.0`,
    since MSI versions are numbers only.
+
+   The release doesn't run the tests again: it publishes only once the CI run of the tagged
+   commit on `main` has passed, and waits for it if it's still running (#236). A commit
+   without one, not pushed to `main`, fails the release.
 
 3. The workflow then builds the [Chocolatey](#chocolatey) package from that MSI, tests it, and
    pushes it unless the tag is a pre-release.

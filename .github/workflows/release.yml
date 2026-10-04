@@ -28,8 +28,8 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, container: "ubuntu:22.04" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
           - { os: macos-latest, target: aarch64-apple-darwin }
-          # Cross-compiled on the Apple silicon runner, so the binary can't run there: no tests
-          # and no --version check. build.rs still checks the tag and sets the version.
+          # Cross-compiled on the Apple silicon runner, so the binary can't run there: no
+          # --version check. build.rs still checks the tag and sets the version.
           - { os: macos-latest, target: x86_64-apple-darwin, cross: true }
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
@@ -54,9 +54,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Test
-        if: ${{ !matrix.cross }}
-        run: cargo test --workspace --locked --no-fail-fast
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Check version
@@ -118,9 +115,46 @@ jobs:
     with:
       artifact: x86_64-unknown-linux-gnu
 
+  # The tag is on a commit of main, which CI has tested on all three systems, Linux in the same
+  # Ubuntu 22.04 container as the build above. Instead of testing it again, wait for that run
+  # and publish only if it passed (#236).
+  ci:
+    name: CI passed
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # An hour at most; CI takes about 15 minutes. A tag pushed right after its commit may
+          # be seen before its CI run is.
+          for attempt in $(seq 120); do
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main" \
+              --jq '.workflow_runs[0] // empty | "\(.status) \(.conclusion) \(.html_url)"')
+            if [ -z "$run" ]; then
+              if [ "$attempt" -ge 10 ]; then
+                echo "::error::No CI run on main for $GITHUB_SHA. Tag a commit on main (docs/releasing.md)."
+                exit 1
+              fi
+              echo "No CI run for $GITHUB_SHA yet"
+            else
+              read -r status conclusion url <<< "$run"
+              echo "$url: $status $conclusion"
+              if [ "$status" = completed ]; then
+                [ "$conclusion" = success ] && exit 0
+                echo "::error::CI did not pass on $GITHUB_SHA: $url"
+                exit 1
+              fi
+            fi
+            sleep 30
+          done
+          echo "::error::CI did not finish on $GITHUB_SHA within an hour"
+          exit 1
+
   publish:
     name: Publish
-    needs: [build, linux-packages]
+    needs: [build, linux-packages, ci]
     runs-on: ubuntu-latest
     permissions:
       contents: write
