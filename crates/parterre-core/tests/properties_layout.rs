@@ -4,7 +4,7 @@
 
 use parterre_core::layout::rank::{limit_width, rank};
 use parterre_core::layout::{
-    self, Direction, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking,
+    self, Direction, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking, Trunk,
 };
 use std::collections::HashMap;
 
@@ -309,6 +309,40 @@ fn check_layout(input: &LayoutInput, opts: &LayoutOptions, what: &str) {
             );
         }
     }
+    // A centred trunk is one straight line.
+    if opts.trunk != Trunk::Leftmost {
+        let along = |i: usize| if vertical { l.nodes[i].x } else { l.nodes[i].y };
+        let line = trunk_of(input);
+        for &i in &line {
+            assert!(
+                (along(i) - along(line[0])).abs() < 0.5,
+                "{what}: trunk node {i} at {} off the line at {}",
+                along(i),
+                along(line[0])
+            );
+        }
+    }
+}
+
+/// The trunk's nodes: first parents from the first priority node down, or the only edge left
+/// where a merge's first parent was dropped.
+fn trunk_of(input: &LayoutInput) -> Vec<usize> {
+    let Some(&anchor) = input.priority.first() else {
+        return Vec::new();
+    };
+    let mut line = vec![anchor as usize];
+    loop {
+        let here = *line.last().unwrap() as u32;
+        let next = input
+            .edges
+            .iter()
+            .filter(|e| e.child == here)
+            .min_by_key(|e| !e.first_parent);
+        match next {
+            Some(e) if !line.contains(&(e.parent as usize)) => line.push(e.parent as usize),
+            _ => return line,
+        }
+    }
 }
 
 #[test]
@@ -321,17 +355,21 @@ fn layout_invariants_random() {
             for concentrate in [false, true] {
                 for mw in [0.0f32, 400.0, 1800.0] {
                     let dir = Direction::ALL[rng.below(4) as usize];
+                    let trunk = Trunk::ALL[rng.below(3) as usize];
                     let opts = LayoutOptions {
                         ranking,
                         concentrate_edges: concentrate,
                         max_layer_width: mw,
                         direction: dir,
+                        trunk,
                         ..LayoutOptions::default()
                     };
                     check_layout(
                         &input,
                         &opts,
-                        &format!("iter {iter} {ranking:?} conc={concentrate} mw={mw} {dir:?}"),
+                        &format!(
+                            "iter {iter} {ranking:?} conc={concentrate} mw={mw} {dir:?} {trunk:?}"
+                        ),
                     );
                 }
             }
@@ -581,4 +619,99 @@ fn limit_width_long_edges() {
             );
         }
     }
+}
+
+/// A trunk `0 → 1 → … → len-1` with `branches` one-node side branches forking off its last node.
+fn trunk_with_branches(len: u32, branches: u32) -> LayoutInput {
+    let n = len + branches;
+    let mut edges: Vec<LayoutEdge> = (0..len - 1)
+        .map(|i| LayoutEdge {
+            child: i,
+            parent: i + 1,
+            first_parent: true,
+        })
+        .collect();
+    for b in 0..branches {
+        edges.push(LayoutEdge {
+            child: len + b,
+            parent: len - 1,
+            first_parent: true,
+        });
+    }
+    LayoutInput {
+        sizes: vec![Point::new(100.0, 22.0); n as usize],
+        times: (0..n as i64).map(|i| 1000 - i).collect(),
+        edges,
+        priority: vec![0],
+    }
+}
+
+#[test]
+fn centred_trunk_has_branches_on_both_sides() {
+    let input = trunk_with_branches(2, 2);
+    let at = |trunk| {
+        let l = layout::layout(
+            &input,
+            &LayoutOptions {
+                trunk,
+                ..LayoutOptions::default()
+            },
+        );
+        (l.nodes[0].x, l.nodes[2].x, l.nodes[3].x)
+    };
+    // Centred: the tip in the middle of its layer, one branch either side.
+    for trunk in [Trunk::Centred, Trunk::Alternating] {
+        let (tip, a, b) = at(trunk);
+        assert!(a.min(b) < tip && tip < a.max(b), "{trunk:?}: {a} {tip} {b}");
+    }
+    // Leftmost, as before: the tip first in its layer.
+    let (tip, a, b) = at(Trunk::Leftmost);
+    assert!(tip < a && tip < b, "Leftmost: {tip} {a} {b}");
+}
+
+#[test]
+fn bundles_split_by_side() {
+    // Four branches, newer than the whole trunk, into its oldest node: one layer per commit
+    // makes them long, and bundled they would share their bend points and so one side.
+    let mut input = trunk_with_branches(3, 4);
+    for (i, t) in input.times.iter_mut().enumerate() {
+        *t = if i < 3 {
+            100 - i as i64
+        } else {
+            1000 - i as i64
+        };
+    }
+    let l = layout::layout(
+        &input,
+        &LayoutOptions {
+            concentrate_edges: true,
+            ranking: Ranking::Chronological,
+            ..LayoutOptions::default()
+        },
+    );
+    let line = l.nodes[2].x;
+    let left = (3..7).filter(|&i| l.nodes[i].x < line).count();
+    assert_eq!(left, 2, "{:?}", l.nodes);
+    // Where all four pass, one bend point per side.
+    let mut through: HashMap<u32, std::collections::HashSet<u32>> = HashMap::new();
+    for (bends, e) in l.edge_bends.iter().zip(&input.edges) {
+        for (k, &b) in bends.iter().enumerate() {
+            through
+                .entry(l.layers[e.child as usize] + 1 + k as u32)
+                .or_default()
+                .insert(b);
+        }
+    }
+    let last_branch_layer = (3..7).map(|i| l.layers[i]).max().unwrap();
+    let shared = &through[&(last_branch_layer + 1)];
+    assert_eq!(shared.len(), 2, "{:?}", l.edge_bends);
+}
+
+#[test]
+fn trunk_follows_the_edge_left_of_a_merge() {
+    // 1's first parent was dropped as redundant: its only edge is to its second parent.
+    let mut input = trunk_with_branches(3, 2);
+    input.edges[1].first_parent = false;
+    let l = layout::layout(&input, &LayoutOptions::default());
+    assert!((l.nodes[0].x - l.nodes[2].x).abs() < 0.5, "{:?}", l.nodes);
 }
