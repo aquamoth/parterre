@@ -71,7 +71,8 @@ crates/parterre-highlight
 
 crates/parterre-telemetry
                        what parterre asks and sends over the network (#175): the update
-                       check (#258), the usage statistics (#261) and the crash reports (#263)
+                       check (#258), the usage statistics (#261, #262, #264) and the crash
+                       reports (#263)
   lib.rs               the update check's thread, at start and then every 24 h; the channel,
                        stamped at build time (`PARTERRE_CHANNEL`), or Snap and Flatpak at
                        run time; `Usage`, the usage statistics from start to close
@@ -82,12 +83,15 @@ crates/parterre-telemetry
                        events a launch sends; no network
   session.rs           the `$session_id` (#262): a new UUIDv7 after 30 min idle, 24 h, or
                        on opening another repository; the caller's clock, no network
+  feature.rs           feature events (#264): `record` a window, dialog, menu or action
+                       from fixed enums, and `register` the settings every event carries;
+                       a test sink (`recording`); no network
   crash.rs             whether panics go to PostHog, and the home folder in them made `~`;
                        no network
   github.rs            GitHub's releases API through ureq, behind the `send` feature
   posthog.rs           all of the PostHog code: posthog-rs's client on a thread of its own,
-                       the events and their standard properties, and the SDK's global client
-                       that sends panics, behind the `send` feature
+                       the events, their standard properties and the registered ones, and
+                       the SDK's global client that sends panics, behind the `send` feature
 
 crates/parterre        the binary (eframe/egui)
   build.rs             asks git for the commit and sets the version string
@@ -142,6 +146,9 @@ crates/parterre        the binary (eframe/egui)
                        Classic/Modern looks; apart from them, what is sent to PostHog (the
                        first-run prompt's answer and the install ID), never exported or reset
   settings_file.rs     settings as versioned JSON: stored, exported and imported
+  usage.rs             feature events as the app records them: a window, dialog or menu
+                       counted once per opening, and the settings as the properties every
+                       event carries
   automation.rs        scripted runs (--script, --screenshot): steps fed to the window as
                        input, frame by frame; see docs/automation.md
   script.rs            workflow scripts (--script): click, type, screenshot, … one step a line

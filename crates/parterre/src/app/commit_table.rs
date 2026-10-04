@@ -442,6 +442,7 @@ impl CommitTable<'_> {
                     .style(crate::menu::style)
                     .show(|ui| {
                         crate::menu::fit_window(ui, |ui| {
+                            crate::usage::menu(ui.ctx(), crate::usage::Menu::Commit);
                             ui.set_min_width(crate::menu::MIN_WIDTH);
                             menu(ui, i, list);
                         });

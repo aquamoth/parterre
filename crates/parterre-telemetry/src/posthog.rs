@@ -5,16 +5,19 @@
 //! carries the install ID as its `distinct_id` and is personless (`$process_person_profile:
 //! false`), PostHog's anonymous events, and PostHog's standard properties, added in
 //! `before_send` as its mobile SDKs add them. Only the channel and git's version get parterre's
-//! own names.
+//! own names. Every usage event, the lifecycle and feature events (#264) alike, also carries
+//! the properties registered last (`feature.rs`), as PostHog's super properties, added in the
+//! usage client's `before_send`.
 //!
-//! The session (`$session_id`, #262) goes on each usage event as it is made, not in
-//! `before_send`: nothing else this client sends, such as a crash report (`$exception`), carries
-//! it, as a session would tie it to the install ID's events.
+//! The session (`$session_id`, #262) goes on each usage event as it is made, the feature events
+//! included, not in `before_send`: nothing else this client sends, such as a crash report
+//! (`$exception`), carries it, as a session would tie it to the install ID's events.
 //!
 //! Crash reports (#263) go through a client of their own, the SDK's global one, whose panic
 //! capture sends a `$exception` the moment a panic happens. They carry the standard properties
-//! but never the install ID: the SDK makes them personless with a random ID. Home folders in
-//! them become `~` in `before_send`, PostHog's way to keep personal data out of exceptions.
+//! but never the install ID, the session or the registered properties: the SDK makes them
+//! personless with a random ID, and their `before_send` is their own. Home folders in them
+//! become `~` there, PostHog's way to keep personal data out of exceptions.
 
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, OnceLock};
@@ -23,6 +26,7 @@ use std::time::Duration;
 use posthog_rs::{Client, ClientOptionsBuilder, ErrorTrackingOptionsBuilder, Event};
 use serde_json::Value;
 
+use crate::feature::{self, Feature};
 use crate::{Channel, Context, Lifecycle, app_version, crash};
 
 /// The parterre project's token. Public by design: it can only send events (#275).
@@ -42,6 +46,8 @@ enum Command {
     /// The window closes, in session `.0`: say so, send what is queued, and tell the sender once
     /// done.
     Close(String, mpsc::Sender<()>),
+    /// A feature was used, in session `.1`.
+    Record(Feature, String),
 }
 
 /// The usage statistics' own thread, which talks to PostHog. Dropped, it sends what it has
@@ -69,9 +75,17 @@ impl Sender {
         Sender { commands }
     }
 
+    /// Where features go, each in its session: to the thread, without waiting.
+    pub(crate) fn sink(&self) -> impl Fn(Feature, String) + Send + 'static {
+        let commands = self.commands.clone();
+        move |feature, session| {
+            let _ = commands.send(Command::Record(feature, session));
+        }
+    }
+
     /// `Application Backgrounded`, in `session`, then what is queued is sent, waiting at most
     /// `wait`.
-    pub(crate) fn close(self, session: String, wait: Duration) {
+    pub(crate) fn close(&self, session: String, wait: Duration) {
         let (done, finished) = mpsc::channel();
         if self.commands.send(Command::Close(session, done)).is_ok() {
             let _ = finished.recv_timeout(wait);
@@ -91,15 +105,24 @@ fn run(
     for lifecycle in &events {
         client.capture(event(lifecycle, &context.install_id, session));
     }
-    match commands.recv() {
-        Ok(Command::Close(session, done)) => {
-            let backgrounded = event(&Lifecycle::Backgrounded, &context.install_id, &session);
-            client.capture(backgrounded);
-            client.shutdown();
-            let _ = done.send(());
+    loop {
+        match commands.recv() {
+            Ok(Command::Record(feature, session)) => {
+                client.capture(feature_event(feature, &context.install_id, &session));
+            }
+            Ok(Command::Close(session, done)) => {
+                let backgrounded = event(&Lifecycle::Backgrounded, &context.install_id, &session);
+                client.capture(backgrounded);
+                client.shutdown();
+                let _ = done.send(());
+                return;
+            }
+            // Stopped: usage statistics unticked.
+            Err(_) => {
+                client.shutdown();
+                return;
+            }
         }
-        // Stopped: usage statistics unticked.
-        Err(_) => client.shutdown(),
     }
 }
 
@@ -116,6 +139,9 @@ fn client(host: &str, standard: Standard, close: Duration) -> Client {
         .shutdown_timeout_ms(u64::try_from(close.as_millis()).unwrap_or(u64::MAX))
         .before_send(move |mut event| {
             standard.apply(&mut event);
+            if let Some(properties) = feature::registered() {
+                apply(&properties, &mut event);
+            }
             Some(event)
         });
     // GeoIP is left on (`disable_geoip` false): the project derives the place, then drops the
@@ -206,6 +232,28 @@ fn event(lifecycle: &Lifecycle, install_id: &str, session: &str) -> Event {
     event
 }
 
+/// The event for `feature`, from this installation, in `session`: its fixed name, and which
+/// feature.
+fn feature_event(feature: Feature, install_id: &str, session: &str) -> Event {
+    let mut event = Event::new(feature.event(), install_id);
+    let _ = event.insert_prop("$session_id", session);
+    let (key, value) = feature.property();
+    let _ = event.insert_prop(key, value);
+    event
+}
+
+/// The registered `properties`, on `event`.
+fn apply(properties: &feature::Properties, event: &mut Event) {
+    for (key, value) in properties.pairs() {
+        let _ = match value {
+            feature::Value::Name(name) => event.insert_prop(key, name),
+            feature::Value::Number(number) => event.insert_prop(key, number),
+            feature::Value::Count(count) => event.insert_prop(key, count),
+            feature::Value::Flag(flag) => event.insert_prop(key, flag),
+        };
+    }
+}
+
 /// PostHog's standard properties, and parterre's own two, as on every event. `$os` and
 /// `$os_version` are the SDK's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -275,6 +323,7 @@ impl Standard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Action, Menu, Screen};
     use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
@@ -437,27 +486,36 @@ mod tests {
         (host, received)
     }
 
-    #[test]
-    fn a_launch_and_its_close_reach_posthog() {
-        let (host, received) = posthog_here();
-        let events = crate::launch(false, Some("0.5.1"), "0.6.0 (a1b2c3d)");
-        let sender = Sender::start(&host, context(), SESSION.into(), events);
-        // Idle since the launch: the close is in a session of its own.
-        sender.close(NEXT_SESSION.into(), Duration::from_secs(10));
+    /// The events PostHog was sent, until it has heard nothing for half a second.
+    fn sent(received: &Receiver<Value>) -> Vec<Value> {
         let mut sent = Vec::new();
         while let Ok(body) = received.recv_timeout(Duration::from_millis(500)) {
             assert_eq!(body["api_key"], TOKEN);
             sent.extend(body["batch"].as_array().cloned().unwrap_or_default());
         }
+        sent
+    }
+
+    #[test]
+    fn a_launch_and_its_close_reach_posthog() {
+        let (host, received) = posthog_here();
+        let events = crate::launch(false, Some("0.5.1"), "0.6.0 (a1b2c3d)");
+        let sender = Sender::start(&host, context(), SESSION.into(), events);
+        sender.sink()(Feature::Screen(Screen::Log), SESSION.into());
+        // Idle since then: the close is in a session of its own.
+        sender.close(NEXT_SESSION.into(), Duration::from_secs(10));
+        let sent = sent(&received);
         let names: Vec<_> = sent.iter().map(|e| e["event"].as_str().unwrap()).collect();
         assert_eq!(
             names,
             [
                 "Application Updated",
                 "Application Opened",
+                "$screen",
                 "Application Backgrounded"
             ]
         );
+        assert_eq!(sent[2]["properties"]["$screen_name"], "log");
         for e in &sent {
             let p = &e["properties"];
             assert_eq!(e["distinct_id"], ID);
@@ -478,7 +536,7 @@ mod tests {
             .iter()
             .map(|e| &e["properties"]["$session_id"])
             .collect();
-        assert_eq!(sessions, [SESSION, SESSION, NEXT_SESSION]);
+        assert_eq!(sessions, [SESSION, SESSION, SESSION, NEXT_SESSION]);
     }
 
     /// Every text in `value`.
@@ -574,6 +632,8 @@ mod tests {
         let homes = vec!["/home/x".to_owned(), workspace.clone(), exe_folder.clone()];
         if let Ok(host) = std::env::var(CRASH_HOST) {
             std::panic::set_hook(Box::new(|_| eprintln!("{HOOK_BEFORE}")));
+            // The usage statistics' properties, which a crash report must not carry.
+            crate::register(crate::feature::tests::properties());
             assert!(capture_panics(&host, "0.6.0 (a1b2c3d)", || None, homes));
             assert!(!capture_panics(&host, "0.6.0", || None, Vec::new()));
             panic!("cannot open /home/x/repos/app/.git/index");
@@ -603,6 +663,9 @@ mod tests {
         assert!(uuid::Uuid::parse_str(e["distinct_id"].as_str().unwrap()).is_ok());
         assert_eq!(p["$process_person_profile"], false);
         assert!(p.get("$session_id").is_none(), "{p}");
+        for (key, _) in crate::feature::tests::properties().pairs() {
+            assert!(p.get(key).is_none(), "{key}: {p}");
+        }
         assert_eq!(p["$exception_level"], "fatal");
         let exception = &p["$exception_list"][0];
         assert_eq!(exception["type"], "Panic");
@@ -624,5 +687,142 @@ mod tests {
         }
         // Nothing more: one panic, one report.
         assert!(received.recv_timeout(Duration::from_millis(500)).is_err());
+    }
+
+    /// Whether a property of an event as sent is one of the fixed set: a feature's name, or
+    /// one of the properties every event carries.
+    fn is_fixed(key: &str, value: &Value) -> bool {
+        let named = |names: Vec<&str>| value.as_str().is_some_and(|v| names.contains(&v));
+        let registered = crate::feature::tests::properties().pairs();
+        match key {
+            "$screen_name" => named(Screen::ALL.iter().map(|s| s.name()).collect()),
+            "menu" => named(Menu::ALL.iter().map(|m| m.name()).collect()),
+            "action" => named(Action::ALL.iter().map(|a| a.name()).collect()),
+            _ => {
+                let standard = [
+                    "$session_id",
+                    "$process_person_profile",
+                    "$app_name",
+                    "$app_version",
+                    "channel",
+                    "git_version",
+                    "$locale",
+                    "$timezone",
+                    "$screen_width",
+                    "$screen_height",
+                ];
+                standard.contains(&key)
+                    || registered.iter().any(|(k, _)| *k == key)
+                    // The SDK's own: `$lib`, `$os` and the like.
+                    || key.starts_with("$lib")
+                    || key.starts_with("$os")
+            }
+        }
+    }
+
+    /// The facade, [`crate::record`], is the whole process's: one test sends through it.
+    #[test]
+    fn features_are_sent_while_usage_statistics_are_and_never_otherwise() {
+        use crate::{Build, Choices, Usage, record, register};
+        const RELEASE: Build = Build {
+            send: true,
+            debug: false,
+        };
+        let on = Some(Choices::default());
+        let unticked = Some(Choices {
+            usage_statistics: false,
+            crash_reports: true,
+        });
+        let (host, received) = posthog_here();
+        let start = |build, do_not_track, choices| {
+            Usage::start_with(build, do_not_track, &host, choices, context(), Vec::new())
+        };
+        // Unticked, DO_NOT_TRACK, unanswered, a debug build, a build without `send`.
+        let debug = Build {
+            send: true,
+            debug: true,
+        };
+        let without_send = Build {
+            send: false,
+            debug: false,
+        };
+        let off = [
+            (RELEASE, false, unticked),
+            (RELEASE, true, on),
+            (RELEASE, false, None),
+            (debug, false, on),
+            (without_send, false, on),
+        ];
+        for (build, do_not_track, choices) in off {
+            let usage = start(build, do_not_track, choices);
+            assert!(usage.is_none(), "{build:?} {do_not_track} {choices:?}");
+            record(Feature::Action(Action::Fit));
+        }
+        assert!(sent(&received).is_empty(), "nothing is sent while off");
+
+        // On: what is recorded is sent, with the properties registered on every event.
+        register(crate::feature::tests::properties());
+        let usage = start(RELEASE, false, on).unwrap();
+        record(Feature::Screen(Screen::Merge));
+        record(Feature::Menu(Menu::Node));
+        record(Feature::Action(Action::Merge));
+        usage.close();
+        let events = sent(&received);
+        let features: Vec<_> = events
+            .iter()
+            .filter_map(|e| {
+                let p = &e["properties"];
+                let which = ["$screen_name", "menu", "action"]
+                    .into_iter()
+                    .find_map(|k| p[k].as_str())?;
+                Some((e["event"].as_str()?, which))
+            })
+            .collect();
+        for expected in [
+            ("$screen", "merge"),
+            ("menu_view", "node"),
+            ("action_run", "merge"),
+        ] {
+            assert!(features.contains(&expected), "{expected:?}: {features:?}");
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| e["event"] == "Application Backgrounded")
+        );
+        // All in the session the usage statistics started with, the feature events included.
+        let session = events[0]["properties"]["$session_id"].clone();
+        assert!(uuid::Uuid::parse_str(session.as_str().unwrap()).is_ok());
+        for e in &events {
+            let p = e["properties"].as_object().unwrap();
+            assert_eq!(e["distinct_id"], ID);
+            assert_eq!(p["$session_id"], session, "{e}");
+            assert_eq!(p["theme"], "dark");
+            assert_eq!(p["graph_mode"], "branchings_and_merges");
+            assert_eq!(p["log_layout"], "side_by_side");
+            assert_eq!(p["text_size"], 1.25);
+            assert_eq!(p["is_auto_reload_on"], true);
+            assert_eq!(p["$screen_density"], 1.5);
+            assert_eq!(p["repository_count"], 3);
+            assert_eq!(p["commit_count_range"], "10000-99999");
+            assert_eq!(p["node_count_range"], "100-999");
+            for (key, value) in p {
+                assert!(is_fixed(key, value), "{key}: {value}");
+            }
+        }
+
+        // Closed: nothing more.
+        record(Feature::Action(Action::Fit));
+        assert!(sent(&received).is_empty(), "nothing is sent once closed");
+
+        // Unticked while sending (dropped): nothing more.
+        let usage = start(RELEASE, false, on).unwrap();
+        drop(usage);
+        record(Feature::Action(Action::Fit));
+        let after = sent(&received);
+        assert!(
+            after.iter().all(|e| e["event"] != "action_run"),
+            "{after:?}"
+        );
     }
 }

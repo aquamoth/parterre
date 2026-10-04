@@ -140,6 +140,7 @@ impl ParterreApp {
             .with_minimize_button(false)
             .with_maximize_button(false);
         let id = egui::ViewportId::from_hash_of("settings");
+        crate::usage::screen(ctx, id.0, crate::usage::Screen::Settings);
         // A new window is created after this frame and painted in the next; don't wait for
         // input to bring that about.
         if self.settings_window_theme.is_none() && !ctx.embed_viewports() {
@@ -557,6 +558,7 @@ impl ParterreApp {
     }
 
     pub(super) fn export_settings(&mut self, mut path: PathBuf) {
+        crate::usage::action(crate::usage::Action::ExportSettings);
         // A name typed without the extension gets it added.
         if path.extension().is_none() {
             path.set_extension("json");
@@ -600,6 +602,7 @@ impl ParterreApp {
             return;
         };
         let shown = dialogs::Dialog::new("import-settings", "Import settings")
+            .screen(crate::usage::Screen::ImportSettings)
             .width(380.0)
             .modal()
             .opener(egui::ViewportId::from_hash_of("settings"))
@@ -649,6 +652,7 @@ impl ParterreApp {
     }
 
     fn apply_import(&mut self, import: Import) {
+        crate::usage::action(crate::usage::Action::ImportSettings);
         let mut parts = Vec::new();
         if import.settings
             && let Some(mut settings) = import.imported.settings
@@ -677,6 +681,7 @@ impl ParterreApp {
             return;
         }
         let shown = dialogs::Dialog::new("reset-settings", "Reset all settings?")
+            .screen(crate::usage::Screen::ResetSettings)
             .icon(glyphs::RESET, true)
             .width(380.0)
             .modal()
@@ -693,6 +698,7 @@ impl ParterreApp {
         match shown.inner {
             dialogs::Answer::Primary => {
                 self.confirm_reset_settings = false;
+                crate::usage::action(crate::usage::Action::ResetSettings);
                 self.reset_settings();
             }
             dialogs::Answer::Cancel => self.confirm_reset_settings = false,

@@ -246,6 +246,7 @@ pub fn dialog(ctx: &egui::Context, error: &ForgeError) -> DialogAnswer {
 
     let explanation = error.explain();
     let shown = crate::dialogs::Dialog::new("pull-requests-error", explanation.title)
+        .screen(crate::usage::Screen::PullRequestsError)
         .icon(glyphs::PULL_REQUEST, false)
         .width(380.0)
         .modal()

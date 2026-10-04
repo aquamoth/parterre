@@ -102,6 +102,7 @@ impl ResetDialog {
         let mut toggle = false;
         // A width with the files pane, and another without.
         let shown = dialogs::Dialog::new("reset-branch", &title)
+            .screen(crate::usage::Screen::Reset)
             .width(width)
             .opener(self.opener)
             .raise(self.fresh)
@@ -480,6 +481,30 @@ mod tests {
             h.shows(&title) && !h.shows("Cancel")
         });
         assert_eq!(read(h.path(), "a.txt"), "one\n");
+    }
+
+    /// Usage statistics (#264): the dialog counts as it opens, the reset as it is started, each
+    /// once however many frames they take, and by kind only.
+    #[test]
+    fn the_dialog_and_the_reset_are_counted_once_each() {
+        use crate::usage::{Action, Feature, Screen};
+        let mut h = Harness::new(repository());
+        let base = h.rev("HEAD~1");
+        let ((), recorded) = parterre_telemetry::recording(|| {
+            open(&mut h, base);
+            h.click("Reset");
+            h.until("the branch moves", |h| h.rev("HEAD") == base);
+            for _ in 0..5 {
+                h.frame();
+            }
+        });
+        assert_eq!(
+            recorded,
+            [
+                Feature::Screen(Screen::Reset),
+                Feature::Action(Action::Reset)
+            ]
+        );
     }
 
     #[test]

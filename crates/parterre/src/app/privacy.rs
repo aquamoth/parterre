@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Align, Layout, RichText, Ui, vec2};
 use parterre_core::Repo;
-use parterre_telemetry::{Build, Choices, Context, Lifecycle, Usage};
+use parterre_telemetry::{Build, Choices, Context, Lifecycle, Properties, Usage};
 
 use super::ParterreApp;
 use crate::settings::{Privacy, PrivacyAnswer};
@@ -58,6 +58,8 @@ pub(super) struct Telemetry {
     screen: Option<[f32; 2]>,
     /// The repository opened last ([`repository_of`]), for the usage statistics started after.
     repository: Option<PathBuf>,
+    /// The properties every event carries, as registered last (#264).
+    registered: Option<Properties>,
 }
 
 impl Telemetry {
@@ -86,6 +88,7 @@ impl Telemetry {
             first_run: false,
             screen: None,
             repository: None,
+            registered: None,
         };
         telemetry.start_crash_reports();
         telemetry
@@ -121,8 +124,9 @@ impl Telemetry {
     }
 
     /// Tells the launch once the screen's size is known (or after a while without), and then
-    /// starts and stops the usage statistics as the user's choices say.
-    fn update(&mut self, ctx: &egui::Context) {
+    /// starts and stops the usage statistics as the user's choices say. `properties` go on
+    /// every event from now on.
+    fn update(&mut self, ctx: &egui::Context, properties: Properties) {
         let input = ctx.with_plugin(|seen: &mut UserInput| std::mem::take(&mut seen.0));
         if input == Some(true)
             && let Some(usage) = &mut self.usage
@@ -152,7 +156,13 @@ impl Telemetry {
             // Unticked: nothing more is sent, the launch's events included.
             self.usage = None;
             self.pending.clear();
-        } else if self.usage.is_none()
+            return;
+        }
+        if self.registered != Some(properties) {
+            self.registered = Some(properties);
+            parterre_telemetry::register(properties);
+        }
+        if self.usage.is_none()
             && let Some(answer) = &self.privacy.answer
         {
             let context = Context {
@@ -222,7 +232,14 @@ fn is_user_input(event: &egui::Event) -> bool {
 impl ParterreApp {
     /// The usage statistics, as the user's choices say. Call every frame.
     pub(super) fn usage_statistics(&mut self, ctx: &egui::Context) {
-        self.telemetry.update(ctx);
+        let properties = crate::usage::properties(
+            &self.settings,
+            ctx.native_pixels_per_point(),
+            self.recent.iter().count(),
+            self.repo.as_ref().map(|r| r.commits.len()),
+            self.scene.as_ref().map(|s| s.graph.nodes.len()),
+        );
+        self.telemetry.update(ctx, properties);
     }
 
     /// Automation: the first-run prompt, as at the first start (`open first-run`).
@@ -468,7 +485,10 @@ mod tests {
         t.privacy.last_version = Some("0.0.1".into());
         let ctx = egui::Context::default();
         for _ in 0..=SCREEN_WAIT {
-            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| t.update(ui.ctx()));
+            let properties = crate::usage::properties(&Default::default(), None, 0, None, None);
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                t.update(ui.ctx(), properties)
+            });
             output.textures_delta.clear();
         }
         assert_eq!(t.launching, None);

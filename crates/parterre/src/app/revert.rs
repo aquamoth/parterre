@@ -99,6 +99,7 @@ impl RevertDialog {
         let short = p.commit.short(self.repo.abbrev_len.max(7));
         let title = format!("Revert {short} in {}", p.name());
         let shown = dialogs::Dialog::new("revert-commit", &title)
+            .screen(crate::usage::Screen::Revert)
             .width(520.0)
             .opener(self.opener)
             .raise(self.fresh)
@@ -200,6 +201,7 @@ impl RestoreDialog {
     /// *Primary* restores them (Enter), *Cancel* keeps them stashed (Esc).
     pub fn show(&mut self, ctx: &egui::Context, busy: bool) -> dialogs::Answer {
         let shown = dialogs::Dialog::new("restore-stash", "Restore stashed changes?")
+            .screen(crate::usage::Screen::RestoreStash)
             .modal()
             .resizable()
             .opener(self.opener)
