@@ -79,9 +79,13 @@ all = { level = "warn", priority = -1 }
 opt-level = 2
 debug = "line-tables-only"
 
+# Line tables, so that PostHog can resolve the stack traces of crash reports (#265). A local
+# build strips them with the symbols. The release workflow keeps them, uploads them to PostHog
+# and strips the binaries after (docs/releasing.md#crash-report-symbols).
 [profile.release]
 lto = "thin"
 codegen-units = 1
+debug = "line-tables-only"
 strip = "symbols"
 
 # The layout is heavy numeric code; optimise it even in dev and test builds (debug assertions
