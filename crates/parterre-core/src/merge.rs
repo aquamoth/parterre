@@ -363,7 +363,7 @@ impl Preview {
                 let args = ["fmt-merge-msg", "--no-log", "--into-name", into];
                 match git.run_with_input(&args, line.clone()) {
                     Ok(message) => message,
-                    // Git before 2.38 names only the checked-out branch.
+                    // Git before 2.35 names only the checked-out branch.
                     Err(_) => retarget(
                         &git.run_with_input(&["fmt-merge-msg", "--no-log"], line)?,
                         &source,

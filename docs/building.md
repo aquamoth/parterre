@@ -89,8 +89,8 @@ packaging\windows\build-msi.ps1   # → target\msi\parterre-<version>-x86_64-pc-
 ```
 
 The script gathers `parterre.exe`, `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.html` in
-`target\msi\stage`. With `-Stage DIR` it takes them from `DIR` instead, as CI and the release
-workflow do; `-Out FILE` names the MSI. It passes `-acceptEula wix7` on every run, which
+`target\msi\stage`. With `-Stage DIR` it takes them from `DIR` instead, as the release
+workflow does; `-Out FILE` names the MSI. It passes `-acceptEula wix7` on every run, which
 accepts WiX's Open Source Maintenance Fee EULA for that run only; don't run `wix eula accept`,
 which leaves an acceptance file behind. The MSI version is the release tag's version in the
 release workflow (`PARTERRE_RELEASE_TAG`), otherwise the version `parterre.exe` carries (from
@@ -127,6 +127,11 @@ version; an older one is refused. That only works within one scope: Windows Inst
 for the installed version in the scope being installed, so a per-user install followed by a
 machine-wide one leaves two entries.
 
+`packaging\windows\test-msi.ps1 -Msi FILE -Scope user|machine` installs the MSI in one scope,
+checks that `parterre --version` runs and that the folder is on that scope's `PATH`, and
+uninstalls it again. The release workflow runs it in both scopes before publishing; the machine
+scope needs an elevated prompt.
+
 ## Linux packages
 
 The `.deb` and `.rpm` are built with `cargo-deb` and `cargo-generate-rpm` from a release build,
@@ -148,9 +153,10 @@ packaging/linux/build-packages.sh --target x86_64-unknown-linux-gnu dist   # as 
 The packages take their version from `parterre --version`, with a pre-release's `-` turned into
 `~` so that `0.5.0~rc1` sorts before `0.5.0` in both dpkg and rpm. The file names keep the `-`,
 since GitHub may rewrite a `~` in a release asset's name. The script also writes
-`THIRD-PARTY-NOTICES.html` and a copy of the AppStream metadata next to the binary, adding an
-entry for the version being packaged when `se.trustfall.parterre.metainfo.xml` has none yet
-(software centres show the newest entry as the version).
+`THIRD-PARTY-NOTICES.html` and the AppStream metadata next to the binary. The metadata's
+releases come from the release tags, newest first and dated by the tag, without pre-releases
+(`packaging/linux/metainfo.sh`); a release built without its tag gets an entry dated the day
+it was built, since software centres show the newest entry as the version.
 
 What they install:
 
@@ -174,8 +180,8 @@ alike.
 
 `packaging/linux/test-package.sh PACKAGE` installs a package with the system's package manager,
 checks that `parterre --version` runs and the desktop files are in place, and removes it again.
-CI runs it on Debian 12, Ubuntu 22.04 and 24.04, Fedora and openSUSE Leap 15.6
-(`.github/workflows/linux-packages.yml`), as root in their containers:
+The release workflow runs it on Debian 12, Ubuntu 22.04 and 24.04, Fedora and openSUSE Leap
+15.6 (`.github/workflows/linux-packages.yml`), as root in their containers:
 
 ```sh
 docker run --rm -v "$PWD:/src" -w /src debian:12 \

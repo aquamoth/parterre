@@ -32,19 +32,7 @@ version=$(echo "$release" | tr - '~')
 mkdir -p "$dir/packaging" "$out"
 cargo about generate --locked -c packaging/about.toml packaging/about.hbs \
     -o "$dir/packaging/THIRD-PARTY-NOTICES.html"
-metainfo=$dir/packaging/se.trustfall.parterre.metainfo.xml
-cp packaging/linux/se.trustfall.parterre.metainfo.xml "$metainfo"
-# Software centres show the newest release entry as the version, so a release gets one even
-# before it is added to the file in the repository.
-case $release in
-*-*) ;;
-*)
-    if ! grep -q "<release version=\"$release\"" "$metainfo"; then
-        sed -i "s|^\( *\)<releases>|&\n\1  <release version=\"$release\" date=\"$(date -u +%F)\"/>|" \
-            "$metainfo"
-    fi
-    ;;
-esac
+packaging/linux/metainfo.sh "$release" "$dir/packaging/se.trustfall.parterre.metainfo.xml"
 
 cargo deb -p parterre --no-build --no-strip --no-dbgsym ${target:+--target "$target"} \
     --deb-version "$version" -o "$out/"

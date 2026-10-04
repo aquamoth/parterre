@@ -22,21 +22,30 @@ release filenames. Tag a clean commit on `main`; the version in the root `Cargo.
    [building.md](building.md#windows-installer)), and Linux a `.deb` and an `.rpm` from the same
    binary, `parterre_0.5.0-rc1_amd64.deb` and `parterre-0.5.0-rc1-1.x86_64.rpm` (see
    [building.md](building.md#linux-packages)). Before the release is published they are
-   installed, run and removed on Debian 12, Ubuntu 22.04 and 24.04, Fedora and openSUSE Leap
-   15.6. A tag with a pre-release part publishes a pre-release; its MSI has version `0.5.0`,
-   since MSI versions are numbers only.
+   installed, run and removed: the `.deb` and `.rpm` on Debian 12, Ubuntu 22.04 and 24.04,
+   Fedora and openSUSE Leap 15.6, and the MSI on Windows per user and machine-wide. If any of
+   that fails, nothing is published. A tag with a pre-release part goes through all of it and
+   publishes a pre-release; its MSI has version `0.5.0`, since MSI versions are numbers only.
+   CI builds no packages, so a pre-release (or a run by hand, below) is where packaging is
+   first tested.
 
    The release doesn't run the tests again: it publishes only once the CI run of the tagged
    commit on `main` has passed, and waits for it if it's still running (#236). A commit
    without one, not pushed to `main`, fails the release.
 
 3. The workflow then publishes the [crates](#cratesio), and builds the
-   [Chocolatey](#chocolatey) package from that MSI, tests it, and pushes it. A pre-release goes
-   to neither: its Chocolatey package is built and tested but not pushed.
+   [Chocolatey](#chocolatey) package from that MSI and pushes it. A pre-release goes to
+   neither: its Chocolatey package is built but not pushed.
 
-Add the release to the `<releases>` of `packaging/linux/se.trustfall.parterre.metainfo.xml`
-afterwards, with its date. Until then the packages get an entry of their own, dated the day
-they were built.
+To try a packaging change without tagging, run the release workflow by hand on its branch:
+
+```sh
+gh workflow run release.yml --ref my-branch
+```
+
+It builds, packages and installs as a release does, but publishes nothing: the packages are
+left as artifacts of the run. Their version follows the nearest tag, as in any build
+([Version strings](#version-strings)).
 
 The build fails if the tag is not `vX.Y.Z` with an optional pre-release suffix, does not point
 at the commit being built, or the sources have local changes. In that case delete the tag
@@ -84,10 +93,10 @@ nuspec and the install and uninstall scripts, which install it machine-wide (`AL
 depend on the `git` package. `packaging/chocolatey/build.ps1` fills in the version, the MSI's
 URL and its SHA-256, and runs `choco pack`.
 
-`.github/workflows/chocolatey.yml` builds the package from a release's MSI, installs and
-uninstalls it on a Windows runner, and keeps the `.nupkg` as a workflow artifact. The release
-workflow runs it for every tag; it also runs on pull requests that change the package (for the
-latest release, never pushing), and by hand for an existing release:
+`.github/workflows/chocolatey.yml` builds the package from a release's MSI and keeps the
+`.nupkg` as a workflow artifact. Nothing installs the package itself; the release has already
+installed the MSI it wraps, machine-wide as the package does. The release workflow runs it for
+every tag, and it can be run by hand for an existing release:
 
 ```sh
 gh workflow run chocolatey.yml -f tag=v0.5.1 -f push=true
