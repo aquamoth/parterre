@@ -48,6 +48,61 @@ pub const RECENT_KEY: &str = "parterre-recent-repositories";
 pub type RememberedMoves =
     std::collections::HashMap<String, std::collections::HashMap<String, (f32, f32, bool)>>;
 
+/// Storage key for what is sent to PostHog: the first-run prompt's answer, the install ID and
+/// the version that ran last (#261). Kept apart from the settings: not exported, imported or
+/// reset with them.
+pub const PRIVACY_KEY: &str = "parterre-privacy";
+
+/// What is sent to PostHog, as stored under [`PRIVACY_KEY`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Privacy {
+    /// The first-run prompt's answer, as Settings › Privacy has changed it since; `None` until
+    /// it is answered.
+    pub answer: Option<PrivacyAnswer>,
+    /// The version that ran last, as `$app_version` names it, for `Application Updated`.
+    pub last_version: Option<String>,
+}
+
+/// The first-run prompt's answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivacyAnswer {
+    /// Made when the prompt was answered, and never changed.
+    pub install_id: String,
+    pub usage_statistics: bool,
+    pub crash_reports: bool,
+}
+
+impl PrivacyAnswer {
+    pub fn choices(&self) -> parterre_telemetry::Choices {
+        parterre_telemetry::Choices {
+            usage_statistics: self.usage_statistics,
+            crash_reports: self.crash_reports,
+        }
+    }
+}
+
+impl Privacy {
+    /// The stored one; as before the first run without one, or if it can't be read (asked
+    /// again then, with a new install ID).
+    pub fn load(storage: &dyn eframe::Storage) -> Privacy {
+        eframe::get_value(storage, PRIVACY_KEY).unwrap_or_default()
+    }
+
+    /// The first-run prompt answered with `choices`: the install ID is made.
+    pub fn answer(&mut self, choices: parterre_telemetry::Choices) {
+        self.answer = Some(PrivacyAnswer {
+            install_id: parterre_telemetry::new_install_id(),
+            usage_statistics: choices.usage_statistics,
+            crash_reports: choices.crash_reports,
+        });
+    }
+
+    pub fn choices(&self) -> Option<parterre_telemetry::Choices> {
+        self.answer.as_ref().map(PrivacyAnswer::choices)
+    }
+}
+
 /// Loads remembered node positions.
 pub fn load_moves(storage: &dyn eframe::Storage) -> RememberedMoves {
     eframe::get_value(storage, MOVES_KEY).unwrap_or_default()
@@ -504,6 +559,25 @@ mod tests {
         s.blame_window.show_history = false;
         s.blame_window.history_height = 300.0;
         assert_eq!(round_trip(&s).blame_window, s.blame_window);
+    }
+
+    #[test]
+    fn the_privacy_answer_and_install_id_survive_a_round_trip() {
+        let mut privacy = Privacy::default();
+        assert_eq!(privacy.choices(), None, "unanswered before the first run");
+        privacy.answer(parterre_telemetry::Choices {
+            usage_statistics: false,
+            crash_reports: true,
+        });
+        privacy.last_version = Some("0.6.0".into());
+        let text = serde_json::to_string(&privacy).unwrap();
+        let back: Privacy = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, privacy);
+        let choices = back.choices().unwrap();
+        assert!(!choices.usage_statistics && choices.crash_reports);
+        // Whatever can't be read is unanswered: asked again.
+        let back: Privacy = serde_json::from_str(r#"{"answer": 3}"#).unwrap_or_default();
+        assert_eq!(back.answer, None);
     }
 
     #[test]

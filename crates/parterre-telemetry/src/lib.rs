@@ -1,10 +1,13 @@
 //! What parterre asks and sends over the network, behind one small interface, so that the
-//! services behind it can be swapped by replacing this crate (#175, #225). For now that is the
-//! update check (#226, #258): GitHub's releases API, asked at start and then once a day, and
-//! nothing of parterre's own sent with it.
+//! services behind it can be swapped by replacing this crate (#175, #225):
+//! - the update check (#226, #258): GitHub's releases API, asked at start and then once a day,
+//!   and nothing of parterre's own sent with it;
+//! - the usage statistics (#261): installs, updates and launches, sent to PostHog with the
+//!   install ID while the user leaves them ticked, through [`Usage`].
 //!
-//! The requests sit behind the `send` feature. Without it nothing is asked or sent, and there
-//! is no update check: [`UpdateCheck::start`] gives `None`.
+//! The requests sit behind the `send` feature. Without it nothing is asked or sent: there is no
+//! update check ([`UpdateCheck::start`] gives `None`) and no usage statistics
+//! ([`Usage::start`] gives `None`).
 
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -13,10 +16,75 @@ use std::time::Duration;
 mod channel;
 #[cfg(feature = "send")]
 mod github;
+#[cfg(feature = "send")]
+mod posthog;
 mod update;
+mod usage;
 
 pub use channel::Channel;
 pub use update::{CARGO_INSTALL, Download, Release, Update, Version, newer};
+pub use usage::{
+    Build, Choices, Lifecycle, app_version, asks, do_not_track, has_usage_statistics, launch,
+    may_check_for_updates, new_install_id, sends,
+};
+
+/// The longest closing waits for the usage statistics to be sent.
+pub const CLOSE: Duration = Duration::from_secs(2);
+
+/// What every event of a launch says besides its own name.
+#[derive(Clone, Debug)]
+pub struct Context {
+    /// The install ID: the `distinct_id`.
+    pub install_id: String,
+    /// This build's version (`0.6.0 (a1b2c3d)`).
+    pub version: String,
+    /// The screen's size in points (logical pixels), if known.
+    pub screen: Option<[f32; 2]>,
+    /// The version of the git parterre runs, asked on the sending thread.
+    pub git_version: fn() -> Option<String>,
+}
+
+/// Usage statistics on their way to PostHog, from start until the window closes ([`close`]) or
+/// the user unticks them (drop it).
+///
+/// [`close`]: Usage::close
+#[derive(Debug)]
+pub struct Usage {
+    #[cfg(feature = "send")]
+    sender: posthog::Sender,
+}
+
+impl Usage {
+    /// Starts sending usage statistics, with `events` at once ([`launch`] for a launch, none
+    /// when ticked again), if the user's `choices` allow it ([`sends`]): `None` while the
+    /// first-run prompt is unanswered (`choices` `None`), when usage statistics are unticked,
+    /// `DO_NOT_TRACK` is set, and in debug builds and builds without `send`.
+    pub fn start(
+        choices: Option<Choices>,
+        context: Context,
+        events: Vec<Lifecycle>,
+    ) -> Option<Usage> {
+        if !sends(Build::THIS, choices, do_not_track()) {
+            return None;
+        }
+        #[cfg(feature = "send")]
+        return Some(Usage {
+            sender: posthog::Sender::start(posthog::HOST, context, events),
+        });
+        #[cfg(not(feature = "send"))]
+        {
+            let _ = (context, events);
+            None
+        }
+    }
+
+    /// The window closes: `Application Backgrounded`, and what is queued is sent, waiting at
+    /// most [`CLOSE`].
+    pub fn close(self) {
+        #[cfg(feature = "send")]
+        self.sender.close(CLOSE);
+    }
+}
 
 /// How long the update check waits before asking again.
 pub const INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);

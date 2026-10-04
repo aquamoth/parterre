@@ -1,6 +1,6 @@
 [package]
 name = "parterre-telemetry"
-description = "Internal to parterre: what it asks and sends over the network, for now the update check. No stability promises."
+description = "Internal to parterre: what it asks and sends over the network, the update check and the usage statistics. No stability promises."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,14 +12,31 @@ homepage.workspace = true
 readme = "README.md"
 
 [features]
-# Requests (`send`): the HTTPS client, and reading GitHub's answers. Without it the crate asks
-# and sends nothing and there is no update check: the switch for packagers (#258).
-send = ["dep:serde", "dep:serde_json", "dep:ureq"]
+# Requests (`send`): the HTTPS client and reading GitHub's answers, for the update check
+# (#258); PostHog's SDK and the system's locale and time zone, for the usage statistics (#261).
+# Without it the crate asks and sends nothing: no update check and no usage statistics. The
+# switch for packagers.
+send = [
+    "dep:serde",
+    "dep:serde_json",
+    "dep:ureq",
+    "dep:posthog-rs",
+    "dep:sys-locale",
+    "dep:iana-time-zone",
+]
 
 [dependencies]
+# The install ID: a random (version 4) UUID.
+uuid = { version = "1", features = ["v4"] }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
+# PostHog's official SDK, its blocking client: no async runtime of parterre's own, and none of
+# its error tracking until crash reports need it (#263). It brings reqwest, beside ureq (#225).
+posthog-rs = { version = "0.27", default-features = false, optional = true }
+# `$locale` and `$timezone`, as PostHog's mobile SDKs send them.
+sys-locale = { version = "0.3", optional = true }
+iana-time-zone = { version = "0.1", optional = true }
 
 [lints]
 workspace = true

@@ -76,6 +76,8 @@ shot context-canvas popup "right-click canvas"
 for page in appearance branchcolours graph filters dragging privacy advanced manage; do
     shot "settings-$page" window "open settings:$page"
 done
+DO_NOT_TRACK=1 shot settings-privacy-dnt window "open settings:privacy"
+shot first-run window "open first-run"
 shot reset-settings window $'open settings:manage\nclick "Reset…"'
 shot import-settings window "open export-settings:$work/settings.json
 open import-settings:$work/settings.json"

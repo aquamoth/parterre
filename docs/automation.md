@@ -28,7 +28,8 @@ worktree. Then it saves one PNG for each of these into `/tmp/shots`, in about 15
 - the ☰ menu and each of its submenus, and the menu while a newer release is out
 - the toolbar popovers
 - the context menus of a node and of the canvas, with their submenus
-- every settings page
+- every settings page, and Privacy with `DO_NOT_TRACK` set
+- the first-run prompt
 - the Keyboard and mouse, Legend and About windows
 - the log, compare, diff and blame windows
 - the question before resetting all settings, and the one asking what of a settings file to
@@ -52,6 +53,10 @@ for them.
 
 - **No stored settings.** It reads none and saves none: no remembered window size, theme or
   moved nodes. Set what you need with the [options below](#setting-the-scene).
+- **Sends nothing.** No update check and no usage statistics. The first-run prompt isn't
+  shown, as if answered with its defaults; `open first-run` shows it. Settings › Privacy shows
+  an example install ID, the same in every run. `DO_NOT_TRACK=1` in the environment shows the
+  page as that leaves it.
 - **One window.** Dialogs and the other windows (log, diff, settings, …), normally windows of
   their own, are drawn inside the main window, so one picture shows them with what they belong
   to.
@@ -130,6 +135,7 @@ takes a branch, a tag or a hash prefix. A name that doesn't exist fails the run.
 | `settings`, `settings:PAGE` | The settings, at `appearance`, `branchcolours`, `graph`, `filters`, `dragging`, `privacy`, `advanced` or `manage` |
 | `export-settings:FILE`, `import-settings:FILE` | The settings' Manage page, as if FILE had been picked to export to (written at once) or import from (the dialog asking what to import) |
 | `about`, `shortcuts`, `legend` | About parterre, Keyboard and mouse, the legend |
+| `first-run` | The first-run prompt about usage statistics and crash reports, as at the first start |
 | `log:REF`, `log:FIRST..SECOND` | The log of a commit, or of a range (as if the nodes were selected in that order) |
 | `compare:FIRST..SECOND` | The compare window; `SECOND` may be `WORKING_TREE` |
 | `diff:COMMIT:PATH` | The diff of a file as the commit changed it, against its first parent |

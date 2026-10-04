@@ -8,10 +8,15 @@ use parterre_telemetry::{Download, Update, UpdateCheck};
 use super::ParterreApp;
 
 impl ParterreApp {
-    /// Starts or stops asking GitHub as the setting says. Scripted runs don't ask: their pictures
-    /// would depend on it. `--newer-release` answers for them.
+    /// Starts or stops asking GitHub as the setting says, once the first-run prompt is answered:
+    /// nothing is sent before (#223). Scripted runs don't ask: their pictures would depend on
+    /// it. `--newer-release` answers for them.
     pub(super) fn update_check(&mut self, ctx: &egui::Context) {
-        if !self.settings.check_for_updates || self.automation.is_active() {
+        let prompting = self.telemetry.prompt.is_some();
+        if !self.settings.check_for_updates
+            || self.automation.is_active()
+            || !parterre_telemetry::may_check_for_updates(prompting)
+        {
             self.update_check = None;
         } else if self.update_check.is_none() && parterre_telemetry::has_update_check() {
             let ctx = ctx.clone();

@@ -128,6 +128,8 @@ pub struct Dialog<'a> {
     icon: Option<Glyph>,
     danger: bool,
     modal: bool,
+    /// Closes only through its own buttons: no close button on its window.
+    undismissable: bool,
     opener: ViewportId,
     raise: bool,
     resizable: bool,
@@ -157,6 +159,7 @@ impl<'a> Dialog<'a> {
             icon: None,
             danger: false,
             modal: false,
+            undismissable: false,
             opener: ViewportId::ROOT,
             raise: false,
             resizable: false,
@@ -176,6 +179,13 @@ impl<'a> Dialog<'a> {
     /// Locks parterre's other windows while it is shown.
     pub fn modal(mut self) -> Self {
         self.modal = true;
+        self
+    }
+    /// Closes only through its own buttons: its window has no close button where the platform
+    /// lets parterre leave it out (winit 0.30: Windows and macOS), and the caller ignores
+    /// [`Shown::should_close`]. Esc does nothing unless the caller makes it.
+    pub fn undismissable(mut self) -> Self {
+        self.undismissable = true;
         self
     }
     /// The window it opens over, where the platform lets parterre place windows (not Wayland).
@@ -271,6 +281,9 @@ impl<'a> Dialog<'a> {
             .with_minimize_button(false)
             .with_maximize_button(false)
             .with_window_type(egui::X11WindowType::Dialog);
+        if self.undismissable {
+            builder = builder.with_close_button(false);
+        }
         // Same size always. On Wayland that is told to the window once it exists (below):
         // told here, winit would set the hints before its title bar exists and leave the bar
         // out of them; the compositor then holds the window to the hints, with the bar outside

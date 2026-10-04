@@ -20,13 +20,17 @@ All three are on by default. Leave one out with `--no-default-features --feature
 | Feature | Brings |
 |---|---|
 | `github` | open pull requests from GitHub (`parterre-forge`) |
-| `send` | the update check, and later anything else parterre asks or sends over the network (`parterre-telemetry`) |
+| `send` | the update check, the usage statistics sent to PostHog, and anything else parterre asks or sends over the network (`parterre-telemetry`) |
 | `syntax` | syntax colour in the diff and blame windows (`parterre-highlight`) |
 
-**Packagers:** `send` is your switch. Built without it, parterre makes no requests of its own
-and has no update check, so it never tells users of your package about releases you haven't
-packaged yet; Settings › Privacy shows *Check for updates* greyed out. Pull requests from GitHub
-(`github`) are asked for only when the user shows them.
+**Packagers:** `send` is your switch. Built without it, parterre makes no requests of its own:
+it has no update check, so it never tells users of your package about releases you haven't
+packaged yet, and sends no usage statistics, so it doesn't ask about them at first start either.
+Settings › Privacy shows those switches greyed out. Pull requests from GitHub (`github`) are
+asked for only when the user shows them. Without `send`, neither PostHog's SDK nor its HTTP
+client (reqwest) is built.
+
+Debug builds never send usage statistics, `send` or not.
 
 ```sh
 cargo build --release --locked --no-default-features --features github,syntax

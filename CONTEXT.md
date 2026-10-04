@@ -190,6 +190,12 @@ What parterre sends to PostHog as it is used (installs, updates, launches, featu
 with the install ID, unless the user unticks them. They never contain personal information.
 _Avoid_: analytics, telemetry, metrics
 
+**First-run prompt**:
+The dialog at parterre's first start that asks whether to send usage statistics and crash
+reports. Only *Continue* closes it, and nothing is sent, the update check included, before it is
+answered.
+_Avoid_: consent dialog, opt-in screen, telemetry prompt
+
 **Crash report**:
 What parterre sends to PostHog the moment it crashes, if the user has ticked crash reports. It
 may contain personal information, so it is off unless the user turns it on.
