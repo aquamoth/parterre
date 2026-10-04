@@ -46,6 +46,8 @@ crates/parterre-core   GUI-free; everything testable lives here
   layout/              layered (Sugiyama) layout
     rank.rs            layer assignment (network simplex / longest path / chronological),
                        plus splitting of over-wide layers
+    trunk.rs           the default branch's first-parent line, and which side of it every
+                       side branch goes
     layered.rs         dummy items for long edges, optional edge bundling
     order.rs           crossing minimisation (median sweeps, exact crossing count)
     position.rs        coordinates within layers (L1 via isotonic regression)
@@ -150,9 +152,10 @@ crates/parterre        the binary (eframe/egui)
 3. **Measure** (`scene.rs`): node boxes use TortoiseGit's geometry: one row per ref, or the
    short hash where there is none, then one row per pull request; 20 px side margins and 5 px
    top and bottom margins; monospace 12 px.
-4. **Lay out** (`layout/`): rank → split wide layers → layered graph with dummies (optionally
-   bundled per parent) → crossing minimisation → L1 coordinates → variable layer gaps →
-   rotate to the chosen direction.
+4. **Lay out** (`layout/`): rank → split wide layers → sides of the trunk (the default
+   branch's first-parent line) → layered graph with dummies (optionally bundled per parent and
+   side) → crossing minimisation, keeping each side on its side → L1 coordinates, the trunk
+   pinned straight → variable layer gaps → rotate to the chosen direction.
 5. **Simulate** (`physics.rs`): nodes and bend points become particles, each with a rest
    position (at first the layout). Springs along edges keep the offsets between rest
    positions; nodes near each other push apart like weak magnets, and neighbours in a row keep
