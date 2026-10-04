@@ -21,11 +21,21 @@ use crate::oid::Oid;
 use crate::repo::{Commit, CommitIx, DEFAULT_ABBREV_LEN, GitRef, Head, RefKind, Repo, Worktree};
 
 mod program;
+mod version;
+
+pub use version::MINIMUM_VERSION;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error("could not run git ({0}); is git installed and on PATH?")]
     Spawn(#[source] std::io::Error),
+    /// The version `git --version` printed, older than [`MINIMUM_VERSION`].
+    #[error(
+        "git {0} is too old; parterre needs git {major}.{minor} or newer",
+        major = MINIMUM_VERSION.0,
+        minor = MINIMUM_VERSION.1
+    )]
+    TooOld(String),
     #[error("`git {args}` failed: {stderr}")]
     Failed { args: String, stderr: String },
     #[error("{0} is not inside a git repository")]
@@ -65,6 +75,24 @@ const LOG_FIELDS: usize = 9;
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 
+/// git with no arguments yet: piped output, the C locale, and no console window.
+fn git_command() -> Command {
+    let mut cmd = Command::new(program::git());
+    cmd.env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        // parterre is a GUI-subsystem app on Windows; without this every git invocation
+        // would flash a console window.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 impl Git {
     pub fn new(dir: impl Into<PathBuf>) -> Git {
         Git { dir: dir.into() }
@@ -80,7 +108,7 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut cmd = Command::new(program::git());
+        let mut cmd = git_command();
         cmd.arg("-C")
             .arg(&self.dir)
             .args(["-c", "core.quotepath=off"])
@@ -89,19 +117,7 @@ impl Git {
             .args(["-c", "color.ui=false"])
             .args(args)
             // Read-only tool: never take the index lock for opportunistic refreshes.
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            // parterre is a GUI-subsystem app on Windows; without this every git invocation
-            // would flash a console window.
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+            .env("GIT_OPTIONAL_LOCKS", "0");
         cmd
     }
 
@@ -890,8 +906,10 @@ fn object_name(v: &Version) -> String {
     format!("{rev}:{}", v.path)
 }
 
-/// Convenience wrapper: load the repository containing `dir`.
+/// Convenience wrapper: load the repository containing `dir`. Fails with
+/// [`GitError::TooOld`] first if git is older than [`MINIMUM_VERSION`].
 pub fn load_repo(dir: &Path) -> Result<Repo, GitError> {
+    version::check()?;
     Git::new(dir).load()
 }
 

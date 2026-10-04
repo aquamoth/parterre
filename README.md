@@ -138,10 +138,10 @@ cargo binstall parterre            # the release binary, with cargo-binstall
 cargo install --locked parterre    # or build it from source
 ```
 
-parterre runs the `git` you already have, which must be on your `PATH`. The `.deb` and `.rpm`
-install it if needed; on Windows, install [Git for Windows](https://git-scm.com/download/win)
-first. The Linux build needs glibc 2.35 or newer (Debian 12, Ubuntu 22.04 and
-later).
+parterre runs the `git` you already have, which must be git 2.31 or newer and on your `PATH`.
+The `.deb` and `.rpm` install it if needed; on Windows, install
+[Git for Windows](https://git-scm.com/download/win) first. The Linux build needs glibc 2.35 or
+newer (Debian 12, Ubuntu 22.04 and later).
 
 ## Quick start
 
