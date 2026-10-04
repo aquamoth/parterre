@@ -2,8 +2,8 @@
 
 The syntax colour of [parterre](https://crates.io/crates/parterre), a TortoiseGit-style revision
 graph viewer: a file's language from its path, and language-neutral spans per line through
-tree-sitter, for the diff and blame windows to colour. The 23 grammars sit behind the `syntax`
-feature, and the app runs them in a child process so that a grammar's crash costs the colours
+tree-sitter, for the diff and blame windows to colour. The grammars of 23 languages sit behind the
+`syntax` feature, and the app runs them in a child process so that a grammar's crash costs the colours
 and nothing else.
 
 It is published only because `parterre` depends on it. It is internal to parterre and makes no

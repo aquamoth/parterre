@@ -66,6 +66,7 @@ impl Cancel {
         if running.cancelled {
             return Ok(None);
         }
+        debug_assert!(running.child.is_none(), "one child at a time");
         let mut child = cmd.spawn()?;
         let pipes = Pipes {
             stdin: child.stdin.take(),
@@ -174,14 +175,21 @@ impl CancelTree {
         self.lock().0
     }
 
-    /// Starts the operation's process with `spawn` and registers it, under the lock, so that
-    /// a cancel can't miss it. Refused once cancelled.
-    pub fn start(&self, spawn: impl FnOnce() -> std::io::Result<Child>) -> Result<Child, Start> {
+    /// Starts the operation's process from `cmd` and registers it, under the lock, so that a
+    /// cancel can't miss it. On Unix the process leads a group of its own, which is what
+    /// [`cancel`](CancelTree::cancel) signals; hooks git starts join it. Refused once
+    /// cancelled.
+    pub fn start(&self, cmd: &mut Command) -> Result<Child, Start> {
         let mut state = self.lock();
         if state.0 {
             return Err(Start::Cancelled);
         }
-        let child = spawn().map_err(Start::Spawn)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let child = cmd.spawn().map_err(Start::Spawn)?;
         state.1 = Some(child.id());
         Ok(child)
     }
@@ -226,10 +234,6 @@ mod tests {
         cmd
     }
 
-    fn sleeper() -> std::io::Result<Child> {
-        sleeper_command().spawn()
-    }
-
     #[test]
     fn a_started_child_is_killed_by_cancel_and_none_starts_after() {
         let cancel = Cancel::new();
@@ -266,9 +270,12 @@ mod tests {
     fn a_tree_refuses_to_start_once_cancelled() {
         let tree = CancelTree::new();
         tree.cancel();
-        assert!(matches!(tree.start(sleeper), Err(Start::Cancelled)));
+        assert!(matches!(
+            tree.start(&mut sleeper_command()),
+            Err(Start::Cancelled)
+        ));
         let tree = CancelTree::new();
-        let mut child = tree.start(sleeper).unwrap();
+        let mut child = tree.start(&mut sleeper_command()).unwrap();
         assert!(!tree.finish());
         let _ = child.kill();
         let _ = child.wait();

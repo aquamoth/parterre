@@ -1,7 +1,8 @@
 # Architecture
 
 parterre is a Cargo workspace with five crates: the domain library, two adapters over external
-stacks, the handles they share, and the binary (#214).
+stacks, the handles they share, and the binary (#214). Forge depends on core; core and
+highlight on util; the binary on all four; nothing on the binary.
 
 ```
 crates/parterre-util   the cancellation handles: `Cancel` holds the one child process running
@@ -59,9 +60,10 @@ crates/parterre-forge  open pull requests, on core's types
                        origin (and its parent), signed in with `gh auth token`, within a
                        rate-limit budget; HTTPS through ureq behind the `github` feature
 
-crates/parterre-highlight  syntax colour for the diff and blame windows (#209)
+crates/parterre-highlight
+                       syntax colour for the diff and blame windows (#209)
   lib.rs               a file's language from its path; language-neutral spans per line
-                       through tree-sitter, the 23 grammars behind the `syntax` feature;
+                       through tree-sitter, 23 languages behind the `syntax` feature;
                        the child process the app runs them in, with a budget and a Cancel
   proto_highlights.scm the Protocol Buffers query, which its crate doesn't export
 

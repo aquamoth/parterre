@@ -4,6 +4,10 @@ Standalone TortoiseGit-style revision graph viewer. Rust workspace, egui/eframe 
 
 - `crates/parterre-core` must stay free of GUI dependencies; put anything testable there.
 - `crates/parterre` is the app; keep rendering and interaction there.
+- `crates/parterre-forge` (pull requests, `github` feature) and `crates/parterre-highlight`
+  (tree-sitter, `syntax` feature) wrap external stacks: their dependencies live in those
+  manifests only, so an engine is swapped by replacing the crate. `crates/parterre-util` holds
+  the std-only cancellation handles the others share; keep it that small (#214).
 - Behavioural reference for what TortoiseGit does: `docs/research/tortoisegit-revision-graph.md`.
 - Screenshots live in `docs/images/<major>.<minor>/`; published packages link to them, so never
   move or delete one (`docs/releasing.md`).

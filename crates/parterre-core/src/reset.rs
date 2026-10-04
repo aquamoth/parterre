@@ -7,10 +7,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::Oid;
-use crate::branches::{Cancel, Catalog, Error, Report, io_error, lost_commits, run};
+use crate::branches::{Catalog, Error, Report, io_error, lost_commits, run};
 use crate::changed_files::{ChangedFile, FileStatus, compare_paths};
 use crate::file_diff::{DiffOptions, FileDiff, FileDiffSpec, Rev};
 use crate::git::{Git, GitError};
+use parterre_util::CancelTree;
 
 /// git's modes, without `--merge`: that one is for aborting a merge, which is left to the
 /// command line.
@@ -822,7 +823,7 @@ fn overwritten(
 pub(crate) fn execute(
     catalog: &Catalog,
     reset: &Reset,
-    cancel: &Cancel,
+    cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<(), Error> {
     if catalog.current.as_deref() != Some(reset.branch.as_str()) || catalog.head != Some(reset.head)

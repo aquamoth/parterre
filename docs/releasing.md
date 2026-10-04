@@ -40,8 +40,9 @@ at the commit being built, or the sources have local changes. In that case delet
 ## crates.io
 
 Cargo requires a package version in `Cargo.toml` and an equal version on each internal
-dependency (`parterre-util`, `parterre-core`, `parterre-forge`, `parterre-highlight`). After the GitHub release workflow passes, use Python 3.11 or newer to generate a
-separate checkout from the tag:
+dependency (`parterre-util`, `parterre-core`, `parterre-forge`, `parterre-highlight`). After
+the GitHub release workflow passes, use Python 3.11 or newer to generate a separate checkout
+from the tag:
 
 ```sh
 scripts/prepare-crates-release.py v0.5.0-rc1

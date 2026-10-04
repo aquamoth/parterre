@@ -6,8 +6,9 @@ mod common;
 
 use common::{TestRepo, read_text};
 use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Cancel, Catalog, Outcome, Report, Stuck};
+use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck};
 use parterre_core::revert::{self, Preview};
+use parterre_util::CancelTree;
 
 fn rev(r: &TestRepo, rev: &str) -> Oid {
     Oid::from_hex(&r.git(&["rev-parse", rev])).unwrap()
@@ -18,7 +19,7 @@ fn preview(r: &TestRepo, commit: &str) -> Preview {
 }
 
 fn run(r: &TestRepo, action: Action) -> Outcome {
-    Branches::new(r.path()).execute(action, None, &Cancel::default())
+    Branches::new(r.path()).execute(action, None, &CancelTree::default())
 }
 
 fn execute(r: &TestRepo, revert: revert::Revert) -> Outcome {

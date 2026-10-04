@@ -13,7 +13,9 @@ readme = "README.md"
 
 [features]
 # The grammars (#209): tree-sitter and one crate per language, each compiling its parser (C)
-# with `cc` in its build script. Without the feature, no file has a language.
+# with `cc` in its build script. Without the feature, no file has a language, and the tests
+# have nothing to run; on by default so that the crate tests on its own.
+default = ["syntax"]
 syntax = [
     "dep:tree-sitter",
     "dep:tree-sitter-highlight",

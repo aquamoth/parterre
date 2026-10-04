@@ -7,8 +7,9 @@ use std::collections::BTreeSet;
 
 use common::TestRepo;
 use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Cancel, Catalog, Outcome};
+use parterre_core::branches::{Action, Branches, Catalog, Outcome};
 use parterre_core::reset::{self, Lost, Mode, Preview};
+use parterre_util::CancelTree;
 
 fn oid(s: &str) -> Oid {
     Oid::from_hex(s).unwrap()
@@ -23,7 +24,7 @@ fn preview(r: &TestRepo, target: &str) -> Preview {
 }
 
 fn execute(r: &TestRepo, reset: reset::Reset) -> Outcome {
-    Branches::new(r.path()).execute(Action::Reset(Box::new(reset)), None, &Cancel::default())
+    Branches::new(r.path()).execute(Action::Reset(Box::new(reset)), None, &CancelTree::default())
 }
 
 fn done(out: Outcome) {

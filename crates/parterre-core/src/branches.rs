@@ -892,7 +892,7 @@ pub enum Error {
     Cancelled,
 }
 
-pub use parterre_util::CancelTree as Cancel;
+use parterre_util::CancelTree;
 
 #[derive(Clone, Debug, Default)]
 pub struct Report {
@@ -1038,7 +1038,12 @@ impl Branches {
         }
     }
 
-    pub fn execute(&self, action: Action, approval: Option<&Warning>, cancel: &Cancel) -> Outcome {
+    pub fn execute(
+        &self,
+        action: Action,
+        approval: Option<&Warning>,
+        cancel: &CancelTree,
+    ) -> Outcome {
         let mut report = Report::default();
         let requested = action.clone();
         match self.execute_inner(action, approval, cancel, &mut report) {
@@ -1092,7 +1097,7 @@ impl Branches {
         &self,
         action: Action,
         approval: Option<&Warning>,
-        cancel: &Cancel,
+        cancel: &CancelTree,
         report: &mut Report,
     ) -> Result<Option<Warning>, Error> {
         let git = Git::new(&self.path);
@@ -1305,7 +1310,7 @@ impl Branches {
         path: &Path,
         action: &Action,
         approval: Option<&Warning>,
-        cancel: &Cancel,
+        cancel: &CancelTree,
         report: &mut Report,
     ) -> Result<Option<Warning>, Error> {
         let git = Git::new(&self.path);
@@ -1586,7 +1591,7 @@ pub(crate) fn lost_commits(
 pub(crate) fn run(
     git: &Git,
     args: Vec<String>,
-    cancel: &Cancel,
+    cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<bool, Error> {
     run_with(git, args, &[], cancel, report)
@@ -1597,15 +1602,11 @@ pub(crate) fn run_with(
     git: &Git,
     args: Vec<String>,
     env: &[(&str, &str)],
-    cancel: &Cancel,
+    cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<bool, Error> {
     let mut child = cancel
-        .start(|| {
-            git.operation_command(&args)
-                .envs(env.iter().copied())
-                .spawn()
-        })
+        .start(git.operation_command(&args).envs(env.iter().copied()))
         .map_err(|e| match e {
             parterre_util::Start::Cancelled => Error::Cancelled,
             parterre_util::Start::Spawn(e) => GitError::Spawn(e).into(),

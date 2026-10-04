@@ -7,10 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::branches::{Attention, Cancel, Catalog, Error, Report, Stuck, run};
+use crate::branches::{Attention, Catalog, Error, Report, Stuck, run};
 use crate::git::Git;
 use crate::log::is_ancestor;
 use crate::{Oid, Repo};
+use parterre_util::CancelTree;
 
 /// How the branch takes in the other's commits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -609,7 +610,7 @@ fn kept_stash(merge: &Merge, conflicted: usize) -> Attention {
 pub(crate) fn execute(
     catalog: &Catalog,
     merge: &Merge,
-    cancel: &Cancel,
+    cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<(), Error> {
     if let Some(out) = &merge.outgoing {
@@ -662,7 +663,7 @@ fn execute_into(
     catalog: &Catalog,
     merge: &Merge,
     out: &Outgoing,
-    cancel: &Cancel,
+    cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<(), Error> {
     let (source, into) = (&out.source, &merge.branch);

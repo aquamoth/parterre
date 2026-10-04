@@ -8,10 +8,11 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::branches::{Attention, Cancel, Catalog, Error, Report, Stuck, run, run_with};
+use crate::branches::{Attention, Catalog, Error, Report, Stuck, run, run_with};
 use crate::git::Git;
 use crate::log::is_ancestor;
 use crate::{Oid, Repo};
+use parterre_util::CancelTree;
 
 /// A rebase the user agreed to. It runs only while the branch is still where it was.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -286,7 +287,7 @@ impl Preview {
 pub(crate) fn execute(
     catalog: &Catalog,
     rebase: &Rebase,
-    cancel: &Cancel,
+    cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<(), Error> {
     if catalog.current.as_deref() != Some(rebase.branch.as_str())

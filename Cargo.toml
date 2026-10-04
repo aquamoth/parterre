@@ -28,7 +28,8 @@ homepage = "https://github.com/aquamoth/parterre"
 parterre-util = { path = "crates/parterre-util", version = "=0.0.0" }
 parterre-core = { path = "crates/parterre-core", version = "=0.0.0" }
 parterre-forge = { path = "crates/parterre-forge", version = "=0.0.0" }
-parterre-highlight = { path = "crates/parterre-highlight", version = "=0.0.0" }
+# Without its default `syntax`, which the app turns on through its own feature.
+parterre-highlight = { path = "crates/parterre-highlight", version = "=0.0.0", default-features = false }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

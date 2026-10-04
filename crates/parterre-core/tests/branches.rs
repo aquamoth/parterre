@@ -3,15 +3,14 @@ mod common;
 
 use common::TestRepo;
 use parterre_core::Oid;
-use parterre_core::branches::{
-    Action, Branches, Cancel, Catalog, Create, CreateDraft, Outcome, Warning,
-};
+use parterre_core::branches::{Action, Branches, Catalog, Create, CreateDraft, Outcome, Warning};
+use parterre_util::CancelTree;
 
 fn oid(s: &str) -> Oid {
     Oid::from_hex(s).unwrap()
 }
 fn execute(r: &TestRepo, a: Action) -> Outcome {
-    Branches::new(r.path()).execute(a, None, &Cancel::default())
+    Branches::new(r.path()).execute(a, None, &CancelTree::default())
 }
 fn done(out: Outcome) {
     assert!(matches!(out, Outcome::Done(_)), "{out:?}");
@@ -564,7 +563,7 @@ fn warning_contains_exact_endangered_ids_and_approval_deletes_only_that_branch()
             .iter()
             .any(|b| b.name == "topic")
     );
-    done(Branches::new(r.path()).execute(action, Some(&w), &Cancel::default()));
+    done(Branches::new(r.path()).execute(action, Some(&w), &CancelTree::default()));
     assert_eq!(r.git(&["branch", "--show-current"]), "main");
     assert_eq!(Catalog::load(r.path()).unwrap().locals.len(), 1);
     // The warning's snapshot survives removal of the last ref for Show in log.
@@ -579,7 +578,7 @@ fn changed_deletion_tip_cannot_reuse_an_approval() {
     let new_tip = r.commit("new work");
     r.checkout("main");
     assert!(matches!(
-        Branches::new(r.path()).execute(action, Some(&w), &Cancel::default()),
+        Branches::new(r.path()).execute(action, Some(&w), &CancelTree::default()),
         Outcome::Failed { .. }
     ));
     assert_eq!(r.git(&["rev-parse", "topic"]), new_tip);
@@ -602,7 +601,8 @@ fn changing_the_lost_set_with_the_same_count_requires_another_warning() {
     let action = deletion(&r, "topic");
     let first = warning(execute(&r, action.clone()));
     r.git(&["tag", "-f", "protect", &b]);
-    let second = warning(Branches::new(r.path()).execute(action, Some(&first), &Cancel::default()));
+    let second =
+        warning(Branches::new(r.path()).execute(action, Some(&first), &CancelTree::default()));
     assert_eq!(first.commits.len(), second.commits.len());
     assert_ne!(first.commits, second.commits);
     assert_eq!(r.git(&["rev-parse", "main"]), base);
@@ -628,7 +628,7 @@ fn departing_detached_head_warns_before_switch_and_create_and_switch() {
         let w = warning(execute(&r, action.clone()));
         assert_eq!(w.commits, [tip]);
         assert_eq!(r.git(&["rev-parse", "HEAD"]), tip.to_hex());
-        done(Branches::new(r.path()).execute(action, Some(&w), &Cancel::default()));
+        done(Branches::new(r.path()).execute(action, Some(&w), &CancelTree::default()));
     }
 }
 
@@ -694,7 +694,7 @@ fn a_missing_upstream_uses_git_head_fallback_and_a_ref_lock_never_forces_deletio
 fn pre_cancelled_operation_has_no_side_effects() {
     let mut r = TestRepo::new();
     let start = oid(&r.commit("base"));
-    let cancel = Cancel::default();
+    let cancel = CancelTree::default();
     cancel.cancel();
     let out = Branches::new(r.path()).execute(
         Action::Create(Create {
@@ -783,7 +783,7 @@ fn check_checkout_cancellation(ignore_term: bool) {
     .unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     r.git(&["config", "core.hooksPath", hooks.to_str().unwrap()]);
-    let cancel = Cancel::default();
+    let cancel = CancelTree::default();
     let worker_cancel = cancel.clone();
     let branch_tool = Branches::new(r.path());
     let (tx, rx) = std::sync::mpsc::channel();
@@ -825,7 +825,7 @@ fn bare_current_branch_cannot_be_deleted_even_when_git_would_allow_it() {
             tip,
         },
         None,
-        &Cancel::default(),
+        &CancelTree::default(),
     );
     assert!(matches!(outcome, Outcome::Failed { .. }), "{outcome:?}");
     assert_eq!(Catalog::load(bare.path()).unwrap().locals.len(), 1);

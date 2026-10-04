@@ -9,10 +9,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::branches::{Attention, Cancel, Catalog, Error, Report, Stuck, run};
+use crate::branches::{Attention, Catalog, Error, Report, Stuck, run};
 use crate::git::Git;
 use crate::log::is_ancestor;
 use crate::{Oid, Repo};
+use parterre_util::CancelTree;
 
 /// The message of the stash entry *Stash changes* makes.
 pub const STASH_MESSAGE: &str = "parterre: before cherry-pick";
@@ -330,7 +331,7 @@ fn stash_count(git: &Git) -> usize {
 pub(crate) fn execute(
     catalog: &Catalog,
     pick: &CherryPick,
-    cancel: &Cancel,
+    cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<(), Error> {
     if catalog.current.as_deref() != Some(pick.branch.as_str()) || catalog.head != Some(pick.head) {

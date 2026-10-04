@@ -11,7 +11,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-pub use parterre_util::Cancel;
+use parterre_util::Cancel;
 
 use crate::blame::{Blame, BlameOptions, BlameSpec};
 use crate::changed_files::{ChangedFile, parse_diff_tree};
@@ -120,11 +120,6 @@ impl Git {
             cmd.env("LC_ALL", locale);
         } else {
             cmd.env_remove("LC_ALL");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
         }
         cmd
     }

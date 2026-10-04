@@ -14,7 +14,7 @@ use parterre_core::file_diff::FileDiffSpec;
 use parterre_core::reset::{Mode, Preview};
 use parterre_core::worktree_folder;
 use parterre_core::{Oid, RefKind, Repo};
-use parterre_util::CancelTree as Cancel;
+use parterre_util::CancelTree;
 
 use super::cherry_pick::CherryPickDialog;
 use super::merge::MergeDialog;
@@ -1387,7 +1387,7 @@ struct Job {
     path: PathBuf,
     label: String,
     opener: ViewportId,
-    cancel: Cancel,
+    cancel: CancelTree,
     rx: mpsc::Receiver<Outcome>,
     /// The worktree to go to once it's done.
     go_to: Option<PathBuf>,
@@ -1942,7 +1942,7 @@ impl Tool {
         opener: ViewportId,
     ) {
         let (tx, rx) = mpsc::channel();
-        let cancel = Cancel::default();
+        let cancel = CancelTree::default();
         let worker_cancel = cancel.clone();
         let worker_path = path.clone();
         let ctx = ctx.clone();

@@ -86,6 +86,14 @@ jobs:
       - name: Clippy
         if: env.BUILD == 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Each crate on its own, and without the features the app turns on: the workspace build
+      # unifies features and would hide a crate that can't build by itself (#214).
+      - name: Check crates alone
+        if: env.BUILD == 'true'
+        run: |
+          cargo check -p parterre-util -p parterre-core -p parterre-forge -p parterre-highlight
+          cargo check -p parterre-highlight --no-default-features
+          cargo check -p parterre --no-default-features
       - name: Test
         if: env.BUILD == 'true'
         run: cargo test --workspace --no-fail-fast
