@@ -1073,6 +1073,7 @@ impl Form {
         let shown = dialogs::Dialog::new(id, title)
             .opener(self.opener)
             .raise(self.fresh)
+            .resizable()
             .show(ctx, |ui| {
                 let commands = dialogs::fields(ui, |ui| {
                     if let Some(ix) = self.repo.lookup(&self.start) {
@@ -2309,7 +2310,8 @@ impl Tool {
         let busy = self.busy();
         let mut dialog = dialogs::Dialog::new("branch-loss", &title)
             .opener(loss.opener)
-            .raise(loss.fresh);
+            .raise(loss.fresh)
+            .resizable();
         if !confirmation {
             dialog = dialog.icon(TRIANGLE, true);
         }
@@ -2480,6 +2482,7 @@ impl Tool {
         if let Some(n) = self.notices.iter().find(|n| Some(n.id) == self.details) {
             let shown = dialogs::Dialog::new("git-operation-details", &n.title)
                 .width(600.0)
+                .resizable()
                 .show(ctx, |ui| {
                     dialogs::fields(ui, |ui| {
                         ui.weak(n.path.display().to_string());

@@ -125,7 +125,6 @@ impl MergeDialog {
             .resizable()
             .show(ctx, |ui| {
                 // Only the commits scroll: everything else stays in view.
-                let grow = Id::new("merge-commits-rest");
                 if let Some(ix) = self.repo.lookup(&self.preview.theirs)
                     && dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len)
                 {
@@ -133,11 +132,14 @@ impl MergeDialog {
                 }
                 let n = self.commits.len();
                 let min = list_height(n.min(MIN_ROWS));
-                let height = dialogs::growing(ui, grow, list_height(n), min);
-                if let Some(oid) = self.commits_table(ui, palette, options, height) {
+                let natural = list_height(n);
+                let picked = dialogs::growing(ui, min, |ui, height| {
+                    let height = height.unwrap_or(natural);
+                    (self.commits_table(ui, palette, options, height), natural)
+                });
+                if let Some(oid) = picked {
                     asked.log = Some(oid);
                 }
-                let after = ui.cursor().top();
                 self.methods(ui, &name);
                 ui.add_enabled_ui(self.method.commits(), |ui| {
                     ui.label("Message");
@@ -172,9 +174,7 @@ impl MergeDialog {
                     .collect();
                 dialogs::command_box(ui, &commands);
                 let enabled = self.blocked().is_none() && !busy;
-                let answer = dialogs::actions(ui, "Merge", enabled, false, false);
-                dialogs::grown(ui, grow, after, height, min);
-                answer
+                dialogs::actions(ui, "Merge", enabled, false, false)
             });
         self.fresh = false;
         asked.answer = Some(if shown.should_close() {

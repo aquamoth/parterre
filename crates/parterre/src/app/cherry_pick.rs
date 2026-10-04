@@ -123,7 +123,6 @@ impl CherryPickDialog {
             .resizable()
             .show(ctx, |ui| {
                 // Only the commits scroll: everything else stays in view.
-                let grow = Id::new("cherry-pick-commits-rest");
                 if let Some(ix) = self.repo.lookup(&self.preview.head)
                     && dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len)
                 {
@@ -131,11 +130,14 @@ impl CherryPickDialog {
                 }
                 let n = self.commits.len();
                 let min = list_height(n.min(MIN_ROWS));
-                let height = dialogs::growing(ui, grow, list_height(n), min);
-                if let Some(oid) = self.commits_table(ui, palette, options, height) {
+                let natural = list_height(n);
+                let picked = dialogs::growing(ui, min, |ui, height| {
+                    let height = height.unwrap_or(natural);
+                    (self.commits_table(ui, palette, options, height), natural)
+                });
+                if let Some(oid) = picked {
                     asked.log = Some(oid);
                 }
-                let after = ui.cursor().top();
                 self.pick_buttons(ui);
                 if ui
                     .checkbox(
@@ -168,9 +170,7 @@ impl CherryPickDialog {
                     .collect();
                 dialogs::command_box(ui, &commands);
                 let enabled = blocked.is_none() && !busy;
-                let answer = dialogs::actions(ui, "Cherry-pick", enabled, false, false);
-                dialogs::grown(ui, grow, after, height, min);
-                answer
+                dialogs::actions(ui, "Cherry-pick", enabled, false, false)
             });
         self.fresh = false;
         asked.answer = Some(if shown.should_close() {
