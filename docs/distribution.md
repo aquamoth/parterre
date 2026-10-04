@@ -96,9 +96,24 @@ menu with *Download X.Y.Z*, which does what fits the channel parterre came throu
   `SNAP_NAME=parterre` and `FLATPAK_ID=se.trustfall.parterre`.
 - **Pre-releases:** a release build compares with the latest release, a release candidate (or
   a dev build) with the newest of any kind, so it hears of the next candidate and the final.
+- **Not before the first-run prompt:** on the first start, the check waits until the user has
+  answered the prompt about usage statistics (#223, #261); later starts check at once.
 - **Off switches:** *Check for updates* in Settings › Privacy, for users. For packagers, the
   `send` feature: built without it, parterre makes no requests of its own at all
   ([building.md](building.md#features)).
+
+## Usage statistics
+
+At its first start parterre asks, in a dialog that only *Continue* closes, whether to send usage
+statistics (ticked) and crash reports (unticked) to PostHog in the EU (#223, #225, #227, #261).
+Nothing is sent before *Continue*. With usage statistics ticked, a release build sends
+`Application Installed` (first run), `Application Updated` (a new version), `Application Opened`
+(every start) and `Application Backgrounded` (on close), with a random install ID made at the
+first run. The channel above goes with them, as `channel`.
+
+- **Off switches:** the switches in Settings › Privacy; `DO_NOT_TRACK` set (to anything but
+  `0`), which also skips the prompt; and for packagers the `send` feature.
+- What is sent, and how to have it deleted: [What parterre sends](privacy.md).
 
 ## Windows
 

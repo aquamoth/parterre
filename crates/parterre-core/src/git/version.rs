@@ -18,28 +18,40 @@ pub const MINIMUM_VERSION: (u32, u32) = (2, 31);
 /// Fails with [`GitError::TooOld`] if the git parterre runs is older than [`MINIMUM_VERSION`].
 /// git runs once; a failure to start it isn't remembered, so installing git fixes it.
 pub(super) fn check() -> Result<(), GitError> {
-    static TOO_OLD: OnceLock<Option<String>> = OnceLock::new();
-    let too_old = match TOO_OLD.get() {
-        Some(too_old) => too_old,
-        None => {
-            let out = super::git_command()
-                .arg("--version")
-                .output()
-                .map_err(GitError::Spawn)?;
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            TOO_OLD.get_or_init(|| too_old(&stdout))
-        }
-    };
-    match too_old {
-        Some(found) => Err(GitError::TooOld(found.clone())),
+    match too_old(printed().map_err(GitError::Spawn)?) {
+        Some(found) => Err(GitError::TooOld(found)),
         None => Ok(()),
     }
+}
+
+/// The version of the git parterre runs, as `git --version` prints it (`2.43.0`,
+/// `2.47.1.windows.2`), for the usage statistics. `None` if git can't be started or its answer
+/// can't be read.
+pub fn version() -> Option<String> {
+    printed().ok().and_then(read).map(str::to_owned)
+}
+
+/// What `git --version` printed, asked once.
+fn printed() -> Result<&'static str, std::io::Error> {
+    static PRINTED: OnceLock<String> = OnceLock::new();
+    if let Some(printed) = PRINTED.get() {
+        return Ok(printed);
+    }
+    let out = super::git_command().arg("--version").output()?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    Ok(PRINTED.get_or_init(|| stdout))
+}
+
+/// The version in what `git --version` printed.
+fn read(out: &str) -> Option<&str> {
+    let found = out.trim().strip_prefix("git version ")?;
+    (!found.is_empty()).then_some(found)
 }
 
 /// The version `git --version` printed, if it is older than [`MINIMUM_VERSION`]. Output it
 /// can't read passes: better to try than to refuse a git that may well work.
 fn too_old(out: &str) -> Option<String> {
-    let found = out.trim().strip_prefix("git version ")?;
+    let found = read(out)?;
     let mut parts = found.split('.').map(str::parse::<u32>);
     let (Some(Ok(major)), Some(Ok(minor))) = (parts.next(), parts.next()) else {
         return None;
@@ -49,7 +61,19 @@ fn too_old(out: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::too_old;
+    use super::{read, too_old};
+
+    #[test]
+    fn reads_the_version_git_prints() {
+        assert_eq!(read("git version 2.43.0\n"), Some("2.43.0"));
+        assert_eq!(
+            read("git version 2.47.1.windows.2\n"),
+            Some("2.47.1.windows.2")
+        );
+        assert_eq!(read("hub version 2.14.2"), None);
+        assert_eq!(read("git version "), None);
+        assert_eq!(read(""), None);
+    }
 
     #[test]
     fn older_than_the_minimum_is_too_old() {

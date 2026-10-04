@@ -23,7 +23,7 @@ use crate::repo::{Commit, CommitIx, DEFAULT_ABBREV_LEN, GitRef, Head, RefKind, R
 mod program;
 mod version;
 
-pub use version::MINIMUM_VERSION;
+pub use version::{MINIMUM_VERSION, version};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {

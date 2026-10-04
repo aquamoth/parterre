@@ -26,6 +26,7 @@ mod diff_window;
 mod file_table;
 mod log_window;
 mod merge;
+mod privacy;
 mod pull_requests;
 mod rebase;
 mod reset;
@@ -48,7 +49,10 @@ use crate::frame_pacing::FrameLimiter;
 use crate::menu;
 use crate::render::{self, Marks};
 use crate::scene::{FONT_SIZE, Scene, to_point};
-use crate::settings::{MOVES_KEY, RECENT_KEY, RememberedMoves, RepoSettings, Settings, load_moves};
+use crate::settings::{
+    MOVES_KEY, PRIVACY_KEY, Privacy, RECENT_KEY, RememberedMoves, RepoSettings, Settings,
+    load_moves,
+};
 use crate::settings_file::{self, Stored};
 use crate::system_theme::SystemTheme;
 use crate::text_size;
@@ -353,6 +357,8 @@ pub struct ParterreApp {
     refresh_pull_requests: bool,
     /// Asks GitHub whether a newer release is out, while `settings.check_for_updates` is on.
     update_check: Option<parterre_telemetry::UpdateCheck>,
+    /// What is sent to PostHog, and the first-run prompt (#261).
+    telemetry: privacy::Telemetry,
     system_theme: SystemTheme,
     /// The theme last given to the window (its title bar), if any.
     window_theme: Option<egui::SystemTheme>,
@@ -412,6 +418,12 @@ impl ParterreApp {
         if let Some(repo) = &repo {
             recent.add(&repo.path);
         }
+        let privacy = cc
+            .storage
+            .filter(|_| persist)
+            .map(Privacy::load)
+            .unwrap_or_default();
+        let telemetry = privacy::Telemetry::new(privacy, automation.is_active());
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         // One screenshot shows everything: the settings in the main window. So does a
         // recording.
@@ -489,6 +501,7 @@ impl ParterreApp {
             pull_requests_error: None,
             refresh_pull_requests: false,
             update_check: None,
+            telemetry,
             system_theme: SystemTheme::watch(&cc.egui_ctx),
             window_theme: None,
             settings_window_theme: None,
@@ -950,6 +963,7 @@ impl ParterreApp {
             "about" => self.show_about = true,
             "shortcuts" => self.show_shortcuts = true,
             "legend" => self.show_legend = true,
+            "first-run" => self.open_first_run_prompt(),
             "settings" => self.open_settings(self.settings_page),
             _ => {
                 let (kind, arg) = what
@@ -2826,6 +2840,7 @@ impl eframe::App for ParterreApp {
             }
         }
         self.update_pull_requests(&ctx);
+        self.usage_statistics(&ctx);
         self.update_check(&ctx);
         self.ensure_scene(&ctx);
         self.view_before = self.view;
@@ -2864,6 +2879,8 @@ impl eframe::App for ParterreApp {
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         self.about_window(&ctx);
+        // Over everything else.
+        self.first_run_prompt(&ctx, frame);
         let palette = Palette::new(
             ctx.global_style().visuals.dark_mode,
             &self.settings.branch_colors,
@@ -2917,7 +2934,14 @@ impl eframe::App for ParterreApp {
             );
             eframe::set_value(storage, MOVES_KEY, &self.moves);
             eframe::set_value(storage, RECENT_KEY, &self.recent);
+            eframe::set_value(storage, PRIVACY_KEY, &self.telemetry.privacy);
         }
+    }
+
+    /// After [`Self::save`]: `Application Backgrounded`, and the usage statistics queued are
+    /// sent, waiting at most [`parterre_telemetry::CLOSE`].
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.telemetry.close();
     }
 }
 

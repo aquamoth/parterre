@@ -70,14 +70,19 @@ crates/parterre-highlight
   proto_highlights.scm the Protocol Buffers query, which its crate doesn't export
 
 crates/parterre-telemetry
-                       what parterre asks and sends over the network (#175); for now the
-                       update check (#258)
+                       what parterre asks and sends over the network (#175): the update
+                       check (#258) and the usage statistics (#261)
   lib.rs               the update check's thread, at start and then every 24 h; the channel,
                        stamped at build time (`PARTERRE_CHANNEL`), or Snap and Flatpak at
-                       run time
+                       run time; `Usage`, the usage statistics from start to close
   update.rs            versions and their order, which release a build hears of, and where
                        *Download* goes on each channel; no network
+  usage.rs             whether anything may go to PostHog (the first-run prompt's answer,
+                       `DO_NOT_TRACK`, debug builds), the install ID, and which lifecycle
+                       events a launch sends; no network
   github.rs            GitHub's releases API through ureq, behind the `send` feature
+  posthog.rs           all of the PostHog code: posthog-rs's client on a thread of its own,
+                       the events and their standard properties, behind the `send` feature
 
 crates/parterre        the binary (eframe/egui)
   build.rs             asks git for the commit and sets the version string
@@ -86,6 +91,8 @@ crates/parterre        the binary (eframe/egui)
   app.rs               canvas interaction, search, status bar, windows, opening folders
     toolbar.rs         the toolbar, its popovers and the ☰ menu
     updates.rs         the update check as the settings say, and *Download* in the ☰ menu
+    privacy.rs         the first-run prompt, and the usage statistics as the user's choices
+                       say; Settings › Privacy shows them
     settings_window.rs the settings: pages of rows, applied as you change them
     auto_reload.rs     a worker thread that reloads when the refs change
     pull_requests.rs   loads open pull requests on a worker thread while they are shown, cached
@@ -126,7 +133,8 @@ crates/parterre        the binary (eframe/egui)
                        terminal there
   widgets.rs           icon buttons, segmented buttons, switches, text fields
   settings.rs          persisted settings, each repository's (the filters), and the
-                       Classic/Modern looks
+                       Classic/Modern looks; apart from them, what is sent to PostHog (the
+                       first-run prompt's answer and the install ID), never exported or reset
   settings_file.rs     settings as versioned JSON: stored, exported and imported
   automation.rs        scripted runs (--script, --screenshot): steps fed to the window as
                        input, frame by frame; see docs/automation.md
