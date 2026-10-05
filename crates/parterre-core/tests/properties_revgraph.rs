@@ -6,7 +6,7 @@ use parterre_core::layout::{self, LayoutEdge, LayoutInput, LayoutOptions, Point,
 use parterre_core::pattern::BranchPatterns;
 use parterre_core::revgraph::{self, GraphOptions, PullRequestHead, Simplification};
 use parterre_core::{Commit, CommitIx, GitRef, Head, Oid, RefKind, Repo};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 struct Rng(u64);
 impl Rng {
@@ -211,6 +211,8 @@ fn revgraph_invariants_random() {
                 assert_eq!(node.is_merge, out > 1, "{what}: is_merge");
             }
             let mut pairs = HashSet::new();
+            // the ends of the edges each collapsed commit is on
+            let mut ends: HashMap<CommitIx, Vec<u32>> = HashMap::new();
             let mut last_child = 0;
             let mut first_seen_for_child = false;
             for (k, e) in g.edges.iter().enumerate() {
@@ -227,19 +229,12 @@ fn revgraph_invariants_random() {
                 assert!(anc[cc].contains(&pc), "{what}: edge to non-ancestor");
                 // an edge lists as many commits as it counts, hidden ancestors of its child
                 // shown as its parent
-                let collapsed = g.collapsed_commits(&repo, *e, usize::MAX);
-                // (the other modes count one path through hidden merges: #290)
-                if opts.simplification == Simplification::Forks {
-                    assert_eq!(collapsed.len(), e.hidden as usize, "{what}: hidden count");
-                }
-                for c in collapsed {
+                let collapsed = g.collapsed(k);
+                assert_eq!(collapsed.len(), e.hidden as usize, "{what}: hidden count");
+                for &c in collapsed {
                     assert!(g.node_of(c).is_none(), "{what}: node collapsed");
                     assert!(anc[cc].contains(&c.ix()), "{what}: collapsed non-ancestor");
-                    assert_eq!(
-                        g.represented_by(c),
-                        Some(e.parent),
-                        "{what}: collapsed into"
-                    );
+                    ends.entry(c).or_default().push(e.parent);
                 }
                 // grouping
                 if k == 0 || e.child != last_child {
@@ -255,6 +250,14 @@ fn revgraph_invariants_random() {
                         "{what}: first-parent edge not first"
                     );
                 }
+            }
+            // a collapsed commit is shown as the end of one of the edges it is on
+            for (c, ends) in &ends {
+                let r = g.represented_by(*c);
+                assert!(
+                    r.is_some_and(|r| ends.contains(&r)),
+                    "{what}: collapsed into"
+                );
             }
             // head
             if let Some(h) = repo.head_commit() {

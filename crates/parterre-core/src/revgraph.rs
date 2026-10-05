@@ -11,16 +11,19 @@
 //!   fork apart: the same reduction run from the tips down (a fork is a merge, seen backwards).
 //!   Merges are not nodes: a hidden commit stands for all its nearest kept ancestors, so a
 //!   branch that merged its base back in forks off at its latest such merge, as if rebased.
-//!   An edge holds the commits of its child that none of the child's edges' ends has, as
-//!   `git log D..F3` lists them, so the branch's own commits are on that edge. Not in
-//!   TortoiseGit.
+//!   Not in TortoiseGit.
 //! * [`Simplification::BranchesAndMerges`] is TortoiseGit's "Show branchings and merges": also
 //!   keeps every merge, fork point and tip, and every commit whose only child is a merge.
 //! * [`Simplification::AllCommits`] keeps everything.
 //!
+//! In every mode an edge holds the commits of its child that none of the child's edges' ends
+//! has, as `git log D..F3` lists them: across hidden merges, both sides, and in the forks mode
+//! the own commits of a branch hung off its latest merge of its base.
+//!
 //! In the decorated mode, an undecorated root commit with an empty tree counts as unchanged
 //! ("TREESAME") to git: it only appears as the end point of an edge, and merge parents leading
-//! to it are dropped, so merges that join otherwise empty histories disappear. One deliberate
+//! to it are dropped, so merges that join otherwise empty histories disappear (their commits
+//! are collapsed into the merge's other edge). One deliberate
 //! difference: git also hides such a root when it carries a tag or branch; parterre shows it,
 //! rather than silently dropping a label.
 //!
@@ -215,8 +218,7 @@ pub struct RevGraph {
     /// For every visible commit, the node that stands for it (itself, or the nearest kept
     /// ancestor it was collapsed into).
     represented_by: Vec<Option<u32>>,
-    /// In the forks mode, the commits collapsed into each edge, newest first; empty in the
-    /// others, whose edges are runs found by walking.
+    /// The commits collapsed into each edge, newest first.
     edge_commits: Vec<Vec<CommitIx>>,
     /// Number of commits reachable from the visible refs.
     pub visible_commits: usize,
@@ -238,9 +240,9 @@ impl RevGraph {
             .find_map(|c| self.node_of(c))
     }
 
-    /// The node a commit is shown as: itself if it is a node, else the kept ancestor it was
-    /// collapsed into. `None` if the commit is not visible, or if it collapses into an
-    /// empty-tree root that is not shown (see the module docs).
+    /// The node a commit is shown as: itself if it is a node, else the end of an edge it is
+    /// collapsed into. `None` if the commit is not visible, or if it is on no edge because it
+    /// only leads to an empty-tree root that is not shown (see the module docs).
     pub fn represented_by(&self, commit: CommitIx) -> Option<u32> {
         self.represented_by.get(commit.ix()).copied().flatten()
     }
@@ -271,33 +273,10 @@ impl RevGraph {
         (0..n).filter(|&i| inside[i]).collect()
     }
 
-    /// Up to `limit` of the commits collapsed into `edge`, newest first: the run of hidden
-    /// commits from the child's matching parent down to the parent node.
-    pub fn collapsed_commits(&self, repo: &Repo, edge: RevEdge, limit: usize) -> Vec<CommitIx> {
-        if let Some(e) = self.edges.iter().position(|&e| e == edge)
-            && let Some(commits) = self.edge_commits.get(e)
-        {
-            return commits.iter().copied().take(limit).collect();
-        }
-        let child = self.nodes[edge.child as usize].commit;
-        let on_edge =
-            |c: CommitIx| self.node_of(c).is_none() && self.represented_by(c) == Some(edge.parent);
-        let parents = &repo.commit(child).parents;
-        let start = if edge.first_parent {
-            parents.first().copied().filter(|&p| on_edge(p))
-        } else {
-            parents.iter().skip(1).copied().find(|&p| on_edge(p))
-        };
-        let mut out = Vec::new();
-        let mut cur = start;
-        while let Some(c) = cur {
-            if out.len() >= limit {
-                break;
-            }
-            out.push(c);
-            cur = repo.commit(c).parents.iter().copied().find(|&p| on_edge(p));
-        }
-        out
+    /// The commits collapsed into edge `e` (an index into [`RevGraph::edges`]), newest
+    /// first. A commit below a hidden fork is on the edges of both sides.
+    pub fn collapsed(&self, e: usize) -> &[CommitIx] {
+        &self.edge_commits[e]
     }
 }
 
@@ -599,18 +578,18 @@ pub fn build_with_pull_requests(
         })
         .collect();
 
-    // In the forks mode a hidden commit can stand for several nodes, so an edge is not one run
-    // of commits: it holds the child's own commits, those no end of its edges has, each on the
-    // edge of the parent it is reached through (else the child's first edge).
-    let mut edge_commits: Vec<Vec<CommitIx>> = Vec::new();
-    if mode == Simplification::Forks {
+    // An edge is not one run of commits: across a hidden merge it has both sides, and in the
+    // forks mode a hidden commit can stand for several nodes. It holds the child's own commits,
+    // those no end of its edges has, each on the edge of the parent it is reached through (else
+    // the child's first edge).
+    let mut edge_commits: Vec<Vec<CommitIx>> = vec![Vec::new(); edges.len()];
+    {
         let mut pos = vec![0u32; n];
         for (i, &c) in order.iter().enumerate() {
             pos[c] = i as u32;
         }
         let mut walk = OwnCommits::new(n);
         let mut own = Vec::new();
-        edge_commits = vec![Vec::new(); edges.len()];
         let mut start = 0;
         while start < edges.len() {
             let child = edges[start].child;
@@ -624,8 +603,8 @@ pub fn build_with_pull_requests(
             let target = |e: &RevEdge| nodes[e.parent as usize].commit.ix() as u32;
             let through = |k: usize, t: u32| {
                 let p = ps[k].ix();
-                if rep[p] == p as u32 {
-                    p as u32 == t
+                if rep[p] == p as u32 || mode != Simplification::Forks {
+                    rep[p] == t
                 } else {
                     reach[p].iter().any(|&(r, _, _)| r == t)
                 }
@@ -642,19 +621,31 @@ pub fn build_with_pull_requests(
                 ps,
                 &targets,
                 &pos,
-                |c| rep[c] != c as u32,
+                |c| node_of[c].is_none(),
                 &parents_of,
                 &mut own,
             );
             for &(c, k) in &own {
                 let e = start + origin.iter().position(|&o| o == Some(k)).unwrap_or(0);
                 edge_commits[e].push(CommitIx(c as u32));
-                represented_by[c] = Some(edges[e].parent);
             }
             start = end;
         }
+        // A commit on several edges is shown as its representative if one of them ends there,
+        // else as the end of the first.
+        let mut settled = vec![false; n];
+        for (e, commits) in edges.iter().zip(&edge_commits) {
+            for c in commits {
+                settled[c.ix()] |= represented_by[c.ix()] == Some(e.parent);
+            }
+        }
         for (e, commits) in edges.iter_mut().zip(&edge_commits) {
             e.hidden = commits.len() as u32;
+            for c in commits {
+                if !std::mem::replace(&mut settled[c.ix()], true) {
+                    represented_by[c.ix()] = Some(e.parent);
+                }
+            }
         }
     }
 

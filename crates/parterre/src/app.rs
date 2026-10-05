@@ -1978,7 +1978,8 @@ impl ParterreApp {
         // Tooltip for the hovered edge: the commits collapsed into it.
         if let (Some(e), None) = (self.hovered_edge, self.drag) {
             let edge = scene.graph.edges[e];
-            let hidden = scene.graph.collapsed_commits(&scene.repo, edge, 12);
+            let collapsed = scene.graph.collapsed(e);
+            let hidden = &collapsed[..collapsed.len().min(12)];
             response.clone().on_hover_ui_at_pointer(|ui| {
                 ui.label(edge_summary(scene, edge));
                 if edge.hidden == 0 {
@@ -1986,7 +1987,7 @@ impl ParterreApp {
                     return;
                 }
                 ui.label(RichText::new(format!("{} commits collapsed:", edge.hidden)).strong());
-                for c in &hidden {
+                for c in hidden {
                     let commit = scene.repo.commit(*c);
                     ui.horizontal(|ui| {
                         ui.monospace(commit.oid.short(scene.repo.abbrev_len));

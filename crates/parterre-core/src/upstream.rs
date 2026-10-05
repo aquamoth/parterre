@@ -85,31 +85,23 @@ impl Upstream {
     /// The edges of `graph` that hold commits of [`Upstream::commits`], each with the sides
     /// of the commits along it, child end first: the child's own commit, then the commits
     /// collapsed into the edge, newest first. `None` for a commit on both sides.
-    pub fn edge_sides(&self, graph: &RevGraph, repo: &Repo) -> Vec<(usize, Vec<Option<Side>>)> {
+    pub fn edge_sides(&self, graph: &RevGraph) -> Vec<(usize, Vec<Option<Side>>)> {
         if self.commits.is_empty() {
             return Vec::new();
         }
         let sides: HashMap<CommitIx, Side> = self.commits.iter().copied().collect();
-        // Only edges that start at one of the commits, or that run into the node one of them
-        // is collapsed into, can hold any.
-        let parents: HashSet<u32> = self
-            .commits
-            .iter()
-            .filter_map(|&(c, _)| graph.represented_by(c))
-            .collect();
         let mut out = Vec::new();
         for (e, &edge) in graph.edges.iter().enumerate() {
             let child = graph.nodes[edge.child as usize].commit;
-            if !sides.contains_key(&child) && !parents.contains(&edge.parent) {
+            let mut along = std::iter::once(child).chain(graph.collapsed(e).iter().copied());
+            if !along.any(|c| sides.contains_key(&c)) {
                 continue;
             }
             let along: Vec<Option<Side>> = std::iter::once(child)
-                .chain(graph.collapsed_commits(repo, edge, usize::MAX))
+                .chain(graph.collapsed(e).iter().copied())
                 .map(|c| sides.get(&c).copied())
                 .collect();
-            if along.iter().any(Option::is_some) {
-                out.push((e, along));
-            }
+            out.push((e, along));
         }
         out
     }

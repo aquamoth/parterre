@@ -95,11 +95,11 @@ fn decorated_mode_matches_simplify_by_decoration() {
     let repo = r.load();
     let g = revgraph::build(&repo, &with_mode(Simplification::Decorated));
     // B (fork point) and C are undecorated; M's first parent rewrites to A, which is an
-    // ancestor of E, so git drops it and M hangs off E only.
+    // ancestor of E, so git drops it and M hangs off E only. C, which E lacks, is on that edge.
     assert_eq!(node_subjects(&repo, &g), ["A", "E", "M"]);
     assert_eq!(
         edge_list(&repo, &g),
-        [edge("E", "A", true, 2), edge("M", "E", false, 0)]
+        [edge("E", "A", true, 2), edge("M", "E", false, 1)]
     );
 }
 
@@ -262,13 +262,9 @@ fn forks_mode_forks_a_branch_off_where_it_last_merged_its_base() {
         let e = g
             .edges
             .iter()
-            .find(|e| subject(g.nodes[e.child as usize].commit) == child)
-            .copied()
+            .position(|e| subject(g.nodes[e.child as usize].commit) == child)
             .unwrap();
-        g.collapsed_commits(&repo, e, 10)
-            .into_iter()
-            .map(subject)
-            .collect()
+        g.collapsed(e).iter().copied().map(subject).collect()
     };
     assert_eq!(collapsed("F3"), ["F2", "F1"]);
     assert_eq!(collapsed("D"), ["C", "B"]);
@@ -425,9 +421,10 @@ fn decorated_mode_drops_merges_of_empty_rooted_histories() {
     r.git(&["branch", "-D", "imported"]);
     let repo = r.load();
     let g = revgraph::build(&repo, &with_mode(Simplification::Decorated));
-    // git log --simplify-by-decoration shows only M; A is shown as the end of M's edge.
+    // git log --simplify-by-decoration shows only M; A is shown as the end of M's edge, which
+    // holds the imported history (#290).
     assert_eq!(node_subjects(&repo, &g), ["A", "M"]);
-    assert_eq!(edge_list(&repo, &g), [edge("M", "A", true, 0)]);
+    assert_eq!(edge_list(&repo, &g), [edge("M", "A", true, 2)]);
     let g = revgraph::build(&repo, &with_mode(Simplification::BranchesAndMerges));
     assert!(node_subjects(&repo, &g).contains(&"R".to_owned()));
 }
@@ -632,14 +629,9 @@ fn lists_commits_collapsed_into_an_edge() {
     let e_to_b = g
         .edges
         .iter()
-        .find(|e| subject(g.nodes[e.child as usize].commit) == "E")
-        .copied()
+        .position(|e| subject(g.nodes[e.child as usize].commit) == "E")
         .unwrap();
-    let hidden: Vec<String> = g
-        .collapsed_commits(&repo, e_to_b, 10)
-        .into_iter()
-        .map(subject)
-        .collect();
+    let hidden: Vec<String> = g.collapsed(e_to_b).iter().copied().map(subject).collect();
     assert_eq!(hidden, ["D"]);
 
     let g = revgraph::build(&repo, &with_mode(Simplification::Decorated));
@@ -647,17 +639,38 @@ fn lists_commits_collapsed_into_an_edge() {
     let e_to_a = g
         .edges
         .iter()
-        .find(|e| subject(g.nodes[e.child as usize].commit) == "E")
-        .copied()
+        .position(|e| subject(g.nodes[e.child as usize].commit) == "E")
         .unwrap();
-    assert_eq!(e_to_a.hidden, 2);
-    let hidden: Vec<String> = g
-        .collapsed_commits(&repo, e_to_a, 10)
-        .into_iter()
-        .map(subject)
-        .collect();
+    assert_eq!(g.edges[e_to_a].hidden, 2);
+    let hidden: Vec<String> = g.collapsed(e_to_a).iter().copied().map(subject).collect();
     assert_eq!(hidden, ["D", "B"]);
-    assert_eq!(g.collapsed_commits(&repo, e_to_a, 1).len(), 1);
+}
+
+/// main: A - B - C - M - E
+///          \       /
+///           D -----       (only main is labelled)
+#[test]
+fn an_edge_holds_both_sides_of_a_hidden_merge() {
+    let mut r = TestRepo::new();
+    r.commit("A");
+    r.branch("f");
+    r.commit("B");
+    r.commit("C");
+    r.checkout("f");
+    r.commit("D");
+    r.checkout("main");
+    r.merge("f", "M");
+    r.git(&["branch", "-D", "f"]);
+    r.commit("E");
+    let repo = r.load();
+    let g = revgraph::build(&repo, &with_mode(Simplification::Decorated));
+    // As `git log A..E` lists them (#290).
+    assert_eq!(edge_list(&repo, &g), [edge("E", "A", true, 4)]);
+    let subject = |c: parterre_core::CommitIx| repo.commit(c).subject.clone();
+    let mut hidden: Vec<String> = g.collapsed(0).iter().copied().map(subject).collect();
+    assert_eq!(hidden[0], "M");
+    hidden.sort();
+    assert_eq!(hidden, ["B", "C", "D", "M"]);
 }
 
 #[test]
