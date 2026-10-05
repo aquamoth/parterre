@@ -134,7 +134,18 @@ them back afterwards. A worktree stopped part-way, by a conflict or a `break`, s
 graph: a rebase with an orange zigzag from its HEAD (the commits replayed so far) to the branch
 being rebased, a merge or cherry-pick with an orange dashed arrow to the commit coming in. A
 banner across the graph says what is stopped and lists the conflicted files; finish or abort it
-with git, or go to another worktree.
+with git, or go to another worktree. It shows at once after parterre's own operations, and
+after a change made elsewhere once it has lasted a moment, so a slow `git` in a terminal
+doesn't flash it.
+
+The banner's *Compare with working tree* lists HEAD against the working tree, as the graph's
+menu does, with each conflicted file's code from `git status` (`UU`, `AA`, `UD`, `DU`, …). A
+file's menu opens it in your merge tool (`git mergetool`, left running on its own), or its folder
+in a terminal or the file manager. When no merge tool is configured, parterre lists the installed
+ones; *Remember this choice* sets `merge.tool` in your global git config. Any conflict but a
+submodule's can also be finished by taking one side whole: *Use mine (main)* or *Use theirs
+(feature)*, saying *deleted* where that side deleted the file. In a rebase, *mine* is your branch
+being replayed. Submodules are left to the terminal.
 
 ## Pull requests
 

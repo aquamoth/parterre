@@ -53,6 +53,8 @@ names! {
         CherryPick => "cherry_pick",
         Revert => "revert",
         RestoreStash => "restore_stash",
+        /// The picker of merge tools, when none is usable.
+        MergeTool => "merge_tool",
         /// What a git operation printed.
         OperationDetails => "operation_details",
         /// The question before opening many diff windows at once.
@@ -100,6 +102,9 @@ names! {
         CherryPick => "cherry_pick",
         Revert => "revert",
         RestoreStash => "restore_stash",
+        /// Keep, delete or take a side of a conflicted file.
+        ResolveConflict => "resolve_conflict",
+        OpenMergeTool => "open_merge_tool",
         OpenRepository => "open_repository",
         CloseRepository => "close_repository",
         Reload => "reload",

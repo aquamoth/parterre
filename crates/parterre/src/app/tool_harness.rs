@@ -296,3 +296,97 @@ pub fn banner_texts(dir: &Path) -> Vec<String> {
     }
     texts.into_iter().map(|(t, _)| t).collect()
 }
+
+/// A merge of `feature` into `main` that stops with `text.txt` conflicted in content and
+/// `gone.txt` deleted by `feature` but changed on `main`.
+pub fn stuck_merge() -> tempfile::TempDir {
+    let dir = before_merge();
+    merge_stops(dir.path());
+    dir
+}
+
+/// [`stuck_merge`]'s history before `main` changes and merges.
+pub fn before_merge() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    git(p, &["init", "-q", "-b", "main"]);
+    git(p, &["config", "user.name", "Test"]);
+    git(p, &["config", "user.email", "test@example.com"]);
+    write(p, "text.txt", "one\ntwo\n");
+    write(p, "gone.txt", "base\n");
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "Base"]);
+    git(p, &["switch", "-q", "-c", "feature"]);
+    write(p, "text.txt", "one\nTWO (feature)\n");
+    git(p, &["rm", "-q", "gone.txt"]);
+    git(p, &["commit", "-q", "-am", "Feature"]);
+    git(p, &["switch", "-q", "main"]);
+    dir
+}
+
+/// On `main` of [`before_merge`]'s history: changes both files and merges `feature`, which
+/// stops.
+pub fn merge_stops(p: &Path) {
+    write(p, "text.txt", "one\n2 (main)\n");
+    write(p, "gone.txt", "main\n");
+    git(p, &["commit", "-q", "-am", "Main"]);
+    try_merge(p);
+}
+
+/// `git merge feature`, which may stop.
+pub fn try_merge(p: &Path) {
+    let out = Command::new("git")
+        .current_dir(p)
+        .args(["merge", "-q", "feature"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "the merge stops");
+}
+
+/// The texts `banner` shows for the repository at `dir`, after clicking `click` if given,
+/// and what the click asked for.
+pub fn banner_click(dir: &Path, click: &str) -> Option<super::rebase::BannerClick> {
+    let (repo, catalog) = load(dir);
+    let ctx = egui::Context::default();
+    let frame = |events: Vec<Event>, texts: &mut Vec<(String, Rect)>| {
+        let mut clicked = None;
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 600.0))),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            clicked = super::rebase::banner(ui, &repo, &catalog);
+        });
+        output.textures_delta.clear();
+        texts.clear();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, texts);
+        }
+        clicked
+    };
+    let mut texts = Vec::new();
+    frame(Vec::new(), &mut texts);
+    let at = texts
+        .iter()
+        .find(|(t, _)| t == click)
+        .unwrap_or_else(|| panic!("no {click:?}: {texts:?}"))
+        .1
+        .center();
+    let mut clicked = None;
+    for pressed in [true, false] {
+        let events = vec![
+            Event::PointerMoved(at),
+            Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        clicked = clicked.or(frame(events, &mut texts));
+    }
+    clicked
+}

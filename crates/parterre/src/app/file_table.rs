@@ -15,6 +15,8 @@ use parterre_core::changed_files::{
     ChangedFile, FileColumn, FileOrder, FileStatus, filter_and_sort,
 };
 use parterre_core::columns::{ColumnWidths, Layout};
+use parterre_core::compare::WorkingTree;
+use parterre_core::conflicts::Answer;
 use parterre_core::file_diff::GITLINK_MODE;
 use parterre_core::git::Git;
 use parterre_core::text::{elide_start, thousands};
@@ -80,6 +82,21 @@ enum MenuPick {
     /// Show changes: the selected files, or this one.
     Open(usize),
     Blame(usize),
+    /// One of the working tree's items.
+    Row(usize, RowPick),
+}
+
+/// What a working-tree row's menu asked for, for its one file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowPick {
+    /// *Open in merge tool*.
+    MergeTool,
+    /// *Keep*, *Delete* or *Use …*.
+    Answer(Answer),
+    /// *Open terminal* in the file's folder.
+    Terminal,
+    /// *Open file system* at the file's folder.
+    FileSystem,
 }
 
 /// What the table asks its window for.
@@ -89,6 +106,8 @@ pub struct TableAction<'f> {
     pub open: Vec<&'f ChangedFile>,
     /// A blame window to open (the row menu's *Blame*).
     pub blame: Option<&'f ChangedFile>,
+    /// A working-tree row's item picked, for its file.
+    pub row: Option<(&'f ChangedFile, RowPick)>,
 }
 
 impl FileTable {
@@ -112,7 +131,25 @@ impl FileTable {
         bar: impl FnOnce(&mut Ui),
     ) -> TableAction<'f> {
         let files = files.map(|l| l.as_deref().map_err(String::as_str));
-        self.table(ui, c, name, owner, files, None, bar)
+        self.table(ui, c, name, owner, files, None, None, bar)
+    }
+
+    /// [`FileTable::show`] for a list against the working tree: conflicted files show git's
+    /// code (`UU`, `UD`, …) as their status, and each row's menu opens the file's folder, and
+    /// the merge tool or finishes the file, as its conflict allows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn show_working_tree<'f>(
+        &mut self,
+        ui: &mut Ui,
+        c: &Colors,
+        name: &str,
+        owner: Id,
+        files: Option<&'f Listing>,
+        tree: Option<&WorkingTree>,
+        bar: impl FnOnce(&mut Ui),
+    ) -> TableAction<'f> {
+        let files = files.map(|l| l.as_deref().map_err(String::as_str));
+        self.table(ui, c, name, owner, files, None, tree, bar)
     }
 
     /// [`FileTable::show`], with each file's Status column as `badges`, one per file listed.
@@ -128,7 +165,7 @@ impl FileTable {
         bar: impl FnOnce(&mut Ui),
     ) -> TableAction<'f> {
         debug_assert_eq!(files.len(), badges.len());
-        self.table(ui, c, name, owner, Some(Ok(files)), Some(badges), bar)
+        self.table(ui, c, name, owner, Some(Ok(files)), Some(badges), None, bar)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -140,6 +177,7 @@ impl FileTable {
         owner: Id,
         files: Option<Result<&'f [ChangedFile], &str>>,
         badges: Option<&[Badges]>,
+        tree: Option<&WorkingTree>,
         bar: impl FnOnce(&mut Ui),
     ) -> TableAction<'f> {
         if self.selection.owner != Some(owner) {
@@ -348,9 +386,20 @@ impl FileTable {
                         _ => text,
                     };
                     let badged = badges.map(|b| &b[shown[row]]);
-                    match badged {
-                        Some(b) => paint_badges(ui, &b.badges, pos2(x[2] + CELL_PAD, y)),
-                        None => put(
+                    let conflict = tree.and_then(|t| t.conflict(&file.path));
+                    match (badged, conflict) {
+                        (_, Some(conflict)) => put(
+                            cell(
+                                ui,
+                                conflict.code(),
+                                FontId::monospace(body.size),
+                                c.removed,
+                                w[2] - 2.0 * CELL_PAD,
+                            ),
+                            x[2] + CELL_PAD,
+                        ),
+                        (Some(b), None) => paint_badges(ui, &b.badges, pos2(x[2] + CELL_PAD, y)),
+                        (None, None) => put(
                             cell(
                                 ui,
                                 file.status.name(),
@@ -373,14 +422,14 @@ impl FileTable {
                     put_right(count(file.removed, c.removed), x[4] + w[4] - CELL_PAD);
                     let path_rect = Rect::from_x_y_ranges(x[0]..=x[0] + w[0], rect.y_range());
                     let status_rect = Rect::from_x_y_ranges(x[2]..=x[2] + w[2], rect.y_range());
-                    let response = match badged {
-                        Some(b)
-                            if response
-                                .hover_pos()
-                                .is_some_and(|p| status_rect.contains(p)) =>
-                        {
-                            response.on_hover_text(&b.words)
+                    let on_status = response
+                        .hover_pos()
+                        .is_some_and(|p| status_rect.contains(p));
+                    let response = match (badged, conflict) {
+                        (_, Some(conflict)) if on_status => {
+                            response.on_hover_text_at_pointer(capitalized(conflict.words()))
                         }
+                        (Some(b), None) if on_status => response.on_hover_text_at_pointer(&b.words),
                         _ => response,
                     };
                     let response =
@@ -399,8 +448,20 @@ impl FileTable {
                                 ui.set_min_width(crate::menu::MIN_WIDTH);
                                 let chosen = selection.paths.len();
                                 let many = chosen > 1 && selection.paths.contains(&file.path);
-                                if let Some(p) = row_menu(ui, row, file, many.then_some(chosen)) {
+                                if let Some(p) =
+                                    row_menu(ui, row, file, many.then_some(chosen), tree)
+                                {
                                     pick = Some(p);
+                                }
+                                if let Some(tree) = tree
+                                    && let Some(p) = working_tree_menu(ui, tree, file)
+                                {
+                                    pick = Some(MenuPick::Row(row, p));
+                                }
+                                crate::menu::separator(ui);
+                                if ui.button("Copy path").clicked() {
+                                    ui.ctx().copy_text(file.path.clone());
+                                    ui.close();
                                 }
                             });
                         });
@@ -413,6 +474,7 @@ impl FileTable {
         let sel = &mut self.selection;
         let mut open = Vec::new();
         let mut blame = None;
+        let mut picked_row = None;
         match pick {
             // The selection, if the row is in it; the row became the selection otherwise.
             Some(MenuPick::Open(row)) => {
@@ -429,6 +491,7 @@ impl FileTable {
                 }
             }
             Some(MenuPick::Blame(row)) => blame = Some(&files[shown[row]]),
+            Some(MenuPick::Row(row, p)) => picked_row = Some((&files[shown[row]], p)),
             None => {}
         }
         match click {
@@ -479,7 +542,11 @@ impl FileTable {
                     .filter(|f| sel.paths.contains(&f.path)),
             );
         }
-        TableAction { open, blame }
+        TableAction {
+            open,
+            blame,
+            row: picked_row,
+        }
     }
 }
 
@@ -513,7 +580,13 @@ fn paint_badges(ui: &Ui, badges: &[Badge], at: egui::Pos2) {
 
 /// The menu of a changed file's row: its diff (or the diffs of the `many` files chosen, when
 /// it is one of them), blame, and copying its path.
-fn row_menu(ui: &mut Ui, row: usize, file: &ChangedFile, many: Option<usize>) -> Option<MenuPick> {
+fn row_menu(
+    ui: &mut Ui,
+    row: usize,
+    file: &ChangedFile,
+    many: Option<usize>,
+    tree: Option<&WorkingTree>,
+) -> Option<MenuPick> {
     let mut pick = None;
     let text = match many {
         Some(n) => format!("Show changes ({n} files)"),
@@ -530,7 +603,10 @@ fn row_menu(ui: &mut Ui, row: usize, file: &ChangedFile, many: Option<usize>) ->
         Some("The file is gone in this version")
     } else if file.modes.contains(&GITLINK_MODE) {
         Some("A submodule has no lines to blame")
-    } else if file.is_binary() {
+    } else if tree
+        .and_then(|t| t.conflict(&file.path))
+        .map_or(file.is_binary(), |c| c.binary)
+    {
         Some("A binary file has no lines to blame")
     } else {
         None
@@ -542,12 +618,67 @@ fn row_menu(ui: &mut Ui, row: usize, file: &ChangedFile, many: Option<usize>) ->
         pick = Some(MenuPick::Blame(row));
         ui.close();
     }
-    crate::menu::separator(ui);
-    if ui.button("Copy path").clicked() {
-        ui.ctx().copy_text(file.path.clone());
-        ui.close();
-    }
     pick
+}
+
+/// A working-tree row's items: the merge tool (greyed, with why, where it can't help), what
+/// finishes its conflict in parterre, and the file's folder in a terminal or the file system.
+fn working_tree_menu(ui: &mut Ui, tree: &WorkingTree, file: &ChangedFile) -> Option<RowPick> {
+    let mut pick = None;
+    let mut item = |ui: &mut Ui, response: Response, p: RowPick| {
+        if response.clicked() {
+            pick = Some(p);
+            ui.close();
+        }
+    };
+    crate::menu::separator(ui);
+    let conflict = tree.conflict(&file.path);
+    let why = match conflict {
+        Some(c) => c.merge_tool().err(),
+        None => Some("Not conflicted"),
+    };
+    let tool = ui
+        .add_enabled(why.is_none(), egui::Button::new("Open in merge tool"))
+        .on_disabled_hover_text(why.unwrap_or_default());
+    item(ui, tool, RowPick::MergeTool);
+    if let Some(c) = conflict {
+        for answer in tree.sides.mine_first(c.answers()) {
+            let commands: Vec<String> = c
+                .commands(answer)
+                .iter()
+                .map(|args| format!("git {}", args.join(" ")))
+                .collect();
+            let response = ui
+                .button(c.item(&tree.sides, answer))
+                .on_hover_text(commands.join("\n"));
+            item(ui, response, RowPick::Answer(answer));
+        }
+    }
+    crate::menu::separator(ui);
+    let terminal = ui.button("Open terminal");
+    item(ui, terminal, RowPick::Terminal);
+    let files = ui.button("Open file system");
+    item(ui, files, RowPick::FileSystem);
+    pick
+}
+
+/// `both modified` as `Both modified`.
+fn capitalized(words: &str) -> String {
+    let mut chars = words.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// The folder holding `path` in the worktree at `root`, or the nearest one that still exists.
+pub fn file_folder(root: &std::path::Path, path: &str) -> std::path::PathBuf {
+    let mut dir = root.join(path);
+    dir.pop();
+    while !dir.is_dir() && dir.starts_with(root) && dir != root {
+        dir.pop();
+    }
+    if dir.is_dir() { dir } else { root.to_owned() }
 }
 
 /// Diff windows asked for, held back while "Open all?" is asked when there are many.
@@ -957,5 +1088,169 @@ mod tests {
         // The ellipsis and the folder share one weak section.
         let colors: Vec<_> = job.sections.iter().map(|s| s.format.color).collect();
         assert_eq!(colors, [weak, text]);
+    }
+
+    /// The compare window's table against a stopped merge, frame by frame: what it shows and
+    /// what a row's menu picked.
+    struct Table {
+        ctx: egui::Context,
+        table: FileTable,
+        listing: Listing,
+        tree: WorkingTree,
+        texts: Vec<(String, Rect)>,
+    }
+
+    impl Table {
+        fn new(dir: &std::path::Path) -> Table {
+            let git = parterre_core::git::Git::new(dir);
+            let head = parterre_core::Oid::from_hex(&super::super::tool_harness::git(
+                dir,
+                &["rev-parse", "HEAD"],
+            ))
+            .unwrap();
+            let compared = parterre_core::compare::Comparison::with_working_tree(head, false)
+                .run(&git)
+                .unwrap();
+            let mut t = Table {
+                ctx: egui::Context::default(),
+                table: FileTable::default(),
+                listing: Ok(compared.files),
+                tree: compared.working_tree.unwrap(),
+                texts: Vec::new(),
+            };
+            t.frame(Vec::new());
+            t
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> Option<(String, RowPick)> {
+            let mut picked = None;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 600.0))),
+                events,
+                ..Default::default()
+            };
+            let (table, listing, tree) = (&mut self.table, &self.listing, &self.tree);
+            let mut output = self.ctx.run_ui(input, |ui| {
+                let c = super::super::log_window::colors(ui);
+                let action = table.show_working_tree(
+                    ui,
+                    &c,
+                    "test",
+                    Id::new("test"),
+                    Some(listing),
+                    Some(tree),
+                    |_| {},
+                );
+                picked = action.row.map(|(f, p)| (f.path.clone(), p));
+            });
+            output.textures_delta.clear();
+            self.texts.clear();
+            for clipped in &output.shapes {
+                super::super::tool_harness::collect(&clipped.shape, &mut self.texts);
+            }
+            let clashes: Vec<_> = self
+                .texts
+                .iter()
+                .filter(|(t, _)| t.contains("use of"))
+                .collect();
+            assert!(clashes.is_empty(), "egui reports id clashes: {clashes:?}");
+            picked
+        }
+
+        fn shows(&self, text: &str) -> bool {
+            self.texts.iter().any(|(t, _)| t == text)
+        }
+
+        fn click(&mut self, text: &str, button: egui::PointerButton) -> Option<(String, RowPick)> {
+            let at = self
+                .texts
+                .iter()
+                .find(|(t, _)| t == text)
+                .unwrap_or_else(|| panic!("no {text:?}: {:?}", self.texts))
+                .1
+                .center();
+            let mut picked = None;
+            for pressed in [true, false] {
+                let events = vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::PointerButton {
+                        pos: at,
+                        button,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    },
+                ];
+                picked = picked.or(self.frame(events));
+            }
+            picked.or(self.frame(Vec::new()))
+        }
+    }
+
+    #[test]
+    fn conflicted_rows_show_git_s_codes() {
+        let dir = super::super::tool_harness::stuck_merge();
+        let t = Table::new(dir.path());
+        assert!(t.shows("UU"), "{:?}", t.texts);
+        assert!(t.shows("UD"));
+        // `gone.txt` is the same as HEAD's, which `git diff HEAD` leaves out.
+        assert!(t.shows("gone.txt"));
+    }
+
+    #[test]
+    fn a_file_deleted_by_them_takes_a_side_but_not_the_merge_tool() {
+        let dir = super::super::tool_harness::stuck_merge();
+        let mut t = Table::new(dir.path());
+        t.click("gone.txt", egui::PointerButton::Secondary);
+        for item in [
+            "Open in merge tool",
+            "Use mine (main)",
+            "Use theirs (feature, deleted)",
+            "Open terminal",
+            "Open file system",
+        ] {
+            assert!(t.shows(item), "{item}: {:?}", t.texts);
+        }
+        // Greyed out: clicking it picks nothing.
+        assert_eq!(
+            t.click("Open in merge tool", egui::PointerButton::Primary),
+            None
+        );
+        t.click("gone.txt", egui::PointerButton::Secondary);
+        assert_eq!(
+            t.click(
+                "Use theirs (feature, deleted)",
+                egui::PointerButton::Primary
+            ),
+            Some(("gone.txt".to_owned(), RowPick::Answer(Answer::Theirs)))
+        );
+    }
+
+    #[test]
+    fn a_content_conflict_opens_in_the_merge_tool() {
+        let dir = super::super::tool_harness::stuck_merge();
+        let mut t = Table::new(dir.path());
+        t.click("text.txt", egui::PointerButton::Secondary);
+        // Or either side, whole.
+        assert!(t.shows("Use mine (main)"));
+        assert!(t.shows("Use theirs (feature)"));
+        assert_eq!(
+            t.click("Open in merge tool", egui::PointerButton::Primary),
+            Some(("text.txt".to_owned(), RowPick::MergeTool))
+        );
+        t.click("text.txt", egui::PointerButton::Secondary);
+        assert_eq!(
+            t.click("Open file system", egui::PointerButton::Primary),
+            Some(("text.txt".to_owned(), RowPick::FileSystem))
+        );
+    }
+
+    #[test]
+    fn a_file_s_folder_is_the_nearest_that_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        assert_eq!(file_folder(root, "a/b/c.txt"), root.join("a/b"));
+        assert_eq!(file_folder(root, "a/gone/c.txt"), root.join("a"));
+        assert_eq!(file_folder(root, "top.txt"), root.to_owned());
     }
 }

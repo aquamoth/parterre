@@ -509,16 +509,12 @@ mod tests {
             h.shows("Revert stopped on conflicts in 1 file")
         });
         assert!(!h.shows("Restore stashed changes?"));
-        let (repo, catalog) = load(h.path());
+        let (_, catalog) = load(h.path());
         assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a revert")));
         let texts = banner_texts(h.path());
-        let expected = format!(
-            "Reverting {} in main: 1 conflicted file",
-            reverted.short(repo.abbrev_len.max(7))
-        );
-        assert!(texts.contains(&expected), "{texts:?}");
+        assert!(texts.contains(&"1 conflicted file".to_owned()), "{texts:?}");
         assert!(
-            texts.contains(&" Your changes are stashed in stash@{0}.".to_owned()),
+            texts.contains(&"Your changes are stashed in stash@{0}.".to_owned()),
             "{texts:?}"
         );
         // Greyed out until it's finished with git.

@@ -6,6 +6,7 @@
 //! working tree, on the range of a range log, and against the commit marked for comparison. The mark is kept by the
 //! app ([`ParterreApp::marked`](super::ParterreApp)) so that it outlives the log it was made in.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use eframe::egui::text::{LayoutJob, TextFormat, TextWrapping};
@@ -13,16 +14,17 @@ use eframe::egui::{
     self, FontId, Id, Key, RichText, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use parterre_core::blame::BlameSpec;
-use parterre_core::compare::Comparison;
+use parterre_core::compare::{Comparison, WorkingTree};
+use parterre_core::conflicts::Resolve;
 use parterre_core::file_diff::{FileDiffSpec, Rev};
 use parterre_core::glyphs;
 use parterre_core::log::commit_name;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::{Oid, Repo};
 
-use super::ParterreApp;
-use super::file_table::{DiffQueue, FileTable, Lister, Listing};
+use super::file_table::{DiffQueue, FileTable, Lister, Listing, RowPick, file_folder};
 use super::log_window::{Colors, badge, badges, colors};
+use super::{Opener, ParterreApp};
 use crate::settings::CompareWindowSettings;
 use crate::text_size;
 use crate::theme::Palette;
@@ -31,7 +33,7 @@ use crate::widgets;
 /// Height of a side's line in the header.
 const SIDE_ROW: f32 = 26.0;
 
-fn viewport_id() -> egui::ViewportId {
+pub(super) fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("compare")
 }
 
@@ -47,8 +49,19 @@ pub enum CompareRequest {
 }
 
 /// Where the left side is read from (`None` for unrelated histories' common ancestor, or on
-/// failure) and the files.
-type Compared = (Option<Rev>, Listing);
+/// failure), the files, and the working tree's conflicts when a side is the working tree.
+type Compared = (Option<Rev>, Listing, Option<WorkingTree>);
+
+/// What a working-tree row asked the app for.
+#[derive(Clone, Debug)]
+pub enum FileRequest {
+    /// Open the file in the merge tool; `root` is the worktree's folder.
+    MergeTool { root: PathBuf, path: String },
+    /// Finish the file in parterre.
+    Resolve(Resolve),
+    /// Open the file's folder in a terminal or the file system.
+    Open(Opener, PathBuf),
+}
 
 /// The compare window's state that outlives what it shows.
 #[derive(Debug, Default)]
@@ -64,6 +77,8 @@ pub struct CompareWindow {
     diffs: DiffQueue<(Arc<Repo>, FileDiffSpec)>,
     /// Blame windows asked for, for the app to take.
     blames: Vec<(Arc<Repo>, BlameSpec)>,
+    /// What working-tree rows asked for, for the app to take.
+    pub requests: Vec<FileRequest>,
 }
 
 #[derive(Debug)]
@@ -117,6 +132,18 @@ impl CompareWindow {
             if view.comparison.reads_working_tree() {
                 self.files = Lister::default();
             }
+        }
+    }
+
+    /// Lists the working tree again, if a side is the working tree: its conflicted files
+    /// changed, which moves no refs.
+    pub fn relist_working_tree(&mut self) {
+        if self
+            .view
+            .as_ref()
+            .is_some_and(|v| v.comparison.reads_working_tree())
+        {
+            self.files = Lister::default();
         }
     }
 
@@ -185,20 +212,22 @@ impl CompareWindow {
         let ctx = ui.ctx().clone();
         let listed = self.files.get(&view.repo.path, comparison, &ctx, |git, c| {
             match c.run(git) {
-                Ok(compared) => (compared.base, Ok(compared.files)),
-                Err(e) => (None, Err(e.to_string())),
+                Ok(compared) => (compared.base, Ok(compared.files), compared.working_tree),
+                Err(e) => (None, Err(e.to_string()), None),
             }
         });
-        let base = listed.and_then(|(base, files)| files.is_ok().then_some(*base));
+        let base = listed.and_then(|(base, files, _)| files.is_ok().then_some(*base));
+        let tree = listed.and_then(|(_, _, tree)| tree.as_ref());
         let weak = ui.visuals().weak_text_color();
         let abbrev = view.repo.abbrev_len;
         let since = &mut env.settings.since_ancestor;
-        let action = self.table.show(
+        let action = self.table.show_working_tree(
             ui,
             c,
             "compare",
             Id::new(comparison),
-            listed.map(|(_, files)| files),
+            listed.map(|(_, files, _)| files),
+            tree,
             |ui| {
                 ui.add_space(8.0);
                 widgets::tip_explained(
@@ -221,6 +250,29 @@ impl CompareWindow {
                 ui.label(RichText::new(note).size(12.0).color(weak));
             },
         );
+        if let (Some((file, pick)), Some(tree)) = (action.row, tree) {
+            let conflict = tree.conflict(&file.path);
+            self.requests.push(match pick {
+                RowPick::MergeTool => FileRequest::MergeTool {
+                    root: tree.root.clone(),
+                    path: file.path.clone(),
+                },
+                RowPick::Answer(answer) => {
+                    let Some(conflict) = conflict else { return };
+                    FileRequest::Resolve(Resolve {
+                        conflict: conflict.clone(),
+                        answer,
+                        item: conflict.item(&tree.sides, answer),
+                    })
+                }
+                RowPick::Terminal => {
+                    FileRequest::Open(Opener::Terminal, file_folder(&tree.root, &file.path))
+                }
+                RowPick::FileSystem => {
+                    FileRequest::Open(Opener::FileManager, file_folder(&tree.root, &file.path))
+                }
+            });
+        }
         // The right-hand side's version, as TortoiseGit's "Blame revisions" blames the newer.
         if let Some(f) = action.blame {
             let spec = BlameSpec {

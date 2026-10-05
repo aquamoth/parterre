@@ -285,6 +285,13 @@ pub const COPY: Glyph = &[
     Part::Path("M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"),
 ];
 
+/// Lucide's triangle-alert: something needs seeing to.
+pub const WARNING: Glyph = &[
+    Part::Path("m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"),
+    Part::Path("M12 9v4"),
+    Part::Path("M12 17h.01"),
+];
+
 /// A rebase's todo commands: pick a check mark, drop a cross, and squash Lucide's
 /// arrow-down-to-line, melding a commit into the one below it in a list of the newest first.
 pub const PICK: Glyph = CHECK;
@@ -292,7 +299,7 @@ pub const SQUASH: Glyph = &[Part::Path("M12 3v12M7 10l5 5 5-5M5 20h14")];
 pub const DROP: Glyph = CLOSE;
 
 /// Every glyph, for tests.
-pub const ALL: [Glyph; 49] = [
+pub const ALL: [Glyph; 50] = [
     MENU,
     SEARCH,
     PLUS,
@@ -342,6 +349,7 @@ pub const ALL: [Glyph; 49] = [
     HISTORY,
     SQUASH,
     PALETTE,
+    WARNING,
 ];
 
 /// One stroke of a flattened path.

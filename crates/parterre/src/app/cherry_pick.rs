@@ -621,11 +621,12 @@ mod tests {
             h.shows("Cherry-pick stopped on conflicts in 1 file")
         });
         let p = h.path();
-        let short = h.rev("up~1").short(h.repo.abbrev_len.max(7));
         let texts = banner_texts(p);
-        let expected =
-            format!("Cherry-picking {short} onto main stopped at 2/3: 1 conflicted file");
-        assert!(texts.contains(&expected), "{texts:?}");
+        assert!(texts.contains(&"1 conflicted file".to_owned()), "{texts:?}");
+        assert!(
+            texts.contains(&"Cherry-pick stopped at 2/3".to_owned()),
+            "{texts:?}"
+        );
 
         let (repo, catalog) = load(p);
         let up = rev(p, "up");
