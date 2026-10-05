@@ -386,8 +386,7 @@ impl ParterreApp {
         let has_repo = open.is_some();
         let reload = ui.add_enabled_ui(has_repo, |ui| menu::item(ui, "Reload", "F5", Mark::None));
         if reload.inner.clicked() {
-            usage::action(usage::Action::Reload);
-            self.reload();
+            self.reload_by_hand(ui.ctx());
         }
         let auto = self.settings.auto_reload;
         if menu::item(ui, "Reload automatically", "", Mark::Check(auto)).clicked() {

@@ -4,9 +4,13 @@
 //! Whether `origin` is on GitHub is asked of git alone, when a repository is opened. GitHub
 //! itself is asked only while pull requests are shown and `gh` is signed in, and as t3code
 //! does: a repository's list is kept for a minute (five if it had none) and asked for again
-//! only after that, when the repository is opened again or its refs change. F5 and turning
-//! them on always ask. After a failure the wait doubles from 20 s up to 15 min, and the last
-//! list stays shown. There is no polling.
+//! only after that, when the repository is opened again, reloaded (F5) or its refs change; a
+//! change while it is kept is loaded once it isn't. A push or a fetch that moves `origin`'s
+//! branches is also asked about once more a minute later, however fresh the list: the pull
+//! request is usually opened just after the push, and after the load the push started (#294).
+//! Only turning them on always asks: pressing F5 again and again asks no more often. After a failure the wait doubles
+//! from 20 s up to 15 min, and the last list stays shown. There is no polling: an idle window
+//! asks nothing.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,7 +46,7 @@ pub enum Loaded {
 struct Entry {
     /// The last list loaded, kept when a later load fails.
     list: Option<Arc<PullRequests>>,
-    /// When to ask GitHub again, at the earliest (F5 aside).
+    /// When to ask GitHub again, at the earliest (turning them on aside).
     next: Instant,
     /// Failed loads in a row.
     failures: u32,
@@ -73,9 +77,12 @@ pub struct PullRequestLoader {
     /// The load running.
     job: Option<Job>,
     /// Something happened after which a list that is no longer fresh is loaded again: the
-    /// repository was opened, or its refs changed.
+    /// repository was opened, or its refs changed. Kept until that load starts.
     due: bool,
-    /// Load whether or not the list is fresh: F5, or pull requests turned on.
+    /// When to ask once more, however fresh the list, since a push or a fetch moved `origin`'s
+    /// branches ([`forge::RECHECK_AFTER_PUSH`]).
+    recheck: Option<Instant>,
+    /// Load whether or not the list is fresh: pull requests turned on.
     force: bool,
     /// The user asked for pull requests: say how it went.
     asked: bool,
@@ -106,6 +113,7 @@ impl PullRequestLoader {
         self.path = path.map(Path::to_owned);
         self.origin = path.and_then(|p| github::origin(&Git::new(p)));
         self.due = true;
+        self.recheck = None;
     }
 
     /// The GitHub repository `origin` points at: pull requests can be shown only if there is
@@ -137,14 +145,13 @@ impl PullRequestLoader {
         self.job.is_some()
     }
 
-    /// The refs changed: load again if the list is no longer fresh.
-    pub fn refs_changed(&mut self) {
+    /// The refs changed: load again once the list is no longer fresh. If `origin`'s branches
+    /// moved ([`forge::origin_moved`]), ask once more a little later, fresh or not.
+    pub fn refs_changed(&mut self, origin_moved: bool) {
         self.due = true;
-    }
-
-    /// Load again now (F5). The list shown stays until the new one is in.
-    pub fn refresh(&mut self) {
-        self.force = true;
+        if origin_moved {
+            self.recheck = Some(Instant::now() + forge::RECHECK_AFTER_PUSH);
+        }
     }
 
     /// The user turned pull requests on: load now, and say how it went.
@@ -157,12 +164,34 @@ impl PullRequestLoader {
     /// shown repository that has finished brought.
     pub fn update(&mut self, shown: bool, ctx: &egui::Context) -> Option<Loaded> {
         if shown && self.origin.is_some() && self.job.is_none() {
-            let stale = self.entry().is_none_or(|e| Instant::now() >= e.next);
-            if self.force || (self.due && stale) {
+            let now = Instant::now();
+            let (next, failed) = match self.entry() {
+                Some(e) => (Some(e.next), e.failures > 0),
+                None => (None, false),
+            };
+            let stale = next.is_none_or(|next| now >= next);
+            // The recheck doesn't cut the wait after a failure short.
+            let recheck_at = self.recheck.map(|at| match next {
+                Some(next) if failed => at.max(next),
+                _ => at,
+            });
+            let recheck = recheck_at.is_some_and(|at| now >= at);
+            if self.force || recheck || (self.due && stale) {
                 self.load(ctx);
+                self.due = false;
+                self.force = false;
+                // The load a push starts right away doesn't stand in for the recheck.
+                if recheck {
+                    self.recheck = None;
+                }
+            } else if let Some(at) = [recheck_at, next.filter(|_| self.due)]
+                .into_iter()
+                .flatten()
+                .min()
+            {
+                // An idle window draws no frames: wake up for what is waiting.
+                ctx.request_repaint_after(at.saturating_duration_since(now));
             }
-            self.due = false;
-            self.force = false;
         }
         let Job { path, asked, rx } = self.job.as_ref()?;
         let asked = *asked;
@@ -340,7 +369,109 @@ pub fn loaded_status(count: usize, here: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::loaded_status;
+    use super::*;
+
+    /// A loader of an empty list (as GitHub answers before the pull request is opened), for a
+    /// repository whose `origin` is on GitHub, with its first load done.
+    fn loaded(dir: &Path, ctx: &egui::Context) -> PullRequestLoader {
+        for args in [
+            &["init", "-q"][..],
+            &["remote", "add", "origin", "https://github.com/o/r.git"],
+        ] {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        }
+        let mut loader = PullRequestLoader::canned("[]");
+        loader.follow(Some(dir));
+        assert!(matches!(
+            finish(&mut loader, ctx),
+            Loaded::Found { count: 0, .. }
+        ));
+        loader
+    }
+
+    /// Runs `update` until the load it started is in.
+    fn finish(loader: &mut PullRequestLoader, ctx: &egui::Context) -> Loaded {
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(loaded) = loader.update(true, ctx) {
+                return loaded;
+            }
+            assert!(Instant::now() < deadline, "the load never finished");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Lets the list's freshness run out.
+    fn expire(loader: &mut PullRequestLoader) {
+        for entry in loader.cache.values_mut() {
+            entry.next = Instant::now();
+        }
+    }
+
+    #[test]
+    fn a_ref_change_while_the_list_is_fresh_is_loaded_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut loader = loaded(dir.path(), &ctx);
+        // A commit: the empty list is kept for five minutes.
+        loader.refs_changed(false);
+        assert!(loader.update(true, &ctx).is_none());
+        assert!(!loader.is_loading());
+        expire(&mut loader);
+        loader.update(true, &ctx);
+        assert!(loader.is_loading(), "the change was never loaded");
+    }
+
+    /// #294: the push of a pull request's branch changes the refs a few seconds before
+    /// `gh pr create` opens it, so the load the push starts finds none.
+    #[test]
+    fn a_push_is_asked_about_again_a_minute_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut loader = loaded(dir.path(), &ctx);
+        expire(&mut loader);
+        // The push: loaded at once, before the pull request is opened.
+        loader.refs_changed(true);
+        assert!(matches!(
+            finish(&mut loader, &ctx),
+            Loaded::Found { count: 0, .. }
+        ));
+        assert!(loader.update(true, &ctx).is_none());
+        assert!(!loader.is_loading());
+        // A minute later, though the empty list is kept for five.
+        loader.recheck = Some(Instant::now());
+        loader.update(true, &ctx);
+        assert!(loader.is_loading(), "the push was not asked about again");
+        finish(&mut loader, &ctx);
+        // Once.
+        assert!(loader.update(true, &ctx).is_none());
+        assert!(!loader.is_loading());
+    }
+
+    /// The recheck after a push doesn't cut the wait after failed loads short.
+    #[test]
+    fn a_push_waits_out_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut loader = loaded(dir.path(), &ctx);
+        for entry in loader.cache.values_mut() {
+            entry.failures = 3;
+        }
+        loader.refs_changed(true);
+        loader.recheck = Some(Instant::now());
+        loader.update(true, &ctx);
+        assert!(!loader.is_loading());
+        expire(&mut loader);
+        loader.update(true, &ctx);
+        assert!(loader.is_loading());
+    }
 
     #[test]
     fn status_counts_what_can_be_shown() {

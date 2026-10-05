@@ -252,11 +252,35 @@ pub fn fresh_for(found_any: bool) -> Duration {
     Duration::from_secs(if found_any { 60 } else { 5 * 60 })
 }
 
+/// How long after a push or a fetch moved `origin`'s branches ([`origin_moved`]) GitHub is
+/// asked once more, however fresh the list. A pull request is usually opened a few seconds
+/// after its branch is pushed: after the load the push itself started (#294).
+pub const RECHECK_AFTER_PUSH: Duration = Duration::from_secs(60);
+
 /// How long to wait after `failures` failed loads in a row, as in t3code: 20 s, doubling, at
 /// most 15 min.
 pub fn retry_after(failures: u32) -> Duration {
     let doublings = failures.saturating_sub(1).min(6);
     Duration::from_secs((20u64 << doublings).min(15 * 60))
+}
+
+/// Whether a push or a fetch moved, added or removed a branch of `origin` between two snapshots
+/// of a repository. Those branches are what GitHub is asked about, and a pull request is
+/// usually opened just after its branch is pushed.
+pub fn origin_moved(old: &Repo, new: &Repo) -> bool {
+    fn branches(repo: &Repo) -> Vec<(&str, Oid)> {
+        let mut branches: Vec<_> = repo
+            .refs
+            .iter()
+            .filter(|r| {
+                r.kind == RefKind::RemoteBranch && r.full_name.starts_with("refs/remotes/origin/")
+            })
+            .map(|r| (r.full_name.as_str(), repo.commit(r.target).oid))
+            .collect();
+        branches.sort_unstable();
+        branches
+    }
+    branches(old) != branches(new)
 }
 
 /// The remotes of the repository `git` works on, with their URLs (`insteadOf` rewrites
@@ -401,6 +425,46 @@ mod tests {
                 (9, 0, vec![]),
             ]
         );
+    }
+
+    #[test]
+    fn origin_moves_with_its_own_branches_only() {
+        let repo = |refs: &[(&str, u32)]| {
+            Repo::new(
+                "/x".into(),
+                vec![commit(1), commit(2)],
+                refs.iter()
+                    .map(|&(name, target)| git_ref(name, target))
+                    .collect(),
+                Head::Detached(CommitIx(0)),
+            )
+        };
+        let before = repo(&[
+            ("refs/heads/main", 0),
+            ("refs/remotes/origin/main", 0),
+            ("refs/remotes/upstream/main", 0),
+        ]);
+        // A commit, and a fetch from another remote: no.
+        let after = repo(&[
+            ("refs/heads/main", 1),
+            ("refs/remotes/origin/main", 0),
+            ("refs/remotes/upstream/main", 1),
+        ]);
+        assert!(!origin_moved(&before, &after));
+        // A push of a new branch, and of a branch that moved: yes.
+        let pushed = repo(&[
+            ("refs/heads/main", 0),
+            ("refs/remotes/origin/main", 0),
+            ("refs/remotes/origin/topic", 1),
+            ("refs/remotes/upstream/main", 0),
+        ]);
+        assert!(origin_moved(&before, &pushed));
+        let moved = repo(&[
+            ("refs/heads/main", 0),
+            ("refs/remotes/origin/main", 1),
+            ("refs/remotes/upstream/main", 0),
+        ]);
+        assert!(origin_moved(&before, &moved));
     }
 
     #[test]

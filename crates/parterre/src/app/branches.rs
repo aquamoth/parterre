@@ -1512,6 +1512,13 @@ struct Notice {
     attention: bool,
 }
 
+impl Notice {
+    /// Nothing more to say than its title: no details to open.
+    fn is_plain(&self) -> bool {
+        self.error.is_none() && self.report.steps.is_empty()
+    }
+}
+
 /// What the usage statistics call `action` (#264): its kind, nothing of what it names.
 fn operation(action: &Action) -> usage::Action {
     match action {
@@ -2104,6 +2111,21 @@ impl Tool {
         });
     }
 
+    /// A green notification of something done outside the branch tool, such as a reload. The
+    /// same one again shows it anew rather than adding another.
+    pub fn inform(&mut self, ctx: &egui::Context, path: PathBuf, title: &str) {
+        let at = ctx.input(|i| i.time);
+        if let Some(n) = self
+            .notices
+            .iter_mut()
+            .find(|n| n.title == title && n.path == path && n.is_plain())
+        {
+            n.at = at;
+            return;
+        }
+        self.notice(ctx, path, title.to_owned(), Report::default(), None);
+    }
+
     /// The graph's `palette` and `options`, for the rebase's commit list.
     pub fn show(&mut self, ctx: &egui::Context, palette: &Palette, options: &GraphOptions) {
         if let Some(mut form) = self.form.take() {
@@ -2491,7 +2513,10 @@ impl Tool {
                         .stroke(egui::Stroke::new(1.0, color))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                if ui.link(RichText::new(&n.title).color(color)).clicked() {
+                                let title = RichText::new(&n.title).color(color);
+                                if n.is_plain() {
+                                    ui.label(title);
+                                } else if ui.link(title).clicked() {
                                     self.details = Some(n.id);
                                 }
                                 if ui.small_button("×").clicked() {
@@ -2970,5 +2995,23 @@ mod tests {
             "error: would be overwritten:\n\ta.js\ngit stash\ngit switch main\n\
              error: would be overwritten:\n\ta.js\n"
         );
+    }
+
+    /// F5 says it reloaded: once, however often it is pressed, and for a few seconds.
+    #[test]
+    fn a_reload_notification_shows_once_and_goes() {
+        let (dir, _others) = repository();
+        let mut h = Harness::new(dir);
+        let path = h.path().to_owned();
+        for _ in 0..3 {
+            let ctx = h.ctx.clone();
+            h.tool.inform(&ctx, path.clone(), "Reloaded");
+            h.frame();
+        }
+        let shown = h.texts.iter().filter(|(t, _)| t == "Reloaded").count();
+        assert_eq!(shown, 1, "{:?}", h.texts);
+        h.time += 6.0;
+        h.frame();
+        assert!(!h.shows("Reloaded"));
     }
 }
