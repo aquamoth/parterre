@@ -82,7 +82,6 @@ fn wait_resolved(r: &TestRepo, path: &str) {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn opening_a_file_runs_git_mergetool_and_git_stages_the_result() {
     let mut r = TestRepo::new();
