@@ -7,9 +7,11 @@
 //! the common ancestor" in its Diff Options.
 //!
 //! Either side can be the working tree (TortoiseGit's "Compare with working tree"): its files
-//! as they are on disk, staged or not, as `git diff <commit>` compares them.
+//! as they are on disk, staged or not, as `git diff <commit>` compares them. Its conflicted
+//! files come too, every one listed, also those whose file equals the commit's.
 
-use crate::changed_files::ChangedFile;
+use crate::changed_files::{ChangedFile, FileStatus, compare_paths};
+use crate::conflicts::{Conflict, Sides};
 use crate::file_diff::Rev;
 use crate::git::{Git, GitError};
 use crate::log::is_ancestor;
@@ -75,13 +77,70 @@ impl Comparison {
         } else {
             Some(self.old)
         };
-        let files = match (base, self.new) {
+        let mut files = match (base, self.new) {
             (None, _) | (Some(Rev::WorkingTree), Rev::WorkingTree) => Vec::new(),
             (Some(Rev::Commit(a)), Rev::Commit(b)) => git.changed_between(&a, &b)?,
             (Some(Rev::Commit(a)), Rev::WorkingTree) => git.changed_in_working_tree(&a, false)?,
             (Some(Rev::WorkingTree), Rev::Commit(b)) => git.changed_in_working_tree(&b, true)?,
         };
-        Ok(Compared { base, files })
+        let working_tree = if self.reads_working_tree() {
+            let (root, conflicts) = crate::conflicts::list(git)?;
+            add_conflicted(&mut files, &conflicts);
+            let sides = crate::conflicts::sides(git, &root, &conflicts);
+            Some(WorkingTree {
+                root,
+                conflicts,
+                sides,
+            })
+        } else {
+            None
+        };
+        Ok(Compared {
+            base,
+            files,
+            working_tree,
+        })
+    }
+}
+
+/// Lists the conflicted files `git diff` left out (their file equals the commit's), as
+/// unmerged, in path order.
+fn add_conflicted(files: &mut Vec<ChangedFile>, conflicts: &[Conflict]) {
+    let missing: Vec<&Conflict> = conflicts
+        .iter()
+        .filter(|c| !files.iter().any(|f| f.path == c.path))
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    for c in missing {
+        let mode = |stage: usize| c.stages[stage].map_or(0, |e| e.mode);
+        files.push(ChangedFile {
+            path: c.path.clone(),
+            old_path: None,
+            status: FileStatus::Unmerged,
+            modes: [mode(1), mode(2)],
+            added: None,
+            removed: None,
+        });
+    }
+    files.sort_by(|a, b| compare_paths(&a.path, &b.path));
+}
+
+/// The working tree's side of a comparison: where it is, and its conflicted files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkingTree {
+    /// The worktree's folder; the files' paths are relative to it.
+    pub root: std::path::PathBuf,
+    pub conflicts: Vec<Conflict>,
+    /// The conflicts' two sides, by the labels git gave them.
+    pub sides: Sides,
+}
+
+impl WorkingTree {
+    /// The conflict of the file at `path`, if it is conflicted.
+    pub fn conflict(&self, path: &str) -> Option<&Conflict> {
+        self.conflicts.iter().find(|c| c.path == path)
     }
 }
 
@@ -92,4 +151,6 @@ pub struct Compared {
     /// `None` when asked for the common ancestor of unrelated histories; `files` is then empty.
     pub base: Option<Rev>,
     pub files: Vec<ChangedFile>,
+    /// When a side is the working tree: its folder and conflicted files.
+    pub working_tree: Option<WorkingTree>,
 }

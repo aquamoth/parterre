@@ -26,6 +26,7 @@ mod diff_window;
 mod file_table;
 mod log_window;
 mod merge;
+mod merge_tool;
 mod privacy;
 mod pull_requests;
 mod rebase;
@@ -342,6 +343,8 @@ pub struct ParterreApp {
     compare: compare_window::CompareWindow,
     /// Raise the compare window in the next frame.
     focus_compare: bool,
+    /// Opening conflicted files in the merge tool.
+    merge_tools: merge_tool::MergeTools,
     /// The commit marked for comparison, and its name when it was marked (or last reloaded).
     marked: Option<(Oid, String)>,
     /// Dragged nodes of every repository, kept when `remember_moves` is on.
@@ -496,6 +499,7 @@ impl ParterreApp {
             blames: blame_window::BlameWindows::new(highlight_engine()),
             compare: compare_window::CompareWindow::default(),
             focus_compare: false,
+            merge_tools: merge_tool::MergeTools::default(),
             marked: None,
             moves,
             watcher: None,
@@ -955,6 +959,7 @@ impl ParterreApp {
             return;
         };
         self.refresh_pull_requests = true;
+        self.branches.look_at_once();
         match parterre_core::git::load_repo(&path) {
             Ok(repo) => {
                 self.install_reloaded(repo, "Reloaded");
@@ -2349,21 +2354,7 @@ impl ParterreApp {
                     self.status = Some((e, true));
                 }
             }
-            Some(MenuAction::Open(opener, dir)) => {
-                let opened = match opener {
-                    Opener::FileManager => {
-                        usage::action(usage::Action::OpenFileManager);
-                        crate::file_manager::open(&dir)
-                    }
-                    Opener::Terminal => {
-                        usage::action(usage::Action::OpenTerminal);
-                        crate::file_manager::open_terminal(&dir)
-                    }
-                };
-                if let Err(e) = opened {
-                    self.status = Some((e, true));
-                }
-            }
+            Some(MenuAction::Open(opener, dir)) => self.open_in(opener, &dir),
             None => {}
         }
 
@@ -2839,6 +2830,45 @@ enum Opener {
     Terminal,
 }
 
+impl ParterreApp {
+    /// Opens `dir` in the file manager or a terminal, saying why not if it can't.
+    fn open_in(&mut self, opener: Opener, dir: &Path) {
+        let opened = match opener {
+            Opener::FileManager => {
+                usage::action(usage::Action::OpenFileManager);
+                crate::file_manager::open(dir)
+            }
+            Opener::Terminal => {
+                usage::action(usage::Action::OpenTerminal);
+                crate::file_manager::open_terminal(dir)
+            }
+        };
+        if let Err(e) = opened {
+            self.status = Some((e, true));
+        }
+    }
+
+    /// What the compare window's working-tree rows asked for.
+    fn file_requests(&mut self, ctx: &egui::Context) {
+        let opener = compare_window::viewport_id();
+        for request in std::mem::take(&mut self.compare.requests) {
+            match request {
+                compare_window::FileRequest::MergeTool { root, path } => {
+                    self.merge_tools.open(ctx, root, path, opener)
+                }
+                compare_window::FileRequest::Resolve(resolve) => self.branches.request(
+                    ctx,
+                    branches::Request::Run(parterre_core::branches::Action::Resolve(Box::new(
+                        resolve,
+                    ))),
+                    opener,
+                ),
+                compare_window::FileRequest::Open(how, dir) => self.open_in(how, &dir),
+            }
+        }
+    }
+}
+
 impl eframe::App for ParterreApp {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         // One pass paints the main window and every immediate viewport, so this paces them all.
@@ -2863,6 +2893,9 @@ impl eframe::App for ParterreApp {
         }
         self.auto_reload(&ctx);
         self.branches.update(&ctx, self.repo.as_ref());
+        if std::mem::take(&mut self.branches.conflicts_changed) {
+            self.compare.relist_working_tree();
+        }
         if let Some(path) = self.branches.reload.take()
             && self.repo.as_ref().is_some_and(|r| r.path == path)
         {
@@ -2901,10 +2934,17 @@ impl eframe::App for ParterreApp {
         if self.settings.show_status_bar {
             egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         }
+        let banner = self.branches.banner_shown();
         if let (Some(repo), Some(catalog)) = (&self.repo, &self.branches.catalog)
-            && let Some(error) = rebase::banner(ui, repo, catalog)
+            && banner
         {
-            self.status = Some((error, true));
+            match rebase::banner(ui, repo, catalog) {
+                Some(rebase::BannerClick::Failed(error)) => self.status = Some((error, true)),
+                Some(rebase::BannerClick::Compare(head)) => {
+                    self.compare_request(CompareRequest::WorkingTree(head))
+                }
+                None => {}
+            }
         }
         if self.repo.is_some() {
             egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
@@ -2922,6 +2962,7 @@ impl eframe::App for ParterreApp {
         self.reset_settings_dialog(&ctx);
         self.log_window(&ctx);
         self.compare_window(&ctx);
+        self.file_requests(&ctx);
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         self.about_window(&ctx);
@@ -2932,6 +2973,10 @@ impl eframe::App for ParterreApp {
             &self.settings.branch_colors,
         );
         self.branches.show(&ctx, &palette, &self.settings.graph);
+        self.merge_tools.show(&ctx);
+        if let Some(e) = self.merge_tools.error.take() {
+            self.status = Some((e, true));
+        }
         for (repo, spec) in std::mem::take(&mut self.branches.diff_requests) {
             self.diffs
                 .open(repo, spec, &self.settings.diff_window, &ctx);

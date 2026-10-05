@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 
 use eframe::egui::{self, Color32, Id, RichText, Ui, ViewportId, vec2};
+use parterre_core::banner::BannerTimer;
 use parterre_core::branches::{
     Action, AddWorktree, BranchTip, Branches, Catalog, Checkout, Create, CreateDraft, Outcome,
     Report, Warning, command_text,
@@ -1527,6 +1528,7 @@ fn operation(action: &Action) -> usage::Action {
         Action::CherryPick(_) => usage::Action::CherryPick,
         Action::Revert(_) => usage::Action::Revert,
         Action::RestoreStash(_) => usage::Action::RestoreStash,
+        Action::Resolve(_) => usage::Action::ResolveConflict,
     }
 }
 
@@ -1614,11 +1616,46 @@ pub struct Tool {
     pub reload: Option<PathBuf>,
     /// A worktree to make the open one.
     pub go_to: Option<PathBuf>,
+    /// When the stuck banner shows.
+    banner: BannerTimer,
+    /// The next look at the worktree shows the banner at once: it follows an operation of
+    /// parterre's own, F5 or opening the repository.
+    look_at_once: bool,
+    /// An operation ended and the worktree hasn't been looked at since.
+    unlooked: bool,
+    /// When the catalogue was last asked for, to ask again while the worktree is stuck.
+    looked_at: f64,
+    /// The open worktree's conflicted files changed with the catalogue last loaded.
+    pub conflicts_changed: bool,
 }
 
 impl Tool {
     pub fn busy(&self) -> bool {
         self.job.is_some()
+    }
+
+    /// The next look at the worktree shows the banner at once, if it is stuck: after F5.
+    pub fn look_at_once(&mut self) {
+        self.look_at_once = true;
+    }
+
+    /// Whether the stuck banner shows (see [`BannerTimer`]).
+    pub fn banner_shown(&mut self) -> bool {
+        self.banner.update(self.busy() || self.unlooked)
+    }
+
+    /// Asks for the catalogue of `repo` on a worker thread.
+    fn load_catalog(&mut self, ctx: &egui::Context, repo: &Arc<Repo>) {
+        let path = repo.path.clone();
+        let worker_ctx = ctx.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = Catalog::load(&path).map_err(|e| e.to_string());
+            let _ = tx.send(result);
+            worker_ctx.request_repaint();
+        });
+        self.loading = Some(rx);
+        self.looked_at = ctx.input(|i| i.time);
     }
 
     pub fn update(&mut self, ctx: &egui::Context, repo: Option<&Arc<Repo>>) {
@@ -1644,6 +1681,8 @@ impl Tool {
                 self.revert_loading = None;
                 self.restore = None;
                 self.catalog = None;
+                self.banner = BannerTimer::default();
+                self.look_at_once = true;
             } else if let Some(dialog) = &self.reset
                 && self.previewing.is_none()
             {
@@ -1652,17 +1691,25 @@ impl Tool {
                 self.preview(ctx, target, None, opener, true);
             }
             self.repo = repo.cloned();
-            self.loading = repo.map(|r| {
-                let path = r.path.clone();
-                let ctx = ctx.clone();
-                let (tx, rx) = mpsc::channel();
-                std::thread::spawn(move || {
-                    let result = Catalog::load(&path).map_err(|e| e.to_string());
-                    let _ = tx.send(result);
-                    ctx.request_repaint();
-                });
-                rx
-            });
+            self.loading = None;
+            if let Some(repo) = repo {
+                self.load_catalog(ctx, repo);
+            }
+        }
+        // While the worktree is stuck, look again every second: for the banner to show once
+        // it lasts, and to go, and for the conflicted files, which change no refs.
+        let now = ctx.input(|i| i.time);
+        if self.banner.watching()
+            && self.loading.is_none()
+            && let Some(repo) = self.repo.clone()
+        {
+            if now - self.looked_at >= 1.0 {
+                self.load_catalog(ctx, &repo);
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    1.0 - (now - self.looked_at),
+                ));
+            }
         }
         let loaded = self.loading.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(result) => Some(result),
@@ -1679,6 +1726,13 @@ impl Tool {
                     if let Some(form) = &mut self.form {
                         form.catalog = catalog.clone();
                     }
+                    let at_once = std::mem::take(&mut self.look_at_once);
+                    self.banner.look(catalog.stuck().is_some(), now, at_once);
+                    self.unlooked = false;
+                    self.conflicts_changed |= self
+                        .catalog
+                        .as_ref()
+                        .is_some_and(|old| old.conflicted != catalog.conflicted);
                     self.catalog = Some(catalog);
                 }
                 Err(e) => {
@@ -1712,6 +1766,12 @@ impl Tool {
             let job = self.job.take().unwrap();
             self.reload = Some(job.path.clone());
             let here = self.repo.as_ref().is_some_and(|r| r.path == job.path);
+            // What was loaded meanwhile is from before it ended: look again, at once.
+            if let Some(repo) = self.repo.clone().filter(|_| here) {
+                self.unlooked = true;
+                self.look_at_once = true;
+                self.load_catalog(ctx, &repo);
+            }
             // Changes stashed for a revert that didn't stop: the user decides about them.
             if let Outcome::Done(report) | Outcome::Failed { report, .. } = &result
                 && let Some(stash) = report.stash.clone()

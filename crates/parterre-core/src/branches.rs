@@ -842,6 +842,8 @@ pub enum Action {
     Revert(Box<crate::revert::Revert>),
     /// Puts back the changes parterre stashed before an operation, and drops the entry.
     RestoreStash(Oid),
+    /// Finishes a conflicted file in the open worktree with one git command.
+    Resolve(Box<crate::conflicts::Resolve>),
 }
 
 impl Action {
@@ -875,6 +877,7 @@ impl Action {
             Self::CherryPick(c) => format!("Cherry-pick {} onto {}", c.name, c.branch),
             Self::Revert(r) => format!("Revert {} in {}", short(r.commit), r.name()),
             Self::RestoreStash(_) => "Restore stashed changes".into(),
+            Self::Resolve(r) => r.label(),
         }
     }
 }
@@ -1084,6 +1087,7 @@ impl Branches {
             Action::CherryPick(c) => Ok(crate::cherry_pick::commands(c)),
             Action::Revert(r) => Ok(crate::revert::commands(r)),
             Action::RestoreStash(_) => Ok(vec![words(&["stash", "pop"])]),
+            Action::Resolve(r) => Ok(r.conflict.commands(r.answer)),
         }
     }
 
@@ -1181,6 +1185,10 @@ impl Branches {
             crate::revert::restore(&catalog, *stash, cancel, report)?;
             return Ok(None);
         }
+        if let Action::Resolve(resolve) = &action {
+            crate::conflicts::execute(&catalog, resolve, cancel, report)?;
+            return Ok(None);
+        }
         let mut commands = Self::commands(&catalog, &action)?;
         let switching = matches!(
             &action,
@@ -1234,7 +1242,8 @@ impl Branches {
             | Action::Merge(_)
             | Action::CherryPick(_)
             | Action::Revert(_)
-            | Action::RestoreStash(_) => {
+            | Action::RestoreStash(_)
+            | Action::Resolve(_) => {
                 unreachable!("handled above")
             }
             Action::Switch(name) => {

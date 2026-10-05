@@ -377,10 +377,19 @@ impl RebaseDialog {
     }
 }
 
+/// What the banner's buttons asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BannerClick {
+    /// *Compare with working tree*: HEAD against the working tree, as the graph's menu opens it.
+    Compare(parterre_core::Oid),
+    /// The terminal didn't open, and why.
+    Failed(String),
+}
+
 /// The banner across the graph while the open worktree is stuck: what's stopped there, if
-/// anything, its conflicted files on hover, and *Open in terminal*. Call before the central
-/// panel. Returns why the terminal didn't open, if it didn't.
-pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
+/// anything, its conflicted files on hover, *Compare with working tree* and *Open in
+/// terminal*. Call before the central panel.
+pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<BannerClick> {
     let stuck = catalog.stuck()?;
     let open = catalog.worktrees.iter().find(|w| w.open);
     let files = &catalog.conflicted;
@@ -453,7 +462,7 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
         )
     };
     let stroke = stuck_color(ui);
-    let mut error = None;
+    let mut click = None;
     egui::Panel::top("operation-in-progress")
         .frame(
             egui::Frame::new()
@@ -463,7 +472,7 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
         )
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let button = 130.0;
+                let button = 330.0;
                 ui.allocate_ui(vec2(ui.available_width() - button, 0.0), |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new("⚠").color(color).strong());
@@ -483,15 +492,21 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<String> {
                     });
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Open in terminal").clicked()
-                        && let Err(e) = crate::file_manager::open_terminal(&catalog.root)
+                    if ui.button("Open in terminal").clicked() {
+                        crate::usage::action(crate::usage::Action::OpenTerminal);
+                        if let Err(e) = crate::file_manager::open_terminal(&catalog.root) {
+                            click = Some(BannerClick::Failed(e));
+                        }
+                    }
+                    if let Some(head) = catalog.head
+                        && ui.button("Compare with working tree").clicked()
                     {
-                        error = Some(e);
+                        click = Some(BannerClick::Compare(head));
                     }
                 });
             });
         });
-    error
+    click
 }
 
 /// The confirmation, the menus and the banner, driven frame by frame in a headless context
@@ -505,7 +520,10 @@ mod tests {
     use parterre_core::branches::Stuck;
 
     use super::super::branches::{self, Request};
-    use super::super::tool_harness::{Harness, banner_texts, git, load, menu, read, write};
+    use super::super::tool_harness::{
+        Harness, banner_click, banner_texts, before_merge, git, load, menu, merge_stops, read,
+        stuck_merge, write,
+    };
 
     fn commit(dir: &Path, path: &str, text: &str, message: &str) {
         write(dir, path, text);
@@ -865,5 +883,110 @@ mod tests {
         // The fix is dropped and the merge flattened: feature, the first of two, conflicts.
         let expected = format!("Rebasing main onto {short} stopped at 1/2: 1 conflicted file");
         assert!(texts.contains(&expected), "{texts:?}");
+    }
+
+    #[test]
+    fn the_banner_opens_head_against_the_working_tree() {
+        let dir = stuck_merge();
+        let head = Oid::from_hex(&git(dir.path(), &["rev-parse", "HEAD"])).unwrap();
+        assert_eq!(
+            banner_click(dir.path(), "Compare with working tree"),
+            Some(super::BannerClick::Compare(head))
+        );
+    }
+
+    #[test]
+    fn opening_a_stuck_worktree_shows_the_banner_at_once() {
+        let mut h = Harness::new(stuck_merge());
+        h.until("the worktree is looked at", |h| h.tool.catalog.is_some());
+        assert!(h.tool.banner_shown());
+    }
+
+    #[test]
+    fn a_change_from_outside_shows_the_banner_once_it_lasts() {
+        let mut h = Harness::new(before_merge());
+        h.until("the worktree is looked at", |h| h.tool.catalog.is_some());
+        assert!(!h.tool.banner_shown());
+        merge_stops(h.path());
+        h.reload();
+        h.until("the merge is seen", |h| {
+            h.tool.catalog.as_ref().is_some_and(|c| c.stuck().is_some())
+        });
+        let seen = h.time;
+        assert!(!h.tool.banner_shown(), "not at once");
+        let start = std::time::Instant::now();
+        while !h.tool.banner_shown() {
+            assert!(start.elapsed().as_secs() < 20, "the banner never shows");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            h.frame();
+        }
+        assert!(h.time - seen >= parterre_core::banner::WAIT);
+    }
+
+    #[test]
+    fn a_change_from_outside_that_is_over_in_time_never_shows_the_banner() {
+        let mut h = Harness::new(before_merge());
+        h.until("the worktree is looked at", |h| h.tool.catalog.is_some());
+        merge_stops(h.path());
+        h.reload();
+        h.until("the merge is seen", |h| {
+            h.tool.catalog.as_ref().is_some_and(|c| c.stuck().is_some())
+        });
+        git(h.path(), &["merge", "--abort"]);
+        h.until("the abort is seen", |h| {
+            h.tool.catalog.as_ref().is_some_and(|c| c.stuck().is_none())
+        });
+        assert!(!h.tool.banner_shown());
+        let until = h.time + 2.0 * parterre_core::banner::WAIT;
+        while h.time < until {
+            h.frame();
+            assert!(!h.tool.banner_shown());
+        }
+    }
+
+    #[test]
+    fn resolving_in_another_tool_is_seen_without_a_reload() {
+        let mut h = Harness::new(stuck_merge());
+        h.until("the worktree is looked at", |h| h.tool.catalog.is_some());
+        assert_eq!(h.tool.catalog.as_ref().unwrap().conflicted.len(), 2);
+        git(h.path(), &["add", "text.txt"]);
+        h.until("the index is looked at again", |h| {
+            h.tool.catalog.as_ref().unwrap().conflicted.len() == 1
+        });
+        assert!(h.tool.conflicts_changed);
+    }
+
+    #[test]
+    fn finishing_a_file_keeps_the_banner_up_while_git_runs() {
+        let mut h = Harness::new(stuck_merge());
+        h.until("the worktree is looked at", |h| h.tool.catalog.is_some());
+        assert!(h.tool.banner_shown());
+        let (_, conflicts) =
+            parterre_core::conflicts::list(&parterre_core::git::Git::new(h.path())).unwrap();
+        let gone = conflicts
+            .into_iter()
+            .find(|c| c.path == "gone.txt")
+            .unwrap();
+        let resolve = parterre_core::conflicts::Resolve {
+            conflict: gone,
+            answer: parterre_core::conflicts::Answer::Keep,
+            side: String::new(),
+        };
+        let ctx = h.ctx.clone();
+        h.tool.request(
+            &ctx,
+            Request::Run(parterre_core::branches::Action::Resolve(Box::new(resolve))),
+            egui::ViewportId::ROOT,
+        );
+        while h.tool.busy() {
+            assert!(h.tool.banner_shown(), "never hidden while it runs");
+            h.frame();
+        }
+        h.reload();
+        h.until("the worktree is looked at again", |h| {
+            h.tool.catalog.as_ref().unwrap().conflicted == ["text.txt"]
+        });
+        assert!(h.tool.banner_shown(), "still merging");
+        assert_eq!(read(h.path(), "gone.txt"), "main\n");
     }
 }
