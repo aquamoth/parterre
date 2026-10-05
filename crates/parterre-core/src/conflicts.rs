@@ -1,7 +1,7 @@
 //! Conflicted files: what git's index holds for each, what kind of conflict that is, and what
-//! can finish it. Content conflicts go to the user's merge tool; the kinds a merge tool can't
-//! open (one side deleted the file, binary files, symlinks) are answered with one git command.
-//! Submodules are left to the terminal.
+//! can finish it. Content conflicts go to the user's merge tool; any conflict but a submodule's
+//! can also be finished by taking one side whole, with one git command. Submodules are left to
+//! the terminal.
 //!
 //! The index decides: a file is conflicted while git holds it unmerged (stages 1 to 3), and
 //! resolved once staged, whatever its text.
@@ -37,21 +37,17 @@ pub struct Conflict {
     pub stages: [Option<Entry>; 3],
     /// A side is binary, by git's test: a NUL in its first 8000 bytes.
     pub binary: bool,
-    /// The file is in the worktree.
-    pub on_disk: bool,
 }
 
 /// What finishes a conflicted file in parterre, in one git command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Answer {
-    /// Stage the file as it is in the worktree (`git add`).
-    Keep,
-    /// Remove it (`git rm`).
-    Delete,
-    /// Take our side (stage 2).
+    /// Take our side (stage 2): its file, or no file if it deleted it.
     Ours,
     /// Take their side (stage 3).
     Theirs,
+    /// Remove a file both sides deleted (`git rm`).
+    Delete,
 }
 
 impl Conflict {
@@ -112,25 +108,41 @@ impl Conflict {
         }
     }
 
-    /// What finishes it in parterre: keep or delete when a side has no file; a side when both
-    /// have one the merge tool can't open. Nothing for content conflicts (the merge tool's)
-    /// and submodules (the terminal's).
+    /// What finishes it in parterre: either side, whole, or deleting what both sides deleted.
+    /// Nothing for submodules (the terminal's).
     pub fn answers(&self) -> Vec<Answer> {
         if self.is_submodule() {
-            return Vec::new();
+            Vec::new()
+        } else if self.stages[1].is_none() && self.stages[2].is_none() {
+            vec![Answer::Delete]
+        } else {
+            vec![Answer::Ours, Answer::Theirs]
         }
-        if self.stages[1].is_none() || self.stages[2].is_none() {
-            let mut answers = Vec::new();
-            if self.on_disk {
-                answers.push(Answer::Keep);
+    }
+
+    /// Whether `answer`'s side deleted the file, so taking it deletes it.
+    pub fn deletes(&self, answer: Answer) -> bool {
+        match answer {
+            Answer::Ours => self.stages[1].is_none(),
+            Answer::Theirs => self.stages[2].is_none(),
+            Answer::Delete => true,
+        }
+    }
+
+    /// The menu item for `answer`: `Use mine (merge-here)`, `Use theirs (feature, deleted)`,
+    /// `Delete`.
+    pub fn item(&self, sides: &Sides, answer: Answer) -> String {
+        let Some(side) = sides.name(answer) else {
+            return "Delete".to_owned();
+        };
+        if self.deletes(answer) {
+            match side.strip_suffix(')') {
+                Some(named) => format!("Use {named}, deleted)"),
+                None => format!("Use {side} (deleted)"),
             }
-            answers.push(Answer::Delete);
-            return answers;
+        } else {
+            format!("Use {side}")
         }
-        if self.merge_tool().is_err() {
-            return vec![Answer::Ours, Answer::Theirs];
-        }
-        Vec::new()
     }
 
     /// The git commands an answer runs, without the leading `git`.
@@ -143,7 +155,6 @@ impl Conflict {
                 .collect()
         };
         let side = match answer {
-            Answer::Keep => return vec![words(&["add", "--"])],
             Answer::Delete => return vec![words(&["rm", "--quiet", "--"])],
             Answer::Ours => (1, "--ours"),
             Answer::Theirs => (2, "--theirs"),
@@ -161,18 +172,17 @@ impl Conflict {
 pub struct Resolve {
     pub conflict: Conflict,
     pub answer: Answer,
-    /// The side's label, as the menu named it; empty for keep and delete.
-    pub side: String,
+    /// The menu item it was picked as, such as `Use theirs (feature)`.
+    pub item: String,
 }
 
 impl Resolve {
-    /// `Keep a.txt`, `Delete a.txt`, `Use feature for a.txt`.
+    /// `Use theirs (feature) for a.txt`, `Delete a.txt`.
     pub fn label(&self) -> String {
         let path = &self.conflict.path;
         match self.answer {
-            Answer::Keep => format!("Keep {path}"),
             Answer::Delete => format!("Delete {path}"),
-            Answer::Ours | Answer::Theirs => format!("Use {} for {path}", self.side),
+            Answer::Ours | Answer::Theirs => format!("{} for {path}", self.item),
         }
     }
 }
@@ -211,29 +221,46 @@ pub(crate) fn execute(
     Ok(())
 }
 
-/// The two sides' names, as git writes them in the conflict markers: `HEAD` and `feature`
-/// in a merge, `HEAD` and `abc1234 (subject)` in a rebase, `Updated upstream` and `Stashed
-/// changes` in a stash pop.
+/// The two sides, as the user knows them: *mine* is the side of the branch the user is on,
+/// *theirs* the one coming in. In a rebase that's stage 3, the user's commit being replayed
+/// onto theirs; otherwise stage 2, `HEAD`. Each is named, where git says by what: a branch, a
+/// commit, or the label git wrote in the markers (`Stashed changes`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sides {
-    pub ours: String,
-    pub theirs: String,
+    /// Stage 2's name.
+    pub ours: Option<String>,
+    /// Stage 3's name.
+    pub theirs: Option<String>,
+    /// The stage that is *mine*: 3 in a rebase, else 2.
+    pub mine: u8,
 }
 
 impl Sides {
-    /// The label of `answer`'s side, in full; `None` for keep and delete.
-    pub fn label(&self, answer: Answer) -> Option<&str> {
-        match answer {
-            Answer::Ours => Some(&self.ours),
-            Answer::Theirs => Some(&self.theirs),
-            Answer::Keep | Answer::Delete => None,
-        }
+    /// `mine (merge-here)`, `theirs (feature)`, or `theirs` when it has no name; `None` for
+    /// [`Answer::Delete`].
+    pub fn name(&self, answer: Answer) -> Option<String> {
+        let (stage, name) = match answer {
+            Answer::Ours => (2, &self.ours),
+            Answer::Theirs => (3, &self.theirs),
+            Answer::Delete => return None,
+        };
+        let who = if stage == self.mine { "mine" } else { "theirs" };
+        Some(match name {
+            Some(name) => format!("{who} ({name})"),
+            None => who.to_owned(),
+        })
     }
-}
 
-/// A marker label's short form, for a menu item: `abc1234 (subject)` is `abc1234`.
-pub fn short_label(label: &str) -> &str {
-    label.split(" (").next().unwrap_or(label)
+    /// `answers` with mine first.
+    pub fn mine_first(&self, mut answers: Vec<Answer>) -> Vec<Answer> {
+        let mine = if self.mine == 3 {
+            Answer::Theirs
+        } else {
+            Answer::Ours
+        };
+        answers.sort_by_key(|a| *a != mine);
+        answers
+    }
 }
 
 /// The open worktree's conflicted files, by path, and its root they are relative to.
@@ -263,14 +290,11 @@ pub fn list(git: &Git) -> Result<(PathBuf, Vec<Conflict>), GitError> {
                 path: path.to_owned(),
                 stages: [None; 3],
                 binary: false,
-                on_disk: false,
             });
         }
         conflicts.last_mut().expect("pushed").stages[stage - 1] = Some(entry);
     }
     for c in &mut conflicts {
-        let file = root.join(&c.path);
-        c.on_disk = file.symlink_metadata().is_ok();
         if c.stages[1].is_some() && c.stages[2].is_some() && !c.is_submodule() {
             c.binary = c.stages[1..]
                 .iter()
@@ -290,66 +314,83 @@ fn is_binary_blob(git: &Git, oid: &Oid) -> Result<bool, GitError> {
     Ok(bytes.iter().take(FIRST_FEW_BYTES).any(|&b| b == 0))
 }
 
-/// The sides' names: as the markers in a conflicted text file have them, which is exactly
-/// what git wrote; else from the operation in progress; else git's `ours` and `theirs`.
+/// The sides of the open worktree's conflicts, named by the operation in progress.
 pub fn sides(git: &Git, root: &Path, conflicts: &[Conflict]) -> Sides {
-    conflicts
-        .iter()
-        .filter(|c| c.merge_tool().is_ok())
-        .find_map(|c| {
-            let text = std::fs::read(root.join(&c.path)).ok()?;
-            from_markers(&String::from_utf8_lossy(&text))
-        })
-        .or_else(|| from_operation(git))
-        .unwrap_or_else(|| Sides {
-            ours: "ours".into(),
-            theirs: "theirs".into(),
-        })
+    let query = |args: &[&str]| -> Option<String> {
+        git.query(args).ok().flatten().filter(|s| !s.is_empty())
+    };
+    let short = |rev: &str| query(&["rev-parse", "--short", "--verify", "-q", rev]);
+    let read = |path: PathBuf| -> Option<String> {
+        let text = std::fs::read_to_string(path).ok()?;
+        Some(text.trim().to_owned()).filter(|t| !t.is_empty())
+    };
+    let branch = query(&["symbolic-ref", "--short", "-q", "HEAD"]).or_else(|| short("HEAD"));
+    let Some(dir) = query(&["rev-parse", "--absolute-git-dir"]).map(PathBuf::from) else {
+        return Sides {
+            ours: branch,
+            theirs: None,
+            mine: 2,
+        };
+    };
+    let rebase = ["rebase-merge", "rebase-apply"]
+        .into_iter()
+        .map(|d| dir.join(d))
+        .find(|d| d.is_dir());
+    if let Some(rebase) = rebase {
+        // Replaying the user's branch onto theirs.
+        let replayed = read(rebase.join("head-name"))
+            .map(|h| h.trim_start_matches("refs/heads/").to_owned())
+            .filter(|h| h != "detached HEAD")
+            .or_else(|| short("REBASE_HEAD"));
+        let onto = read(rebase.join("onto")).and_then(|oid| {
+            query(&[
+                "for-each-ref",
+                "--points-at",
+                &oid,
+                "--format=%(refname:short)",
+                "refs/heads",
+            ])
+            .and_then(|names| names.lines().next().map(str::to_owned))
+            .or_else(|| short(&oid))
+        });
+        return Sides {
+            ours: onto,
+            theirs: replayed,
+            mine: 3,
+        };
+    }
+    let theirs = if dir.join("MERGE_HEAD").is_file() {
+        // `Merge branch 'feature'`: what the user merged, by the name they gave.
+        read(dir.join("MERGE_MSG"))
+            .and_then(|m| Some(m.lines().next()?.split('\'').nth(1)?.to_owned()))
+            .or_else(|| short("MERGE_HEAD"))
+    } else if let Some(picked) = short("CHERRY_PICK_HEAD") {
+        Some(picked)
+    } else if let Some(reverted) = short("REVERT_HEAD") {
+        Some(format!("revert of {reverted}"))
+    } else {
+        // No operation (a stash pop): the label git wrote in a text conflict's markers.
+        conflicts
+            .iter()
+            .filter(|c| c.merge_tool().is_ok())
+            .find_map(|c| {
+                let text = std::fs::read(root.join(&c.path)).ok()?;
+                from_markers(&String::from_utf8_lossy(&text)).map(|(_, theirs)| theirs)
+            })
+    };
+    Sides {
+        ours: branch,
+        theirs,
+        mine: 2,
+    }
 }
 
-/// The labels of the first conflict's markers in `text`.
-pub fn from_markers(text: &str) -> Option<Sides> {
+/// The labels of the first conflict's markers in `text`: `<<<<<<< ours` and `>>>>>>> theirs`.
+pub fn from_markers(text: &str) -> Option<(String, String)> {
     let mut lines = text.lines();
     let ours = lines.find_map(|l| l.strip_prefix("<<<<<<< "))?.trim_end();
     let theirs = lines.find_map(|l| l.strip_prefix(">>>>>>> "))?.trim_end();
-    Some(Sides {
-        ours: ours.to_owned(),
-        theirs: theirs.to_owned(),
-    })
-}
-
-/// The labels git gives an operation's sides, for conflicts with no markers to read.
-fn from_operation(git: &Git) -> Option<Sides> {
-    let dir = PathBuf::from(git.query(&["rev-parse", "--absolute-git-dir"]).ok()??);
-    let commit = |name: &str| -> Option<String> {
-        let line = git
-            .query(&["log", "-1", "--format=%h (%s)", name, "--"])
-            .ok()??;
-        (!line.is_empty()).then_some(line)
-    };
-    let theirs = if dir.join("MERGE_HEAD").is_file() {
-        // `Merge branch 'feature'`: git labels their side by the name merged.
-        std::fs::read_to_string(dir.join("MERGE_MSG"))
-            .ok()
-            .and_then(|m| Some(m.lines().next()?.split('\'').nth(1)?.to_owned()))
-            .or_else(|| {
-                git.query(&["rev-parse", "--short", "MERGE_HEAD"])
-                    .ok()
-                    .flatten()
-            })?
-    } else if let Some(c) = commit("REBASE_HEAD")
-        .filter(|_| dir.join("rebase-merge").is_dir() || dir.join("rebase-apply").is_dir())
-    {
-        c
-    } else if let Some(c) = commit("CHERRY_PICK_HEAD") {
-        c
-    } else {
-        format!("parent of {}", commit("REVERT_HEAD")?)
-    };
-    Some(Sides {
-        ours: "HEAD".into(),
-        theirs,
-    })
+    Some((ours.to_owned(), theirs.to_owned()))
 }
 
 #[cfg(test)]
@@ -363,12 +404,11 @@ mod tests {
         })
     }
 
-    fn conflict(stages: [Option<Entry>; 3], binary: bool, on_disk: bool) -> Conflict {
+    fn conflict(stages: [Option<Entry>; 3], binary: bool) -> Conflict {
         Conflict {
             path: "a b.txt".into(),
             stages,
             binary,
-            on_disk,
         }
     }
 
@@ -387,7 +427,7 @@ mod tests {
             ([f, None, None], "DD", "both deleted"),
         ];
         for (stages, code, words) in cases {
-            let c = conflict(stages, false, true);
+            let c = conflict(stages, false);
             assert_eq!((c.code(), c.words()), (code, words));
         }
     }
@@ -395,50 +435,71 @@ mod tests {
     #[test]
     fn only_text_on_both_sides_goes_to_the_merge_tool() {
         let f = entry(FILE);
-        assert_eq!(conflict([f, f, f], false, true).merge_tool(), Ok(()));
-        assert_eq!(conflict([None, f, f], false, true).merge_tool(), Ok(()));
-        assert!(conflict([f, f, f], true, true).merge_tool().is_err());
-        assert!(conflict([f, f, None], false, true).merge_tool().is_err());
+        assert_eq!(conflict([f, f, f], false).merge_tool(), Ok(()));
+        assert_eq!(conflict([None, f, f], false).merge_tool(), Ok(()));
+        assert!(conflict([f, f, f], true).merge_tool().is_err());
+        assert!(conflict([f, f, None], false).merge_tool().is_err());
         let link = entry(SYMLINK);
-        assert!(
-            conflict([link, link, link], false, true)
-                .merge_tool()
-                .is_err()
-        );
+        assert!(conflict([link, link, link], false).merge_tool().is_err());
         let sub = entry(GITLINK);
-        assert!(conflict([sub, sub, sub], false, true).merge_tool().is_err());
+        assert!(conflict([sub, sub, sub], false).merge_tool().is_err());
     }
 
     #[test]
     fn answers_by_kind() {
         let f = entry(FILE);
-        assert_eq!(conflict([f, f, f], false, true).answers(), vec![]);
-        assert_eq!(
-            conflict([f, f, f], true, true).answers(),
-            vec![Answer::Ours, Answer::Theirs]
-        );
+        let sides = vec![Answer::Ours, Answer::Theirs];
+        assert_eq!(conflict([f, f, f], false).answers(), sides);
+        assert_eq!(conflict([f, f, f], true).answers(), sides);
         let link = entry(SYMLINK);
+        assert_eq!(conflict([link, link, link], false).answers(), sides);
+        assert_eq!(conflict([f, f, None], false).answers(), sides);
         assert_eq!(
-            conflict([link, link, link], false, true).answers(),
-            vec![Answer::Ours, Answer::Theirs]
-        );
-        assert_eq!(
-            conflict([f, f, None], false, true).answers(),
-            vec![Answer::Keep, Answer::Delete]
-        );
-        // Nothing on disk to keep.
-        assert_eq!(
-            conflict([f, None, None], false, false).answers(),
+            conflict([f, None, None], false).answers(),
             vec![Answer::Delete]
         );
         let sub = entry(GITLINK);
-        assert_eq!(conflict([sub, sub, sub], false, true).answers(), vec![]);
+        assert_eq!(conflict([sub, sub, sub], false).answers(), vec![]);
+    }
+
+    #[test]
+    fn items_name_mine_and_theirs_and_say_what_deletes() {
+        let f = entry(FILE);
+        let merge = Sides {
+            ours: Some("merge-here".into()),
+            theirs: Some("feature".into()),
+            mine: 2,
+        };
+        let c = conflict([f, f, None], false);
+        assert_eq!(c.item(&merge, Answer::Ours), "Use mine (merge-here)");
+        assert_eq!(
+            c.item(&merge, Answer::Theirs),
+            "Use theirs (feature, deleted)"
+        );
+        // A rebase replays the user's commit (stage 3) onto theirs (stage 2).
+        let rebase = Sides {
+            ours: Some("main".into()),
+            theirs: Some("topic".into()),
+            mine: 3,
+        };
+        assert_eq!(c.item(&rebase, Answer::Ours), "Use theirs (main)");
+        assert_eq!(c.item(&rebase, Answer::Theirs), "Use mine (topic, deleted)");
+        assert_eq!(
+            rebase.mine_first(c.answers()),
+            vec![Answer::Theirs, Answer::Ours]
+        );
+        let unnamed = Sides {
+            ours: None,
+            theirs: None,
+            mine: 2,
+        };
+        assert_eq!(c.item(&unnamed, Answer::Theirs), "Use theirs (deleted)");
     }
 
     #[test]
     fn a_side_that_deleted_the_file_is_taken_by_removing_it() {
         let f = entry(FILE);
-        let c = conflict([f, f, None], true, true);
+        let c = conflict([f, f, None], true);
         assert_eq!(
             c.commands(Answer::Theirs),
             vec![vec!["rm", "--quiet", "--", "a b.txt"]]
@@ -458,13 +519,8 @@ mod tests {
                     <<<<<<< other\n";
         assert_eq!(
             from_markers(text),
-            Some(Sides {
-                ours: "HEAD".into(),
-                theirs: "954001b (Edit list)".into()
-            })
+            Some(("HEAD".into(), "954001b (Edit list)".into()))
         );
         assert_eq!(from_markers("no markers\n"), None);
-        assert_eq!(short_label("954001b (Edit list)"), "954001b");
-        assert_eq!(short_label("Stashed changes"), "Stashed changes");
     }
 }

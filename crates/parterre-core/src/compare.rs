@@ -115,13 +115,15 @@ fn add_conflicted(files: &mut Vec<ChangedFile>, conflicts: &[Conflict]) {
     }
     for c in missing {
         let mode = |stage: usize| c.stages[stage].map_or(0, |e| e.mode);
+        // Left out for being the same as the commit: no lines changed, unless it's binary.
+        let lines = (!c.binary && !c.is_submodule()).then_some(0);
         files.push(ChangedFile {
             path: c.path.clone(),
             old_path: None,
             status: FileStatus::Unmerged,
             modes: [mode(1), mode(2)],
-            added: None,
-            removed: None,
+            added: lines,
+            removed: lines,
         });
     }
     files.sort_by(|a, b| compare_paths(&a.path, &b.path));

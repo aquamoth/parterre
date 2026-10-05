@@ -142,10 +142,10 @@ The banner's *Compare with working tree* lists HEAD against the working tree, as
 menu does, with each conflicted file's code from `git status` (`UU`, `AA`, `UD`, `DU`, …). A
 file's menu opens it in your merge tool (`git mergetool`, left running on its own), or its folder
 in a terminal or the file manager. When no merge tool is configured, parterre lists the installed
-ones; *Remember this choice* sets `merge.tool` in your global git config. What a merge tool can't
-open is answered in the menu: *Keep* or *Delete* a file one side deleted, and *Use* one side of a
-binary file or symlink, named as git names them in conflict markers (`HEAD`, `feature`).
-Submodules are left to the terminal.
+ones; *Remember this choice* sets `merge.tool` in your global git config. Any conflict but a
+submodule's can also be finished by taking one side whole: *Use mine (main)* or *Use theirs
+(feature)*, saying *deleted* where that side deleted the file. In a rebase, *mine* is your branch
+being replayed. Submodules are left to the terminal.
 
 ## Pull requests
 

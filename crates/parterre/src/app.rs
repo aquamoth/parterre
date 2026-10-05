@@ -2937,14 +2937,9 @@ impl eframe::App for ParterreApp {
         let banner = self.branches.banner_shown();
         if let (Some(repo), Some(catalog)) = (&self.repo, &self.branches.catalog)
             && banner
+            && let Some(rebase::BannerClick::Compare(head)) = rebase::banner(ui, repo, catalog)
         {
-            match rebase::banner(ui, repo, catalog) {
-                Some(rebase::BannerClick::Failed(error)) => self.status = Some((error, true)),
-                Some(rebase::BannerClick::Compare(head)) => {
-                    self.compare_request(CompareRequest::WorkingTree(head))
-                }
-                None => {}
-            }
+            self.compare_request(CompareRequest::WorkingTree(head))
         }
         if self.repo.is_some() {
             egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));

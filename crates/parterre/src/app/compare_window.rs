@@ -15,7 +15,7 @@ use eframe::egui::{
 };
 use parterre_core::blame::BlameSpec;
 use parterre_core::compare::{Comparison, WorkingTree};
-use parterre_core::conflicts::{Resolve, short_label};
+use parterre_core::conflicts::Resolve;
 use parterre_core::file_diff::{FileDiffSpec, Rev};
 use parterre_core::glyphs;
 use parterre_core::log::commit_name;
@@ -259,15 +259,10 @@ impl CompareWindow {
                 },
                 RowPick::Answer(answer) => {
                     let Some(conflict) = conflict else { return };
-                    let side = tree
-                        .sides
-                        .label(answer)
-                        .map(short_label)
-                        .unwrap_or_default();
                     FileRequest::Resolve(Resolve {
                         conflict: conflict.clone(),
                         answer,
-                        side: side.to_owned(),
+                        item: conflict.item(&tree.sides, answer),
                     })
                 }
                 RowPick::Terminal => {

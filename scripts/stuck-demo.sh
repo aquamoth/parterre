@@ -23,6 +23,7 @@ g() { git -C "$repo" "$@"; }
 w() { local dir=$1; shift; git -C "$out/$dir" "$@" >/dev/null 2>&1 || true; }
 put() { mkdir -p "$(dirname "$1")"; printf "$2" > "$1"; }
 # A submodule's commit, straight into the index: no submodule needed for its conflict.
+# Commit right after, without `git add -A`, which would drop it again.
 gitlink() { g update-index --add --cacheinfo "160000,$2,$1"; }
 commit() { g add -A && g commit -q -m "$1"; }
 
@@ -89,7 +90,8 @@ put guide/index.md 'the guide, as a folder\n'
 ln -sfn target-feature link
 g add -A
 gitlink sub 2222222222222222222222222222222222222222
-commit "Feature: every kind of change"
+# Not `commit`: its `git add -A` would drop the submodule, which has no folder on disk.
+g commit -q -m "Feature: every kind of change"
 
 # main: changes them another way.
 g switch -q main
@@ -104,7 +106,7 @@ g rm -q old.txt
 ln -sfn target-main link
 g add -A
 gitlink sub 3333333333333333333333333333333333333333
-commit "Main: every kind of change"
+g commit -q -m "Main: every kind of change"
 
 # topic: three commits from the base, the second conflicting with main.
 g switch -q -c topic "$base"

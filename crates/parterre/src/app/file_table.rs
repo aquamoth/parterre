@@ -16,7 +16,7 @@ use parterre_core::changed_files::{
 };
 use parterre_core::columns::{ColumnWidths, Layout};
 use parterre_core::compare::WorkingTree;
-use parterre_core::conflicts::{Answer, short_label};
+use parterre_core::conflicts::Answer;
 use parterre_core::file_diff::GITLINK_MODE;
 use parterre_core::git::Git;
 use parterre_core::text::{elide_start, thousands};
@@ -427,9 +427,9 @@ impl FileTable {
                         .is_some_and(|p| status_rect.contains(p));
                     let response = match (badged, conflict) {
                         (_, Some(conflict)) if on_status => {
-                            response.on_hover_text(capitalized(conflict.words()))
+                            response.on_hover_text_at_pointer(capitalized(conflict.words()))
                         }
-                        (Some(b), None) if on_status => response.on_hover_text(&b.words),
+                        (Some(b), None) if on_status => response.on_hover_text_at_pointer(&b.words),
                         _ => response,
                     };
                     let response =
@@ -641,21 +641,18 @@ fn working_tree_menu(ui: &mut Ui, tree: &WorkingTree, file: &ChangedFile) -> Opt
         .add_enabled(why.is_none(), egui::Button::new("Open in merge tool"))
         .on_disabled_hover_text(why.unwrap_or_default());
     item(ui, tool, RowPick::MergeTool);
-    for answer in conflict.map(|c| c.answers()).unwrap_or_default() {
-        let label = tree.sides.label(answer);
-        let text = match (answer, label) {
-            (Answer::Keep, _) => "Keep".to_owned(),
-            (Answer::Delete, _) => "Delete".to_owned(),
-            (_, Some(label)) => format!("Use {}", short_label(label)),
-            (_, None) => continue,
-        };
-        let hover = match label {
-            Some(label) => label.to_owned(),
-            None if answer == Answer::Keep => "git add".to_owned(),
-            None => "git rm".to_owned(),
-        };
-        let response = ui.button(text).on_hover_text(hover);
-        item(ui, response, RowPick::Answer(answer));
+    if let Some(c) = conflict {
+        for answer in tree.sides.mine_first(c.answers()) {
+            let commands: Vec<String> = c
+                .commands(answer)
+                .iter()
+                .map(|args| format!("git {}", args.join(" ")))
+                .collect();
+            let response = ui
+                .button(c.item(&tree.sides, answer))
+                .on_hover_text(commands.join("\n"));
+            item(ui, response, RowPick::Answer(answer));
+        }
     }
     crate::menu::separator(ui);
     let terminal = ui.button("Open terminal");
@@ -1200,14 +1197,14 @@ mod tests {
     }
 
     #[test]
-    fn a_file_deleted_by_them_is_kept_or_deleted_but_not_merged() {
+    fn a_file_deleted_by_them_takes_a_side_but_not_the_merge_tool() {
         let dir = super::super::tool_harness::stuck_merge();
         let mut t = Table::new(dir.path());
         t.click("gone.txt", egui::PointerButton::Secondary);
         for item in [
             "Open in merge tool",
-            "Keep",
-            "Delete",
+            "Use mine (main)",
+            "Use theirs (feature, deleted)",
             "Open terminal",
             "Open file system",
         ] {
@@ -1220,8 +1217,11 @@ mod tests {
         );
         t.click("gone.txt", egui::PointerButton::Secondary);
         assert_eq!(
-            t.click("Keep", egui::PointerButton::Primary),
-            Some(("gone.txt".to_owned(), RowPick::Answer(Answer::Keep)))
+            t.click(
+                "Use theirs (feature, deleted)",
+                egui::PointerButton::Primary
+            ),
+            Some(("gone.txt".to_owned(), RowPick::Answer(Answer::Theirs)))
         );
     }
 
@@ -1230,8 +1230,9 @@ mod tests {
         let dir = super::super::tool_harness::stuck_merge();
         let mut t = Table::new(dir.path());
         t.click("text.txt", egui::PointerButton::Secondary);
-        assert!(!t.shows("Keep"));
-        assert!(!t.shows("Use HEAD"));
+        // Or either side, whole.
+        assert!(t.shows("Use mine (main)"));
+        assert!(t.shows("Use theirs (feature)"));
         assert_eq!(
             t.click("Open in merge tool", egui::PointerButton::Primary),
             Some(("text.txt".to_owned(), RowPick::MergeTool))

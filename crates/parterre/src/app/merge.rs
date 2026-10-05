@@ -481,11 +481,7 @@ mod tests {
         let (repo, catalog) = load(h.path());
         assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a merge")));
         let texts = banner_texts(h.path());
-        let expected = format!(
-            "Merging {} into main: 1 conflicted file",
-            up.short(repo.abbrev_len.max(7))
-        );
-        assert!(texts.contains(&expected), "{texts:?}");
+        assert!(texts.contains(&"1 conflicted file".to_owned()), "{texts:?}");
         // Merging is greyed out until it's finished with git.
         let node = |click: Option<&str>| {
             let (repo, catalog) = (&repo, &catalog);
@@ -511,17 +507,14 @@ mod tests {
             std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let mut h = Harness::new(dir);
-        let up = h.rev("up");
         open(&mut h);
         h.click("Merge");
         h.until("the orange notice", |h| h.shows("Merge not committed"));
-        let (repo, _) = load(h.path());
         let texts = banner_texts(h.path());
-        let expected = format!(
-            "Merging {} into main: not committed",
-            up.short(repo.abbrev_len.max(7))
+        assert!(
+            texts.contains(&"Merge not committed".to_owned()),
+            "{texts:?}"
         );
-        assert!(texts.contains(&expected), "{texts:?}");
     }
 
     #[test]

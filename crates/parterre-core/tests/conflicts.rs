@@ -65,7 +65,7 @@ fn answer(r: &TestRepo, path: &str, answer: Answer) -> Outcome {
     let resolve = Resolve {
         conflict: conflict(r, path),
         answer,
-        side: String::new(),
+        item: String::new(),
     };
     Branches::new(r.path()).execute(
         Action::Resolve(Box::new(resolve)),
@@ -178,36 +178,48 @@ fn only_text_on_both_sides_goes_to_the_merge_tool() {
 fn what_finishes_each_kind_in_parterre() {
     let r = merge_of_every_kind();
     let answers = |p: &str| conflict(&r, p).answers();
-    assert_eq!(answers("text.txt"), []);
-    assert_eq!(answers("both-added.txt"), []);
-    assert_eq!(
-        answers("deleted-by-them.txt"),
-        [Answer::Keep, Answer::Delete]
-    );
-    assert_eq!(answers("deleted-by-us.txt"), [Answer::Keep, Answer::Delete]);
-    assert_eq!(answers("image.bin"), [Answer::Ours, Answer::Theirs]);
-    assert_eq!(answers("link"), [Answer::Ours, Answer::Theirs]);
+    for p in [
+        "text.txt",
+        "both-added.txt",
+        "deleted-by-them.txt",
+        "deleted-by-us.txt",
+        "image.bin",
+        "link",
+    ] {
+        assert_eq!(answers(p), [Answer::Ours, Answer::Theirs], "{p}");
+    }
     // Submodules are left to the terminal.
     assert_eq!(answers("sub"), []);
 }
 
 #[test]
-fn keep_stages_the_file_as_it_is() {
+fn taking_the_side_that_kept_a_file_stages_it() {
     let r = merge_of_every_kind();
-    done(answer(&r, "deleted-by-them.txt", Answer::Keep));
+    done(answer(&r, "deleted-by-them.txt", Answer::Ours));
     assert!(!unmerged(&r).contains(&"deleted-by-them.txt".to_owned()));
     assert_eq!(staged(&r, "deleted-by-them.txt"), "main");
-    done(answer(&r, "deleted-by-us.txt", Answer::Keep));
+    done(answer(&r, "deleted-by-us.txt", Answer::Theirs));
     assert_eq!(staged(&r, "deleted-by-us.txt"), "feature");
+    assert!(r.path().join("deleted-by-us.txt").is_file());
 }
 
 #[test]
-fn delete_removes_it_from_the_index_and_the_disk() {
+fn taking_the_side_that_deleted_a_file_deletes_it() {
     let r = merge_of_every_kind();
-    done(answer(&r, "deleted-by-them.txt", Answer::Delete));
+    let c = conflict(&r, "deleted-by-them.txt");
+    assert!(c.deletes(Answer::Theirs));
+    done(answer(&r, "deleted-by-them.txt", Answer::Theirs));
     assert!(!unmerged(&r).contains(&"deleted-by-them.txt".to_owned()));
     assert_eq!(r.git(&["ls-files", "--", "deleted-by-them.txt"]), "");
     assert!(!r.path().join("deleted-by-them.txt").exists());
+}
+
+#[test]
+fn a_side_of_a_content_conflict_is_taken_whole() {
+    let r = merge_of_every_kind();
+    done(answer(&r, "text.txt", Answer::Theirs));
+    assert!(!unmerged(&r).contains(&"text.txt".to_owned()));
+    assert_eq!(staged(&r, "text.txt"), "one\nTWO (feature)\nthree");
 }
 
 #[test]
@@ -238,8 +250,8 @@ fn a_file_resolved_meanwhile_is_left_alone() {
     r.git(&["rm", "-q", "deleted-by-them.txt"]);
     let resolve = Resolve {
         conflict: stale,
-        answer: Answer::Keep,
-        side: String::new(),
+        answer: Answer::Ours,
+        item: String::new(),
     };
     let out = Branches::new(r.path()).execute(
         Action::Resolve(Box::new(resolve)),
@@ -261,25 +273,35 @@ fn a_file_resolved_meanwhile_is_left_alone() {
 #[test]
 fn an_answer_the_kind_doesn_t_have_is_refused() {
     let r = merge_of_every_kind();
-    let out = answer(&r, "text.txt", Answer::Ours);
+    let out = answer(&r, "sub", Answer::Ours);
     assert!(matches!(out, Outcome::Failed { .. }), "{out:?}");
-    assert!(unmerged(&r).contains(&"text.txt".to_owned()));
+    assert!(unmerged(&r).contains(&"sub".to_owned()));
+}
+
+/// Sides with names, mine being stage `mine`.
+fn named(ours: &str, theirs: &str, mine: u8) -> Sides {
+    Sides {
+        ours: Some(ours.to_owned()),
+        theirs: Some(theirs.to_owned()),
+        mine,
+    }
 }
 
 #[test]
-fn a_merge_s_sides_are_head_and_the_branch_merged() {
+fn a_merge_s_sides_are_my_branch_and_the_branch_merged() {
     let r = merge_of_every_kind();
+    let sides = sides(&r);
+    assert_eq!(sides, named("main", "feature", 2));
+    let gone = conflict(&r, "deleted-by-them.txt");
+    assert_eq!(gone.item(&sides, Answer::Ours), "Use mine (main)");
     assert_eq!(
-        sides(&r),
-        Sides {
-            ours: "HEAD".into(),
-            theirs: "feature".into()
-        }
+        gone.item(&sides, Answer::Theirs),
+        "Use theirs (feature, deleted)"
     );
 }
 
 #[test]
-fn without_a_text_conflict_a_merge_s_sides_come_from_its_message() {
+fn a_merge_of_a_deletion_names_the_branch_merged() {
     let mut r = TestRepo::new();
     r.write("f", b"base\n");
     r.commit_all("Base");
@@ -291,13 +313,7 @@ fn without_a_text_conflict_a_merge_s_sides_come_from_its_message() {
     r.commit_all("Edit f");
     assert!(!try_git(&r, &["merge", "-q", "topic"]));
     assert_eq!(conflict(&r, "f").code(), "UD");
-    assert_eq!(
-        sides(&r),
-        Sides {
-            ours: "HEAD".into(),
-            theirs: "topic".into()
-        }
-    );
+    assert_eq!(sides(&r), named("main", "topic", 2));
 }
 
 /// A file both sides of a history change, for a stop in each operation.
@@ -319,31 +335,30 @@ fn short(r: &TestRepo, rev: &str) -> String {
 }
 
 #[test]
-fn a_rebase_s_sides_are_head_and_the_commit_replayed() {
-    let (r, topic) = diverged();
+fn a_rebase_s_mine_is_the_branch_replayed_onto_theirs() {
+    let (r, _) = diverged();
     r.checkout("topic");
     assert!(!try_git(&r, &["rebase", "-q", "main"]));
+    let sides = sides(&r);
+    assert_eq!(sides, named("main", "topic", 3));
+    let c = conflict(&r, "list.txt");
     assert_eq!(
-        sides(&r),
-        Sides {
-            ours: "HEAD".into(),
-            theirs: format!("{} (Topic: edit list)", short(&r, &topic)),
-        }
+        sides.mine_first(c.answers()),
+        [Answer::Theirs, Answer::Ours]
     );
+    assert_eq!(c.item(&sides, Answer::Theirs), "Use mine (topic)");
+    assert_eq!(c.item(&sides, Answer::Ours), "Use theirs (main)");
 }
 
 #[test]
-fn a_cherry_pick_s_sides_are_head_and_the_commit_picked() {
+fn a_cherry_pick_s_theirs_is_the_commit_picked() {
     let (r, topic) = diverged();
     assert!(!try_git(&r, &["cherry-pick", &topic]));
-    assert_eq!(
-        sides(&r).theirs,
-        format!("{} (Topic: edit list)", short(&r, &topic))
-    );
+    assert_eq!(sides(&r), named("main", &short(&r, &topic), 2));
 }
 
 #[test]
-fn a_revert_s_sides_are_head_and_the_parent_of_the_commit() {
+fn a_revert_s_theirs_is_the_revert() {
     let (mut r, _) = diverged();
     let edit = r.git(&["rev-parse", "HEAD"]);
     r.write("list.txt", b"one\n2 (main), again\nthree\n");
@@ -351,15 +366,12 @@ fn a_revert_s_sides_are_head_and_the_parent_of_the_commit() {
     assert!(!try_git(&r, &["revert", "--no-edit", &edit]));
     assert_eq!(
         sides(&r),
-        Sides {
-            ours: "HEAD".into(),
-            theirs: format!("parent of {} (Main: edit list)", short(&r, &edit)),
-        }
+        named("main", &format!("revert of {}", short(&r, &edit)), 2)
     );
 }
 
 #[test]
-fn a_stash_pop_s_sides_are_git_s_own_words() {
+fn a_stash_pop_s_theirs_is_named_as_the_markers_name_it() {
     let mut r = TestRepo::new();
     r.write("settings.ini", b"colour = blue\n");
     r.commit_all("Base");
@@ -368,17 +380,10 @@ fn a_stash_pop_s_sides_are_git_s_own_words() {
     r.write("settings.ini", b"colour = red\n");
     r.commit_all("Red");
     assert!(!try_git(&r, &["stash", "pop", "-q"]));
-    assert_eq!(
-        sides(&r),
-        Sides {
-            ours: "Updated upstream".into(),
-            theirs: "Stashed changes".into()
-        }
-    );
-    // A content conflict: the merge tool's, with no operation in progress.
+    assert_eq!(sides(&r), named("main", "Stashed changes", 2));
     let c = conflict(&r, "settings.ini");
     assert!(c.merge_tool().is_ok());
-    assert!(c.answers().is_empty());
+    assert_eq!(c.answers(), [Answer::Ours, Answer::Theirs]);
 }
 
 #[test]
@@ -404,7 +409,9 @@ fn comparing_with_the_working_tree_lists_every_conflicted_file() {
         .find(|f| f.path == "deleted-by-them.txt")
         .unwrap();
     assert_eq!(kept.status, FileStatus::Unmerged);
-    assert_eq!(tree.sides.theirs, "feature");
+    assert_eq!(tree.sides.theirs.as_deref(), Some("feature"));
+    // Not binary, so its diff is read as text.
+    assert_eq!(kept.added, Some(0));
 }
 
 #[test]
@@ -423,7 +430,7 @@ fn comparing_commits_lists_no_conflicts() {
 }
 
 #[test]
-fn a_file_against_a_directory_is_kept_or_deleted_by_its_moved_aside_name() {
+fn a_file_against_a_directory_is_finished_by_its_moved_aside_name() {
     let mut r = TestRepo::new();
     r.write("guide", b"the guide\n");
     r.commit_all("Base");
@@ -440,8 +447,9 @@ fn a_file_against_a_directory_is_kept_or_deleted_by_its_moved_aside_name() {
         .find(|c| c.path.starts_with("guide~"))
         .expect("git moves the file aside");
     assert_eq!(aside.code(), "UD");
-    assert_eq!(aside.answers(), [Answer::Keep, Answer::Delete]);
-    done(answer(&r, &aside.path, Answer::Delete));
+    assert_eq!(aside.answers(), [Answer::Ours, Answer::Theirs]);
+    // Their side is the folder: taking it deletes the file moved aside.
+    done(answer(&r, &aside.path, Answer::Theirs));
     assert!(unmerged(&r).is_empty());
     assert!(r.path().join("guide/index.md").is_file());
 }

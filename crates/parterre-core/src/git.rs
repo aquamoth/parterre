@@ -689,7 +689,8 @@ impl Git {
                 let Some(v) = v else { return Ok(None) };
                 if v.rev == Rev::WorkingTree {
                     let path = self.dir.join(&v.path);
-                    let meta = std::fs::metadata(&path)
+                    // A symlink's own size, as git sees it: its target needn't exist.
+                    let meta = std::fs::symlink_metadata(&path)
                         .map_err(|source| GitError::Read { path, source })?;
                     return Ok(Some(meta.len()));
                 }

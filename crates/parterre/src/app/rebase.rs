@@ -377,135 +377,120 @@ impl RebaseDialog {
     }
 }
 
-/// What the banner's buttons asked for.
+/// What the banner's button asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BannerClick {
     /// *Compare with working tree*: HEAD against the working tree, as the graph's menu opens it.
     Compare(parterre_core::Oid),
-    /// The terminal didn't open, and why.
-    Failed(String),
 }
 
-/// The banner across the graph while the open worktree is stuck: what's stopped there, if
-/// anything, its conflicted files on hover, *Compare with working tree* and *Open in
-/// terminal*. Call before the central panel.
+/// The banner across the graph while the open worktree is stuck: what it needs (its
+/// conflicted files, listed on hover, or what stopped), and *Compare with working tree*,
+/// where each file opens in the right tool. Call before the central panel.
 pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<BannerClick> {
     let stuck = catalog.stuck()?;
     let open = catalog.worktrees.iter().find(|w| w.open);
     let files = &catalog.conflicted;
-    let merging = open.and_then(|w| w.merging);
     let picking = open.and_then(|w| w.picking.as_ref());
-    let reverting = open.and_then(|w| w.reverting);
-    let (mut text, hint) = match open.and_then(|w| w.rebasing.as_ref()) {
-        None if let Some(p) = picking => {
-            let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
-            let commit = p.commit.short(repo.abbrev_len.max(7));
-            let at = if p.total > 1 {
-                format!(" stopped at {}/{}", p.done, p.total)
-            } else {
-                String::new()
-            };
-            (format!("Cherry-picking {commit} onto {branch}{at}"), FINISH)
-        }
-        None if let Some(commit) = reverting => {
-            let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
-            let commit = commit.short(repo.abbrev_len.max(7));
-            (format!("Reverting {commit} in {branch}"), FINISH)
-        }
-        None if let Some(theirs) = merging => {
-            let branch = open.and_then(|w| w.branch.as_deref()).unwrap_or("HEAD");
-            // `MERGE_HEAD` is only a commit, and `git status` names none at all.
-            let theirs = theirs.short(repo.abbrev_len.max(7));
-            (format!("Merging {theirs} into {branch}"), FINISH)
-        }
-        Some(r) => {
-            let branch = r.branch.as_deref().unwrap_or("HEAD");
-            // Git records only the commit, and `git status` names it the same way.
-            let onto = r
-                .onto
-                .map(|o| format!(" onto {}", o.short(repo.abbrev_len.max(7))))
-                .unwrap_or_default();
-            (
-                format!("Rebasing {branch}{onto} stopped at {}/{}", r.done, r.total),
-                FINISH,
-            )
-        }
-        None if stuck == Stuck::Conflicts => (
-            plural(files.len(), "conflicted file"),
-            if files.len() == 1 {
-                "Resolve it with git, or go to another worktree."
-            } else {
-                "Resolve them with git, or go to another worktree."
-            },
-        ),
-        None => (stuck.reason(), FINISH),
+    // How far a rebase or a cherry-pick of several got.
+    let progress = match open.and_then(|w| w.rebasing.as_ref()) {
+        Some(r) => Some(format!("Rebase stopped at {}/{}", r.done, r.total)),
+        None => picking
+            .filter(|p| p.total > 1)
+            .map(|p| format!("Cherry-pick stopped at {}/{}", p.done, p.total)),
     };
-    if !files.is_empty() && stuck != Stuck::Conflicts {
-        text.push_str(&format!(": {}", plural(files.len(), "conflicted file")));
-    } else if merging.is_some() || picking.is_some() || reverting.is_some() {
+    let operation = match (
+        open.and_then(|w| w.merging),
+        picking,
+        open.and_then(|w| w.reverting),
+    ) {
+        (Some(_), _, _) => Some("Merge"),
+        (_, Some(_), _) => Some("Cherry-pick"),
+        (_, _, Some(_)) => Some("Revert"),
+        _ => None,
+    };
+    let (title, detail) = if !files.is_empty() {
+        (plural(files.len(), "conflicted file"), progress)
+    } else if let Some(progress) = progress {
+        (progress, None)
+    } else if let Some(operation) = operation {
         // Stopped with no conflicts: a hook refused to commit it, or a pick came out empty.
-        text.push_str(": not committed");
-    }
+        (format!("{operation} not committed"), None)
+    } else {
+        (stuck.reason(), None)
+    };
+    let hint = match stuck {
+        Stuck::Conflicts if files.len() == 1 => "Resolve it with git, or go to another worktree.",
+        Stuck::Conflicts => "Resolve them with git, or go to another worktree.",
+        Stuck::InProgress(_) => FINISH,
+    };
     let stashed = catalog
         .stashed_for_revert
         .as_ref()
-        .map(|entry| format!(" Your changes are stashed in {entry}."));
-    let (fill, color) = if ui.visuals().dark_mode {
+        .map(|entry| format!("Your changes are stashed in {entry}."));
+    let accent = stuck_color(ui);
+    let (fill, border) = if ui.visuals().dark_mode {
         (
-            Color32::from_rgb(75, 45, 10),
-            Color32::from_rgb(255, 200, 130),
+            Color32::from_rgb(52, 41, 24),
+            Color32::from_rgb(105, 78, 34),
         )
     } else {
         (
-            Color32::from_rgb(255, 232, 196),
-            Color32::from_rgb(110, 55, 0),
+            Color32::from_rgb(255, 248, 232),
+            Color32::from_rgb(236, 208, 150),
         )
     };
-    let stroke = stuck_color(ui);
+    let text = ui.visuals().text_color();
+    let weak = ui.visuals().weak_text_color();
     let mut click = None;
-    egui::Panel::top("operation-in-progress")
+    let panel = egui::Panel::top("operation-in-progress")
         .frame(
             egui::Frame::new()
                 .fill(fill)
-                .stroke(egui::Stroke::new(1.0, stroke))
-                .inner_margin(egui::Margin::symmetric(12, 6)),
+                .stroke(egui::Stroke::new(1.0, border))
+                .inner_margin(egui::Margin {
+                    left: 18,
+                    right: 12,
+                    top: 7,
+                    bottom: 7,
+                }),
         )
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let button = 330.0;
-                ui.allocate_ui(vec2(ui.available_width() - button, 0.0), |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("⚠").color(color).strong());
-                        let label = ui.label(RichText::new(&text).color(color).strong());
-                        // The commit a cherry-pick stopped at, by its subject, and the files.
-                        let subject = picking
-                            .and_then(|p| repo.lookup(&p.commit))
-                            .map(|c| repo.commit(c).subject.clone());
-                        let hover: Vec<String> = subject.into_iter().chain(files.clone()).collect();
-                        if !hover.is_empty() {
-                            label.on_hover_text(hover.join("\n"));
-                        }
-                        ui.label(RichText::new(hint).color(color));
-                        if let Some(stashed) = &stashed {
-                            ui.label(RichText::new(stashed).color(color));
-                        }
-                    });
-                });
+                ui.set_min_height(30.0);
+                let (icon, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
+                crate::widgets::paint_glyph(ui.painter(), icon, glyphs::WARNING, accent);
+                ui.add_space(4.0);
+                let title = ui.label(RichText::new(&title).color(text).strong());
+                // The commit a cherry-pick stopped at, by its subject, and the files.
+                let subject = picking
+                    .and_then(|p| repo.lookup(&p.commit))
+                    .map(|c| repo.commit(c).subject.clone());
+                let hover: Vec<String> = subject.into_iter().chain(files.clone()).collect();
+                if !hover.is_empty() {
+                    title.on_hover_text(hover.join("\n"));
+                }
+                for line in detail.iter().chain(stashed.iter()) {
+                    ui.label(RichText::new(line).color(text));
+                }
+                ui.label(RichText::new(hint).color(weak));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Open in terminal").clicked() {
-                        crate::usage::action(crate::usage::Action::OpenTerminal);
-                        if let Err(e) = crate::file_manager::open_terminal(&catalog.root) {
-                            click = Some(BannerClick::Failed(e));
-                        }
-                    }
                     if let Some(head) = catalog.head
-                        && ui.button("Compare with working tree").clicked()
+                        && crate::widgets::primary_button(ui, "Compare with working tree", 0.0)
+                            .clicked()
                     {
                         click = Some(BannerClick::Compare(head));
                     }
                 });
             });
         });
+    // A stripe down its left edge in the stuck colour, as the graph draws a stuck worktree.
+    let rect = panel.response.rect;
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(rect.min, vec2(4.0, rect.height())),
+        0.0,
+        accent,
+    );
     click
 }
 
@@ -879,10 +864,12 @@ mod tests {
         assert!(reset.1.is_none());
 
         let texts = banner_texts(p);
-        let short = up.short(repo.abbrev_len.max(7));
         // The fix is dropped and the merge flattened: feature, the first of two, conflicts.
-        let expected = format!("Rebasing main onto {short} stopped at 1/2: 1 conflicted file");
-        assert!(texts.contains(&expected), "{texts:?}");
+        assert!(texts.contains(&"1 conflicted file".to_owned()), "{texts:?}");
+        assert!(
+            texts.contains(&"Rebase stopped at 1/2".to_owned()),
+            "{texts:?}"
+        );
     }
 
     #[test]
@@ -969,8 +956,8 @@ mod tests {
             .unwrap();
         let resolve = parterre_core::conflicts::Resolve {
             conflict: gone,
-            answer: parterre_core::conflicts::Answer::Keep,
-            side: String::new(),
+            answer: parterre_core::conflicts::Answer::Ours,
+            item: String::new(),
         };
         let ctx = h.ctx.clone();
         h.tool.request(
