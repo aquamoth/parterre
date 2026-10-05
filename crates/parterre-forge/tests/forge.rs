@@ -107,6 +107,92 @@ fn pull_requests_label_their_heads_in_the_graph() {
     assert!(labelled.contains(&("C".to_owned(), vec![])));
 }
 
+/// My fork, cloned with the parent as `upstream`, with remote branches hidden: my pull request
+/// into the parent shows on my branch's commit, which only `origin/topic` has. Another fork's
+/// pull request, were GitHub to list one, brings none of its commits in.
+#[test]
+fn a_forks_own_pull_request_shows_with_remote_branches_hidden() {
+    let mut r = TestRepo::new();
+    r.commit("A");
+    let base = r.commit("B");
+    let parent = r.commit("C");
+    r.git(&["reset", "-q", "--hard", &base]);
+    let mine = r.commit("D");
+    r.git(&["reset", "-q", "--hard", &base]);
+    let theirs = r.commit("E");
+    r.git(&["reset", "-q", "--hard", &base]);
+    r.git(&["remote", "add", "origin", "https://github.com/me/fork"]);
+    r.git(&[
+        "remote",
+        "add",
+        "upstream",
+        "https://github.com/them/parent",
+    ]);
+    r.git(&["update-ref", "refs/remotes/origin/main", &base]);
+    r.git(&["update-ref", "refs/remotes/origin/topic", &mine]);
+    r.git(&["update-ref", "refs/remotes/upstream/main", &parent]);
+    r.git(&["update-ref", "refs/remotes/other/topic", &theirs]);
+    r.git(&["branch", "--set-upstream-to=origin/main", "main"]);
+    let git = Git::new(r.path());
+    let into_parent = |number, head: &str, head_repo: &str| PullRequest {
+        number,
+        title: format!("PR {number}"),
+        author: "someone".into(),
+        draft: false,
+        head: parterre_core::Oid::from_hex(head).unwrap(),
+        head_branch: "topic".into(),
+        head_repo: Some(head_repo.into()),
+        base_branch: "main".into(),
+        base_repo: "them/parent".into(),
+        url: format!("https://github.com/them/parent/pull/{number}"),
+    };
+    let prs = PullRequests {
+        list: vec![
+            into_parent(5, &mine, "me/fork"),
+            into_parent(6, &theirs, "other/fork"),
+        ],
+        remotes: vec![
+            Remote {
+                name: "origin".into(),
+                repo: "me/fork".into(),
+            },
+            Remote {
+                name: "upstream".into(),
+                repo: "them/parent".into(),
+            },
+        ],
+        upstreams: forge::upstreams(&git).unwrap(),
+    };
+    let options = GraphOptions {
+        show_pull_requests: true,
+        show_remote_branches: false,
+        ..GraphOptions::default()
+    };
+    let repo = r.load();
+    let heads: Vec<_> = prs.heads(&repo).into_iter().map(|(h, _)| h).collect();
+    let g = revgraph::build_with_pull_requests(&repo, &options, &heads);
+    let labelled: Vec<(String, Vec<usize>)> = g
+        .nodes
+        .iter()
+        .map(|n| {
+            (
+                repo.commit(n.commit).subject.clone(),
+                n.pull_requests.clone(),
+            )
+        })
+        .collect();
+    assert!(
+        labelled.contains(&("D".to_owned(), vec![0])),
+        "{labelled:?}"
+    );
+    for absent in ["C", "E"] {
+        assert!(
+            labelled.iter().all(|(s, _)| s != absent),
+            "{absent}: {labelled:?}"
+        );
+    }
+}
+
 #[test]
 fn canned_pull_requests_are_on_their_heads_on_origin() {
     let mut r = TestRepo::new();

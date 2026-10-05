@@ -73,11 +73,13 @@ pub struct PullRequests {
 
 impl PullRequests {
     /// The pull requests whose heads are commits of `repo`, each with where it is shown: its
-    /// head commit, and the refs of its base branch. Those are the remote-tracking branches of
-    /// the base branch, in every remote that points at the pull request's repository, and the
-    /// local branches that have one of them as upstream.
+    /// head commit, the refs of its base branch, and the remote-tracking branch of its head
+    /// branch. The base branch's refs are its remote-tracking branches, in every remote that
+    /// points at the pull request's repository, and the local branches that have one of them as
+    /// upstream. The head branch's is the first in a remote that points at its repository.
     pub fn heads(&self, repo: &Repo) -> Vec<(PullRequestHead, &PullRequest)> {
         let mut bases: HashMap<(String, &str), Vec<usize>> = HashMap::new();
+        let mut tracking: HashMap<(String, &str), usize> = HashMap::new();
         for (i, r) in repo.refs.iter().enumerate() {
             let tracked = match r.kind {
                 RefKind::RemoteBranch => Some(r.full_name.as_str()),
@@ -85,6 +87,9 @@ impl PullRequests {
                 _ => None,
             };
             if let Some(key) = tracked.and_then(|t| remote_branch(&self.remotes, t)) {
+                if r.kind == RefKind::RemoteBranch {
+                    tracking.entry(key.clone()).or_insert(i);
+                }
                 bases.entry(key).or_default().push(i);
             }
         }
@@ -94,7 +99,18 @@ impl PullRequests {
                 let commit = repo.lookup(&pr.head)?;
                 let key = (pr.base_repo.to_ascii_lowercase(), pr.base_branch.as_str());
                 let bases = bases.get(&key).cloned().unwrap_or_default();
-                Some((PullRequestHead { commit, bases }, pr))
+                let head = pr.head_repo.as_ref().and_then(|head_repo| {
+                    let key = (head_repo.to_ascii_lowercase(), pr.head_branch.as_str());
+                    tracking.get(&key).copied()
+                });
+                Some((
+                    PullRequestHead {
+                        commit,
+                        bases,
+                        head,
+                    },
+                    pr,
+                ))
             })
             .collect()
     }
@@ -410,19 +426,20 @@ mod tests {
                 ),
             ]),
         };
-        let heads: Vec<(u64, u32, Vec<usize>)> = prs
+        let heads: Vec<(u64, u32, Vec<usize>, Option<usize>)> = prs
             .heads(&repo)
             .into_iter()
-            .map(|(h, pr)| (pr.number, h.commit.0, h.bases))
+            .map(|(h, pr)| (pr.number, h.commit.0, h.bases, h.head))
             .collect();
         assert_eq!(
             heads,
             [
                 // Owner and name compare without case, as on GitHub. origin/sub/main is the
                 // branch sub/main, and the tag is no branch.
-                (12, 1, vec![0, 2]),
-                (10, 1, vec![1, 3]),
-                (9, 0, vec![]),
+                // The fork's feature is origin/feature; the parent's isn't fetched.
+                (12, 1, vec![0, 2], Some(4)),
+                (10, 1, vec![1, 3], None),
+                (9, 0, vec![], Some(4)),
             ]
         );
     }

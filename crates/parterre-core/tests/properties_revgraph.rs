@@ -335,20 +335,62 @@ fn revgraph_invariants_random() {
             if opts.simplification == Simplification::AllCommits {
                 assert_eq!(g.nodes.len(), g.visible_commits, "{what}");
             }
-            // pull requests: a head is labelled exactly when it is visible and one of its base
-            // refs is shown; they change nothing else about what is visible
+            // pull requests: a head branch that would start history as a remote branch does so
+            // whether remote branches are shown or not; a head is labelled exactly when it is
+            // visible and neither its head branch nor every ref of its base is on the hide
+            // list; nothing else changes
             if n > 0 {
                 let mut pr_rng = Rng(0x5EED_0000 + (iter * 1000 + oi) as u64);
+                let remote_refs: Vec<usize> = (0..repo.refs.len())
+                    .filter(|&i| repo.refs[i].kind == RefKind::RemoteBranch)
+                    .collect();
                 let heads: Vec<PullRequestHead> = (0..pr_rng.below(5))
                     .map(|_| PullRequestHead {
                         commit: CommitIx(pr_rng.below(n as u64) as u32),
                         bases: (0..repo.refs.len())
                             .filter(|_| pr_rng.chance(0.3))
                             .collect(),
+                        head: (!remote_refs.is_empty() && pr_rng.chance(0.5))
+                            .then(|| remote_refs[pr_rng.below(remote_refs.len() as u64) as usize]),
                     })
                     .collect();
                 let gp = revgraph::build_with_pull_requests(&repo, opts, &heads);
-                assert_eq!(gp.visible_commits, g.visible_commits, "{what}");
+                let hidden_ref = |i: usize| hidden.matches(repo.refs[i].kind, &repo.refs[i].name);
+                let shown = |h: &PullRequestHead| {
+                    opts.show_pull_requests
+                        && (h.bases.is_empty() || h.bases.iter().any(|&i| !hidden_ref(i)))
+                        && !h.head.is_some_and(hidden_ref)
+                };
+                let starts = |i: usize| {
+                    let r = &repo.refs[i];
+                    r.is_head
+                        || (!opts.current_branch_only
+                            && opts.filter_matches(&r.name)
+                            && !hidden_ref(i))
+                };
+                let mut visible_with = visible.clone();
+                let mut stack: Vec<usize> = heads
+                    .iter()
+                    .filter(|h| shown(h) && h.head.is_some_and(starts))
+                    .map(|h| h.commit.ix())
+                    .collect();
+                while let Some(c) = stack.pop() {
+                    if !visible_with[c] {
+                        visible_with[c] = true;
+                        let ps = &repo.commits[c].parents;
+                        let ps = if opts.first_parent_only || fpo_of.contains(&c) {
+                            &ps[..ps.len().min(1)]
+                        } else {
+                            &ps[..]
+                        };
+                        stack.extend(ps.iter().map(|p| p.ix()));
+                    }
+                }
+                assert_eq!(
+                    gp.visible_commits,
+                    visible_with.iter().filter(|&&v| v).count(),
+                    "{what}"
+                );
                 let mut seen = HashSet::new();
                 for node in &gp.nodes {
                     assert!(seen.insert(node.commit), "{what}: duplicate node");
@@ -361,11 +403,7 @@ fn revgraph_invariants_random() {
                     assert!(anc[cc].contains(&pc), "{what}: edge to non-ancestor");
                 }
                 for (k, h) in heads.iter().enumerate() {
-                    let base_shown = h.bases.iter().any(|&i| {
-                        let r = &repo.refs[i];
-                        (opts.shows(r.kind) || r.is_head) && visible[r.target.ix()]
-                    });
-                    let labelled = opts.show_pull_requests && visible[h.commit.ix()] && base_shown;
+                    let labelled = shown(h) && visible_with[h.commit.ix()];
                     let node = gp.node_of(h.commit);
                     let has = node.is_some_and(|x| gp.nodes[x as usize].pull_requests.contains(&k));
                     assert_eq!(has, labelled, "{what}: pull request {k} {h:?}");
