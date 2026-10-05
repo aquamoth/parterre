@@ -2499,7 +2499,7 @@ impl Tool {
                                 }
                             });
                             // Its first rows only, so the × stays on screen however much git
-                            // printed (#283); the details dialog has the rest.
+                            // printed (#283); the details dialog has the rest (#295).
                             if let Some(error) = &n.error {
                                 let mut job = Arc::unwrap_or_clone(
                                     egui::WidgetText::from(error).into_layout_job(
@@ -2509,7 +2509,22 @@ impl Tool {
                                     ),
                                 );
                                 job.wrap.max_rows = NOTICE_ROWS;
-                                ui.add(egui::Label::new(job).wrap());
+                                job.wrap.max_width = ui.available_width();
+                                let galley = ui.fonts_mut(|f| f.layout_job(job));
+                                let cut = galley.elided;
+                                let text = ui.add(egui::Label::new(galley).sense(if cut {
+                                    egui::Sense::click()
+                                } else {
+                                    egui::Sense::hover()
+                                }));
+                                if cut
+                                    && (text
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .clicked()
+                                        || ui.link("Show all").clicked())
+                                {
+                                    self.details = Some(n.id);
+                                }
                             }
                         });
                 }
@@ -2524,7 +2539,15 @@ impl Tool {
                 .resizable()
                 .show(ctx, |ui| {
                     dialogs::fields(ui, |ui| {
-                        ui.weak(n.path.display().to_string());
+                        ui.horizontal(|ui| {
+                            ui.weak(n.path.display().to_string());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    copy_button(ui, n.id, details_text(n));
+                                },
+                            );
+                        });
                         if let Some(error) = &n.error {
                             let color = if n.attention {
                                 stuck_color(ui)
@@ -2553,6 +2576,43 @@ impl Tool {
     }
 }
 
+/// What the details dialog of `n` shows, to copy: its error, then each command with what it
+/// printed.
+fn details_text(n: &Notice) -> String {
+    let mut text = n.error.clone().unwrap_or_default();
+    for step in &n.report.steps {
+        for part in [command_text(&step.args), step.output.clone()] {
+            if !part.is_empty() {
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&part);
+            }
+        }
+    }
+    text
+}
+
+/// Copies `text`, with a check mark for a moment after the click.
+fn copy_button(ui: &mut Ui, id: u64, text: String) {
+    let copied_id = Id::new("copied-operation-details").with(id);
+    let now = ui.input(|i| i.time);
+    let at: Option<f64> = ui.data(|d| d.get_temp(copied_id));
+    let copied = at.is_some_and(|at| now - at < 1.5);
+    if copied {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(300));
+    }
+    let done = Color32::from_rgb(0x2e, 0xa0, 0x43);
+    if widgets::copy_button(ui, copied, done)
+        .on_hover_text("Copy")
+        .clicked()
+    {
+        ui.ctx().copy_text(text);
+        ui.data_mut(|d| d.insert_temp(copied_id, now));
+    }
+}
+
 impl Drop for Tool {
     fn drop(&mut self) {
         if let Some(job) = &self.job {
@@ -2565,9 +2625,9 @@ impl Drop for Tool {
 mod tests {
     use std::path::Path;
 
-    use eframe::egui;
+    use eframe::egui::{self, Pos2};
     use parterre_core::Oid;
-    use parterre_core::branches::{Action, BranchTip};
+    use parterre_core::branches::{Action, BranchTip, Report, Step};
 
     use super::super::tool_harness::{Harness, git, load, menu, write};
     use super::Request;
@@ -2832,30 +2892,83 @@ mod tests {
         assert!(!h.shows("Delete anyway"));
     }
 
-    #[test]
-    fn a_long_error_keeps_its_notification_in_the_window() {
+    /// A failed operation's notification with `error`, placed and sized.
+    fn failed(error: &str) -> Harness {
         let mut h = Harness::new(branches());
-        let output: String = (0..200)
-            .map(|i| format!("\tweb/Scripts/controllers/file{i}.js\n"))
-            .collect();
         let (ctx, path) = (h.ctx.clone(), h.path().to_owned());
         h.tool.notice(
             &ctx,
             path,
             "Switch to main failed".into(),
             Default::default(),
-            Some(format!("error: would be overwritten:\n{output}")),
+            Some(error.into()),
         );
-        // Its first frames place and size it.
         for _ in 0..5 {
             h.frame();
         }
-        assert!(h.at("×").y > 0.0 && h.at("Switch to main failed").y > 0.0);
-        h.click("Switch to main failed");
+        h
+    }
+
+    fn opens_details(h: &mut Harness, click: Pos2) {
+        h.click_at(click, 1);
         h.until("the details", |h| h.shows("Close"));
         h.click("Close");
         h.until("the details close", |h| !h.shows("Close"));
+    }
+
+    #[test]
+    fn a_long_error_keeps_its_notification_in_the_window() {
+        let output: String = (0..200)
+            .map(|i| format!("\tweb/Scripts/controllers/file{i}.js\n"))
+            .collect();
+        let error = format!("error: would be overwritten:\n{output}");
+        let mut h = failed(&error);
+        assert!(h.at("×").y > 0.0 && h.at("Switch to main failed").y > 0.0);
+        // The rest is a click away: on the title, on Show all, or on the cut text (#295).
+        for click in ["Switch to main failed", "Show all", error.as_str()] {
+            let at = h.at(click);
+            opens_details(&mut h, at);
+        }
         h.click("×");
         assert!(!h.shows("Switch to main failed"), "{:?}", h.texts);
+    }
+
+    #[test]
+    fn a_short_error_shows_whole_without_show_all() {
+        let h = failed("error: pathspec 'x' did not match");
+        assert!(h.shows("error: pathspec 'x' did not match"));
+        assert!(!h.shows("Show all"), "{:?}", h.texts);
+    }
+
+    #[test]
+    fn the_details_copy_the_error_then_each_command_and_its_output() {
+        let step = |args: &[&str], output: &str| Step {
+            args: args.iter().map(|a| a.to_string()).collect(),
+            output: output.into(),
+            success: false,
+        };
+        let n = super::Notice {
+            id: 1,
+            title: "Switch to main failed".into(),
+            path: "/repo".into(),
+            report: Report {
+                steps: vec![
+                    step(&["stash"], ""),
+                    step(
+                        &["switch", "main"],
+                        "error: would be overwritten:\n\ta.js\n",
+                    ),
+                ],
+                ..Default::default()
+            },
+            error: Some("error: would be overwritten:\n\ta.js\n".into()),
+            at: 0.0,
+            attention: false,
+        };
+        assert_eq!(
+            super::details_text(&n),
+            "error: would be overwritten:\n\ta.js\ngit stash\ngit switch main\n\
+             error: would be overwritten:\n\ta.js\n"
+        );
     }
 }
