@@ -248,14 +248,38 @@ fn forks_mode_forks_a_branch_off_where_it_last_merged_its_base() {
     let repo = r.load();
     let g = revgraph::build(&repo, &with_mode(Simplification::Forks));
     // As if f were rebased onto D: its older merges and B, where it forked, are left out.
+    // Its own commits are on its edge to D, as `git log D..F3` lists them (#289).
     assert_eq!(
         edge_list(&repo, &g),
         [
             edge("D", "A", true, 2),
             edge("E", "D", true, 0),
-            edge("F3", "D", false, 0),
+            edge("F3", "D", false, 2),
         ]
     );
+    let subject = |c: parterre_core::CommitIx| repo.commit(c).subject.clone();
+    let collapsed = |child: &str| -> Vec<String> {
+        let e = g
+            .edges
+            .iter()
+            .find(|e| subject(g.nodes[e.child as usize].commit) == child)
+            .copied()
+            .unwrap();
+        g.collapsed_commits(&repo, e, 10)
+            .into_iter()
+            .map(subject)
+            .collect()
+    };
+    assert_eq!(collapsed("F3"), ["F2", "F1"]);
+    assert_eq!(collapsed("D"), ["C", "B"]);
+    let shown_as = |s: &str| {
+        let c = (0..repo.commits.len() as u32)
+            .map(parterre_core::CommitIx)
+            .find(|&c| subject(c) == s)
+            .unwrap();
+        subject(g.nodes[g.represented_by(c).unwrap() as usize].commit)
+    };
+    assert_eq!(shown_as("F1"), "D");
 }
 
 /// main:     A - B - C - D - E
