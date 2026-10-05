@@ -1150,8 +1150,12 @@ impl ParterreApp {
     /// over by commit id.
     fn install_reloaded(&mut self, repo: Repo, status: &str) {
         self.pending_select = self.selected_commits();
+        let origin_moved = self
+            .repo
+            .as_ref()
+            .is_none_or(|shown| parterre_forge::origin_moved(shown, &repo));
         let repo = Arc::new(repo);
-        self.pull_requests.refs_changed();
+        self.pull_requests.refs_changed(origin_moved);
         self.log.reload(&repo);
         self.compare.reload(&repo);
         self.repo = Some(repo);
