@@ -1496,6 +1496,9 @@ pub struct Reverted {
     pub label: String,
 }
 
+/// The most rows of its error a notice shows.
+const NOTICE_ROWS: usize = 6;
+
 #[derive(Debug)]
 struct Notice {
     id: u64,
@@ -2495,8 +2498,18 @@ impl Tool {
                                     remove = Some(n.id);
                                 }
                             });
+                            // Its first rows only, so the × stays on screen however much git
+                            // printed (#283); the details dialog has the rest.
                             if let Some(error) = &n.error {
-                                ui.add(egui::Label::new(error).wrap());
+                                let mut job = Arc::unwrap_or_clone(
+                                    egui::WidgetText::from(error).into_layout_job(
+                                        ui.style(),
+                                        egui::FontSelection::Default,
+                                        egui::Align::Center,
+                                    ),
+                                );
+                                job.wrap.max_rows = NOTICE_ROWS;
+                                ui.add(egui::Label::new(job).wrap());
                             }
                         });
                 }
@@ -2817,5 +2830,32 @@ mod tests {
             h.shows("Delete 2 branches") && !h.shows("Cancel")
         });
         assert!(!h.shows("Delete anyway"));
+    }
+
+    #[test]
+    fn a_long_error_keeps_its_notification_in_the_window() {
+        let mut h = Harness::new(branches());
+        let output: String = (0..200)
+            .map(|i| format!("\tweb/Scripts/controllers/file{i}.js\n"))
+            .collect();
+        let (ctx, path) = (h.ctx.clone(), h.path().to_owned());
+        h.tool.notice(
+            &ctx,
+            path,
+            "Switch to main failed".into(),
+            Default::default(),
+            Some(format!("error: would be overwritten:\n{output}")),
+        );
+        // Its first frames place and size it.
+        for _ in 0..5 {
+            h.frame();
+        }
+        assert!(h.at("×").y > 0.0 && h.at("Switch to main failed").y > 0.0);
+        h.click("Switch to main failed");
+        h.until("the details", |h| h.shows("Close"));
+        h.click("Close");
+        h.until("the details close", |h| !h.shows("Close"));
+        h.click("×");
+        assert!(!h.shows("Switch to main failed"), "{:?}", h.texts);
     }
 }
