@@ -87,14 +87,15 @@ jobs:
           PARTERRE_CHANNEL: ${{ runner.os == 'Windows' && 'zip' || 'tarball' }}
         run: cargo build --release --locked --target ${{ matrix.target }}
       # Each build is a binary of its own, with its own build ID, LC_UUID or PDB, so the debug
-      # info of each is kept under symbols/ or pdb/, by channel.
+      # info of each is kept under symbols/ or pdb/, by channel. Cargo leaves the dSYM in release/
+      # as a symlink into deps/, so it's copied with -L (#305).
       - name: Split debug info
         shell: bash
         run: |
           release=target/${{ matrix.target }}/release
           case $RUNNER_OS in
           Linux) packaging/linux/split-debuginfo.sh "$release/parterre" symbols/tarball ;;
-          macOS) mkdir -p symbols/tarball && cp -R "$release/parterre.dSYM" symbols/tarball/ ;;
+          macOS) mkdir -p symbols/tarball && cp -RL "$release/parterre.dSYM" symbols/tarball/ ;;
           Windows) mkdir -p pdb/zip && cp "$release/parterre.pdb" pdb/zip/ ;;
           esac
       - name: Check version
