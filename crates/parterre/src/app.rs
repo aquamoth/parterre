@@ -351,14 +351,15 @@ pub struct ParterreApp {
     moves: RememberedMoves,
     /// Reloads when the refs change, if `settings.auto_reload` is on.
     watcher: Option<auto_reload::Watcher>,
+    /// A reload the user asked for (F5), loading on a worker thread: the repository's path,
+    /// and what came of it.
+    reloading: Option<(PathBuf, std::sync::mpsc::Receiver<Result<Repo, String>>)>,
     /// Open pull requests from GitHub, while they are shown.
     pull_requests: pull_requests::PullRequestLoader,
     /// Whether pull requests were turned on in the last frame, to see the user turn them on.
     pull_requests_setting: bool,
     /// Why pull requests the user asked for couldn't be loaded, shown in a dialog.
     pull_requests_error: Option<parterre_forge::ForgeError>,
-    /// Load the pull requests again (F5).
-    refresh_pull_requests: bool,
     /// Asks GitHub whether a newer release is out, while `settings.check_for_updates` is on.
     update_check: Option<parterre_telemetry::UpdateCheck>,
     /// What is sent to PostHog, and the first-run prompt (#261).
@@ -503,13 +504,13 @@ impl ParterreApp {
             marked: None,
             moves,
             watcher: None,
+            reloading: None,
             pull_requests: match &automation.pull_requests {
                 Some(json) => pull_requests::PullRequestLoader::canned(json),
                 None => pull_requests::PullRequestLoader::default(),
             },
             pull_requests_setting,
             pull_requests_error: None,
-            refresh_pull_requests: false,
             update_check: None,
             telemetry,
             system_theme: SystemTheme::watch(&cc.egui_ctx),
@@ -958,13 +959,67 @@ impl ParterreApp {
         let Some(path) = self.repo.as_ref().map(|r| r.path.clone()) else {
             return;
         };
-        self.refresh_pull_requests = true;
         self.branches.look_at_once();
         match parterre_core::git::load_repo(&path) {
             Ok(repo) => {
                 self.install_reloaded(repo, "Reloaded");
                 // Anything the watcher has loaded meanwhile may be older than this.
                 self.watcher = None;
+            }
+            Err(e) => self.status = Some((format!("Reload failed: {e}"), true)),
+        }
+    }
+
+    /// F5, or Reload in the menu: loads the repository again on a worker thread, while the
+    /// window goes on responding ([`App::finish_reload`]). Pressed again meanwhile, the load
+    /// running will do. Pull requests are asked for only if the list is no longer fresh.
+    fn reload_by_hand(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.repo.as_ref().map(|r| r.path.clone()) else {
+            return;
+        };
+        if self.reloading.is_some() {
+            return;
+        }
+        usage::action(usage::Action::Reload);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (dir, ctx) = (path.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(parterre_core::git::load_repo(&dir).map_err(|e| e.to_string()));
+            ctx.request_repaint();
+        });
+        self.reloading = Some((path, rx));
+    }
+
+    /// Shows what the user's reload loaded, once no drag is going on, and says so in a
+    /// notification: a graph that hasn't changed looks the same.
+    fn finish_reload(&mut self, ctx: &egui::Context) {
+        if self.drag.is_some() {
+            return;
+        }
+        let Some((path, rx)) = &self.reloading else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("it stopped unexpectedly".to_owned())
+            }
+        };
+        let path = path.clone();
+        self.reloading = None;
+        // Another repository has been opened meanwhile.
+        if self.repo.as_ref().is_none_or(|r| r.path != path) {
+            return;
+        }
+        match result {
+            Ok(repo) => {
+                // F5: the banner shows at once if the worktree is stuck.
+                self.branches.look_at_once();
+                self.install_reloaded(repo, "Reloaded");
+                // Anything the watcher has loaded meanwhile may be older than this.
+                self.watcher = None;
+                self.branches.inform(ctx, path, "Reloaded");
             }
             Err(e) => self.status = Some((format!("Reload failed: {e}"), true)),
         }
@@ -1155,8 +1210,12 @@ impl ParterreApp {
     /// over by commit id.
     fn install_reloaded(&mut self, repo: Repo, status: &str) {
         self.pending_select = self.selected_commits();
+        let origin_moved = self
+            .repo
+            .as_ref()
+            .is_none_or(|shown| parterre_forge::origin_moved(shown, &repo));
         let repo = Arc::new(repo);
-        self.pull_requests.refs_changed();
+        self.pull_requests.refs_changed(origin_moved);
         self.log.reload(&repo);
         self.compare.reload(&repo);
         self.repo = Some(repo);
@@ -1206,9 +1265,6 @@ impl ParterreApp {
             loader.ask();
         }
         self.pull_requests_setting = setting;
-        if std::mem::take(&mut self.refresh_pull_requests) {
-            loader.refresh();
-        }
         let wanted = setting && loader.origin().is_some();
         match loader.update(wanted, ctx) {
             Some(pull_requests::Loaded::Found { count, asked }) => {
@@ -1391,6 +1447,23 @@ impl ParterreApp {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // Before the text fields, which do nothing with it. Held down, it reloads once.
+        let f5 = ctx.input(|i| {
+            i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: Key::F5,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    }
+                )
+            })
+        });
+        if f5 {
+            self.reload_by_hand(ctx);
+        }
         if ctx.egui_wants_keyboard_input() {
             if ctx.input(|i| i.key_pressed(Key::Escape)) {
                 ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("search")));
@@ -1433,10 +1506,6 @@ impl ParterreApp {
         if command(Key::Num0) || pressed(Key::Num0) {
             self.view
                 .zoom_around(self.canvas, self.canvas.center(), 1.0 / self.view.zoom);
-        }
-        if pressed(Key::F5) {
-            usage::action(usage::Action::Reload);
-            self.reload();
         }
         // One node gives its log, two the range between them; three or more nothing.
         if pressed(Key::L) {
@@ -1500,6 +1569,11 @@ impl ParterreApp {
             if self.is_laying_out() {
                 ui.spinner();
                 ui.label("Laying out…");
+                ui.separator();
+            }
+            if self.reloading.is_some() {
+                ui.spinner();
+                ui.label("Reloading…");
                 ui.separator();
             }
             if self.pull_requests.is_loading() {
@@ -2892,6 +2966,7 @@ impl eframe::App for ParterreApp {
             self.title = title;
         }
         self.auto_reload(&ctx);
+        self.finish_reload(&ctx);
         self.branches.update(&ctx, self.repo.as_ref());
         if std::mem::take(&mut self.branches.conflicts_changed) {
             self.compare.relist_working_tree();
@@ -2992,8 +3067,10 @@ impl eframe::App for ParterreApp {
                 || self.pull_requests_active()
                     && self.pull_requests.list().is_some()
                     && self.job.is_some();
-            self.automation.waiting =
-                self.diffs.is_loading() || self.blames.is_loading() || pulling;
+            self.automation.waiting = self.diffs.is_loading()
+                || self.blames.is_loading()
+                || pulling
+                || self.reloading.is_some();
             self.automation
                 .drive(&ctx, self.scene.as_ref(), &mut self.view, self.canvas);
         }
