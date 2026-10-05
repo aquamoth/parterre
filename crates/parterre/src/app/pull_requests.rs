@@ -4,12 +4,13 @@
 //! Whether `origin` is on GitHub is asked of git alone, when a repository is opened. GitHub
 //! itself is asked only while pull requests are shown and `gh` is signed in, and as t3code
 //! does: a repository's list is kept for a minute (five if it had none) and asked for again
-//! only after that, when the repository is opened again or its refs change; a change while it
-//! is kept is loaded once it isn't. A push or a fetch that moves `origin`'s branches is also
-//! asked about once more a minute later, however fresh the list: the pull request is usually
-//! opened just after the push, and after the load the push started (#294). F5 and turning
-//! them on always ask. After a failure the wait doubles from 20 s up to 15 min, and the last
-//! list stays shown. There is no polling: an idle window asks nothing.
+//! only after that, when the repository is opened again, reloaded (F5) or its refs change; a
+//! change while it is kept is loaded once it isn't. A push or a fetch that moves `origin`'s
+//! branches is also asked about once more a minute later, however fresh the list: the pull
+//! request is usually opened just after the push, and after the load the push started (#294).
+//! Only turning them on always asks: pressing F5 again and again asks no more often. After a failure the wait doubles
+//! from 20 s up to 15 min, and the last list stays shown. There is no polling: an idle window
+//! asks nothing.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -45,7 +46,7 @@ pub enum Loaded {
 struct Entry {
     /// The last list loaded, kept when a later load fails.
     list: Option<Arc<PullRequests>>,
-    /// When to ask GitHub again, at the earliest (F5 aside).
+    /// When to ask GitHub again, at the earliest (turning them on aside).
     next: Instant,
     /// Failed loads in a row.
     failures: u32,
@@ -81,7 +82,7 @@ pub struct PullRequestLoader {
     /// When to ask once more, however fresh the list, since a push or a fetch moved `origin`'s
     /// branches ([`forge::RECHECK_AFTER_PUSH`]).
     recheck: Option<Instant>,
-    /// Load whether or not the list is fresh: F5, or pull requests turned on.
+    /// Load whether or not the list is fresh: pull requests turned on.
     force: bool,
     /// The user asked for pull requests: say how it went.
     asked: bool,
@@ -151,11 +152,6 @@ impl PullRequestLoader {
         if origin_moved {
             self.recheck = Some(Instant::now() + forge::RECHECK_AFTER_PUSH);
         }
-    }
-
-    /// Load again now (F5). The list shown stays until the new one is in.
-    pub fn refresh(&mut self) {
-        self.force = true;
     }
 
     /// The user turned pull requests on: load now, and say how it went.
