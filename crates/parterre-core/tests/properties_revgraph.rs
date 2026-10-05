@@ -225,6 +225,22 @@ fn revgraph_invariants_random() {
                     g.nodes[e.parent as usize].commit.ix(),
                 );
                 assert!(anc[cc].contains(&pc), "{what}: edge to non-ancestor");
+                // an edge lists as many commits as it counts, hidden ancestors of its child
+                // shown as its parent
+                let collapsed = g.collapsed_commits(&repo, *e, usize::MAX);
+                // (the other modes count one path through hidden merges: #290)
+                if opts.simplification == Simplification::Forks {
+                    assert_eq!(collapsed.len(), e.hidden as usize, "{what}: hidden count");
+                }
+                for c in collapsed {
+                    assert!(g.node_of(c).is_none(), "{what}: node collapsed");
+                    assert!(anc[cc].contains(&c.ix()), "{what}: collapsed non-ancestor");
+                    assert_eq!(
+                        g.represented_by(c),
+                        Some(e.parent),
+                        "{what}: collapsed into"
+                    );
+                }
                 // grouping
                 if k == 0 || e.child != last_child {
                     assert!(

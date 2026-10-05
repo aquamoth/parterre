@@ -11,7 +11,9 @@
 //!   fork apart: the same reduction run from the tips down (a fork is a merge, seen backwards).
 //!   Merges are not nodes: a hidden commit stands for all its nearest kept ancestors, so a
 //!   branch that merged its base back in forks off at its latest such merge, as if rebased.
-//!   Not in TortoiseGit.
+//!   An edge holds the commits of its child that none of the child's edges' ends has, as
+//!   `git log D..F3` lists them, so the branch's own commits are on that edge. Not in
+//!   TortoiseGit.
 //! * [`Simplification::BranchesAndMerges`] is TortoiseGit's "Show branchings and merges": also
 //!   keeps every merge, fork point and tip, and every commit whose only child is a merge.
 //! * [`Simplification::AllCommits`] keeps everything.
@@ -24,6 +26,8 @@
 //!
 //! All modes share one pass over the commits in parents-first order that decides whether each
 //! commit is kept and, for hidden commits, which kept commit represents them.
+
+use std::collections::BinaryHeap;
 
 use serde::{Deserialize, Serialize};
 
@@ -211,6 +215,9 @@ pub struct RevGraph {
     /// For every visible commit, the node that stands for it (itself, or the nearest kept
     /// ancestor it was collapsed into).
     represented_by: Vec<Option<u32>>,
+    /// In the forks mode, the commits collapsed into each edge, newest first; empty in the
+    /// others, whose edges are runs found by walking.
+    edge_commits: Vec<Vec<CommitIx>>,
     /// Number of commits reachable from the visible refs.
     pub visible_commits: usize,
     /// Number of branches left out because they match [`GraphOptions::hide_branches`].
@@ -267,6 +274,11 @@ impl RevGraph {
     /// Up to `limit` of the commits collapsed into `edge`, newest first: the run of hidden
     /// commits from the child's matching parent down to the parent node.
     pub fn collapsed_commits(&self, repo: &Repo, edge: RevEdge, limit: usize) -> Vec<CommitIx> {
+        if let Some(e) = self.edges.iter().position(|&e| e == edge)
+            && let Some(commits) = self.edge_commits.get(e)
+        {
+            return commits.iter().copied().take(limit).collect();
+        }
         let child = self.nodes[edge.child as usize].commit;
         let on_edge =
             |c: CommitIx| self.node_of(c).is_none() && self.represented_by(c) == Some(edge.parent);
@@ -579,7 +591,7 @@ pub fn build_with_pull_requests(
         edges.extend(out);
     }
 
-    let represented_by = (0..n)
+    let mut represented_by: Vec<Option<u32>> = (0..n)
         .map(|c| {
             (rep[c] != NO_REP)
                 .then(|| node_of[rep[c] as usize])
@@ -587,11 +599,71 @@ pub fn build_with_pull_requests(
         })
         .collect();
 
+    // In the forks mode a hidden commit can stand for several nodes, so an edge is not one run
+    // of commits: it holds the child's own commits, those no end of its edges has, each on the
+    // edge of the parent it is reached through (else the child's first edge).
+    let mut edge_commits: Vec<Vec<CommitIx>> = Vec::new();
+    if mode == Simplification::Forks {
+        let mut pos = vec![0u32; n];
+        for (i, &c) in order.iter().enumerate() {
+            pos[c] = i as u32;
+        }
+        let mut walk = OwnCommits::new(n);
+        let mut own = Vec::new();
+        edge_commits = vec![Vec::new(); edges.len()];
+        let mut start = 0;
+        while start < edges.len() {
+            let child = edges[start].child;
+            let end = start
+                + edges[start..]
+                    .iter()
+                    .take_while(|e| e.child == child)
+                    .count();
+            let x = nodes[child as usize].commit.ix();
+            let ps = parents_of(x);
+            let target = |e: &RevEdge| nodes[e.parent as usize].commit.ix() as u32;
+            let through = |k: usize, t: u32| {
+                let p = ps[k].ix();
+                if rep[p] == p as u32 {
+                    p as u32 == t
+                } else {
+                    reach[p].iter().any(|&(r, _, _)| r == t)
+                }
+            };
+            let origin: Vec<Option<usize>> = edges[start..end]
+                .iter()
+                .map(|e| (0..ps.len()).find(|&k| through(k, target(e))))
+                .collect();
+            let targets: Vec<usize> = edges[start..end]
+                .iter()
+                .map(|e| target(e) as usize)
+                .collect();
+            walk.run(
+                ps,
+                &targets,
+                &pos,
+                |c| rep[c] != c as u32,
+                &parents_of,
+                &mut own,
+            );
+            for &(c, k) in &own {
+                let e = start + origin.iter().position(|&o| o == Some(k)).unwrap_or(0);
+                edge_commits[e].push(CommitIx(c as u32));
+                represented_by[c] = Some(edges[e].parent);
+            }
+            start = end;
+        }
+        for (e, commits) in edges.iter_mut().zip(&edge_commits) {
+            e.hidden = commits.len() as u32;
+        }
+    }
+
     RevGraph {
         nodes,
         edges,
         node_of,
         represented_by,
+        edge_commits,
         visible_commits,
         hidden_branches,
     }
@@ -622,6 +694,90 @@ fn parents_first_order<'a>(
     }
     order.reverse();
     order
+}
+
+/// A node's own commits, found as git's merge-base walk does: history is painted down from
+/// the node's hidden parents and from the ends of its edges at once, newest first, and a
+/// commit painted only from the node is its own. Stops once no such commit is left to paint.
+struct OwnCommits {
+    flags: Vec<u8>,
+    /// For a commit painted from the node, the index of the node's parent it came through.
+    origin: Vec<usize>,
+    touched: Vec<usize>,
+    queue: BinaryHeap<(u32, usize)>,
+    /// Painted commits still queued that only the node has.
+    live: usize,
+}
+
+const FROM_NODE: u8 = 1;
+const FROM_TARGET: u8 = 2;
+
+impl OwnCommits {
+    fn new(n: usize) -> OwnCommits {
+        OwnCommits {
+            flags: vec![0; n],
+            origin: vec![0; n],
+            touched: Vec::new(),
+            queue: BinaryHeap::new(),
+            live: 0,
+        }
+    }
+
+    /// The commits, newest first, that are reached from `parents` through commits for which
+    /// `hidden` holds and that no commit of `targets` has, each with the index into `parents`
+    /// it is reached through. `pos` orders commits parents first.
+    fn run<'a>(
+        &mut self,
+        parents: &[CommitIx],
+        targets: &[usize],
+        pos: &[u32],
+        hidden: impl Fn(usize) -> bool,
+        parents_of: &impl Fn(usize) -> &'a [CommitIx],
+        out: &mut Vec<(usize, usize)>,
+    ) {
+        out.clear();
+        for &t in targets {
+            self.paint(t, FROM_TARGET, 0, pos);
+        }
+        for (k, p) in parents.iter().enumerate() {
+            if hidden(p.ix()) {
+                self.paint(p.ix(), FROM_NODE, k, pos);
+            }
+        }
+        while self.live > 0 {
+            let Some((_, c)) = self.queue.pop() else {
+                break;
+            };
+            let flags = self.flags[c];
+            if flags == FROM_NODE {
+                self.live -= 1;
+                out.push((c, self.origin[c]));
+            }
+            // Only the ends' paint goes past nodes.
+            for p in parents_of(c) {
+                if flags != FROM_NODE || hidden(p.ix()) {
+                    self.paint(p.ix(), flags, self.origin[c], pos);
+                }
+            }
+        }
+        for c in self.touched.drain(..) {
+            self.flags[c] = 0;
+        }
+        self.queue.clear();
+        self.live = 0;
+    }
+
+    fn paint(&mut self, c: usize, flag: u8, origin: usize, pos: &[u32]) {
+        let old = self.flags[c];
+        if old == 0 {
+            self.touched.push(c);
+            self.queue.push((pos[c], c));
+            self.origin[c] = origin;
+        }
+        let new = old | flag;
+        self.flags[c] = new;
+        self.live = self.live + usize::from(new == FROM_NODE) - usize::from(old == FROM_NODE);
+    }
 }
 
 /// Ancestry queries among kept commits, used to drop redundant merge parents.

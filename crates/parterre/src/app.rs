@@ -1909,13 +1909,14 @@ impl ParterreApp {
         } else if let (Some(node), None) = (self.hovered, self.drag) {
             let n = &scene.graph.nodes[node];
             let commit = scene.repo.commit(n.commit);
-            let hidden: u32 = scene
+            // The node's first edge: its first-parent one, else (where the forks mode hangs a
+            // branch off its latest merge of its base) the one holding its own commits.
+            let hidden = scene
                 .graph
                 .edges
                 .iter()
-                .filter(|e| e.child as usize == node && e.first_parent)
-                .map(|e| e.hidden)
-                .sum();
+                .find(|e| e.child as usize == node)
+                .map_or(0, |e| e.hidden);
             let refs: Vec<&str> = n
                 .refs
                 .iter()
