@@ -107,7 +107,7 @@ pub fn paint(
         if !on {
             continue;
         }
-        for (e, sides) in u.edge_sides(graph, repo) {
+        for (e, sides) in u.edge_sides(graph) {
             let Some(path) = edge_path(scene, e, settings.edge_style, to_screen, Some(visible))
             else {
                 continue;

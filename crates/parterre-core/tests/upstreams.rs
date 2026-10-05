@@ -540,7 +540,7 @@ fn edges_hold_the_commits_between() {
             .unwrap_or_else(|| repo.commit(n.commit).subject.clone())
     };
     let mut edges: Vec<(String, String, Vec<Option<Side>>)> = u
-        .edge_sides(&graph, &repo)
+        .edge_sides(&graph)
         .into_iter()
         .map(|(e, sides)| {
             let edge = graph.edges[e];
