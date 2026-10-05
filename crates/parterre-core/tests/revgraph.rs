@@ -761,18 +761,22 @@ fn pull_request_repo() -> TestRepo {
     r
 }
 
-/// A pull request's head on the commit with `subject`, into the branch named `base`.
+/// A pull request's head on the commit with `subject`, into the branch named `base`, with the
+/// remote-tracking branch on that commit, if one is, as its head branch.
 fn pull_request_head(repo: &Repo, subject: &str, base: &str) -> PullRequestHead {
+    let commit = repo
+        .commits
+        .iter()
+        .position(|c| c.subject == subject)
+        .map(|i| parterre_core::CommitIx(i as u32))
+        .unwrap();
     PullRequestHead {
-        commit: repo
-            .commits
-            .iter()
-            .position(|c| c.subject == subject)
-            .map(|i| parterre_core::CommitIx(i as u32))
-            .unwrap(),
+        commit,
         bases: (0..repo.refs.len())
             .filter(|&i| repo.refs[i].name == base)
             .collect(),
+        head: (0..repo.refs.len())
+            .find(|&i| repo.refs[i].kind == RefKind::RemoteBranch && repo.refs[i].target == commit),
     }
 }
 
@@ -814,28 +818,35 @@ fn pull_request_heads_label_commits_and_make_them_nodes() {
 }
 
 #[test]
-fn pull_requests_need_a_visible_base_and_head() {
+fn pull_requests_show_unless_their_branches_are_hidden() {
     let repo = pull_request_repo().load();
     let mut opts = with_mode(Simplification::Decorated);
     opts.show_pull_requests = true;
 
-    // Into a branch that isn't in the repository, or not shown.
+    // Into a branch that isn't in the repository: shown, as a fork's own pull request into a
+    // parent that no remote points at is.
     let unknown = [pull_request_head(&repo, "D", "origin/gone")];
     let g = revgraph::build_with_pull_requests(&repo, &opts, &unknown);
-    assert!(pull_request_nodes(&repo, &g).is_empty());
-    let heads = [pull_request_head(&repo, "D", "origin/main")];
-    let g = revgraph::build_with_pull_requests(
-        &repo,
-        &GraphOptions {
-            show_remote_branches: false,
-            ..opts.clone()
-        },
-        &heads,
-    );
-    assert!(pull_request_nodes(&repo, &g).is_empty());
+    assert_eq!(pull_request_nodes(&repo, &g), [("D".to_owned(), vec![0])]);
 
-    // A head that no shown branch reaches does not bring its history in: pull requests label
-    // commits, they don't start history.
+    // Into a branch on the hide list, or from one: not shown, and nothing brought in.
+    let into_hidden = [pull_request_head(&repo, "E", "origin/main")];
+    let hiding = |list: &str| GraphOptions {
+        show_remote_branches: false,
+        hide_branches: list.into(),
+        ..opts.clone()
+    };
+    for list in ["main", "feature"] {
+        let g = revgraph::build_with_pull_requests(&repo, &hiding(list), &into_hidden);
+        assert!(pull_request_nodes(&repo, &g).is_empty(), "{list}");
+        assert!(
+            !node_subjects(&repo, &g).contains(&"E".to_owned()),
+            "{list}"
+        );
+    }
+
+    // A head that no shown branch reaches does not bring its history in while only the
+    // current branch is shown.
     let into_main = [pull_request_head(&repo, "E", "main")];
     let g = revgraph::build_with_pull_requests(
         &repo,
@@ -859,4 +870,75 @@ fn pull_requests_need_a_visible_base_and_head() {
         pull_request_nodes(&repo, &g),
         [("C".to_owned(), vec![0, 2]), ("E".to_owned(), vec![1])]
     );
+}
+
+/// With remote branches hidden, a pull request's head branch still brings its commits in, as
+/// it would shown: the toolbar's pull-request button is a switch of its own. The head shows its
+/// pull request, not the remote-tracking branch.
+#[test]
+fn pull_requests_show_with_remote_branches_hidden() {
+    let repo = pull_request_repo().load();
+    let opts = GraphOptions {
+        show_pull_requests: true,
+        show_remote_branches: false,
+        ..with_mode(Simplification::Decorated)
+    };
+    let heads = [pull_request_head(&repo, "E", "origin/main")];
+    let g = revgraph::build_with_pull_requests(&repo, &opts, &heads);
+    assert_eq!(pull_request_nodes(&repo, &g), [("E".to_owned(), vec![0])]);
+    let e = g.node_of(heads[0].commit).unwrap() as usize;
+    assert!(g.nodes[e].refs.is_empty(), "no origin/feature label");
+
+    // Without pull requests, origin/feature's commits are not there.
+    let g = revgraph::build_with_pull_requests(
+        &repo,
+        &GraphOptions {
+            show_pull_requests: false,
+            ..opts.clone()
+        },
+        &heads,
+    );
+    assert_eq!(node_subjects(&repo, &g), ["A", "C"]);
+}
+
+/// My fork, with remote branches hidden: my pull request into the parent shows, though the
+/// parent's main is ahead of anything shown, and whether or not a remote points at the parent.
+///
+///         C     upstream/main: the parent, ahead
+///        /
+/// A - B         main and origin/main: the fork, behind
+///        \
+///         D     origin/topic: my pull request into the parent's main
+#[test]
+fn a_forks_own_pull_request_shows_with_remote_branches_hidden() {
+    let mut r = TestRepo::new();
+    r.commit("A");
+    r.commit("B");
+    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    r.branch("topic");
+    r.commit("D");
+    r.git(&["update-ref", "refs/remotes/origin/topic", "topic"]);
+    r.checkout("main");
+    r.branch("parent");
+    r.commit("C");
+    r.git(&["update-ref", "refs/remotes/upstream/main", "parent"]);
+    r.checkout("main");
+    r.git(&["branch", "-D", "topic", "parent"]);
+    let repo = r.load();
+    let opts = GraphOptions {
+        show_pull_requests: true,
+        show_remote_branches: false,
+        ..with_mode(Simplification::Decorated)
+    };
+    let with_upstream = [pull_request_head(&repo, "D", "upstream/main")];
+    assert_eq!(with_upstream[0].bases.len(), 1);
+    let g = revgraph::build_with_pull_requests(&repo, &opts, &with_upstream);
+    assert_eq!(pull_request_nodes(&repo, &g), [("D".to_owned(), vec![0])]);
+    assert!(!node_subjects(&repo, &g).contains(&"C".to_owned()));
+
+    // A clone of the fork alone: no ref of the parent's main.
+    let origin_only = [pull_request_head(&repo, "D", "parent/main")];
+    assert!(origin_only[0].bases.is_empty());
+    let g = revgraph::build_with_pull_requests(&repo, &opts, &origin_only);
+    assert_eq!(pull_request_nodes(&repo, &g), [("D".to_owned(), vec![0])]);
 }

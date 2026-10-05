@@ -185,15 +185,21 @@ pub struct RevNode {
     pub worktrees: Vec<usize>,
 }
 
-/// Where an open pull request is shown: its head commit, if that is in the repository, and the
-/// refs of its base branch (indices into [`Repo::refs`]). It is shown, as a label on its head,
-/// only while one of those refs is, and its head is part of the graph anyway: like a hidden
-/// branch, it labels commits but doesn't start history. As a label it makes its head a node,
-/// as a tag does.
+/// Where an open pull request is shown: its head commit, if that is in the repository, the
+/// refs of its base branch, and the remote-tracking branch of its head branch, if fetched
+/// (indices into [`Repo::refs`]). It is shown as a label on its head, which it makes a node, as
+/// a tag does.
+///
+/// Its head branch starts history as that branch would with remote branches shown, whether
+/// they are or not: the name filter, the hide list and "current branch only" apply to it, the
+/// switch doesn't. It is left out if its base branch is on the hide list. With no ref of its
+/// base branch at all, as for a fork's own pull request into a parent no remote points at, it
+/// is shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequestHead {
     pub commit: CommitIx,
     pub bases: Vec<usize>,
+    pub head: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -352,10 +358,28 @@ pub fn build_with_pull_requests(
         .filter_map(|(k, w)| Some((k, w.head?.ix())))
         .filter(|&(k, c)| c < n && options.starts_history_named(&repo.worktrees[k].name()))
         .collect();
+    // Pull requests whose branches aren't on the hide list; their head branches start history.
+    let shown_pull_requests: Vec<bool> = pull_requests
+        .iter()
+        .map(|pr| {
+            let hidden_ref = |i: usize| hidden.matches(repo.refs[i].kind, &repo.refs[i].name);
+            options.show_pull_requests
+                && pr.commit.ix() < n
+                && (pr.bases.is_empty() || pr.bases.iter().any(|&i| !hidden_ref(i)))
+                && !pr.head.is_some_and(hidden_ref)
+        })
+        .collect();
     let mut visible = vec![false; n];
     let mut stack: Vec<usize> = (0..n)
         .filter(|&c| refs_on[c].iter().any(|&i| starts_history(i)))
         .collect();
+    stack.extend(
+        pull_requests
+            .iter()
+            .zip(&shown_pull_requests)
+            .filter(|&(pr, &shown)| shown && pr.head.is_some_and(starts_history))
+            .map(|(pr, _)| pr.commit.ix()),
+    );
     stack.extend(head);
     stack.extend(detached.iter().map(|&(_, c)| c));
     let mut visible_commits = 0;
@@ -379,19 +403,13 @@ pub fn build_with_pull_requests(
         })
         .count();
 
-    // Pull requests into a shown branch label their heads where those are shown anyway.
+    // Pull requests label their heads.
     let mut pulls_on: Vec<Vec<usize>> = vec![Vec::new(); n];
-    if options.show_pull_requests {
-        let base_shown = |i: usize| {
-            let r = &repo.refs[i];
-            (options.shows(r.kind) || r.is_head) && visible[r.target.ix()]
-        };
-        for (k, pr) in pull_requests.iter().enumerate() {
-            let c = pr.commit.ix();
-            if c < n && visible[c] && pr.bases.iter().any(|&i| base_shown(i)) {
-                pulls_on[c].push(k);
-                decorated[c] = true;
-            }
+    for (k, pr) in pull_requests.iter().enumerate() {
+        let c = pr.commit.ix();
+        if shown_pull_requests[k] && visible[c] {
+            pulls_on[c].push(k);
+            decorated[c] = true;
         }
     }
 

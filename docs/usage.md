@@ -143,11 +143,17 @@ Open pull requests show as labels on the commits they propose when `origin` is o
 and branches; click it to open it in the browser. Drafts are greyed out. The toolbar's
 pull-request button hides them, and if they can't be shown, turning them on there says why.
 
-A pull request shows once its branch has been fetched and its base branch is shown. parterre
-asks GitHub about the fetched branches only, at most once a minute per repository, F5 included,
-and never without signing in. A push or a fetch that moves a branch of `origin` is asked about
-once more a minute later, for the pull request opened just after the push. Once less than a tenth of your hourly API allowance is left, it waits for
-the next hour.
+A pull request shows once its branch has been fetched, also with remote branches hidden: its
+commits come in as its branch's would, and its commit carries the pull request instead of the
+branch's name. The name filter, the hide list and *current branch only* apply to it as to its
+branch, and a pull request into a branch on the hide list is hidden too. Only pull requests
+from `origin`'s branches show: a fork's own, into it or into its parent (whether or not a
+remote points at the parent), never other forks'.
+
+parterre asks GitHub about the fetched branches only, at most once a minute per repository, F5
+included, and never without signing in. A push or a fetch that moves a branch of `origin` is
+asked about once more a minute later, for the pull request opened just after the push. Once
+less than a tenth of your hourly API allowance is left, it waits for the next hour.
 
 ## Upstreams
 
