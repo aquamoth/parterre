@@ -1755,13 +1755,14 @@ impl Tool {
         self.banner.update(self.busy() || self.unlooked)
     }
 
-    /// Asks for the catalogue of `repo` on a worker thread.
+    /// Asks for the catalogue of `repo` on a worker thread: its refs and worktrees as the graph
+    /// shows them.
     fn load_catalog(&mut self, ctx: &egui::Context, repo: &Arc<Repo>) {
-        let path = repo.path.clone();
+        let repo = repo.clone();
         let worker_ctx = ctx.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = Catalog::load(&path).map_err(|e| e.to_string());
+            let result = Catalog::of(&repo).map_err(|e| e.to_string());
             let _ = tx.send(result);
             worker_ctx.request_repaint();
         });
@@ -1880,7 +1881,8 @@ impl Tool {
             let job = self.job.take().unwrap();
             self.reload = Some(job.path.clone());
             let here = self.repo.as_ref().is_some_and(|r| r.path == job.path);
-            // What was loaded meanwhile is from before it ended: look again, at once.
+            // What was loaded meanwhile is from before it ended: look at the worktree again
+            // at once, for whether it's stuck. The refs follow with the graph's reload.
             if let Some(repo) = self.repo.clone().filter(|_| here) {
                 self.unlooked = true;
                 self.look_at_once = true;

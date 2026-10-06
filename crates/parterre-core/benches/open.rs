@@ -72,8 +72,10 @@ fn open(c: &mut Criterion) {
     group.bench_function("graph load", |b| {
         b.iter(|| parterre_core::git::load_repo(&path).expect("load"))
     });
+    // Built from the graph's snapshot, as the app does (#310).
+    let repo = parterre_core::git::load_repo(&path).expect("load");
     group.bench_function("branch catalogue", |b| {
-        b.iter(|| parterre_core::branches::Catalog::load(&path).expect("catalogue"))
+        b.iter(|| parterre_core::branches::Catalog::of(&repo).expect("catalogue"))
     });
     group.bench_function("watcher lookup", |b| {
         b.iter(|| parterre_core::watch::RefStorage::locate(&path).expect("locate"))
