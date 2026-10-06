@@ -110,7 +110,8 @@ folder and a greyer fill. From a node's menu:
   open windows stay: it is the same history.
 - *Delete worktree* deletes one, with its folder, after asking. With several nodes selected
   that all have worktrees, *Delete N worktrees* deletes them all after one question, which
-  lists what each would lose.
+  lists what each would lose. Tick *Also delete local branch* there to delete their branches
+  too; the question then counts the commits only those branches had.
 - *Open* › *File system* / *Terminal* opens its folder; *Copy* copies the folder's path.
 
 **Branches:** *Create branch here…* (optionally switching to it), *Switch to* a branch or a
