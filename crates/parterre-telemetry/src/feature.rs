@@ -64,6 +64,8 @@ names! {
         /// The question before a force push.
         ForcePush => "force_push",
         SetUpstream => "set_upstream",
+        /// The question before deleting remote branches.
+        DeleteRemoteBranch => "delete_remote_branch",
         /// The question before opening many diff windows at once.
         OpenDiffs => "open_diffs",
         PullRequestsError => "pull_requests_error",
@@ -116,6 +118,7 @@ names! {
         Pull => "pull",
         Push => "push",
         SetUpstream => "set_upstream",
+        DeleteRemoteBranch => "delete_remote_branch",
         OpenRepository => "open_repository",
         CloseRepository => "close_repository",
         Reload => "reload",

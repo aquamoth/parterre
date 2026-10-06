@@ -72,6 +72,18 @@ pub struct PullRequests {
 }
 
 impl PullRequests {
+    /// The open pull request proposing `branch` of the forge repository `repo` (`owner/name`),
+    /// if any.
+    pub fn proposing(&self, repo: &str, branch: &str) -> Option<&PullRequest> {
+        self.list.iter().find(|pr| {
+            pr.head_branch == branch
+                && pr
+                    .head_repo
+                    .as_deref()
+                    .is_some_and(|r| r.eq_ignore_ascii_case(repo))
+        })
+    }
+
     /// The pull requests whose heads are commits of `repo`, each with where it is shown: its
     /// head commit, the refs of its base branch, and the remote-tracking branch of its head
     /// branch. The base branch's refs are its remote-tracking branches, in every remote that
@@ -482,6 +494,20 @@ mod tests {
             ("refs/remotes/upstream/main", 0),
         ]);
         assert!(origin_moved(&before, &moved));
+    }
+
+    #[test]
+    fn a_branch_is_proposed_by_its_own_repositorys_pull_request_only() {
+        let mut pr = pull_request(7, 1, "o/r", "main");
+        pr.head_branch = "topic".into();
+        pr.head_repo = Some("O/R".into());
+        let prs = PullRequests {
+            list: vec![pr],
+            ..PullRequests::default()
+        };
+        assert_eq!(prs.proposing("o/r", "topic").map(|p| p.number), Some(7));
+        assert!(prs.proposing("o/r", "main").is_none());
+        assert!(prs.proposing("fork/r", "topic").is_none());
     }
 
     #[test]

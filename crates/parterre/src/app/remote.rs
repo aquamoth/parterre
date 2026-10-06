@@ -1,11 +1,19 @@
 //! Keeping branches and their remotes in step (#181): *Pull*, *Push* and *Set upstream…* in the
 //! node menu, the question before pulling a diverged branch, the upstream dialog, and the
-//! window with git's output while a fetch, pull or push runs.
+//! window with git's output while a fetch, pull or push runs. Deleting remote branches (#318):
+//! what the question before it says, and the open pull requests that refuse it.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use eframe::egui::{self, Align, Layout, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::{Action, Catalog, command_text};
-use parterre_core::remote::{self, Diverged, Live, Pull, Push, PushState, Reconcile, SetUpstream};
+use parterre_core::git::Git;
+use parterre_core::remote::{
+    self, Diverged, Live, Pull, Push, PushState, Reconcile, RemoteBranchTip, SetUpstream,
+};
 use parterre_core::{Oid, Repo};
+use parterre_forge::github;
 
 use super::branches::{Request, Target, capitalized, loading_reason, target_menu_named};
 use crate::{dialogs, menu, widgets};
@@ -312,13 +320,180 @@ impl SetUpstreamDialog {
     }
 }
 
+/// Whether a remote branch about to be deleted is proposed by an open pull request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Proposed {
+    /// Its remote isn't on GitHub: there's nothing to ask.
+    NotOnGithub,
+    No,
+    Open {
+        number: u64,
+        title: String,
+        url: String,
+    },
+    /// Parterre couldn't ask, and why.
+    Unknown(String),
+}
+
+/// Asks GitHub whether `branches` have open pull requests, for the question before deleting
+/// them; `canned` is `--pull-requests-from`'s list, used instead. Pull requests are listed for
+/// `origin`'s repository, so a branch of another GitHub repository can't be told. Run it on a
+/// worker thread.
+pub fn check_pull_requests(
+    path: &Path,
+    branches: &[RemoteBranchTip],
+    canned: Option<&str>,
+) -> Vec<Proposed> {
+    let git = Git::new(path);
+    let origin = github::origin(&git);
+    let mut list = None;
+    branches
+        .iter()
+        .map(|b| {
+            let url = git.query(&["remote", "get-url", &b.remote]).ok().flatten();
+            let Some(repo) = url.as_deref().and_then(github::GithubRepo::from_url) else {
+                return Proposed::NotOnGithub;
+            };
+            let full_name = repo.full_name();
+            if origin.as_ref() != Some(&repo) {
+                return Proposed::Unknown(format!(
+                    "{} isn't origin's repository, the one parterre asks GitHub about",
+                    full_name
+                ));
+            }
+            let found = list.get_or_insert_with(|| match canned {
+                Some(json) => github::load_canned(&git, json),
+                None => github::load(&git),
+            });
+            match found {
+                Err(e) => Proposed::Unknown(e.to_string()),
+                Ok(prs) => match prs.proposing(&full_name, &b.branch) {
+                    Some(pr) => Proposed::Open {
+                        number: pr.number,
+                        title: pr.title.clone(),
+                        url: pr.url.clone(),
+                    },
+                    None => Proposed::No,
+                },
+            }
+        })
+        .collect()
+}
+
+/// The open pull requests of remote branches about to be deleted, being asked for.
+#[derive(Debug)]
+pub struct Checks {
+    rx: Option<std::sync::mpsc::Receiver<Vec<Proposed>>>,
+    found: Option<Vec<Proposed>>,
+}
+
+impl Checks {
+    pub fn start(
+        ctx: &egui::Context,
+        path: PathBuf,
+        branches: Vec<RemoteBranchTip>,
+        canned: Option<Arc<str>>,
+    ) -> Checks {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(check_pull_requests(&path, &branches, canned.as_deref()));
+            ctx.request_repaint();
+        });
+        Checks {
+            rx: Some(rx),
+            found: None,
+        }
+    }
+
+    fn poll(&mut self) {
+        let Some(rx) = &self.rx else { return };
+        match rx.try_recv() {
+            Ok(found) => self.found = Some(found),
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.found = Some(Vec::new());
+            }
+        }
+        self.rx = None;
+    }
+
+    /// Deleting may go ahead: the check is done, and no branch has an open pull request.
+    pub fn allow(&self) -> bool {
+        self.found
+            .as_ref()
+            .is_some_and(|f| !f.iter().any(|p| matches!(p, Proposed::Open { .. })))
+    }
+}
+
+/// What deleting remote `branches` does besides losing commits: they go for everyone, local
+/// branches lose their upstream, and a remote's default branch is named; then whether a pull
+/// request proposes one, which refuses it.
+pub(super) fn deletion_notes(
+    ui: &mut Ui,
+    branches: &[RemoteBranchTip],
+    catalog: Option<&Catalog>,
+    repo: &Repo,
+    checks: &mut Checks,
+) {
+    checks.poll();
+    let mut remotes: Vec<&str> = branches.iter().map(|b| b.remote.as_str()).collect();
+    remotes.dedup();
+    match remotes.as_slice() {
+        [remote] => ui.label(format!("Deleted on {remote} for everyone.")),
+        _ => ui.label("Deleted on their remotes for everyone."),
+    };
+    for (i, b) in branches.iter().enumerate() {
+        let name = b.name();
+        let mut trackers: Vec<&str> = catalog.map(|c| c.trackers(&name)).unwrap_or_default();
+        trackers.sort_unstable();
+        match trackers.as_slice() {
+            [] => {}
+            [one] => {
+                ui.label(format!("{one} loses its upstream."));
+            }
+            many => {
+                let (last, rest) = many.split_last().expect("several");
+                ui.label(format!(
+                    "{} and {last} lose their upstream.",
+                    rest.join(", ")
+                ));
+            }
+        }
+        if repo.default_branch.as_deref() == Some(format!("refs/remotes/{name}").as_str()) {
+            ui.label(format!("{name} is {}'s default branch.", b.remote));
+        }
+        match checks.found.as_ref().and_then(|f| f.get(i)) {
+            None if checks.found.is_none() => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak(format!("Looking for a pull request from {name}…"));
+                });
+            }
+            Some(Proposed::Open { number, title, url }) => {
+                ui.horizontal_wrapped(|ui| {
+                    let error = ui.visuals().error_fg_color;
+                    ui.colored_label(error, format!("{name} has an open pull request:"));
+                    ui.hyperlink_to(format!("#{number} {title}"), url);
+                });
+            }
+            Some(Proposed::Unknown(why)) => {
+                ui.weak(format!(
+                    "Couldn't look for a pull request from {name}: {why}."
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use eframe::egui;
     use parterre_core::branches::Action;
-    use parterre_core::remote::{Live, Pull, Push};
+    use parterre_core::remote::{Live, Pull, Push, RemoteBranchTip};
 
     use super::super::branches::Request;
     use super::super::tool_harness::{Harness, collect, git, load, menu, write};
@@ -541,5 +716,157 @@ mod tests {
         ] {
             assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
         }
+    }
+
+    /// [`cloned`], with `feature` pushed and tracking `origin/feature`.
+    fn with_feature() -> (tempfile::TempDir, tempfile::TempDir) {
+        let (origin, work) = cloned();
+        let p = work.path();
+        git(p, &["switch", "-q", "-c", "feature"]);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "Feature"]);
+        git(p, &["push", "-q", "-u", "origin", "feature"]);
+        git(p, &["switch", "-q", "main"]);
+        (origin, work)
+    }
+
+    fn delete(h: &Harness, names: &[&str]) -> Request {
+        Request::Run(Action::DeleteRemoteBranches(
+            names
+                .iter()
+                .map(|name| RemoteBranchTip {
+                    remote: "origin".into(),
+                    branch: (*name).into(),
+                    tip: h.rev(&format!("origin/{name}")),
+                })
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn a_remote_branchs_node_offers_to_delete_it() {
+        let (_origin, work) = with_feature();
+        let p = work.path();
+        let (repo, catalog) = load(p);
+        let tip = repo.commit(repo.resolve("origin/feature").unwrap()).oid;
+        let main = repo.commit(repo.resolve("main").unwrap()).oid;
+        let item = |group: &[parterre_core::Oid], click| {
+            menu(
+                |ui| {
+                    super::super::branches::node_menu(
+                        ui,
+                        &repo,
+                        tip,
+                        group,
+                        Some(&catalog),
+                        false,
+                        false,
+                    )
+                },
+                click,
+            )
+        };
+        let (_, asked) = item(&[tip], Some("Delete remote branch origin/feature"));
+        let Some(Request::Run(Action::DeleteRemoteBranches(branches))) = asked else {
+            panic!("a deletion: {asked:?}")
+        };
+        assert_eq!(branches[0].name(), "origin/feature");
+        let (_, asked) = item(&[tip, main], Some("Delete 2 remote branches"));
+        let Some(Request::Run(Action::DeleteRemoteBranches(branches))) = asked else {
+            panic!("a deletion: {asked:?}")
+        };
+        let names: Vec<_> = branches.iter().map(RemoteBranchTip::name).collect();
+        assert_eq!(names, ["origin/feature", "origin/main"]);
+    }
+
+    #[test]
+    fn deleting_a_remote_branch_says_who_it_affects_then_deletes_it() {
+        let (origin, work) = with_feature();
+        let mut h = Harness::new(work);
+        h.until("the catalogue loads", |h| h.tool.catalog.is_some());
+        let request = delete(&h, &["feature"]);
+        h.ask(request, "Delete remote branch origin/feature?");
+        assert!(h.shows("Deleted on origin for everyone."), "{:?}", h.texts);
+        assert!(h.shows("feature loses its upstream."), "{:?}", h.texts);
+        assert!(!h.shows("Delete anyway"));
+        // Not on GitHub: nothing to wait for once looked up.
+        h.until("looked up", |h| !h.shows_part("Looking for a pull request"));
+        h.click("Delete");
+        h.until("deleted", |_| {
+            git(origin.path(), &["branch", "--list", "feature"]).is_empty()
+        });
+    }
+
+    /// origin on GitHub, as far as parterre can tell, with `feature` fetched from it.
+    fn on_github() -> tempfile::TempDir {
+        let (_origin, work) = with_feature();
+        let p = work.path();
+        git(
+            p,
+            &["remote", "set-url", "origin", "https://github.com/o/r"],
+        );
+        git(
+            p,
+            &["remote", "add", "fork", "https://github.com/someone/r"],
+        );
+        git(p, &["remote", "add", "elsewhere", "/srv/git/r"]);
+        work
+    }
+
+    const CANNED: &str =
+        r#"[{"number": 12, "title": "Add feature", "head": "feature", "base": "main"}]"#;
+
+    #[test]
+    fn a_branch_proposed_by_an_open_pull_request_is_found() {
+        let work = on_github();
+        let tip = |remote: &str, branch: &str| RemoteBranchTip {
+            remote: remote.into(),
+            branch: branch.into(),
+            tip: parterre_core::Oid::from_hex(&git(work.path(), &["rev-parse", "HEAD"])).unwrap(),
+        };
+        let found = super::check_pull_requests(
+            work.path(),
+            &[
+                tip("origin", "feature"),
+                tip("origin", "main"),
+                tip("fork", "feature"),
+                tip("elsewhere", "feature"),
+            ],
+            Some(CANNED),
+        );
+        assert_eq!(
+            found[0],
+            super::Proposed::Open {
+                number: 12,
+                title: "Add feature".into(),
+                url: "https://github.com/o/r/pull/12".into(),
+            }
+        );
+        assert_eq!(found[1], super::Proposed::No);
+        assert!(
+            matches!(found[2], super::Proposed::Unknown(_)),
+            "{:?}",
+            found[2]
+        );
+        assert_eq!(found[3], super::Proposed::NotOnGithub);
+    }
+
+    #[test]
+    fn a_branch_with_an_open_pull_request_is_not_deleted() {
+        let mut h = Harness::new(on_github());
+        h.tool = super::super::branches::Tool::with_canned_pull_requests(Some(CANNED));
+        h.frame();
+        h.until("the catalogue loads", |h| h.tool.catalog.is_some());
+        let request = delete(&h, &["feature"]);
+        h.ask(request, "Delete remote branch origin/feature?");
+        h.until("the check", |h| {
+            h.shows("origin/feature has an open pull request:")
+        });
+        assert!(h.shows("#12 Add feature"));
+        h.click("Delete");
+        assert!(
+            h.shows("Delete remote branch origin/feature?"),
+            "still asking"
+        );
+        assert!(!h.tool.busy());
     }
 }

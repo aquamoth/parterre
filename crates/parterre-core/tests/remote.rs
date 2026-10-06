@@ -6,7 +6,9 @@ mod common;
 use common::TestRepo;
 use parterre_core::Oid;
 use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck, Warning};
-use parterre_core::remote::{self, Diverged, Live, Pull, Push, PushState, Reconcile, SetUpstream};
+use parterre_core::remote::{
+    self, Diverged, Live, Pull, Push, PushState, Reconcile, RemoteBranchTip, SetUpstream,
+};
 use parterre_util::CancelTree;
 use tempfile::TempDir;
 
@@ -771,4 +773,133 @@ fn a_cancelled_push_stops_git_and_pushes_nothing() {
     assert_eq!(error, "Operation cancelled.");
     assert!(started.elapsed() < std::time::Duration::from_secs(30));
     assert_eq!(on_origin(&s, "main"), before);
+}
+
+fn delete_remote(r: &TestRepo, names: &[&str]) -> Action {
+    Action::DeleteRemoteBranches(
+        names
+            .iter()
+            .map(|name| RemoteBranchTip {
+                remote: "origin".into(),
+                branch: (*name).into(),
+                tip: rev(r, &format!("origin/{name}")),
+            })
+            .collect(),
+    )
+}
+
+/// `feature`, pushed with one commit of its own.
+fn pushed_feature() -> Setup {
+    let mut s = setup();
+    s.work.branch("feature");
+    s.work.commit("feature");
+    s.work.git(&["push", "-q", "-u", "origin", "feature"]);
+    s.work.checkout("main");
+    s
+}
+
+#[test]
+fn deleting_a_remote_branch_always_asks_first_then_deletes_it_for_everyone() {
+    let s = pushed_feature();
+    let action = delete_remote(&s.work, &["feature"]);
+    let w = warning(execute(&s.work, action, None));
+    // The local branch still has its commit: nothing is lost, but it asks.
+    assert!(w.is_confirmation());
+    assert!(w.commits.is_empty());
+    let tip = rev(&s.work, "origin/feature").to_hex();
+    assert_eq!(
+        w.commands
+            .iter()
+            .map(|c| parterre_core::branches::command_text(c))
+            .collect::<Vec<_>>(),
+        [format!(
+            "git push --progress --force-with-lease=refs/heads/feature:{tip} origin --delete feature"
+        )]
+    );
+    let report = done(execute(&s.work, w.action.clone(), Some(&w)));
+    assert_eq!(report.steps.len(), 1);
+    assert_eq!(on_origin(&s, "feature"), None);
+    assert!(!s.work.git(&["branch", "-r"]).contains("origin/feature"));
+    // The local branch is left, its upstream gone.
+    assert_eq!(rev(&s.work, "feature").to_hex(), tip);
+}
+
+#[test]
+fn deleting_a_remote_branch_lists_the_commits_only_it_has() {
+    let mut s = pushed_feature();
+    s.work.git(&["branch", "-D", "feature"]);
+    let only = rev(&s.work, "origin/feature");
+    let w = warning(execute(&s.work, delete_remote(&s.work, &["feature"]), None));
+    assert!(!w.is_confirmation());
+    assert_eq!(w.commits, vec![only]);
+    assert_eq!(w.deletions.len(), 1);
+    assert_eq!(w.deletions[0].name, "origin/feature");
+    done(execute(&s.work, w.action.clone(), Some(&w)));
+    assert_eq!(on_origin(&s, "feature"), None);
+    let _ = &mut s;
+}
+
+#[test]
+fn deleting_several_remote_branches_counts_shared_commits_once() {
+    let s = pushed_feature();
+    s.work.git(&["push", "-q", "origin", "feature:copy"]);
+    s.work.git(&["fetch", "-q", "origin"]);
+    s.work.git(&["branch", "-D", "feature"]);
+    let w = warning(execute(
+        &s.work,
+        delete_remote(&s.work, &["copy", "feature"]),
+        None,
+    ));
+    assert_eq!(w.commits.len(), 1, "the commit both have, once");
+    assert_eq!(w.commands.len(), 2);
+    done(execute(&s.work, w.action.clone(), Some(&w)));
+    assert_eq!(on_origin(&s, "feature"), None);
+    assert_eq!(on_origin(&s, "copy"), None);
+}
+
+#[test]
+fn a_remote_branch_that_moved_since_it_was_offered_is_not_deleted() {
+    let mut s = pushed_feature();
+    let stale = delete_remote(&s.work, &["feature"]);
+    s.work.checkout("feature");
+    s.work.commit("more");
+    s.work.git(&["push", "-q", "origin", "feature"]);
+    let (error, report) = failed(execute(&s.work, stale, None));
+    assert!(error.contains("moved"), "{error}");
+    assert!(report.steps.is_empty());
+    assert!(on_origin(&s, "feature").is_some());
+}
+
+#[test]
+fn a_remote_branch_that_moved_on_the_remote_unseen_is_kept_and_a_fetch_suggested() {
+    let mut s = pushed_feature();
+    let w = warning(execute(&s.work, delete_remote(&s.work, &["feature"]), None));
+    s.other.git(&["fetch", "-q", "origin"]);
+    s.other.git(&[
+        "checkout",
+        "-q",
+        "-b",
+        "feature",
+        "--track",
+        "origin/feature",
+    ]);
+    let theirs = s.other.commit("theirs");
+    s.other.git(&["push", "-q", "origin", "feature"]);
+    let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
+    assert_eq!(
+        error,
+        "origin/feature moved on origin since the last fetch. Fetch, and look again."
+    );
+    assert!(report.fetch);
+    assert_eq!(on_origin(&s, "feature"), Some(theirs));
+}
+
+#[test]
+fn an_approval_from_before_the_commits_changed_asks_again() {
+    let s = pushed_feature();
+    let w = warning(execute(&s.work, delete_remote(&s.work, &["feature"]), None));
+    s.work.git(&["branch", "-D", "feature"]);
+    let again = warning(execute(&s.work, w.action.clone(), Some(&w)));
+    assert_eq!(again.commits.len(), 1);
+    assert!(on_origin(&s, "feature").is_some());
 }

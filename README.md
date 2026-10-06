@@ -72,7 +72,8 @@ the branch being rebased.
 and **push** any local branch from its node. A push that would replace the remote's commits
 asks first, and says whether the branch has a copy of each; it forces only with a lease
 (`--force-with-lease --force-if-includes`). parterre has no password prompt of its own: use a
-credential helper or ssh-agent.
+credential helper or ssh-agent. **Delete** a remote branch from its node: parterre asks
+first, lists any commits only it has, and won't delete a branch with an open pull request.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/rebase-dark.png">

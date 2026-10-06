@@ -483,7 +483,9 @@ impl ParterreApp {
             selection: Selection::default(),
             selected_edge: None,
             preview: None,
-            branches: branches::Tool::default(),
+            branches: branches::Tool::with_canned_pull_requests(
+                automation.pull_requests.as_deref(),
+            ),
             context_node: None,
             pending_select: Vec::new(),
             drag: None,
@@ -1174,7 +1176,8 @@ impl ParterreApp {
     /// current branch lacks) or the revert's (`revert:REF`), once the branch information is in.
     /// Also runs a fetch (`fetch`), a pull of the current branch (`pull`) or a push
     /// (`push:BRANCH`, to the first remote, or `push:BRANCH:REMOTE`), and opens the upstream
-    /// dialog (`set-upstream:BRANCH`).
+    /// dialog (`set-upstream:BRANCH`) or the question before deleting remote branches
+    /// (`delete-remote-branch:REMOTE/BRANCH`, or several: `A,B`).
     fn open_branch_dialog(
         &mut self,
         ctx: &egui::Context,
@@ -1277,6 +1280,30 @@ impl ParterreApp {
                         remote: remote.ok_or("the repository has no remote")?,
                     },
                 )))
+            }
+            "delete-remote-branch" => {
+                let branches = name
+                    .split(',')
+                    .map(|name| {
+                        let tip = catalog
+                            .remotes
+                            .iter()
+                            .find(|r| r.name == name)
+                            .ok_or_else(|| format!("no remote-tracking branch named {name}"))?
+                            .tip;
+                        let (remote, branch) = catalog
+                            .tracking_parts(name)
+                            .ok_or_else(|| format!("no remote in {name}"))?;
+                        Ok(parterre_core::remote::RemoteBranchTip {
+                            remote: remote.to_owned(),
+                            branch: branch.to_owned(),
+                            tip,
+                        })
+                    })
+                    .collect::<Result<_, String>>()?;
+                branches::Request::Run(parterre_core::branches::Action::DeleteRemoteBranches(
+                    branches,
+                ))
             }
             "set-upstream" => {
                 if !catalog.locals.iter().any(|b| b.name == name) {

@@ -10,7 +10,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use parterre_util::CancelTree;
 
-use crate::branches::{Attention, Catalog, Error, LocalBranch, Report, Step, Stuck, Warning};
+use crate::branches::{
+    Attention, Catalog, Deletion, Error, LocalBranch, Report, Step, Stuck, Warning, all_commits,
+    lost_commits, same_losses,
+};
 use crate::git::{Git, GitError};
 use crate::{Oid, Repo};
 
@@ -94,6 +97,22 @@ pub struct SetUpstream {
     pub upstream: String,
 }
 
+/// A remote-tracking branch, at the tip it had when offered: `origin/topic` is branch `topic`
+/// of remote `origin`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteBranchTip {
+    pub remote: String,
+    pub branch: String,
+    pub tip: Oid,
+}
+
+impl RemoteBranchTip {
+    /// `origin/topic`.
+    pub fn name(&self) -> String {
+        format!("{}/{}", self.remote, self.branch)
+    }
+}
+
 /// What pushing a branch to a remote would do, by the last fetch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PushState {
@@ -151,6 +170,22 @@ pub fn set_upstream_command(set: &SetUpstream) -> Vec<String> {
         format!("--set-upstream-to=refs/remotes/{}", set.upstream),
         "--".into(),
         set.branch.clone(),
+    ]
+}
+
+/// Deletes the branch on its remote, only if it is still where the last fetch saw it.
+pub(crate) fn delete_remote_command(b: &RemoteBranchTip) -> Vec<String> {
+    vec![
+        "push".into(),
+        "--progress".into(),
+        format!(
+            "--force-with-lease=refs/heads/{}:{}",
+            b.branch,
+            b.tip.to_hex()
+        ),
+        b.remote.clone(),
+        "--delete".into(),
+        b.branch.clone(),
     ]
 }
 
@@ -383,6 +418,120 @@ pub(crate) fn push(
     }
 }
 
+/// Deletes branches on their remotes, one by one. It always asks first ([`Warning`]): a
+/// confirmation when the commits are reached from elsewhere, else a warning listing those only
+/// they reach. A branch the remote moved since the last fetch is kept, and a fetch suggested.
+pub(crate) fn delete_remote_branches(
+    catalog: &Catalog,
+    action: &crate::branches::Action,
+    branches: &[RemoteBranchTip],
+    approval: Option<&Warning>,
+    cancel: &CancelTree,
+    report: &mut Report,
+    live: Option<&Live>,
+) -> Result<Option<Warning>, Error> {
+    if branches.is_empty() {
+        return Err(Error::Invalid("Choose a remote branch to delete.".into()));
+    }
+    for (i, b) in branches.iter().enumerate() {
+        let name = b.name();
+        if branches[..i].contains(b) {
+            return Err(Error::Invalid(format!(
+                "Remote branch {name} is listed twice."
+            )));
+        }
+        if !catalog.remote_names.contains(&b.remote)
+            || !catalog
+                .remotes
+                .iter()
+                .any(|r| r.name == name && r.tip == b.tip)
+        {
+            return Err(Error::Invalid(format!(
+                "Remote branch {name} moved or is gone since. Reload and try again."
+            )));
+        }
+    }
+    let git = Git::new(&catalog.root);
+    let excluded: Vec<String> = branches
+        .iter()
+        .map(|b| format!("refs/remotes/{}", b.name()))
+        .collect();
+    let deletions = branches
+        .iter()
+        .map(|b| {
+            Ok(Deletion {
+                name: b.name(),
+                path: None,
+                commits: lost_commits(&git, catalog, b.tip, &excluded, &[], None)?,
+                files: Vec::new(),
+                refusal: None,
+                branch: None,
+                head: Some(b.tip),
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let commits = all_commits(&deletions);
+    let approved = approval.is_some_and(|w| {
+        w.action == *action && w.commits == commits && same_losses(&w.deletions, &deletions)
+    });
+    if !approved {
+        return Ok(Some(Warning {
+            action: action.clone(),
+            commits,
+            replaced: Vec::new(),
+            deletions,
+            repo: Arc::new(git.load()?),
+            commands: branches.iter().map(delete_remote_command).collect(),
+            head: None,
+        }));
+    }
+    for b in branches {
+        if run_live(&git, delete_remote_command(b), cancel, report, live)? {
+            continue;
+        }
+        let pushed = last_output(report);
+        let Some(now) = ls_remote(&git, b, cancel)? else {
+            return Err(Error::Failed(format!("{pushed}\n\n{NO_PROMPT}")));
+        };
+        let (name, remote) = (b.name(), &b.remote);
+        let moved = match now {
+            Some(tip) if tip == b.tip => return Err(Error::Failed(pushed)),
+            Some(_) => format!("{name} moved on {remote} since the last fetch."),
+            None => format!("{name} is already gone from {remote}."),
+        };
+        report.fetch = true;
+        return Err(Error::Failed(format!("{moved} Fetch, and look again.")));
+    }
+    Ok(None)
+}
+
+/// Where the branch is on its remote now (`ls-remote`): `None` if git couldn't ask, `Some(None)`
+/// if the remote has no such branch.
+fn ls_remote(
+    git: &Git,
+    b: &RemoteBranchTip,
+    cancel: &CancelTree,
+) -> Result<Option<Option<Oid>>, Error> {
+    let args: Vec<String> = ["ls-remote", &b.remote, &format!("refs/heads/{}", b.branch)]
+        .map(str::to_owned)
+        .to_vec();
+    let mut command = network_command(git, &args);
+    let child = cancel.start(&mut command).map_err(|e| match e {
+        parterre_util::Start::Cancelled => Error::Cancelled,
+        parterre_util::Start::Spawn(e) => GitError::Spawn(e).into(),
+    })?;
+    let out = child.wait_with_output();
+    if cancel.finish() {
+        return Err(Error::Cancelled);
+    }
+    let out = out.map_err(GitError::Spawn)?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(Some(text.split_whitespace().next().and_then(Oid::from_hex)))
+}
+
 /// The remote's commits a force push would replace, split into those with no copy on the
 /// branch (lost) and those with one (replaced), as the graph colours them.
 fn lost_and_replaced(
@@ -574,9 +723,21 @@ impl Live {
     }
 }
 
+/// An operation's git command that may reach a remote. ssh is kept from asking on a terminal
+/// parterre's user can't see: it fails instead, unless the user has an askpass program of
+/// their own.
+fn network_command(git: &Git, args: &[String]) -> std::process::Command {
+    let mut command = git.operation_command(args);
+    if std::env::var_os("SSH_ASKPASS").is_none() {
+        command
+            .env("SSH_ASKPASS", "parterre-has-no-askpass")
+            .env("SSH_ASKPASS_REQUIRE", "force");
+    }
+    command
+}
+
 /// Runs a git command as [`crate::branches::run`] does, streaming its output to `live` as it
-/// comes. ssh is kept from asking on a terminal parterre's user can't see: it fails instead,
-/// unless the user has an askpass program of their own.
+/// comes.
 fn run_live(
     git: &Git,
     args: Vec<String>,
@@ -587,12 +748,7 @@ fn run_live(
     let own = Live::default();
     let live = live.unwrap_or(&own);
     live.start(&args);
-    let mut command = git.operation_command(&args);
-    if std::env::var_os("SSH_ASKPASS").is_none() {
-        command
-            .env("SSH_ASKPASS", "parterre-has-no-askpass")
-            .env("SSH_ASKPASS_REQUIRE", "force");
-    }
+    let mut command = network_command(git, &args);
     let mut child = cancel.start(&mut command).map_err(|e| match e {
         parterre_util::Start::Cancelled => Error::Cancelled,
         parterre_util::Start::Spawn(e) => GitError::Spawn(e).into(),

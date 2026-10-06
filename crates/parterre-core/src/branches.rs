@@ -894,8 +894,10 @@ pub enum Action {
     Pull(Box<crate::remote::Pull>),
     /// Pushes a local branch to its own name on a remote.
     Push(Box<crate::remote::Push>),
-    /// Sets or unsets a local branch's upstream.
+    /// Sets a local branch's upstream.
     SetUpstream(Box<crate::remote::SetUpstream>),
+    /// Deletes branches on their remotes, each still at the tip it was offered at.
+    DeleteRemoteBranches(Vec<crate::remote::RemoteBranchTip>),
 }
 
 impl Action {
@@ -934,13 +936,20 @@ impl Action {
             Self::Pull(p) => format!("Pull {}", p.branch),
             Self::Push(p) => format!("Push {} to {}", p.branch, p.remote),
             Self::SetUpstream(s) => format!("Set upstream of {} to {}", s.branch, s.upstream),
+            Self::DeleteRemoteBranches(branches) => match branches.as_slice() {
+                [one] => format!("Delete remote branch {}", one.name()),
+                branches => format!("Delete {} remote branches", branches.len()),
+            },
         }
     }
 
     /// Fetching, pulling and pushing: they reach a remote, so their output is shown as it
     /// comes, and they can be cancelled.
     pub fn is_network(&self) -> bool {
-        matches!(self, Self::Fetch | Self::Pull(_) | Self::Push(_))
+        matches!(
+            self,
+            Self::Fetch | Self::Pull(_) | Self::Push(_) | Self::DeleteRemoteBranches(_)
+        )
     }
 }
 
@@ -978,6 +987,8 @@ pub struct Report {
     pub stash: Option<Stashed>,
     /// The commit the operation made, for the log to select.
     pub created: Option<Oid>,
+    /// What went wrong is likely out of date: a fetch would show how things stand.
+    pub fetch: bool,
 }
 
 /// A stash entry parterre made, by its commit: other worktrees and sessions share the list.
@@ -1064,7 +1075,7 @@ pub struct Deletion {
     /// The worktree's local branch, which can go with it.
     pub branch: Option<WorktreeBranch>,
     /// The worktree's HEAD or the branch's tip.
-    head: Option<Oid>,
+    pub(crate) head: Option<Oid>,
 }
 
 impl Deletion {
@@ -1087,12 +1098,12 @@ pub struct WorktreeBranch {
 }
 
 /// Approved deletions, as loaded again just before running them.
-fn same_losses(approved: &[Deletion], now: &[Deletion]) -> bool {
+pub(crate) fn same_losses(approved: &[Deletion], now: &[Deletion]) -> bool {
     approved.len() == now.len() && approved.iter().zip(now).all(|(a, b)| a.same_loss(b))
 }
 
 /// Every commit the deletions lose, once.
-fn all_commits(deletions: &[Deletion]) -> Vec<Oid> {
+pub(crate) fn all_commits(deletions: &[Deletion]) -> Vec<Oid> {
     let mut commits: Vec<Oid> = deletions.iter().flat_map(|d| d.commits.clone()).collect();
     commits.sort_by_key(|o| o.to_hex());
     commits.dedup();
@@ -1212,6 +1223,10 @@ impl Branches {
             Action::Pull(p) => Ok(vec![crate::remote::pull_command(p.how)]),
             Action::Push(p) => Ok(vec![crate::remote::push_command(catalog, p, false)]),
             Action::SetUpstream(s) => Ok(vec![crate::remote::set_upstream_command(s)]),
+            Action::DeleteRemoteBranches(branches) => Ok(branches
+                .iter()
+                .map(crate::remote::delete_remote_command)
+                .collect()),
         }
     }
 
@@ -1344,6 +1359,11 @@ impl Branches {
                 crate::remote::set_upstream(&catalog, set, cancel, report)?;
                 return Ok(None);
             }
+            Action::DeleteRemoteBranches(branches) => {
+                return crate::remote::delete_remote_branches(
+                    &catalog, &action, branches, approval, cancel, report, live,
+                );
+            }
             _ => {}
         }
         let mut commands = Self::commands(&catalog, &action)?;
@@ -1404,7 +1424,8 @@ impl Branches {
             | Action::Fetch
             | Action::Pull(_)
             | Action::Push(_)
-            | Action::SetUpstream(_) => {
+            | Action::SetUpstream(_)
+            | Action::DeleteRemoteBranches(_) => {
                 unreachable!("handled above")
             }
             Action::Switch(name) => {
