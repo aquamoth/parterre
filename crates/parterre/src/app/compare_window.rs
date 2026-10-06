@@ -181,10 +181,9 @@ impl CompareWindow {
         self.diffs.confirm_many(ui, Id::new("compare-many-diffs"));
     }
 
-    /// The two commits, one per line, and the button that swaps them, except while
-    /// resolving conflicts.
+    /// The two commits, one per line, and the button that swaps them; not the working tree,
+    /// which stays on the right as in `git diff <commit>`.
     fn header(&mut self, ui: &mut Ui, c: &Colors, env: &mut Env) {
-        let resolving = self.resolving();
         let Some(view) = &mut self.view else { return };
         let height = 2.0 * SIDE_ROW + 12.0;
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
@@ -198,7 +197,7 @@ impl CompareWindow {
                 .max_rect(rect.shrink2(vec2(8.0, 0.0)))
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
-        if !resolving {
+        if !view.comparison.reads_working_tree() {
             let swap = widgets::tip_explained(
                 widgets::icon_button(&mut tools, glyphs::SWAP, false),
                 "Swap sides",

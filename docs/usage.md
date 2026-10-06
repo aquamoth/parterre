@@ -143,7 +143,7 @@ menu does. A conflicted file's status is a red box with what each side did to it
 theirs: `MM` both modified, `MD` modified by us and deleted by them, `AA` both added, `A·` only
 ours has it (as after both renamed a file differently), and so on; hover it for `git status`'s
 words. *Conflicts only*, checked at first, lists just those; each drops out once resolved. While
-resolving, *Swap sides* is gone, and so is *Since common ancestor* where it changes nothing. A
+resolving, *Since common ancestor* is gone where it changes nothing. A
 file's menu opens it in your merge tool (`git mergetool`, left running on its own), or its folder
 in a terminal or the file manager. When no merge tool is configured, parterre lists the installed
 ones; *Remember this choice* sets `merge.tool` in your global git config. Any conflict but a
@@ -221,7 +221,7 @@ selected *Selected revisions*. To compare commits far apart, *Mark for compariso
 node menu or a row in the log) and pick *Compare with marked* on the other, from any log. A
 range log's *Compare files* compares its two ends. The window's *Since common ancestor* shows
 only what the right-hand side changed since the two forked, as a pull request does; *Swap sides*
-turns the comparison round.
+turns a comparison of two commits round; the working tree stays on the right.
 
 ## Blame
 
