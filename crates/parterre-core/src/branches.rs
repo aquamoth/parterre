@@ -194,6 +194,8 @@ pub struct Catalog {
     pub locals: Vec<LocalBranch>,
     pub remotes: Vec<RemoteBranch>,
     pub remote_names: Vec<String>,
+    /// Each remote's default branch, as its `<remote>/HEAD` names it: `origin/main`.
+    pub remote_defaults: Vec<String>,
     pub occupied: HashMap<String, PathBuf>,
     pub current: Option<String>,
     pub head: Option<Oid>,
@@ -270,7 +272,7 @@ impl Catalog {
                     Ok(String::new())
                 }
             });
-            let refs = git.run(&["for-each-ref", "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads", "refs/remotes", "refs/tags"]);
+            let refs = git.run(&["for-each-ref", "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(symref)", "refs/heads", "refs/remotes", "refs/tags"]);
             (
                 config.join().expect("config read"),
                 listing.join().expect("worktree listing"),
@@ -295,10 +297,11 @@ impl Catalog {
         remote_names.sort_by_key(|r| std::cmp::Reverse(r.len()));
         let mut locals = Vec::new();
         let mut remotes = Vec::new();
+        let mut remote_defaults = Vec::new();
         let mut roots = Vec::new();
         for line in refs.lines() {
             let f: Vec<_> = line.split('\0').collect();
-            if f.len() != 7 {
+            if f.len() != 8 {
                 return Err(Error::Invalid("Unexpected Git reference listing.".into()));
             }
             let tip = if f[2] == "commit" {
@@ -313,6 +316,12 @@ impl Catalog {
                 None
             };
             let Some(tip) = tip else { continue };
+            // `origin/HEAD` names the remote's default branch.
+            if f[0].starts_with("refs/remotes/")
+                && let Some(default) = f[7].strip_prefix("refs/remotes/")
+            {
+                remote_defaults.push(default.to_owned());
+            }
             roots.push((f[0].to_owned(), tip));
             if let Some(name) = f[0].strip_prefix("refs/heads/") {
                 let upstream = (!f[5].is_empty() && !f[6].is_empty()).then(|| {
@@ -481,6 +490,7 @@ impl Catalog {
         Ok(Self {
             locals,
             remotes,
+            remote_defaults,
             remote_names,
             occupied,
             current,
@@ -988,7 +998,7 @@ pub struct Report {
     /// The commit the operation made, for the log to select.
     pub created: Option<Oid>,
     /// What went wrong is likely out of date: a fetch would show how things stand.
-    pub fetch: bool,
+    pub suggest_fetch: bool,
 }
 
 /// A stash entry parterre made, by its commit: other worktrees and sessions share the list.

@@ -890,7 +890,7 @@ fn a_remote_branch_that_moved_on_the_remote_unseen_is_kept_and_a_fetch_suggested
         error,
         "origin/feature moved on origin since the last fetch. Fetch, and look again."
     );
-    assert!(report.fetch);
+    assert!(report.suggest_fetch);
     assert_eq!(on_origin(&s, "feature"), Some(theirs));
 }
 
@@ -902,4 +902,59 @@ fn an_approval_from_before_the_commits_changed_asks_again() {
     let again = warning(execute(&s.work, w.action.clone(), Some(&w)));
     assert_eq!(again.commits.len(), 1);
     assert!(on_origin(&s, "feature").is_some());
+}
+
+#[test]
+fn each_remotes_default_branch_is_known() {
+    let s = setup();
+    assert!(
+        Catalog::load(s.work.path())
+            .unwrap()
+            .remote_defaults
+            .is_empty()
+    );
+    s.work.git(&["remote", "set-head", "origin", "main"]);
+    let catalog = Catalog::load(s.work.path()).unwrap();
+    assert_eq!(catalog.remote_defaults, ["origin/main"]);
+    assert!(catalog.remotes.iter().all(|r| !r.name.ends_with("/HEAD")));
+}
+
+#[test]
+fn a_deletion_that_stops_partway_says_which_went() {
+    let mut s = pushed_feature();
+    s.work.git(&["push", "-q", "origin", "feature:copy"]);
+    s.work.git(&["fetch", "-q", "origin"]);
+    let w = warning(execute(
+        &s.work,
+        delete_remote(&s.work, &["copy", "feature"]),
+        None,
+    ));
+    s.other.git(&["fetch", "-q", "origin"]);
+    s.other.git(&[
+        "checkout",
+        "-q",
+        "-b",
+        "feature",
+        "--track",
+        "origin/feature",
+    ]);
+    s.other.commit("theirs");
+    s.other.git(&["push", "-q", "origin", "feature"]);
+    let (error, _) = failed(execute(&s.work, w.action.clone(), Some(&w)));
+    assert_eq!(
+        error,
+        "origin/feature moved on origin since the last fetch. Fetch, and look again. \
+         origin/copy was deleted."
+    );
+    assert_eq!(on_origin(&s, "copy"), None);
+    assert!(on_origin(&s, "feature").is_some());
+}
+
+#[test]
+fn a_remotes_head_naming_the_branch_doesnt_keep_its_commits() {
+    let s = pushed_feature();
+    s.work.git(&["remote", "set-head", "origin", "feature"]);
+    s.work.git(&["branch", "-D", "feature"]);
+    let w = warning(execute(&s.work, delete_remote(&s.work, &["feature"]), None));
+    assert_eq!(w.commits, vec![rev(&s.work, "origin/feature")]);
 }

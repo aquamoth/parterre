@@ -97,8 +97,8 @@ pub struct SetUpstream {
     pub upstream: String,
 }
 
-/// A remote-tracking branch, at the tip it had when offered: `origin/topic` is branch `topic`
-/// of remote `origin`.
+/// A branch on a remote, at the tip its remote-tracking branch had when offered: `origin/topic`
+/// is branch `topic` of remote `origin`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteBranchTip {
     pub remote: String,
@@ -452,9 +452,17 @@ pub(crate) fn delete_remote_branches(
         }
     }
     let git = Git::new(&catalog.root);
+    // A remote's `HEAD` naming one of them goes with it.
     let excluded: Vec<String> = branches
         .iter()
-        .map(|b| format!("refs/remotes/{}", b.name()))
+        .flat_map(|b| {
+            let name = b.name();
+            let head = catalog
+                .remote_defaults
+                .contains(&name)
+                .then(|| format!("refs/remotes/{}/HEAD", b.remote));
+            std::iter::once(format!("refs/remotes/{name}")).chain(head)
+        })
         .collect();
     let deletions = branches
         .iter()
@@ -493,14 +501,29 @@ pub(crate) fn delete_remote_branches(
         let Some(now) = ls_remote(&git, b, cancel)? else {
             return Err(Error::Failed(format!("{pushed}\n\n{NO_PROMPT}")));
         };
+        // Those before it went.
+        let deleted: Vec<String> = branches
+            .iter()
+            .take_while(|d| *d != b)
+            .map(RemoteBranchTip::name)
+            .collect();
+        let deleted = match deleted.as_slice() {
+            [] => String::new(),
+            [one] => format!(" {one} was deleted."),
+            many => format!(" {} were deleted.", many.join(", ")),
+        };
         let (name, remote) = (b.name(), &b.remote);
         let moved = match now {
-            Some(tip) if tip == b.tip => return Err(Error::Failed(pushed)),
+            Some(tip) if tip == b.tip => {
+                return Err(Error::Failed(format!("{pushed}{deleted}")));
+            }
             Some(_) => format!("{name} moved on {remote} since the last fetch."),
             None => format!("{name} is already gone from {remote}."),
         };
-        report.fetch = true;
-        return Err(Error::Failed(format!("{moved} Fetch, and look again.")));
+        report.suggest_fetch = true;
+        return Err(Error::Failed(format!(
+            "{moved} Fetch, and look again.{deleted}"
+        )));
     }
     Ok(None)
 }

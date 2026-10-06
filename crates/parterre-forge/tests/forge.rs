@@ -291,3 +291,38 @@ fn github_is_not_asked_without_fetched_branches() {
     let prs = github::load(&Git::new(r.path())).expect("nothing to ask");
     assert!(prs.list.is_empty());
 }
+
+#[test]
+fn a_remote_branch_proposed_by_an_open_pull_request_is_found_before_deleting_it() {
+    let mut r = TestRepo::new();
+    let tip = r.commit("A");
+    r.git(&["remote", "add", "origin", "https://github.com/o/r"]);
+    r.git(&["remote", "add", "fork", "https://github.com/someone/r"]);
+    r.git(&["remote", "add", "elsewhere", "/srv/git/r"]);
+    r.git(&["update-ref", "refs/remotes/origin/feature", &tip]);
+    let canned = r#"[{"number": 12, "title": "Add feature", "head": "feature", "base": "main"}]"#;
+    let branch = |remote: &str, branch: &str| (remote.to_owned(), branch.to_owned());
+    let found = github::proposals(
+        &Git::new(r.path()),
+        &[
+            branch("origin", "feature"),
+            branch("origin", "main"),
+            branch("fork", "feature"),
+            branch("elsewhere", "feature"),
+        ],
+        Some(canned),
+    );
+    let github::Proposed::Open(pr) = &found[0] else {
+        panic!("open: {found:?}")
+    };
+    assert_eq!((pr.number, pr.title.as_str()), (12, "Add feature"));
+    assert_eq!(found[1], github::Proposed::No);
+    // The canned list's pull requests are all origin's own.
+    assert_eq!(found[2], github::Proposed::No);
+    assert_eq!(found[3], github::Proposed::NotOnGithub);
+    // Nothing on GitHub: nothing asked.
+    assert_eq!(
+        github::proposals(&Git::new(r.path()), &[branch("elsewhere", "x")], None),
+        [github::Proposed::NotOnGithub]
+    );
+}

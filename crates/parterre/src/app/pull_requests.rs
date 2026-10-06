@@ -1,8 +1,9 @@
 //! Open pull requests from GitHub, loaded on a worker thread while they are shown. Not in
 //! TortoiseGit.
 //!
-//! Whether `origin` is on GitHub is asked of git alone, when a repository is opened. GitHub
-//! itself is asked only while pull requests are shown and `gh` is signed in, and as t3code
+//! Whether `origin` is on GitHub is asked of git alone, when a repository is opened. Here,
+//! GitHub itself is asked only while pull requests are shown (the question before deleting a
+//! remote branch asks once more, shown or not: `app::remote`) and `gh` is signed in, and as t3code
 //! does: a repository's list is kept for a minute (five if it had none) and asked for again
 //! only after that, when the repository is opened again, reloaded (F5) or its refs change; a
 //! change while it is kept is loaded once it isn't. A push or a fetch that moves `origin`'s

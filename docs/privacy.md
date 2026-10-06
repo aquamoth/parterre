@@ -114,6 +114,10 @@ for the open pull requests of the branches you have fetched. That sends the repo
 and name, and those branch names, to GitHub, which hosts them. Nothing is asked without signing
 in. The toolbar's pull-request button turns it off ([user guide](usage.md#pull-requests)).
 
+Before you delete a branch on a remote that is on GitHub, parterre asks once more, with
+pull requests shown or not, whether an open pull request proposes that branch: it won't delete
+one that does. That sends the branch names being deleted.
+
 ## Who is responsible
 
 Trustfall AB, Yachtvägen 35, 749 48 Enköping, Sweden, is the controller of the usage

@@ -21,7 +21,7 @@ use parterre_util::CancelTree;
 use super::cherry_pick::CherryPickDialog;
 use super::merge::MergeDialog;
 use super::rebase::{RebaseDialog, stuck_color};
-use super::remote::{Checks, PullDialog, SetUpstreamDialog};
+use super::remote::{PullDialog, PullRequestCheck, SetUpstreamDialog};
 use super::reset::ResetDialog;
 use super::revert::{RestoreDialog, RevertDialog};
 use crate::theme::Palette;
@@ -286,25 +286,13 @@ fn branch_section(
         found.sort_by(|a, b| a.name.cmp(&b.name));
         found
     };
-    if group.len() > 1 && group.iter().all(|&c| !deletable(c).is_empty()) {
-        let all: Vec<BranchTip> = group.iter().flat_map(|&c| deletable(c)).collect();
-        let names: Vec<String> = all.iter().map(|b| b.name.clone()).collect();
-        let label = format!("Delete {} local branches", all.len());
-        let delete = Request::Run(Action::DeleteBranches(all));
-        all_item(ui, label, &names, delete, None, busy, &mut request);
-    } else {
-        let deletions: Vec<Target> = deletable(commit)
-            .into_iter()
-            .map(|b| {
-                (
-                    b.name.clone(),
-                    Request::Run(Action::DeleteBranches(vec![b])),
-                    None,
-                )
-            })
-            .collect();
-        target_menu(ui, "Delete branch", &deletions, busy, &mut request);
-    }
+    let deletions = Deletions {
+        verb: "Delete branch",
+        many: "local branches",
+        name: |b: &BranchTip| b.name.clone(),
+        delete: Action::DeleteBranches,
+    };
+    deletions.items(ui, commit, group, deletable, busy, &mut request);
     remote_deletions(ui, repo, commit, group, catalog, busy, &mut request);
     rebase_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
     merge_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
@@ -364,21 +352,49 @@ fn remote_deletions(
         found.sort_by_key(RemoteBranchTip::name);
         found
     };
-    if group.len() > 1 && group.iter().all(|&c| !deletable(c).is_empty()) {
-        let all: Vec<RemoteBranchTip> = group.iter().flat_map(|&c| deletable(c)).collect();
-        let names: Vec<String> = all.iter().map(RemoteBranchTip::name).collect();
-        let label = format!("Delete {} remote branches", all.len());
-        let delete = Request::Run(Action::DeleteRemoteBranches(all));
-        all_item(ui, label, &names, delete, None, busy, request);
-    } else {
-        let deletions: Vec<Target> = deletable(commit)
-            .into_iter()
-            .map(|b| {
-                let request = Request::Run(Action::DeleteRemoteBranches(vec![b.clone()]));
-                (b.name(), request, None)
-            })
-            .collect();
-        target_menu(ui, "Delete remote branch", &deletions, busy, request);
+    let deletions = Deletions {
+        verb: "Delete remote branch",
+        many: "remote branches",
+        name: RemoteBranchTip::name,
+        delete: Action::DeleteRemoteBranches,
+    };
+    deletions.items(ui, commit, group, deletable, busy, request);
+}
+
+/// Deleting what's at a node: one item each (*Delete branch* X), or, when every node of a
+/// group has some, one for them all (*Delete 3 branches*).
+struct Deletions<T> {
+    verb: &'static str,
+    /// What several are, after their count.
+    many: &'static str,
+    name: fn(&T) -> String,
+    delete: fn(Vec<T>) -> Action,
+}
+
+impl<T: Clone> Deletions<T> {
+    fn items(
+        &self,
+        ui: &mut Ui,
+        commit: Oid,
+        group: &[Oid],
+        at: impl Fn(Oid) -> Vec<T>,
+        busy: bool,
+        request: &mut Option<Request>,
+    ) {
+        let each: Vec<Vec<T>> = group.iter().map(|&c| at(c)).collect();
+        if group.len() > 1 && each.iter().all(|found| !found.is_empty()) {
+            let all: Vec<T> = each.into_iter().flatten().collect();
+            let names: Vec<String> = all.iter().map(self.name).collect();
+            let label = format!("Delete {} {}", all.len(), self.many);
+            let delete = Request::Run((self.delete)(all));
+            all_item(ui, label, &names, delete, None, busy, request);
+        } else {
+            let targets: Vec<Target> = at(commit)
+                .into_iter()
+                .map(|t| ((self.name)(&t), Request::Run((self.delete)(vec![t])), None))
+                .collect();
+            target_menu(ui, self.verb, &targets, busy, request);
+        }
     }
 }
 
@@ -1622,7 +1638,7 @@ struct Loss {
     /// The deletions whose changed files are listed, by index.
     show_files: std::collections::HashSet<usize>,
     /// Remote branches': whether pull requests propose them.
-    checks: Option<Checks>,
+    checks: Option<PullRequestCheck>,
 }
 
 /// A reset's preview, being read for the dialog.
@@ -1894,10 +1910,10 @@ impl Tool {
                     if self.repo.as_ref().is_some_and(|r| r.path == job.path) =>
                 {
                     let checks = match &warning.action {
-                        Action::DeleteRemoteBranches(branches) => Some(Checks::start(
+                        Action::DeleteRemoteBranches(branches) => Some(PullRequestCheck::start(
                             ctx,
                             job.path.clone(),
-                            branches.clone(),
+                            branches,
                             self.canned_pull_requests.clone(),
                         )),
                         _ => None,
@@ -2649,8 +2665,7 @@ impl Tool {
                 if let (Action::DeleteRemoteBranches(branches), Some(checks)) =
                     (&warning.action, checks.as_mut())
                 {
-                    let repo = &warning.repo;
-                    super::remote::deletion_notes(ui, branches, catalog.as_deref(), repo, checks);
+                    super::remote::deletion_notes(ui, branches, catalog.as_deref(), checks);
                 }
                 let worktrees = matches!(warning.action, Action::DeleteWorktrees { .. });
                 match warning.deletions.as_slice() {
@@ -2782,7 +2797,7 @@ impl Tool {
             dialogs::command_box(ui, &commands);
             // Changing a remote for everyone: Cancel has the focus even when nothing is lost.
             let remote = checks.is_some();
-            let allowed = checks.as_ref().is_none_or(Checks::allow);
+            let allowed = checks.as_ref().is_none_or(PullRequestCheck::allow);
             let focus = loss.fresh && (remote || !confirmation);
             dialogs::actions(ui, button, !busy && allowed, !confirmation, focus)
         });
@@ -2892,7 +2907,7 @@ impl Tool {
                                 }
                             }
                             // What failed is likely out of date.
-                            if n.report.fetch
+                            if n.report.suggest_fetch
                                 && ui
                                     .add_enabled(self.job.is_none(), egui::Link::new("Fetch"))
                                     .clicked()

@@ -53,7 +53,8 @@ greyed out. Hover a label for the title, author and branches, and click it to op
 request in your browser. The node's menu opens it too.
 
 parterre asks GitHub only about the branches you have fetched, at most once a minute per
-repository, and keeps well inside your hourly API budget. Nothing is sent without signing in.
+repository, and once more before deleting a remote branch, and keeps well inside your hourly
+API budget. Nothing is sent without signing in.
 The update check, usage statistics and crash reports are in
 [What parterre sends](docs/privacy.md).
 
