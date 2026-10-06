@@ -41,6 +41,9 @@ pub struct FileTable {
     selection: FileSelection,
     /// Until the window closes.
     pub widths: ColumnWidths,
+    /// *Conflicts only* unchecked: every file is listed while the working tree has
+    /// conflicts. Checked again once none is left, so that the next conflicts start filtered.
+    all_files: bool,
 }
 
 /// A git-style status letter in the Status column: filled when staged, outlined when only on
@@ -186,10 +189,6 @@ impl FileTable {
                 ..FileSelection::default()
             };
         }
-        let shown = match files {
-            Some(Ok(files)) => Some(filter_and_sort(files, &self.filter, self.order)),
-            _ => None,
-        };
         let weak = ui.visuals().weak_text_color();
 
         // The bar: filter, what the window adds, count.
@@ -207,9 +206,35 @@ impl FileTable {
             Id::new((name, "filter")),
             280.0,
         );
+        // While the working tree has conflicts, only they are listed unless asked otherwise.
+        let conflicts = tree.filter(|t| !t.conflicts.is_empty());
+        if conflicts.is_some() {
+            bar_ui.add_space(8.0);
+            let mut only = !self.all_files;
+            widgets::tip_explained(
+                bar_ui.checkbox(&mut only, "Conflicts only"),
+                "Conflicts only",
+                "",
+                "List only the files with conflicts, as git status shows them under \
+                 Unmerged paths. Each drops out of the list once it is resolved.",
+            );
+            self.all_files = !only;
+        } else if matches!(files, Some(Ok(_))) {
+            self.all_files = false;
+        }
         bar(&mut bar_ui);
+        let shown = match files {
+            Some(Ok(files)) => {
+                let mut shown = filter_and_sort(files, &self.filter, self.order);
+                if let Some(tree) = conflicts.filter(|_| !self.all_files) {
+                    shown.retain(|&i| tree.conflict(&files[i].path).is_some());
+                }
+                Some(shown)
+            }
+            _ => None,
+        };
         if let (Some(Ok(files)), Some(shown)) = (files, &shown) {
-            let count = if self.filter.is_empty() {
+            let count = if shown.len() == files.len() {
                 let n = files.len();
                 format!("{} file{}", thousands(n), if n == 1 { "" } else { "s" })
             } else {
@@ -388,16 +413,15 @@ impl FileTable {
                     let badged = badges.map(|b| &b[shown[row]]);
                     let conflict = tree.and_then(|t| t.conflict(&file.path));
                     match (badged, conflict) {
-                        (_, Some(conflict)) => put(
-                            cell(
+                        (_, Some(conflict)) => {
+                            boxed(
                                 ui,
                                 conflict.code(),
-                                FontId::monospace(body.size),
+                                false,
                                 c.removed,
-                                w[2] - 2.0 * CELL_PAD,
-                            ),
-                            x[2] + CELL_PAD,
-                        ),
+                                pos2(x[2] + CELL_PAD, y),
+                            );
+                        }
                         (Some(b), None) => paint_badges(ui, &b.badges, pos2(x[2] + CELL_PAD, y)),
                         (None, None) => put(
                             cell(
@@ -552,30 +576,35 @@ impl FileTable {
 
 /// Badges left to right from `at`, centred on its height.
 fn paint_badges(ui: &Ui, badges: &[Badge], at: egui::Pos2) {
-    const SIZE: f32 = 16.0;
-    for (i, badge) in badges.iter().enumerate() {
-        let left = at.x + i as f32 * (SIZE + 4.0);
-        let r = Rect::from_min_size(pos2(left, at.y - SIZE / 2.0), Vec2::splat(SIZE));
-        if badge.filled {
-            ui.painter().rect_filled(r, 3.0, badge.color);
-        } else {
-            ui.painter().rect_stroke(
-                r.shrink(0.5),
-                3.0,
-                Stroke::new(1.2, badge.color),
-                egui::StrokeKind::Inside,
-            );
-        }
-        let fg = if badge.filled {
-            Color32::WHITE
-        } else {
-            badge.color
-        };
-        let g = ui
-            .painter()
-            .layout_no_wrap(badge.letter.to_string(), FontId::monospace(11.0), fg);
-        ui.painter().galley(r.center() - g.size() / 2.0, g, fg);
+    let mut x = at.x;
+    for badge in badges {
+        let text = badge.letter.to_string();
+        x += boxed(ui, &text, badge.filled, badge.color, pos2(x, at.y)) + 4.0;
     }
+}
+
+/// `text` in a box from `at`, centred on its height: filled when `filled`, outlined
+/// otherwise. As wide as it is high for one letter, wider for more. Returns its width.
+fn boxed(ui: &Ui, text: &str, filled: bool, color: Color32, at: egui::Pos2) -> f32 {
+    const SIZE: f32 = 16.0;
+    let fg = if filled { Color32::WHITE } else { color };
+    let g = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), FontId::monospace(11.0), fg);
+    let width = (g.size().x + 6.0).max(SIZE);
+    let r = Rect::from_min_size(pos2(at.x, at.y - SIZE / 2.0), vec2(width, SIZE));
+    if filled {
+        ui.painter().rect_filled(r, 3.0, color);
+    } else {
+        ui.painter().rect_stroke(
+            r.shrink(0.5),
+            3.0,
+            Stroke::new(1.2, color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    ui.painter().galley(r.center() - g.size() / 2.0, g, fg);
+    width
 }
 
 /// The menu of a changed file's row: its diff (or the diffs of the `many` files chosen, when
@@ -1102,6 +1131,20 @@ mod tests {
 
     impl Table {
         fn new(dir: &std::path::Path) -> Table {
+            let (listing, tree) = Table::list(dir);
+            let mut t = Table {
+                ctx: egui::Context::default(),
+                table: FileTable::default(),
+                listing,
+                tree,
+                texts: Vec::new(),
+            };
+            t.frame(Vec::new());
+            t
+        }
+
+        /// HEAD against the working tree in `dir`.
+        fn list(dir: &std::path::Path) -> (Listing, WorkingTree) {
             let git = parterre_core::git::Git::new(dir);
             let head = parterre_core::Oid::from_hex(&super::super::tool_harness::git(
                 dir,
@@ -1111,15 +1154,13 @@ mod tests {
             let compared = parterre_core::compare::Comparison::with_working_tree(head, false)
                 .run(&git)
                 .unwrap();
-            let mut t = Table {
-                ctx: egui::Context::default(),
-                table: FileTable::default(),
-                listing: Ok(compared.files),
-                tree: compared.working_tree.unwrap(),
-                texts: Vec::new(),
-            };
-            t.frame(Vec::new());
-            t
+            (Ok(compared.files), compared.working_tree.unwrap())
+        }
+
+        /// Lists the working tree again, as the compare window does when the index changes.
+        fn relist(&mut self, dir: &std::path::Path) {
+            (self.listing, self.tree) = Table::list(dir);
+            self.frame(Vec::new());
         }
 
         fn frame(&mut self, events: Vec<egui::Event>) -> Option<(String, RowPick)> {
@@ -1194,6 +1235,38 @@ mod tests {
         assert!(t.shows("UD"));
         // `gone.txt` is the same as HEAD's, which `git diff HEAD` leaves out.
         assert!(t.shows("gone.txt"));
+    }
+
+    #[test]
+    fn while_conflicted_only_conflicts_are_listed_unless_asked() {
+        use super::super::tool_harness::{git, write};
+        let dir = super::super::tool_harness::stuck_merge();
+        let p = dir.path();
+        write(p, "new.txt", "new\n");
+        git(p, &["add", "new.txt"]);
+        let mut t = Table::new(p);
+        assert!(t.shows("Conflicts only"), "{:?}", t.texts);
+        assert!(t.shows("text.txt") && t.shows("gone.txt"));
+        assert!(!t.shows("new.txt"));
+        assert!(t.shows("2 of 3 files"));
+        t.click("Conflicts only", egui::PointerButton::Primary);
+        assert!(t.shows("new.txt"), "{:?}", t.texts);
+        assert!(t.shows("3 files"));
+        t.click("Conflicts only", egui::PointerButton::Primary);
+        assert!(!t.shows("new.txt"));
+        // A resolved file drops out.
+        write(p, "text.txt", "one\ntwo\n");
+        git(p, &["add", "text.txt"]);
+        t.relist(p);
+        assert!(t.shows("gone.txt") && !t.shows("text.txt"));
+        // With none left, every file is listed and the checkbox goes; the next conflicts
+        // start filtered even if it was unchecked.
+        t.click("Conflicts only", egui::PointerButton::Primary);
+        git(p, &["rm", "-q", "gone.txt"]);
+        t.relist(p);
+        assert!(!t.shows("Conflicts only"));
+        assert!(t.shows("new.txt"), "{:?}", t.texts);
+        assert!(!t.table.all_files);
     }
 
     #[test]

@@ -80,6 +80,22 @@ fn trees_are_compared_whole_or_since_the_common_ancestor() {
 }
 
 #[test]
+fn the_common_ancestor_matters_only_where_the_histories_forked() {
+    let (r, [base, feature, main]) = forked();
+    let repo = r.load();
+    let commit = |h: &str| Oid::from_hex(h).unwrap();
+    let c = Comparison::of(&repo, ix(&repo, &base), ix(&repo, &feature), false);
+    assert!(!c.ancestor_matters(&repo));
+    assert!(c.swapped().ancestor_matters(&repo));
+    let c = Comparison::of(&repo, ix(&repo, &feature), ix(&repo, &main), false);
+    assert!(c.ancestor_matters(&repo));
+    // The working tree counts as HEAD, which is main.
+    assert!(!Comparison::with_working_tree(commit(&main), false).ancestor_matters(&repo));
+    assert!(!Comparison::with_working_tree(commit(&base), false).ancestor_matters(&repo));
+    assert!(Comparison::with_working_tree(commit(&feature), false).ancestor_matters(&repo));
+}
+
+#[test]
 fn unrelated_histories_have_no_common_ancestor() {
     let (mut r, [_, _, main]) = forked();
     r.git(&["checkout", "-q", "--orphan", "other"]);
