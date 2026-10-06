@@ -753,6 +753,26 @@ mod tests {
         });
     }
 
+    #[test]
+    fn a_remote_branch_already_gone_is_a_notification_with_fetch() {
+        let (origin, work) = with_feature();
+        let mut h = Harness::new(work);
+        h.until("the catalogue loads", |h| h.tool.catalog.is_some());
+        let request = delete(&h, &["feature"]);
+        h.ask(request, "Delete remote branch origin/feature?");
+        h.until("looked up", |h| !h.shows_part("Looking for a pull request"));
+        git(origin.path(), &["branch", "-D", "feature"]);
+        h.click("Delete");
+        h.until("told", |h| {
+            h.shows("origin/feature was already gone") && h.shows("Fetch")
+        });
+        assert!(h.shows_part("Someone deleted it"), "{:?}", h.texts);
+        h.click("Fetch");
+        h.until("fetched", |h| {
+            !git(h.path(), &["branch", "-r"]).contains("origin/feature")
+        });
+    }
+
     /// origin on GitHub, as far as parterre can tell, with `feature` fetched from it.
     fn on_github() -> tempfile::TempDir {
         let (_origin, work) = with_feature();
