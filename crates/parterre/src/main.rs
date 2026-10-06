@@ -381,6 +381,11 @@ fn main() -> ExitCode {
     // On Wayland a vsync'ed swap of a hidden window blocks the whole app (egui#5145); see
     // `frame_pacing`. eframe reads this once, when it creates the GL context.
     let vsync = !frame_pacing::wayland_session();
+    // Created invisible and shown once its first frame is painted: otherwise Windows shows it
+    // white, then at its unmaximized size, then black, before anything of parterre's (#309).
+    // Not on Wayland, where a hidden window is what the freeze above is about, and not in a
+    // scripted or recorded run, which paints from the first frame on.
+    let hidden_start = vsync && !scripted && record.is_none();
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(
@@ -388,6 +393,7 @@ fn main() -> ExitCode {
                     .as_ref()
                     .map_or_else(|| app::window_title(repo.as_ref()), app::Opening::title),
             )
+            .with_visible(!hidden_start)
             .with_app_id(settings::APP_ID)
             .with_inner_size([w, h])
             .with_min_inner_size([400.0, 300.0])
@@ -419,7 +425,13 @@ fn main() -> ExitCode {
         options,
         Box::new(move |cc| {
             Ok(Box::new(app::ParterreApp::new(
-                cc, repo, opening, overrides, automation, vsync,
+                cc,
+                repo,
+                opening,
+                overrides,
+                automation,
+                vsync,
+                hidden_start,
             )))
         }),
     );

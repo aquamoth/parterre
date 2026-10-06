@@ -353,6 +353,8 @@ pub struct ParterreApp {
     watcher: Option<auto_reload::Watcher>,
     /// The repository named at start, still loading while the window came up (#309).
     opening: Option<Opening>,
+    /// Created invisible, to be shown once its first frame is painted (#309).
+    hidden: bool,
     /// A reload the user asked for (F5), loading on a worker thread: the repository's path,
     /// and what came of it.
     reloading: Option<(PathBuf, std::sync::mpsc::Receiver<Result<Repo, String>>)>,
@@ -399,6 +401,7 @@ impl ParterreApp {
         overrides: impl FnOnce(&mut Settings),
         automation: Automation,
         vsync: bool,
+        hidden: bool,
     ) -> ParterreApp {
         crate::startup::mark("window created");
         let persist = !automation.is_active();
@@ -487,6 +490,7 @@ impl ParterreApp {
                 .then(|| (CORRUPT_SETTINGS.to_owned(), true))
                 .or_else(|| opening.as_ref().and_then(Opening::status)),
             opening,
+            hidden,
             show_shortcuts: false,
             show_legend: false,
             show_settings: false,
@@ -960,6 +964,15 @@ impl ParterreApp {
                 _ => Pending::start(what, dialog.save_file(), ctx),
             });
         }
+    }
+
+    /// What is on its way to the graph area, while nothing is there yet: the repository
+    /// named at start, still loading, or the one shown, not laid out yet.
+    fn opening_name(&self) -> Option<String> {
+        self.opening
+            .as_ref()
+            .and_then(Opening::name)
+            .or_else(|| self.repo.as_ref().map(|repo| repo.display_name()))
     }
 
     /// Shows the repository that started loading before the window, once it is in (#309).
@@ -2873,19 +2886,19 @@ impl Opening {
         }
     }
 
-    /// In place of the graph meanwhile: a word, centred, and nothing to click.
-    fn panel(&self, ui: &mut Ui) {
-        if !self.named {
-            return;
-        }
-        ui.add_space((ui.available_height() / 2.0 - 10.0).max(0.0));
-        ui.vertical_centered(|ui| {
-            ui.label(
-                RichText::new(format!("Opening {}…", name_and_place(&self.path).0))
-                    .color(ui.visuals().weak_text_color()),
-            );
-        });
+    /// The folder's name, when the user named it.
+    fn name(&self) -> Option<String> {
+        self.named.then(|| name_and_place(&self.path).0)
     }
+}
+
+/// In place of the graph while `name` is being opened or laid out: a word, centred, and
+/// nothing to click.
+fn opening_panel(ui: &mut Ui, name: &str) {
+    ui.add_space((ui.available_height() / 2.0 - 10.0).max(0.0));
+    ui.vertical_centered(|ui| {
+        ui.label(RichText::new(format!("Opening {name}…")).color(ui.visuals().weak_text_color()));
+    });
 }
 
 pub fn window_title(repo: Option<&Repo>) -> String {
@@ -3075,6 +3088,11 @@ impl eframe::App for ParterreApp {
         }
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
+        // Shown once the first frame, "Opening…" or the graph, has been painted (#309).
+        if self.hidden && ctx.cumulative_frame_nr() > 0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            self.hidden = false;
+        }
         crate::dialogs::set_look(
             &ctx,
             crate::dialogs::Look {
@@ -3144,11 +3162,11 @@ impl eframe::App for ParterreApp {
         {
             self.compare_request(CompareRequest::WorkingTree(head))
         }
-        if self.repo.is_some() {
+        if self.scene.is_some() {
             egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
-        } else if let Some(opening) = &self.opening {
-            // Not the welcome view: the repository is on its way (#309).
-            egui::CentralPanel::default().show(ui, |ui| opening.panel(ui));
+        } else if let Some(name) = self.opening_name() {
+            // Neither the welcome view nor a bare canvas: the graph is on its way (#309).
+            egui::CentralPanel::default().show(ui, |ui| opening_panel(ui, &name));
         } else {
             egui::CentralPanel::default().show(ui, |ui| self.welcome(ui));
         }
