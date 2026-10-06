@@ -900,7 +900,7 @@ impl Action {
             Self::Detach(oid) => format!("Switch to {} (detached)", short(*oid)),
             Self::DeleteBranches(branches) => match branches.as_slice() {
                 [one] => format!("Delete branch {}", one.name),
-                branches => format!("Delete {} branches", branches.len()),
+                branches => format!("Delete {} local branches", branches.len()),
             },
             Self::AddWorktree(a) => format!("Add worktree {}", folder(&a.path)),
             Self::DeleteWorktrees(paths) => match paths.as_slice() {
