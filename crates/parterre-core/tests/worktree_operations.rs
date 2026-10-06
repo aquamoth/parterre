@@ -103,7 +103,25 @@ fn deletion(r: &TestRepo, name: &str) -> Action {
 }
 
 fn deletions(r: &TestRepo, names: &[&str]) -> Action {
-    Action::DeleteWorktrees(names.iter().map(|n| listed(r, n)).collect())
+    Action::DeleteWorktrees {
+        paths: names.iter().map(|n| listed(r, n)).collect(),
+        branches: false,
+    }
+}
+
+/// The deletion, with the worktrees' branches too.
+fn with_branches(action: Action) -> Action {
+    match action {
+        Action::DeleteWorktrees { paths, .. } => Action::DeleteWorktrees {
+            paths,
+            branches: true,
+        },
+        other => panic!("not a worktree deletion: {other:?}"),
+    }
+}
+
+fn branch_exists(r: &TestRepo, name: &str) -> bool {
+    !r.git(&["branch", "--list", name]).is_empty()
 }
 
 fn registered(r: &TestRepo, name: &str) -> bool {
@@ -584,14 +602,20 @@ fn the_main_open_and_locked_worktrees_are_never_deleted() {
     // From the linked worktree, the main one isn't the open one.
     let main = Catalog::load(&linked).unwrap().main;
     let error = failed(Branches::new(&linked).execute(
-        Action::DeleteWorktrees(vec![main]),
+        Action::DeleteWorktrees {
+            paths: vec![main],
+            branches: false,
+        },
         None,
         &CancelTree::default(),
     ));
     assert!(error.contains("main worktree"), "{error}");
     let open = Catalog::load(&linked).unwrap().root;
     let error = failed(Branches::new(&linked).execute(
-        Action::DeleteWorktrees(vec![open]),
+        Action::DeleteWorktrees {
+            paths: vec![open],
+            branches: false,
+        },
         None,
         &CancelTree::default(),
     ));
@@ -779,6 +803,212 @@ fn the_worktrees_git_refuses_are_asked_about_again_and_the_rest_deleted() {
         }
         // Git versions that remove such worktrees without --force.
         Outcome::Done(_) => assert!(!path.exists() && !plain.exists()),
+        other => panic!("{other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Deleting a worktree's branch with it.
+
+#[test]
+fn a_branch_that_loses_nothing_goes_with_its_worktree_after_the_same_confirmation() {
+    let (r, others, _) = repository();
+    let path = worktree(&r, others.path(), "clean", &["-b", "clean"]);
+    let mut confirm = warning(execute(&r, deletion(&r, "clean"), None));
+    let branch = confirm.deletions[0].branch.clone().expect("its branch");
+    assert_eq!((branch.name.as_str(), branch.commits.len()), ("clean", 0));
+    assert!(!confirm.deletes_branches());
+    confirm.set_deletes_branches(true);
+    assert!(confirm.is_confirmation());
+    assert_eq!(confirm.action, with_branches(deletion(&r, "clean")));
+    assert_eq!(confirm.commands.len(), 2);
+    assert_eq!(confirm.commands[1], ["branch", "-d", "--", "clean"]);
+    done(execute(&r, confirm.action.clone(), Some(&confirm)));
+    assert!(!path.exists());
+    assert!(!branch_exists(&r, "clean"));
+}
+
+#[test]
+fn a_branch_with_commits_only_it_has_turns_the_confirmation_into_a_warning() {
+    let (r, others, _) = repository();
+    let path = worktree(&r, others.path(), "w", &["-b", "topic"]);
+    git_in(
+        &path,
+        &["commit", "-q", "--allow-empty", "-m", "only on topic"],
+    );
+    let only = oid(&git_in(&path, &["rev-parse", "HEAD"]));
+    let mut w = warning(execute(&r, deletion(&r, "w"), None));
+    // Kept, the branch keeps its commit.
+    assert!(w.is_confirmation() && w.commits.is_empty());
+    assert_eq!(w.deletions[0].branch.as_ref().unwrap().commits, [only]);
+    w.set_deletes_branches(true);
+    assert!(!w.is_confirmation());
+    assert_eq!(w.commits, [only]);
+    assert_eq!(w.commands[1], ["branch", "-D", "--", "topic"]);
+    // Unticked again, it's the confirmation it was.
+    w.set_deletes_branches(false);
+    assert!(w.is_confirmation() && w.commits.is_empty());
+    assert_eq!(w.commands.len(), 1);
+    w.set_deletes_branches(true);
+    done(execute(&r, w.action.clone(), Some(&w)));
+    assert!(!path.exists());
+    assert!(!branch_exists(&r, "topic"));
+}
+
+#[test]
+fn approving_the_worktree_alone_never_deletes_its_branch() {
+    let (r, others, _) = repository();
+    let path = worktree(&r, others.path(), "w", &["-b", "topic"]);
+    git_in(
+        &path,
+        &["commit", "-q", "--allow-empty", "-m", "only on topic"],
+    );
+    let confirm = warning(execute(&r, deletion(&r, "w"), None));
+    let asked = warning(execute(
+        &r,
+        with_branches(deletion(&r, "w")),
+        Some(&confirm),
+    ));
+    assert!(!asked.is_confirmation());
+    assert!(path.exists() && branch_exists(&r, "topic"));
+    // And the approval with the branch is for that, not the worktree alone.
+    let mut both = confirm.clone();
+    both.set_deletes_branches(true);
+    let again = warning(execute(&r, deletion(&r, "w"), Some(&both)));
+    assert!(again.is_confirmation());
+    assert!(path.exists() && branch_exists(&r, "topic"));
+}
+
+#[test]
+fn a_branch_that_moved_since_the_approval_is_asked_about_again() {
+    let (r, others, _) = repository();
+    let path = worktree(&r, others.path(), "w", &["-b", "topic"]);
+    let mut w = warning(execute(&r, deletion(&r, "w"), None));
+    w.set_deletes_branches(true);
+    assert!(w.is_confirmation());
+    git_in(&path, &["commit", "-q", "--allow-empty", "-m", "after"]);
+    let after = oid(&git_in(&path, &["rev-parse", "HEAD"]));
+    let again = warning(execute(&r, w.action.clone(), Some(&w)));
+    assert_eq!(again.commits, [after]);
+    assert!(again.deletes_branches());
+    assert!(path.exists() && branch_exists(&r, "topic"));
+}
+
+#[test]
+fn a_branch_git_d_refuses_but_that_loses_nothing_goes_without_asking_again() {
+    let (r, others, _) = repository();
+    let path = worktree(&r, others.path(), "w", &["-b", "topic"]);
+    git_in(&path, &["commit", "-q", "--allow-empty", "-m", "tagged"]);
+    // A tag keeps the commit, but `branch -d` only asks HEAD and the upstream.
+    git_in(&path, &["tag", "kept"]);
+    let mut w = warning(execute(&r, deletion(&r, "w"), None));
+    w.set_deletes_branches(true);
+    assert!(w.is_confirmation(), "{:?}", w.commits);
+    done(execute(&r, w.action.clone(), Some(&w)));
+    assert!(!path.exists());
+    assert!(!branch_exists(&r, "topic"));
+    assert!(!r.git(&["tag", "--list", "kept"]).is_empty());
+}
+
+#[test]
+fn branches_deleted_together_lose_the_commits_they_share() {
+    let (r, others, _) = repository();
+    let one = worktree(&r, others.path(), "one", &["-b", "one"]);
+    git_in(&one, &["commit", "-q", "--allow-empty", "-m", "shared"]);
+    let shared = oid(&git_in(&one, &["rev-parse", "HEAD"]));
+    worktree(&r, others.path(), "two", &["-b", "two", &shared.to_hex()]);
+    let mut w = warning(execute(&r, deletions(&r, &["one", "two"]), None));
+    // Each alone is kept by the other.
+    let lost = |w: &Warning, i: usize| w.deletions[i].branch.as_ref().unwrap().commits.clone();
+    assert_eq!((lost(&w, 0), lost(&w, 1)), (vec![shared], vec![shared]));
+    w.set_deletes_branches(true);
+    assert_eq!(w.commits, [shared]);
+    assert_eq!(w.commands[2], ["branch", "-D", "--", "one", "two"]);
+    done(execute(&r, w.action.clone(), Some(&w)));
+    assert!(!branch_exists(&r, "one") && !branch_exists(&r, "two"));
+}
+
+#[test]
+fn a_detached_worktree_has_no_branch_to_delete() {
+    let (r, others, _) = repository();
+    let path = worktree(&r, others.path(), "d", &["--detach"]);
+    let mut w = warning(execute(&r, deletion(&r, "d"), None));
+    assert!(w.deletions[0].branch.is_none());
+    w.set_deletes_branches(true);
+    assert_eq!(w.commands.len(), 1, "no branch step");
+    done(execute(&r, w.action.clone(), Some(&w)));
+    assert!(!path.exists());
+    assert_eq!(r.git(&["branch", "--format=%(refname:short)"]), "main");
+}
+
+#[test]
+fn the_branch_a_worktree_is_rebasing_goes_with_it() {
+    let (mut r, others, _) = repository();
+    r.git(&["branch", "side"]);
+    r.write("file", b"main\n");
+    r.commit_all("main change");
+    let wt = worktree(&r, others.path(), "rebasing", &["side"]);
+    std::fs::write(wt.join("file"), "side\n").unwrap();
+    git_in(&wt, &["commit", "-qam", "side change"]);
+    let side = oid(&git_in(&wt, &["rev-parse", "HEAD"]));
+    let out = Command::new(parterre_core::git::program())
+        .current_dir(&wt)
+        .args(["rebase", "main"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let mut w = warning(execute(&r, deletion(&r, "rebasing"), None));
+    let branch = w.deletions[0]
+        .branch
+        .clone()
+        .expect("the branch being rebased");
+    assert_eq!((branch.name.as_str(), branch.tip), ("side", side));
+    assert_eq!(branch.commits, [side]);
+    w.set_deletes_branches(true);
+    assert!(w.commits.contains(&side));
+    done(execute(&r, w.action.clone(), Some(&w)));
+    assert!(!wt.exists());
+    assert!(!branch_exists(&r, "side"));
+}
+
+#[test]
+fn a_worktree_git_refuses_keeps_its_branch_and_the_others_go() {
+    let (r, others, _) = repository();
+    let plain = worktree(&r, others.path(), "plain", &["-b", "plain"]);
+    let path = worktree(&r, others.path(), "w", &["-b", "w"]);
+    let sub = TestRepo::new();
+    sub.git(&["commit", "-q", "--allow-empty", "-m", "sub"]);
+    git_in(
+        &path,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &sub.path().to_string_lossy(),
+            "sub",
+        ],
+    );
+    git_in(&path, &["commit", "-qm", "add a submodule"]);
+    let mut fresh = warning(execute(&r, deletions(&r, &["w", "plain"]), None));
+    fresh.set_deletes_branches(true);
+    match execute(&r, fresh.action.clone(), Some(&fresh)) {
+        Outcome::Warning(again) => {
+            assert!(!plain.exists() && !branch_exists(&r, "plain"));
+            assert!(path.exists() && branch_exists(&r, "w"));
+            assert_eq!(again.action, with_branches(deletion(&r, "w")));
+            assert!(again.deletions[0].refusal.is_some());
+            done(execute(&r, again.action.clone(), Some(&again)));
+            assert!(!path.exists() && !branch_exists(&r, "w"));
+        }
+        // Git versions that remove such worktrees without --force.
+        Outcome::Done(_) => {
+            assert!(!path.exists() && !plain.exists());
+            assert!(!branch_exists(&r, "w") && !branch_exists(&r, "plain"));
+        }
         other => panic!("{other:?}"),
     }
 }

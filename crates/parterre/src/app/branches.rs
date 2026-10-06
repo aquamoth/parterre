@@ -637,9 +637,10 @@ fn worktree_section(
             })
         });
         let names: Vec<String> = all.iter().map(|w| w.name()).collect();
-        let delete = Request::Run(Action::DeleteWorktrees(
-            all.iter().map(|w| w.path.clone()).collect(),
-        ));
+        let delete = Request::Run(Action::DeleteWorktrees {
+            paths: all.iter().map(|w| w.path.clone()).collect(),
+            branches: false,
+        });
         let label = format!("Delete {} worktrees", all.len());
         all_item(ui, label, &names, delete, blocked, busy, &mut request);
         return request;
@@ -649,7 +650,10 @@ fn worktree_section(
         .map(|w| {
             (
                 w.name(),
-                Request::Run(Action::DeleteWorktrees(vec![w.path.clone()])),
+                Request::Run(Action::DeleteWorktrees {
+                    paths: vec![w.path.clone()],
+                    branches: false,
+                }),
                 locked(w),
             )
         })
@@ -1528,7 +1532,7 @@ fn operation(action: &Action) -> usage::Action {
         Action::Detach(_) => usage::Action::SwitchDetached,
         Action::DeleteBranches(_) => usage::Action::DeleteBranch,
         Action::AddWorktree(_) => usage::Action::AddWorktree,
-        Action::DeleteWorktrees(_) => usage::Action::DeleteWorktree,
+        Action::DeleteWorktrees { .. } => usage::Action::DeleteWorktree,
         Action::Reset(_) => usage::Action::Reset,
         Action::Rebase(_) => usage::Action::Rebase,
         Action::Merge(_) => usage::Action::Merge,
@@ -2370,6 +2374,7 @@ impl Tool {
         let confirmation = warning.is_confirmation();
         let refused = warning.deletions.iter().any(|d| d.refusal.is_some());
         let several = warning.deletions.len() > 1;
+        let mut deletes_branches = warning.deletes_branches();
         let (title, button) = match &warning.action {
             Action::DeleteBranches(_) => {
                 let what = match warning.deletions.as_slice() {
@@ -2381,7 +2386,7 @@ impl Tool {
                     "Delete anyway",
                 )
             }
-            Action::DeleteWorktrees(_) => {
+            Action::DeleteWorktrees { .. } => {
                 let what = match warning.deletions.as_slice() {
                     [one] => format!("worktree {}", one.name),
                     many => format!("{} worktrees", many.len()),
@@ -2429,7 +2434,7 @@ impl Tool {
         let show_files = &mut loss.show_files;
         let shown = dialog.show(ctx, |ui| {
             dialogs::fields(ui, |ui| {
-                let worktrees = matches!(warning.action, Action::DeleteWorktrees(_));
+                let worktrees = matches!(warning.action, Action::DeleteWorktrees { .. });
                 match warning.deletions.as_slice() {
                     [one] if worktrees => {
                         if let Some(path) = &one.path {
@@ -2443,6 +2448,19 @@ impl Tool {
                         ui.label("These folders and everything in them will be deleted.");
                     }
                     _ => {}
+                }
+                let owned: Vec<&str> = warning
+                    .deletions
+                    .iter()
+                    .filter_map(|d| d.branch.as_ref())
+                    .map(|b| b.name.as_str())
+                    .collect();
+                if worktrees && !owned.is_empty() {
+                    let label = match owned.as_slice() {
+                        [one] => format!("Also delete local branch {one}"),
+                        _ => "Also delete their local branches".to_owned(),
+                    };
+                    ui.checkbox(&mut deletes_branches, label);
                 }
                 let unreachable =
                     "These commits are not reachable from any surviving branch, tag or worktree.";
@@ -2475,14 +2493,26 @@ impl Tool {
                             }
                         }
                     }
+                    let branch = d
+                        .branch
+                        .as_ref()
+                        .filter(|b| deletes_branches && !b.commits.is_empty());
+                    if !several && (!d.commits.is_empty() || branch.is_some()) {
+                        ui.label(unreachable);
+                    }
                     if !d.commits.is_empty() {
-                        if !several {
-                            ui.label(unreachable);
-                        }
                         row(ui, &mut |ui| {
                             ui.label(plural(d.commits.len(), "commit"));
                             if ui.link("Show in log").clicked() {
                                 show_log = Some(d.commits.clone());
+                            }
+                        });
+                    }
+                    if let Some(b) = branch {
+                        row(ui, &mut |ui| {
+                            ui.label(format!("{} on {}", plural(b.commits.len(), "commit"), b.name));
+                            if ui.link("Show in log").clicked() {
+                                show_log = Some(b.commits.clone());
                             }
                         });
                     }
@@ -2520,9 +2550,13 @@ impl Tool {
         if let Some(commits) = show_log {
             self.log_request = Some((warning.repo.clone(), commits, true));
         }
+        if deletes_branches != loss.warning.deletes_branches() {
+            loss.warning.set_deletes_branches(deletes_branches);
+            ctx.request_repaint();
+        }
         match shown.inner {
             dialogs::Answer::Primary => {
-                let action = warning.action.clone();
+                let action = loss.warning.action.clone();
                 self.run(ctx, loss.path, action, Some(loss.warning), loss.opener)
             }
             dialogs::Answer::Cancel => {}
@@ -2709,7 +2743,7 @@ impl Drop for Tool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use eframe::egui::{self, Pos2};
     use parterre_core::Oid;
@@ -2755,7 +2789,7 @@ mod tests {
 
     fn names(request: &Option<Request>) -> Vec<String> {
         match request {
-            Some(Request::Run(Action::DeleteWorktrees(paths))) => paths
+            Some(Request::Run(Action::DeleteWorktrees { paths, .. })) => paths
                 .iter()
                 .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
                 .collect(),
@@ -2838,7 +2872,10 @@ mod tests {
             .collect();
         let c = rev(&paths[2], "HEAD");
         h.ask(
-            Request::Run(Action::DeleteWorktrees(listed)),
+            Request::Run(Action::DeleteWorktrees {
+                paths: listed,
+                branches: false,
+            }),
             "Delete 3 worktrees and lose 1 changed file and 1 commit?",
         );
         assert!(h.shows("These folders and everything in them will be deleted."));
@@ -2874,7 +2911,10 @@ mod tests {
             .map(|w| w.path.clone())
             .collect();
         h.ask(
-            Request::Run(Action::DeleteWorktrees(listed)),
+            Request::Run(Action::DeleteWorktrees {
+                paths: listed,
+                branches: false,
+            }),
             "Delete 2 worktrees?",
         );
         assert!(!h.shows("Delete anyway") && h.shows("Delete"));
@@ -2882,6 +2922,73 @@ mod tests {
         h.until("both are gone", |_| {
             !a.exists() && !others.path().join("b").exists()
         });
+    }
+
+    /// The worktree `name` in `others`, as the catalogue lists it.
+    fn listed(dir: &Path, others: &Path, name: &str) -> PathBuf {
+        load(dir)
+            .1
+            .worktrees
+            .into_iter()
+            .find(|w| parterre_core::worktree_folder::same_path(&w.path, &others.join(name)))
+            .unwrap()
+            .path
+    }
+
+    fn worktree_deletion(path: PathBuf) -> Request {
+        Request::Run(Action::DeleteWorktrees {
+            paths: vec![path],
+            branches: false,
+        })
+    }
+
+    #[test]
+    fn a_worktree_s_branch_goes_with_it_only_when_ticked() {
+        let (dir, others) = repository();
+        let b = others.path().join("b");
+        git(&b, &["commit", "-q", "--allow-empty", "-m", "only on b"]);
+        let only = rev(&b, "HEAD");
+        let path = listed(dir.path(), others.path(), "b");
+        let mut h = Harness::new(dir);
+        h.ask(worktree_deletion(path.clone()), "Delete worktree b?");
+        // Unticked, the branch keeps its commit: a confirmation.
+        assert!(h.shows("Delete") && !h.shows("Delete anyway"));
+        h.click("Also delete local branch b");
+        h.until("the branch's commit is listed", |h| {
+            h.shows("Delete worktree b and lose 1 commit?")
+                && h.shows("1 commit on b")
+                && h.shows("Delete anyway")
+        });
+        h.click("Show in log");
+        let (_, commits, _) = h.tool.log_request.take().expect("the log is asked for");
+        assert_eq!(commits, [only]);
+        // Unticked again, it's the confirmation again.
+        h.click("Also delete local branch b");
+        h.until("back to the confirmation", |h| {
+            h.shows("Delete worktree b?")
+        });
+        h.key(egui::Key::Escape);
+        h.until("closed", |h| !h.shows("Delete worktree b?"));
+        // Nothing is remembered: asked again, it's unticked.
+        h.ask(worktree_deletion(path), "Delete worktree b?");
+        h.click("Also delete local branch b");
+        h.until("ticked", |h| h.shows("Delete anyway"));
+        h.click("Delete anyway");
+        h.until("both are gone", |h| {
+            !b.exists() && git(h.path(), &["branch", "--list", "b"]).is_empty()
+        });
+    }
+
+    #[test]
+    fn a_detached_worktree_offers_no_branch_to_delete() {
+        let (dir, others) = repository();
+        let path = listed(dir.path(), others.path(), "c");
+        let mut h = Harness::new(dir);
+        h.ask(
+            worktree_deletion(path),
+            "Delete worktree c and lose 1 commit?",
+        );
+        assert!(!h.shows_part("Also delete"), "{:?}", h.texts);
     }
 
     /// main: base → tip; `one` and `two` at base, `three` at a commit of its own on base,

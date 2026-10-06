@@ -1178,7 +1178,10 @@ impl ParterreApp {
                             .ok_or_else(|| format!("no worktree named {name}"))
                     })
                     .collect::<Result<_, _>>()?;
-                branches::Request::Run(parterre_core::branches::Action::DeleteWorktrees(paths))
+                branches::Request::Run(parterre_core::branches::Action::DeleteWorktrees {
+                    paths,
+                    branches: false,
+                })
             }
             "merge" => branches::Request::Merge {
                 theirs: oid(name)?,
