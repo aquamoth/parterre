@@ -400,6 +400,7 @@ fn main() -> ExitCode {
     // An interactive window on Windows comes up cloaked, and unmaximized until it is: see
     // `reveal`. The builder hook runs after eframe has restored the saved window state. A
     // scripted or recorded run paints from its first frame on and is left to eframe.
+    #[cfg(windows)]
     let interactive = !scripted && record.is_none();
     #[cfg(windows)]
     let maximized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
