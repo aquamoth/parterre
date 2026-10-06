@@ -63,6 +63,20 @@ impl Comparison {
         }
     }
 
+    /// True if [`Comparison::since_ancestor`] can change what is compared: false when `old` is
+    /// an ancestor of `new`, or the same commit, which makes it their common ancestor. The
+    /// working tree counts as `HEAD`; a side missing from `repo` counts as forked.
+    pub fn ancestor_matters(&self, repo: &Repo) -> bool {
+        let ix = |rev: Rev| match rev {
+            Rev::Commit(oid) => repo.lookup(&oid),
+            Rev::WorkingTree => repo.head_commit(),
+        };
+        match (ix(self.old), ix(self.new)) {
+            (Some(old), Some(new)) => !is_ancestor(repo, old, new),
+            _ => true,
+        }
+    }
+
     /// True if a side is the working tree, whose files can change at any time.
     pub fn reads_working_tree(&self) -> bool {
         self.old == Rev::WorkingTree || self.new == Rev::WorkingTree

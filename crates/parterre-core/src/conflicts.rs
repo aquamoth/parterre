@@ -64,6 +64,22 @@ impl Conflict {
         }
     }
 
+    /// What each side did to the file, ours then theirs, for [`Conflict::code`] in the words
+    /// of the changed-files table: `M` modified, `A` added, `D` deleted, and `·` where that
+    /// side has no file at this path (`AU`, `UA`: a rename/rename, or a file moved aside for a
+    /// directory). git's `U` only says the file is unmerged.
+    pub fn letters(&self) -> [char; 2] {
+        match self.code() {
+            "UU" => ['M', 'M'],
+            "AA" => ['A', 'A'],
+            "UD" => ['M', 'D'],
+            "DU" => ['D', 'M'],
+            "AU" => ['A', '·'],
+            "UA" => ['·', 'A'],
+            _ => ['D', 'D'],
+        }
+    }
+
     /// `git status`'s words for [`Conflict::code`].
     pub fn words(&self) -> &'static str {
         match self.code() {
@@ -418,17 +434,21 @@ mod tests {
     fn codes_follow_the_stages_as_git_status_names_them() {
         let f = entry(FILE);
         let cases = [
-            ([f, f, f], "UU", "both modified"),
-            ([None, f, f], "AA", "both added"),
-            ([f, f, None], "UD", "deleted by them"),
-            ([f, None, f], "DU", "deleted by us"),
-            ([None, f, None], "AU", "added by us"),
-            ([None, None, f], "UA", "added by them"),
-            ([f, None, None], "DD", "both deleted"),
+            ([f, f, f], "UU", "MM", "both modified"),
+            ([None, f, f], "AA", "AA", "both added"),
+            ([f, f, None], "UD", "MD", "deleted by them"),
+            ([f, None, f], "DU", "DM", "deleted by us"),
+            ([None, f, None], "AU", "A·", "added by us"),
+            ([None, None, f], "UA", "·A", "added by them"),
+            ([f, None, None], "DD", "DD", "both deleted"),
         ];
-        for (stages, code, words) in cases {
+        for (stages, code, letters, words) in cases {
             let c = conflict(stages, false);
-            assert_eq!((c.code(), c.words()), (code, words));
+            let shown: String = c.letters().iter().collect();
+            assert_eq!(
+                (c.code(), shown.as_str(), c.words()),
+                (code, letters, words)
+            );
         }
     }
 
