@@ -87,6 +87,19 @@ struct CompareView {
     /// [`Repo::refs_by_commit`] of `repo`.
     refs: Vec<Vec<usize>>,
     comparison: Comparison,
+    /// [`Comparison::ancestor_matters`], found when the comparison or the snapshot changes.
+    ancestor_matters: bool,
+}
+
+impl CompareView {
+    fn new(repo: Arc<Repo>, comparison: Comparison) -> CompareView {
+        CompareView {
+            refs: repo.refs_by_commit(),
+            ancestor_matters: comparison.ancestor_matters(&repo),
+            repo,
+            comparison,
+        }
+    }
 }
 
 /// What the window needs from the app.
@@ -104,11 +117,7 @@ impl CompareWindow {
             // The column widths picked last as long as the window is open.
             self.table.widths = Default::default();
         }
-        self.view = Some(CompareView {
-            refs: repo.refs_by_commit(),
-            repo,
-            comparison,
-        });
+        self.view = Some(CompareView::new(repo, comparison));
     }
 
     pub fn is_open(&self) -> bool {
@@ -127,8 +136,7 @@ impl CompareWindow {
     /// working tree is listed again.
     pub fn reload(&mut self, repo: &Arc<Repo>) {
         if let Some(view) = &mut self.view {
-            view.refs = repo.refs_by_commit();
-            view.repo = repo.clone();
+            *view = CompareView::new(repo.clone(), view.comparison);
             if view.comparison.reads_working_tree() {
                 self.files = Lister::default();
             }
@@ -171,7 +179,8 @@ impl CompareWindow {
         self.diffs.confirm_many(ui, Id::new("compare-many-diffs"));
     }
 
-    /// The two commits, one per line, and the button that swaps them.
+    /// The two commits, one per line, and the button that swaps them; not the working tree,
+    /// which stays on the right as in `git diff <commit>`.
     fn header(&mut self, ui: &mut Ui, c: &Colors, env: &mut Env) {
         let Some(view) = &mut self.view else { return };
         let height = 2.0 * SIDE_ROW + 12.0;
@@ -186,14 +195,16 @@ impl CompareWindow {
                 .max_rect(rect.shrink2(vec2(8.0, 0.0)))
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
-        let swap = widgets::tip_explained(
-            widgets::icon_button(&mut tools, glyphs::SWAP, false),
-            "Swap sides",
-            "",
-            "Put the right-hand side on the left, and the left-hand one on the right.",
-        );
-        if swap.clicked() {
-            view.comparison = view.comparison.swapped();
+        if !view.comparison.reads_working_tree() {
+            let swap = widgets::tip_explained(
+                widgets::icon_button(&mut tools, glyphs::SWAP, false),
+                "Swap sides",
+                "",
+                "Put the right-hand side on the left, and the left-hand one on the right.",
+            );
+            if swap.clicked() {
+                *view = CompareView::new(view.repo.clone(), view.comparison.swapped());
+            }
         }
         let right = tools.min_rect().left() - 12.0;
         let sides = [("From", view.comparison.old), ("To", view.comparison.new)];
@@ -204,7 +215,8 @@ impl CompareWindow {
         }
     }
 
-    /// The changed-files table, with the common-ancestor switch in its bar.
+    /// The changed-files table, with the common-ancestor switch in its bar where it changes
+    /// what is compared.
     fn files(&mut self, ui: &mut Ui, c: &Colors, env: &mut Env) {
         let Some(view) = &mut self.view else { return };
         view.comparison.since_ancestor = env.settings.since_ancestor;
@@ -221,6 +233,7 @@ impl CompareWindow {
         let weak = ui.visuals().weak_text_color();
         let abbrev = view.repo.abbrev_len;
         let since = &mut env.settings.since_ancestor;
+        let ancestor_matters = view.ancestor_matters;
         let action = self.table.show_working_tree(
             ui,
             c,
@@ -229,18 +242,22 @@ impl CompareWindow {
             listed.map(|(_, files, _)| files),
             tree,
             |ui| {
-                ui.add_space(8.0);
-                widgets::tip_explained(
-                    ui.checkbox(since, "Since common ancestor"),
-                    "Since common ancestor",
-                    "",
-                    "Compare the right-hand side with where the two histories forked, rather \
-                     than with the left-hand side: only what the right-hand side changed \
-                     since then, as a pull request shows it (git diff A...B). The working \
-                     tree forks where HEAD does.",
-                );
+                if ancestor_matters {
+                    ui.add_space(8.0);
+                    widgets::tip_explained(
+                        ui.checkbox(since, "Since common ancestor"),
+                        "Since common ancestor",
+                        "",
+                        "Compare the right-hand side with where the two histories forked, \
+                         rather than with the left-hand side: only what the right-hand side \
+                         changed since then, as a pull request shows it (git diff A...B). The \
+                         working tree forks where HEAD does.",
+                    );
+                }
                 let note = match base {
-                    Some(Some(Rev::Commit(base))) if comparison.since_ancestor => {
+                    Some(Some(Rev::Commit(base)))
+                        if comparison.since_ancestor && ancestor_matters =>
+                    {
                         format!("from {}", base.short(abbrev))
                     }
                     Some(None) => "No common ancestor".to_owned(),
