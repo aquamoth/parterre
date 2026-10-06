@@ -282,7 +282,7 @@ fn branch_section(
     if group.len() > 1 && group.iter().all(|&c| !deletable(c).is_empty()) {
         let all: Vec<BranchTip> = group.iter().flat_map(|&c| deletable(c)).collect();
         let names: Vec<String> = all.iter().map(|b| b.name.clone()).collect();
-        let label = format!("Delete {} branches", all.len());
+        let label = format!("Delete {} local branches", all.len());
         let delete = Request::Run(Action::DeleteBranches(all));
         all_item(ui, label, &names, delete, None, busy, &mut request);
     } else {
@@ -2374,7 +2374,7 @@ impl Tool {
             Action::DeleteBranches(_) => {
                 let what = match warning.deletions.as_slice() {
                     [one] => format!("branch {}", one.name),
-                    many => format!("{} branches", many.len()),
+                    many => format!("{} local branches", many.len()),
                 };
                 (
                     format!("Delete {what} and lose {commits}?"),
@@ -2922,7 +2922,7 @@ mod tests {
                 click,
             )
         };
-        let (_, asked) = item(three, &[three, base, tip], Some("Delete 4 branches"));
+        let (_, asked) = item(three, &[three, base, tip], Some("Delete 4 local branches"));
         assert_eq!(branch_names(&asked), ["three", "one", "two", "merged"]);
         let (texts, _) = item(base, &[base], None);
         assert!(texts.iter().any(|t| t == "Delete branch"), "{texts:?}");
@@ -2945,7 +2945,10 @@ mod tests {
             tip: h.rev(name),
         };
         let action = Action::DeleteBranches(vec![tip("one"), tip("three"), tip("merged")]);
-        h.ask(Request::Run(action), "Delete 3 branches and lose 1 commit?");
+        h.ask(
+            Request::Run(action),
+            "Delete 3 local branches and lose 1 commit?",
+        );
         for name in ["one", "three", "merged", "1 commit"] {
             assert!(h.shows(name), "{name}: {:?}", h.texts);
         }
@@ -2973,7 +2976,7 @@ mod tests {
             git(h.path(), &["branch", "--format=%(refname:short)"]) == "main\nthree\ntwo"
         });
         h.until("the notification", |h| {
-            h.shows("Delete 2 branches") && !h.shows("Cancel")
+            h.shows("Delete 2 local branches") && !h.shows("Cancel")
         });
         assert!(!h.shows("Delete anyway"));
     }

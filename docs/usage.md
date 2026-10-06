@@ -115,7 +115,7 @@ folder and a greyer fill. From a node's menu:
 
 **Branches:** *Create branch here…* (optionally switching to it), *Switch to* a branch or a
 commit (detached), and *Delete branch*. With several nodes selected that all have local
-branches, *Delete N branches* deletes them all. It asks first only when that loses commits,
+branches, *Delete N local branches* deletes them all. It asks first only when that loses commits,
 and then it lists each branch's.
 
 **The open worktree's branch**, from the graph and the log:
