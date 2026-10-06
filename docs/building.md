@@ -301,7 +301,8 @@ Privacy & Security › Open Anyway* opens it, once. A copy from `curl` or built 
 quarantined and opens at once.
 
 From a terminal, run `/Applications/parterre.app/Contents/MacOS/parterre`, or link it onto the
-`PATH`. Started from the Dock or Finder, parterre has launchd's `PATH`, not the shell's (#326).
+`PATH`. Started from the Dock or Finder, git and `gh` still get the login shell's `PATH`, as
+from a terminal (#326).
 
 `packaging/macos/test-dmg.sh DMG REPO` installs the app from a disk image into
 `/Applications`, checks its signature and `parterre --version`, starts it through Launch
