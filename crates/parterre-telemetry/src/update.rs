@@ -193,6 +193,7 @@ impl Update {
             Channel::Msi => format!("parterre-{version}-{target}.msi"),
             Channel::Zip => format!("parterre-{version}-{target}.zip"),
             Channel::Tarball => format!("parterre-{version}-{target}.tar.gz"),
+            Channel::Dmg => format!("parterre-{version}-{target}.dmg"),
             Channel::Deb => {
                 let arch = match arch {
                     "x86_64" => "amd64",
@@ -349,7 +350,7 @@ mod tests {
             other => panic!("{other:?}"),
         };
         let release = "https://github.com/aquamoth/parterre/releases/download/v0.6.0-rc1";
-        // As in the release v0.6.0-rc1.
+        // As in the release v0.6.0-rc1, and the .dmg as the release workflow names it since.
         for (channel, target, file) in [
             (
                 Channel::Msi,
@@ -370,6 +371,11 @@ mod tests {
                 Channel::Tarball,
                 "aarch64-apple-darwin",
                 "parterre-0.6.0-rc1-aarch64-apple-darwin.tar.gz",
+            ),
+            (
+                Channel::Dmg,
+                "x86_64-apple-darwin",
+                "parterre-0.6.0-rc1-x86_64-apple-darwin.dmg",
             ),
             (
                 Channel::Deb,

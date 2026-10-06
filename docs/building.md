@@ -37,7 +37,7 @@ cargo build --release --locked --no-default-features --features github,syntax
 ```
 
 A release build stamps where it is published in `PARTERRE_CHANNEL` (`msi`, `zip`, `tarball`,
-`deb` or `rpm`), so that *Download* offers the same kind of file
+`dmg`, `deb` or `rpm`), so that *Download* offers the same kind of file
 ([distribution.md](distribution.md#update-check)). Leave it unset in any other build: unset is
 `cargo install`.
 
@@ -253,7 +253,61 @@ keeps it out.
 
 ## macOS
 
-Should build with `cargo build --release`. Not yet tried.
+```sh
+xcode-select --install    # once: the C compiler and git
+cargo build --release
+./target/release/parterre ~/some/repo
+```
+
+## macOS app
+
+The release's disk images hold `parterre.app`, to drag into Applications. Setup, once:
+
+```sh
+cargo install --locked cargo-about --features cli
+```
+
+Then:
+
+```sh
+cargo build --release
+packaging/macos/build-dmg.sh    # → target/packages/parterre-<version>-<target>.dmg
+```
+
+The release builds it for each target from a build stamped with its channel (see
+[Features](#features)), and passes the version, since the Intel binary built on Apple silicon
+can't be run to tell it:
+
+```sh
+PARTERRE_CHANNEL=dmg cargo build --release --target aarch64-apple-darwin
+packaging/macos/build-dmg.sh --target aarch64-apple-darwin --version 0.5.1 dist
+```
+
+| File in `parterre.app/Contents` | What |
+|---|---|
+| `MacOS/parterre` | the binary |
+| `Info.plist` | from `packaging/macos/Info.plist`: bundle ID `se.trustfall.parterre`, the version, and the oldest macOS the binary loads on (10.12 on Intel, 11.0 on Apple silicon) |
+| `Resources/parterre.icns` | the icon, in Finder, the Dock and the app switcher |
+| `Resources/LICENSE`, `NOTICE`, `THIRD-PARTY-NOTICES.html` | the licences, which go wherever the app goes |
+
+The bundle version is the version without its pre-release part, as the MSI's is: bundle
+versions are numbers only, so `0.5.0-rc1` and `0.5.0` are both `0.5.0`.
+
+The app is signed ad hoc (`codesign --sign -`), not with a Developer ID, and not notarized
+(why: [distribution.md](distribution.md#macos)). Apple silicon runs nothing unsigned, and the
+signature seals `Info.plist` and the resources with the binary. A copy downloaded with a
+browser is quarantined, so the first start says Apple could not verify it; *System Settings ›
+Privacy & Security › Open Anyway* opens it, once. A copy from `curl` or built locally isn't
+quarantined and opens at once.
+
+From a terminal, run `/Applications/parterre.app/Contents/MacOS/parterre`, or link it onto the
+`PATH`. Started from the Dock or Finder, git and `gh` still get the login shell's `PATH`, as
+from a terminal (#326).
+
+`packaging/macos/test-dmg.sh DMG REPO` installs the app from a disk image into
+`/Applications`, checks its signature and `parterre --version`, starts it through Launch
+Services as Finder does, with a screenshot of `REPO`, and removes it again. The release
+workflow runs it on Apple silicon and Intel runners before publishing.
 
 ## Checking visuals without a human
 
@@ -283,7 +337,8 @@ script it writes (`crates/parterre/src/win_resource.rs`), together with the vers
 Explorer shows under *Properties → Details*: product name, file and product version, the
 copyright line of `NOTICE` and Trustfall AB as the company. That needs `rc.exe` from the Windows SDK (installed with the
 build tools above), or `x86_64-w64-mingw32-windres` for the GNU target; without one the build
-only warns and the `.exe` has no icon or details. The `.icns` waits for a macOS `.app` bundle.
+only warns and the `.exe` has no icon or details. The `.icns` is the icon of the
+[macOS app](#macos-app).
 
 On Linux, `packaging/linux/install.sh` installs the release binary into `~/.local/bin`, and the
 desktop entry, the icon and the file managers' *Revision Graph* where the desktop finds them;
