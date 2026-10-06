@@ -10,7 +10,7 @@ use parterre_core::{RefKind, Repo};
 
 /// Runs git in `dir`, as [`TestRepo::git`] does in the repository.
 fn git_in(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = Command::new(parterre_core::git::program())
         .current_dir(dir)
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

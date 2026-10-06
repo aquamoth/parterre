@@ -266,7 +266,7 @@ mod tests {
     use parterre_core::branches::Stuck;
 
     use super::super::branches::{self, Request};
-    use super::super::tool_harness::{Harness, banner_texts, git, load, menu, read, write};
+    use super::super::tool_harness::{Harness, banner_texts, git, init, load, menu, read, write};
 
     fn commit(dir: &Path, path: &str, text: &str, message: &str) {
         write(dir, path, text);
@@ -278,10 +278,7 @@ mod tests {
     fn repository() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        // Parterre's own git reads the identity from the repository: CI has no global one.
-        git(p, &["config", "user.name", "Test"]);
-        git(p, &["config", "user.email", "test@example.com"]);
+        init(p);
         commit(p, "file", "one\n", "base");
         commit(p, "other", "other\n", "other");
         git(p, &["branch", "side"]);

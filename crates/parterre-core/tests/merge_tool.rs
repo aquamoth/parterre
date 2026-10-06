@@ -93,7 +93,7 @@ fn opening_a_file_runs_git_mergetool_and_git_stages_the_result() {
     r.checkout("main");
     r.write("list.txt", b"one\n2 (main)\n");
     r.commit_all("Main");
-    let merged = Command::new("git")
+    let merged = Command::new(parterre_core::git::program())
         .current_dir(r.path())
         .args(["merge", "-q", "topic"])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

@@ -17,10 +17,12 @@ mod menu;
 mod raster;
 mod record;
 mod render;
+mod reveal;
 mod scene;
 mod script;
 mod settings;
 mod settings_file;
+mod startup;
 mod system_theme;
 mod text_size;
 mod theme;
@@ -35,7 +37,6 @@ mod widgets;
 #[cfg(test)]
 mod win_resource;
 
-use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -298,6 +299,7 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
 }
 
 fn main() -> ExitCode {
+    startup::begin();
     console::attach_parent();
     let mut cli = Cli::parse();
     if let Some(id) = cli.highlight.as_deref() {
@@ -335,25 +337,22 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let scripted = cli.screenshot.is_some() || script.is_some();
-    // Why the repository named on the command line didn't open, when the window says so.
-    let mut open_error = None;
-    let repo = match &cli.path {
-        Some(path) => match parterre_core::git::load_repo(path) {
-            Ok(repo) => Some(repo),
-            // In a terminal or a scripted run, say why and stop. Started from Explorer's menu, a
-            // desktop entry or a shortcut there is no one to read stderr, so the window opens
-            // and shows it.
-            Err(e) if cli.export.is_some() || scripted || std::io::stderr().is_terminal() => {
+    // The repository loads on a thread of its own while the window comes up, which hides most
+    // of the load behind the window's own start (#309); the window shows why if it fails.
+    // Started from a menu or file manager with none named, the current directory is tried.
+    let opening = app::Opening::start(cli.path.clone());
+    // An export has no window to wait in, and a scripted run says why it failed and stops
+    // before any window: those wait for the load here.
+    let (repo, opening) = if cli.export.is_some() || scripted {
+        match opening.wait() {
+            Ok(repo) => (repo, None),
+            Err(e) => {
                 eprintln!("parterre: {e}");
                 return ExitCode::FAILURE;
             }
-            Err(e) => {
-                open_error = Some(format!("Could not open {}: {e}", path.display()));
-                None
-            }
-        },
-        // Started from a menu or file manager, the current directory is seldom a repository.
-        None => parterre_core::git::load_repo(std::path::Path::new(".")).ok(),
+        }
+    } else {
+        (None, Some(opening))
     };
 
     if let Some(path) = cli.export.clone() {
@@ -375,7 +374,7 @@ fn main() -> ExitCode {
 
     // A screenshot run exits by itself and reports where it saved, as a recording does; an
     // interactive window must not be tied to the terminal it was started from.
-    if !scripted && record.is_none() {
+    if !scripted && record.is_none() && !startup::enabled() {
         console::detach();
     }
 
@@ -385,7 +384,11 @@ fn main() -> ExitCode {
     let vsync = !frame_pacing::wayland_session();
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(app::window_title(repo.as_ref()))
+            .with_title(
+                opening
+                    .as_ref()
+                    .map_or_else(|| app::window_title(repo.as_ref()), app::Opening::title),
+            )
             .with_app_id(settings::APP_ID)
             .with_inner_size([w, h])
             .with_min_inner_size([400.0, 300.0])
@@ -394,6 +397,23 @@ fn main() -> ExitCode {
         ..Default::default()
     };
     options.glow_options.vsync = vsync;
+    // An interactive window on Windows comes up cloaked, and unmaximized until it is: see
+    // `reveal`. The builder hook runs after eframe has restored the saved window state. A
+    // scripted or recorded run paints from its first frame on and is left to eframe.
+    #[cfg(windows)]
+    let interactive = !scripted && record.is_none();
+    #[cfg(windows)]
+    let maximized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(windows)]
+    if interactive {
+        let maximized = maximized.clone();
+        options.window_builder = Some(Box::new(move |builder: egui::ViewportBuilder| {
+            if builder.maximized == Some(true) {
+                maximized.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            builder.with_maximized(false)
+        }));
+    }
     let mut automation = Automation::default();
     automation.fit = cli.fit;
     automation.zoom = cli.zoom;
@@ -416,8 +436,16 @@ fn main() -> ExitCode {
         settings::APP_ID,
         options,
         Box::new(move |cc| {
+            #[cfg(windows)]
+            let reveal = interactive
+                .then(|| {
+                    reveal::Reveal::start(cc, maximized.load(std::sync::atomic::Ordering::Relaxed))
+                })
+                .flatten();
+            #[cfg(not(windows))]
+            let reveal = None;
             Ok(Box::new(app::ParterreApp::new(
-                cc, repo, open_error, overrides, automation, vsync,
+                cc, repo, opening, overrides, automation, vsync, reveal,
             )))
         }),
     );

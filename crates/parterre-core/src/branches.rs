@@ -217,31 +217,85 @@ pub struct Catalog {
     uses: Vec<(String, PathBuf)>,
 }
 
+/// `git worktree list --porcelain -z`'s listing, or the older form's made to look the same.
+/// Unlike the viewer's compatibility fallback, safety checks propagate listing errors.
+fn worktree_listing(git: &Git, root: &Path) -> Result<String, Error> {
+    match git.run(&["worktree", "list", "--porcelain", "-z"]) {
+        Ok(listing) => Ok(listing),
+        Err(GitError::Failed { .. }) => {
+            // Git 2.34 lacks -z. Never turn a failed listing into an empty catalogue;
+            // retry its older form, rejecting unrecognised fields (e.g. a split path).
+            let plain = git.run(&["worktree", "list", "--porcelain"])?;
+            if root.to_string_lossy().contains(['\n', '\r'])
+                || plain.lines().any(|line| {
+                    !matches!(
+                        line.split(' ').next(),
+                        Some(
+                            "" | "worktree"
+                                | "HEAD"
+                                | "branch"
+                                | "bare"
+                                | "detached"
+                                | "locked"
+                                | "prunable"
+                        )
+                    )
+                })
+            {
+                return Err(Error::Invalid("Cannot safely read worktree paths with this Git version. Update Git to 2.36 or newer.".into()));
+            }
+            Ok(plain.replace('\n', "\0"))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 impl Catalog {
     pub fn load(path: &Path) -> Result<Self, Error> {
         let git = Git::new(path);
-        let root = git.repo_root()?;
-        let has_working_tree = git.run(&["rev-parse", "--is-inside-work-tree"])?.trim() == "true";
-        let current = git
-            .query(&["symbolic-ref", "--quiet", "HEAD"])?
-            .map(|s| s.trim_start_matches("refs/heads/").to_owned());
-        let head = git
-            .query(&["rev-parse", "--verify", "HEAD^{commit}"])?
-            .map(|s| parse_oid(&s))
-            .transpose()?;
+        let location = git.location()?;
+        let root = location.root().to_owned();
+        let has_working_tree = location.work_tree.is_some();
+        // The four listings at once rather than one after the other: each is a git start,
+        // which on Windows is most of what it costs (#309).
+        let (config, listing, conflicted, refs) = std::thread::scope(|s| {
+            let config = s.spawn(|| git.config());
+            let listing = s.spawn(|| worktree_listing(&git, &root));
+            let conflicted = s.spawn(|| {
+                // Conflicted files outlive an operation: an autostash or `git stash pop` that
+                // conflicted leaves them with none in progress.
+                if has_working_tree {
+                    git.run(&["diff", "--name-only", "-z", "--diff-filter=U"])
+                } else {
+                    Ok(String::new())
+                }
+            });
+            let refs = git.run(&["for-each-ref", "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads", "refs/remotes", "refs/tags"]);
+            (
+                config.join().expect("config read"),
+                listing.join().expect("worktree listing"),
+                conflicted.join().expect("conflict listing"),
+                refs,
+            )
+        });
+        let config = config?;
+        let listing = listing?;
+        let refs = refs?;
+        let conflicted: Vec<String> = conflicted?
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .collect();
         let auto_setup_rebase = matches!(
-            git.query(&["config", "--get", "branch.autoSetupRebase"])?
-                .as_deref(),
+            config.get("branch.autoSetupRebase"),
             Some("always" | "remote")
         );
-        let mut remote_names: Vec<String> =
-            git.run(&["remote"])?.lines().map(str::to_owned).collect();
+        let mut remote_names = config.remotes();
         // A remote may itself contain '/', so match the longest configured prefix.
         remote_names.sort_by_key(|r| std::cmp::Reverse(r.len()));
         let mut locals = Vec::new();
         let mut remotes = Vec::new();
         let mut roots = Vec::new();
-        let refs = git.run(&["for-each-ref", "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads", "refs/remotes", "refs/tags"])?;
         for line in refs.lines() {
             let f: Vec<_> = line.split('\0').collect();
             if f.len() != 7 {
@@ -286,44 +340,12 @@ impl Catalog {
         remotes.sort_by(|a, b| a.name.cmp(&b.name));
         let mut occupied = HashMap::new();
         let mut uses = Vec::new();
-        // Unlike the viewer's compatibility fallback, safety checks propagate listing errors.
-        let listing = match git.run(&["worktree", "list", "--porcelain", "-z"]) {
-            Ok(listing) => listing,
-            Err(GitError::Failed { .. }) => {
-                // Git 2.34 lacks -z. Never turn a failed listing into an empty catalogue;
-                // retry its older form, rejecting unrecognised fields (e.g. a split path).
-                let plain = git.run(&["worktree", "list", "--porcelain"])?;
-                if root.to_string_lossy().contains(['\n', '\r'])
-                    || plain.lines().any(|line| {
-                        !matches!(
-                            line.split(' ').next(),
-                            Some(
-                                "" | "worktree"
-                                    | "HEAD"
-                                    | "branch"
-                                    | "bare"
-                                    | "detached"
-                                    | "locked"
-                                    | "prunable"
-                            )
-                        )
-                    })
-                {
-                    return Err(Error::Invalid("Cannot safely read worktree paths with this Git version. Update Git to 2.36 or newer.".into()));
-                }
-                plain.replace('\n', "\0")
-            }
-            Err(error) => return Err(error.into()),
-        };
         let main_place = listing
             .split('\0')
             .find_map(|s| s.strip_prefix("worktree "))
             .map(PathBuf::from)
             .unwrap_or_else(|| root.clone());
-        let common = PathBuf::from(
-            git.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?
-                .trim(),
-        );
+        let common = location.common_dir;
         // Each linked worktree's administrative folder, by the worktree's own folder.
         let mut admins = vec![(main_place.clone(), common.clone())];
         let linked = common.join("worktrees");
@@ -352,6 +374,35 @@ impl Catalog {
                 records.last_mut().expect("never empty").push(field);
             }
         }
+        // HEAD's branch and commit are in the open worktree's record. Without one to match (a
+        // bare repository, or inside a `.git` folder) git is asked (#309).
+        let open_record = records.iter().filter(|_| has_working_tree).find(|record| {
+            record.iter().any(|f| {
+                f.strip_prefix("worktree ")
+                    .is_some_and(|p| crate::worktree_folder::same_path(Path::new(p), &root))
+            })
+        });
+        let (current, head) = match open_record {
+            Some(record) => (
+                record
+                    .iter()
+                    .find_map(|f| f.strip_prefix("branch refs/heads/"))
+                    .map(str::to_owned),
+                record
+                    .iter()
+                    .find_map(|f| f.strip_prefix("HEAD "))
+                    .filter(|oid| !oid.bytes().all(|b| b == b'0'))
+                    .map(parse_oid)
+                    .transpose()?,
+            ),
+            None => (
+                git.query(&["symbolic-ref", "--quiet", "HEAD"])?
+                    .map(|s| s.trim_start_matches("refs/heads/").to_owned()),
+                git.query(&["rev-parse", "--verify", "HEAD^{commit}"])?
+                    .map(|s| parse_oid(&s))
+                    .transpose()?,
+            ),
+        };
         let mut worktrees = Vec::new();
         let mut heads = Vec::new();
         for record in records.iter().filter(|r| !r.is_empty()) {
@@ -422,17 +473,6 @@ impl Catalog {
         for (place, admin) in &admins {
             reservations(admin, place, &mut occupied, &mut uses)?;
         }
-        // Conflicted files outlive an operation: an autostash or `git stash pop` that
-        // conflicted leaves them with none in progress.
-        let conflicted = if has_working_tree {
-            git.run(&["diff", "--name-only", "-z", "--diff-filter=U"])?
-                .split('\0')
-                .filter(|p| !p.is_empty())
-                .map(str::to_owned)
-                .collect()
-        } else {
-            Vec::new()
-        };
         let stashed_for_revert = worktrees
             .iter()
             .find(|w| w.open)

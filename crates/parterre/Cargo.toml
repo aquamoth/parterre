@@ -48,6 +48,10 @@ serde_json.workspace = true
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
 
+# eframe's, to read the window handle it hands out (src/reveal.rs).
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+
 [dev-dependencies]
 tempfile.workspace = true
 

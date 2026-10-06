@@ -290,7 +290,7 @@ mod tests {
     use parterre_core::branches::Stuck;
 
     use super::super::branches::{self, Request};
-    use super::super::tool_harness::{Harness, banner_texts, git, load, menu, read, write};
+    use super::super::tool_harness::{Harness, banner_texts, git, init, load, menu, read, write};
 
     fn commit(dir: &Path, path: &str, text: &str, message: &str) {
         write(dir, path, text);
@@ -303,11 +303,7 @@ mod tests {
     fn repository(diverged: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        // A merge commits, and parterre's own git reads the identity from the repository,
-        // not from the harness's environment: CI has no global one.
-        git(p, &["config", "user.name", "Test"]);
-        git(p, &["config", "user.email", "test@example.com"]);
+        init(p);
         commit(p, "file", "base\n", "base");
         git(p, &["switch", "-q", "-c", "up"]);
         commit(p, "one", "one\n", "their one");
@@ -571,9 +567,7 @@ mod tests {
     fn pull_request() -> (tempfile::TempDir, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        git(p, &["config", "user.name", "Test"]);
-        git(p, &["config", "user.email", "test@example.com"]);
+        init(p);
         commit(p, "file", "base\n", "base");
         git(p, &["switch", "-q", "-c", "feature"]);
         commit(p, "one", "one\n", "my one");
@@ -699,7 +693,7 @@ mod tests {
         git(p, &["switch", "-q", "-c", "side", "main"]);
         commit(p, "one", "side\n", "side one");
         git(p, &["switch", "-q", "feature"]);
-        let out = std::process::Command::new("git")
+        let out = std::process::Command::new(parterre_core::git::program())
             .current_dir(p)
             .args(["merge", "-q", "side"])
             .output()

@@ -16,7 +16,7 @@ use parterre_util::CancelTree;
 
 /// Runs git, which may fail (a merge that stops on conflicts).
 fn try_git(r: &TestRepo, args: &[&str]) -> bool {
-    Command::new("git")
+    Command::new(parterre_core::git::program())
         .current_dir(r.path())
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

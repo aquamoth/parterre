@@ -39,7 +39,7 @@ fn failed(out: Outcome) -> String {
 
 /// Runs git in `dir`; returns its trimmed output.
 fn git_in(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = Command::new(parterre_core::git::program())
         .current_dir(dir)
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -163,7 +163,7 @@ fn a_rebase_stopped_on_a_conflict_is_an_operation_in_progress() {
     let wt = worktree(&r, others.path(), "rebasing", &["side"]);
     std::fs::write(wt.join("file"), "side\n").unwrap();
     git_in(&wt, &["commit", "-qam", "side change"]);
-    let out = Command::new("git")
+    let out = Command::new(parterre_core::git::program())
         .current_dir(&wt)
         .args(["rebase", "main"])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -199,7 +199,7 @@ fn deleting_a_worktree_with_a_rebase_in_progress_warns_then_ends_it() {
     std::fs::write(wt.join("file"), "side\n").unwrap();
     git_in(&wt, &["commit", "-qam", "side change"]);
     let side = git_in(&wt, &["rev-parse", "HEAD"]);
-    let out = Command::new("git")
+    let out = Command::new(parterre_core::git::program())
         .current_dir(&wt)
         .args(["rebase", "main"])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -339,7 +339,7 @@ fn adding_a_detached_worktree_checks_out_the_commit() {
     ));
     assert_eq!(git_in(&path, &["rev-parse", "HEAD"]), base.to_hex());
     assert!(
-        Command::new("git")
+        Command::new(parterre_core::git::program())
             .current_dir(&path)
             .args(["symbolic-ref", "-q", "HEAD"])
             .status()

@@ -26,8 +26,18 @@ Commands (Rust from `~/.cargo/bin`):
   A test must not write under `.git/refs` by hand: Git 3.0 makes new repositories reftable
   (#228). To check once, run the tests with git built `WITH_BREAKING_CHANGES=YesPlease` first
   on `PATH`; CI doesn't (#251).
+  The test helpers run the git parterre resolved, `parterre_core::git::program()` (on Windows
+  the real `git.exe`, not the `cmd\git.exe` launcher), and spend as few git starts as will
+  do: that is what the suite's time goes on (#309).
 - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all` before committing.
 - `cargo run --release -p parterre-core --example stats -- <repo>` – graph sizes and timings.
+- `PARTERRE_BENCH_REPO=<repo> cargo bench -p parterre-core` – what opening a repository costs,
+  as criterion measures it; `-- --save-baseline main` on `main` and `-- --baseline main` on a
+  branch compare the two (`crates/parterre-core/benches/open.rs`). Run from PowerShell on
+  Windows, where git is found as a user's is. Builds from two worktrees must not share a
+  target directory: copy the saved baseline folder from `target/criterion` instead.
+- `PARTERRE_STARTUP_TIMING=1 parterre <repo>` – a normal start prints its milestones to
+  stderr (window created, graph shown, …), for timing what a user waits for.
 - Automation, for checking visuals without a human (`docs/automation.md`):
   - `cargo run -- <repo> --screenshot out.png` – the window as a PNG.
   - `--script FILE` – drive the window: `open` any window or dialog, click by on-screen text or

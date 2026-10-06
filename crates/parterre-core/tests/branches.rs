@@ -460,7 +460,7 @@ fn rebase_and_bisect_reserve_a_branch_even_when_head_is_detached() {
         let wt = tempfile::tempdir().unwrap();
         let path = wt.path().join("linked");
         r.git(&["worktree", "add", "--detach", path.to_str().unwrap(), &hash]);
-        let dir = std::process::Command::new("git")
+        let dir = std::process::Command::new(parterre_core::git::program())
             .args([
                 "-C",
                 path.to_str().unwrap(),
@@ -971,4 +971,32 @@ fn failing_checkout_hook_reports_that_the_new_branch_is_checked_out() {
         "{error}"
     );
     assert_eq!(r.git(&["branch", "--show-current"]), "created");
+}
+
+#[test]
+fn remotes_are_named_as_git_remote_lists_them() {
+    let mut r = TestRepo::new();
+    let tip = oid(&r.commit("base"));
+    // A name with a dot in it, one set up by its fetch line alone, and `remote.pushDefault`,
+    // which names no remote: the catalogue reads them from the config in one call, as
+    // `git remote` does (#309).
+    r.git(&["remote", "add", "a.b", "https://example.invalid/a"]);
+    r.git(&[
+        "config",
+        "remote.fo.fetch",
+        "+refs/heads/*:refs/remotes/fo/*",
+    ]);
+    r.git(&["config", "remote.pushDefault", "a.b"]);
+    let catalog = Catalog::load(r.path()).unwrap();
+    let mut names = catalog.remote_names.clone();
+    names.sort();
+    assert_eq!(names, ["a.b", "fo"]);
+    assert_eq!(r.git(&["remote"]), "a.b\nfo");
+    // HEAD's branch and commit come from the worktree listing now.
+    assert_eq!(catalog.current.as_deref(), Some("main"));
+    assert_eq!(catalog.head, Some(tip));
+    r.git(&["checkout", "-q", "--detach"]);
+    let detached = Catalog::load(r.path()).unwrap();
+    assert_eq!(detached.current, None);
+    assert_eq!(detached.head, Some(tip));
 }

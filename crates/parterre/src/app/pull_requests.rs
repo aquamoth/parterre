@@ -378,7 +378,7 @@ mod tests {
             &["init", "-q"][..],
             &["remote", "add", "origin", "https://github.com/o/r.git"],
         ] {
-            let ok = std::process::Command::new("git")
+            let ok = std::process::Command::new(parterre_core::git::program())
                 .args(args)
                 .current_dir(dir)
                 .env("GIT_CONFIG_NOSYSTEM", "1")

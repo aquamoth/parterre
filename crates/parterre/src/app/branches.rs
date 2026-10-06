@@ -1729,6 +1729,7 @@ impl Tool {
             self.loading = None;
             match result {
                 Ok(catalog) => {
+                    crate::startup::mark("branch catalogue loaded");
                     let catalog = Arc::new(catalog);
                     if let Some(form) = &mut self.form {
                         form.catalog = catalog.clone();

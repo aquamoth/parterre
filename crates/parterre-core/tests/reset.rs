@@ -46,7 +46,7 @@ fn read(r: &TestRepo, path: &str) -> String {
 fn real_status(r: &TestRepo, paths: &BTreeSet<String>) -> BTreeSet<String> {
     // Not trimmed, as `TestRepo::git` has it: the first line may start with a space. With the
     // system's git config, as parterre's own git runs.
-    let out = std::process::Command::new("git")
+    let out = std::process::Command::new(parterre_core::git::program())
         .current_dir(r.path())
         .args([
             "status",
@@ -432,7 +432,7 @@ fn no_reset_is_offered_detached_mid_merge_or_where_the_branch_is() {
     r.write("a.txt", b"theirs\n");
     r.commit_all("theirs");
     r.checkout("main");
-    let out = std::process::Command::new("git")
+    let out = std::process::Command::new(parterre_core::git::program())
         .current_dir(r.path())
         .args(["merge", "-q", "other"])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

@@ -516,21 +516,15 @@ struct Config {
 
 impl Config {
     fn read(git: &Git) -> Config {
-        let get = |key: &str| {
-            git.query(&["config", "--get", key])
-                .ok()
-                .flatten()
-                .map(|v| v.trim().to_ascii_lowercase())
-        };
-        let truthy = |key: &str| {
-            get(key)
-                .as_deref()
-                .is_some_and(|v| !matches!(v, "false" | "no" | "off" | "0" | ""))
-        };
+        // One `config --list` rather than a `--get` per key (#309).
+        let config = git.config().unwrap_or_default();
+        let truthy = |key: &str| config.bool(key).unwrap_or(false);
         Config {
             merge_auto_stash: truthy("merge.autoStash"),
             rebase_auto_stash: truthy("rebase.autoStash"),
-            no_ff: get("merge.ff").as_deref() == Some("false"),
+            no_ff: config
+                .get("merge.ff")
+                .is_some_and(|v| v.eq_ignore_ascii_case("false")),
             log: truthy("merge.log"),
         }
     }

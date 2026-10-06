@@ -15,7 +15,7 @@ use parterre_core::{Oid, Repo};
 use super::branches::{Request, Tool};
 
 pub fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = Command::new(parterre_core::git::program())
         .current_dir(dir)
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -32,6 +32,24 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// A new repository on `main` with the test identity, in one git call: parterre's own git reads
+/// the identity from the repository (CI has no global one), and it is written to the config
+/// file at once rather than with a `git config` call each (#309). Automatic maintenance is off
+/// too: git starts it as a process of its own after every commit.
+pub fn init(dir: &Path) {
+    git(dir, &["init", "-q", "-b", "main"]);
+    let config = dir.join(".git").join("config");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&config)
+        .unwrap_or_else(|e| panic!("open {}: {e}", config.display()));
+    std::io::Write::write_all(
+        &mut file,
+        b"[user]\n\tname = Test\n\temail = test@example.com\n[maintenance]\n\tauto = false\n",
+    )
+    .unwrap();
 }
 
 /// A file's text, with the line endings `core.autocrlf` gives it on checkout (Windows)
@@ -309,9 +327,7 @@ pub fn stuck_merge() -> tempfile::TempDir {
 pub fn before_merge() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path();
-    git(p, &["init", "-q", "-b", "main"]);
-    git(p, &["config", "user.name", "Test"]);
-    git(p, &["config", "user.email", "test@example.com"]);
+    init(p);
     write(p, "text.txt", "one\ntwo\n");
     write(p, "gone.txt", "base\n");
     git(p, &["add", "-A"]);
@@ -335,7 +351,7 @@ pub fn merge_stops(p: &Path) {
 
 /// `git merge feature`, which may stop.
 pub fn try_merge(p: &Path) {
-    let out = Command::new("git")
+    let out = Command::new(parterre_core::git::program())
         .current_dir(p)
         .args(["merge", "-q", "feature"])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

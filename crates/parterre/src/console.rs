@@ -6,8 +6,8 @@
 //! window opens the console is released again: a process attached to a console is killed when
 //! that console closes, and the window should outlive the terminal it was started from.
 //!
-//! This is the one place in the workspace that uses `unsafe` (to declare the two kernel32
-//! functions); everything else keeps `unsafe_code` denied.
+//! This and `reveal` are the places in the workspace that use `unsafe` (to declare a few
+//! Win32 functions); everything else keeps `unsafe_code` denied.
 
 /// Attaches to the console of the process that started us, if it has one.
 pub fn attach_parent() {

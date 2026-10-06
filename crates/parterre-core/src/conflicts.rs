@@ -310,24 +310,28 @@ pub fn list(git: &Git) -> Result<(PathBuf, Vec<Conflict>), GitError> {
         }
         conflicts.last_mut().expect("pushed").stages[stage - 1] = Some(entry);
     }
+    // Both sides' blobs in one git call, not one each, to tell binary files: those with a NUL
+    // in their first few bytes, as git tells them (#309).
+    let sides = |c: &Conflict| {
+        let both = c.stages[1].is_some() && c.stages[2].is_some() && !c.is_submodule();
+        c.stages[1..]
+            .iter()
+            .flatten()
+            .filter(move |e| both && e.mode != SYMLINK)
+            .map(|e| e.oid)
+            .collect::<Vec<_>>()
+    };
+    let wanted: Vec<Oid> = conflicts.iter().flat_map(sides).collect();
+    let binary: std::collections::HashMap<Oid, bool> = wanted
+        .iter()
+        .copied()
+        .zip(git.blobs(&wanted)?)
+        .map(|(oid, bytes)| (oid, bytes.iter().take(FIRST_FEW_BYTES).any(|&b| b == 0)))
+        .collect();
     for c in &mut conflicts {
-        if c.stages[1].is_some() && c.stages[2].is_some() && !c.is_submodule() {
-            c.binary = c.stages[1..]
-                .iter()
-                .flatten()
-                .filter(|e| e.mode != SYMLINK)
-                .map(|e| is_binary_blob(&git, &e.oid))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .any(|b| b);
-        }
+        c.binary = sides(c).iter().any(|oid| binary.get(oid) == Some(&true));
     }
     Ok((root, conflicts))
-}
-
-fn is_binary_blob(git: &Git, oid: &Oid) -> Result<bool, GitError> {
-    let bytes = git.run_bytes(&["cat-file", "blob", &oid.to_hex()])?;
-    Ok(bytes.iter().take(FIRST_FEW_BYTES).any(|&b| b == 0))
 }
 
 /// The sides of the open worktree's conflicts, named by the operation in progress.

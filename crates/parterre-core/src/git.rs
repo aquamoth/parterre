@@ -23,6 +23,7 @@ use crate::repo::{Commit, CommitIx, DEFAULT_ABBREV_LEN, GitRef, Head, RefKind, R
 mod program;
 mod version;
 
+pub use program::program;
 pub use version::{MINIMUM_VERSION, version};
 
 #[derive(Debug, thiserror::Error)]
@@ -86,7 +87,7 @@ const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b
 
 /// git with no arguments yet: piped output, the C locale, and no console window.
 fn git_command() -> Command {
-    let mut cmd = Command::new(program::git());
+    let mut cmd = Command::new(program());
     cmd.env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -147,6 +148,169 @@ fn not_opened(dir: &Path, stderr: &str) -> GitError {
     GitError::Failed {
         args: format!("-C {} rev-parse", dir.display()),
         stderr: stderr.to_owned(),
+    }
+}
+
+/// Where the repository around a folder keeps things, from one `rev-parse`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Location {
+    /// The git dir: a work tree's `.git`, a linked worktree's `.git/worktrees/<name>`, or a
+    /// bare repository itself.
+    pub git_dir: PathBuf,
+    /// The git dir the refs are kept in: the main worktree's, from a linked worktree;
+    /// otherwise the git dir itself.
+    pub common_dir: PathBuf,
+    /// The root of the work tree the folder is in: none in a bare repository or inside a
+    /// `.git` folder.
+    pub work_tree: Option<PathBuf>,
+}
+
+impl Location {
+    /// The repository root: the work tree, or the git dir where there is none.
+    pub fn root(&self) -> &Path {
+        self.work_tree.as_deref().unwrap_or(&self.git_dir)
+    }
+}
+
+/// What [`Git::location`]'s `rev-parse` printed, as far as it got: with no work tree it stops
+/// at `--show-toplevel`, after `--is-inside-work-tree` has said `false`. `None` for anything
+/// else cut short, or nothing at all (not a repository).
+fn parse_location(stdout: &str, success: bool) -> Option<Location> {
+    let mut lines = stdout.lines();
+    let inside_work_tree = lines.next()? == "true";
+    let git_dir = PathBuf::from(lines.next()?);
+    let common_dir = PathBuf::from(lines.next()?);
+    let work_tree = match (inside_work_tree, lines.next()) {
+        (true, Some(top)) if success => Some(PathBuf::from(top)),
+        (false, _) => None,
+        _ => return None,
+    };
+    Some(Location {
+        git_dir,
+        common_dir,
+        work_tree,
+    })
+}
+
+/// git's settings as `git config --list` prints them, read in one call for whatever a loader
+/// or a dialog wants to know, where `git config --get` is a call per key (#309).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Config {
+    /// Each setting's key, its section and name in lower case as git prints them, and its
+    /// value, in git's order: a later one overrides an earlier one. A key set without a value
+    /// (`[core]\n\tbare`) has none.
+    entries: Vec<(String, Option<String>)>,
+}
+
+impl Config {
+    /// `key`'s value as `git config --get` gives it: the last one set, the section and name
+    /// matched regardless of case and the subsection as it is; empty for a key set without
+    /// a value.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.last(key).map(|value| value.unwrap_or(""))
+    }
+
+    /// `key` as `git config --bool` reads it: `true`, `yes`, `on`, `1` or set without a
+    /// value; `false`, `no`, `off`, `0` or empty. `None` if unset, or something else.
+    pub fn bool(&self, key: &str) -> Option<bool> {
+        match self.last(key)?.map(str::to_ascii_lowercase).as_deref() {
+            None | Some("true" | "yes" | "on" | "1") => Some(true),
+            Some("false" | "no" | "off" | "0" | "") => Some(false),
+            _ => None,
+        }
+    }
+
+    /// The remotes' names, as `git remote` lists them: every `remote.<name>.<setting>` names
+    /// one.
+    pub fn remotes(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|(key, _)| key.strip_prefix("remote.")?.rsplit_once('.'))
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn last(&self, key: &str) -> Option<Option<&str>> {
+        let key = canonical_key(key);
+        self.entries
+            .iter()
+            .rev()
+            .find(|(k, _)| *k == key)
+            .map(|(_, value)| value.as_deref())
+    }
+}
+
+/// `key` with its section and name in lower case, as git prints keys, and any subsection
+/// between them as it is.
+fn canonical_key(key: &str) -> String {
+    match (key.find('.'), key.rfind('.')) {
+        (Some(first), Some(last)) if first < last => format!(
+            "{}.{}.{}",
+            key[..first].to_ascii_lowercase(),
+            &key[first + 1..last],
+            key[last + 1..].to_ascii_lowercase()
+        ),
+        _ => key.to_ascii_lowercase(),
+    }
+}
+
+/// `git config -z --list`'s output: a NUL after each setting, its key and value separated by
+/// the first newline, and no newline for a key set without a value.
+fn parse_config(out: &[u8]) -> Config {
+    let entries = out
+        .split(|&b| b == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(
+            |entry| match String::from_utf8_lossy(entry).split_once('\n') {
+                Some((key, value)) => (key.to_owned(), Some(value.to_owned())),
+                None => (String::from_utf8_lossy(entry).into_owned(), None),
+            },
+        )
+        .collect();
+    Config { entries }
+}
+
+/// `cat-file --batch`'s output for `count` objects asked for: `<oid> <type> <size>`, a
+/// newline, the contents and a newline, each. `None` if it reads otherwise, or an object is
+/// missing.
+fn parse_batch(out: &[u8], count: usize) -> Option<Vec<Vec<u8>>> {
+    let mut objects = Vec::with_capacity(count);
+    let mut rest = out;
+    for _ in 0..count {
+        let newline = rest.iter().position(|&b| b == b'\n')?;
+        let header = std::str::from_utf8(&rest[..newline]).ok()?;
+        rest = &rest[newline + 1..];
+        let mut fields = header.split(' ');
+        let (_oid, kind) = (fields.next()?, fields.next()?);
+        if kind == "missing" {
+            return None;
+        }
+        let size: usize = fields.next()?.parse().ok()?;
+        objects.push(rest.get(..size)?.to_vec());
+        rest = rest.get(size + 1..)?;
+    }
+    Some(objects)
+}
+
+impl Git {
+    /// git's settings, in one call.
+    pub fn config(&self) -> Result<Config, GitError> {
+        Ok(parse_config(&self.run_bytes(&["config", "-z", "--list"])?))
+    }
+
+    /// The contents of blobs, in one call.
+    pub(crate) fn blobs(&self, oids: &[Oid]) -> Result<Vec<Vec<u8>>, GitError> {
+        if oids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let input: String = oids.iter().map(|o| format!("{o}\n")).collect();
+        let out = self.run_with_input_bytes(&["cat-file", "--batch"], input)?;
+        parse_batch(&out, oids.len())
+            .ok_or_else(|| GitError::Parse("unexpected output from cat-file --batch".into()))
     }
 }
 
@@ -232,6 +396,17 @@ impl Git {
         args: &[&str],
         input: impl Into<Vec<u8>>,
     ) -> Result<String, GitError> {
+        let out = self.run_with_input_bytes(args, input)?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// Runs git with `input` on stdin and returns stdout as bytes, failing on a non-zero exit
+    /// status.
+    fn run_with_input_bytes(
+        &self,
+        args: &[&str],
+        input: impl Into<Vec<u8>>,
+    ) -> Result<Vec<u8>, GitError> {
         use std::io::Write as _;
         let input = input.into();
         let mut child = self
@@ -252,7 +427,7 @@ impl Git {
                 stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
             });
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(out.stdout)
     }
 
     /// Runs git and returns stdout as bytes, failing on a non-zero exit status, unless `cancel`
@@ -298,49 +473,32 @@ impl Git {
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned()))
     }
 
-    /// rev-parse about the repository itself: trimmed stdout, or why git couldn't open it.
-    fn rev_parse_repo(&self, args: &[&str]) -> Result<String, GitError> {
-        let out = self.output(args)?;
-        if !out.status.success() {
-            return Err(not_opened(&self.dir, &String::from_utf8_lossy(&out.stderr)));
+    /// Where the repository around [`Git::dir`] keeps things, or why git couldn't open it.
+    pub fn location(&self) -> Result<Location, GitError> {
+        // One call for all of it: `--show-toplevel` fails after the others have printed where
+        // there is no work tree (a bare repository, or inside a `.git` folder), which is how
+        // git says so (#309).
+        let out = self.output(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--is-inside-work-tree",
+            "--git-dir",
+            "--git-common-dir",
+            "--show-toplevel",
+        ])?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        match parse_location(&stdout, out.status.success()) {
+            Some(location) => Ok(location),
+            None if out.status.success() => {
+                Err(GitError::Parse(format!("rev-parse printed {stdout:?}")))
+            }
+            None => Err(not_opened(&self.dir, &String::from_utf8_lossy(&out.stderr))),
         }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
     }
 
     /// Resolves the repository root: the working tree, or the git dir for a bare repository.
     pub fn repo_root(&self) -> Result<PathBuf, GitError> {
-        Ok(self.locate()?.0)
-    }
-
-    /// The repository root, and whether it is a working tree.
-    fn locate(&self) -> Result<(PathBuf, bool), GitError> {
-        let out =
-            self.rev_parse_repo(&["rev-parse", "--is-bare-repository", "--absolute-git-dir"])?;
-        let mut lines = out.lines();
-        let bare = lines.next() == Some("true");
-        let git_dir = lines
-            .next()
-            .ok_or_else(|| GitError::Parse("rev-parse printed no git dir".into()))?;
-        if bare {
-            return Ok((PathBuf::from(git_dir), false));
-        }
-        // Inside a `.git` directory there is no work tree: use the git dir itself.
-        Ok(match self.query(&["rev-parse", "--show-toplevel"])? {
-            Some(top) if !top.is_empty() => (PathBuf::from(top), true),
-            _ => (PathBuf::from(git_dir), false),
-        })
-    }
-
-    /// The repository's git dir and common dir: the same directory, except in a linked
-    /// worktree, whose own git dir holds its HEAD while the refs are shared.
-    pub fn git_dirs(&self) -> Result<(PathBuf, PathBuf), GitError> {
-        let out = self.rev_parse_repo(&["rev-parse", "--absolute-git-dir", "--git-common-dir"])?;
-        let mut lines = out.lines();
-        let (Some(git_dir), Some(common)) = (lines.next(), lines.next()) else {
-            return Err(GitError::Parse("rev-parse printed no git dir".into()));
-        };
-        // The common dir is printed relative to the directory git ran in.
-        Ok((PathBuf::from(git_dir), self.dir.join(common)))
+        Ok(self.location()?.root().to_owned())
     }
 
     /// Loads all refs (notes excluded) and every commit reachable from them.
@@ -348,7 +506,9 @@ impl Git {
     /// Refs and HEAD are read first and the log is then walked from exactly those commits, so
     /// a concurrent fetch cannot leave refs pointing at commits that were not loaded.
     pub fn load(&self) -> Result<Repo, GitError> {
-        let (root, has_working_tree) = self.locate()?;
+        let location = self.location()?;
+        let root = location.root().to_owned();
+        let has_working_tree = location.work_tree.is_some();
         let git = Git::new(&root);
 
         let ref_format = format!(
@@ -386,10 +546,30 @@ impl Git {
         }
         raw_refs.retain(|r| r.commit.is_some());
 
-        let head_branch = git.query(&["symbolic-ref", "-q", "HEAD"])?;
-        let head_oid = git
-            .query(&["rev-parse", "-q", "--verify", "HEAD^{commit}"])?
-            .and_then(|s| Oid::from_hex(&s));
+        // HEAD's branch and commit are in the worktree listing, for the open worktree. Without
+        // one to match (a bare repository, or inside a `.git` folder) git is asked: the branch,
+        // and its commit unless the ref listing has it (#309).
+        let open = raw_worktrees
+            .iter()
+            .filter(|_| has_working_tree)
+            .find(|w| same_folder(Path::new(&w.path), &root));
+        let (head_branch, head_oid) = match open {
+            Some(w) => (w.branch.clone(), w.head),
+            None => {
+                let branch = git.query(&["symbolic-ref", "-q", "HEAD"])?;
+                let listed = branch
+                    .as_deref()
+                    .and_then(|branch| raw_refs.iter().find(|r| r.full_name == branch))
+                    .and_then(|r| r.commit);
+                let oid = match listed {
+                    Some(oid) => Some(oid),
+                    None => git
+                        .query(&["rev-parse", "-q", "--verify", "HEAD^{commit}"])?
+                        .and_then(|s| Oid::from_hex(&s)),
+                };
+                (branch, oid)
+            }
+        };
 
         let mut starts: Vec<Oid> = raw_refs.iter().filter_map(|r| r.commit).collect();
         starts.extend(head_oid);
@@ -1192,6 +1372,85 @@ pub fn classify_ref(full_name: &str) -> (RefKind, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_are_read_as_config_get_would_give_them() {
+        let config = parse_config(
+            b"core.bare\0user.name\nTest\0merge.ff\nfalse\0merge.ff\nonly\0\
+              branch.autosetuprebase\nalways\0remote.origin.url\nhttps://x/y\0\
+              remote.a.b.fetch\n+refs/heads/*:refs/remotes/a.b/*\0remote.pushdefault\norigin\0\
+              merge.log\nyes\0merge.autostash\n\0rebase.autostash\nmaybe\0\
+              diff.Sub Section.textconv\ncat\0",
+        );
+        // The last value wins; section and name match regardless of case, a subsection as is.
+        assert_eq!(config.get("merge.ff"), Some("only"));
+        assert_eq!(config.get("Branch.AutoSetupRebase"), Some("always"));
+        assert_eq!(config.get("diff.Sub Section.textconv"), Some("cat"));
+        assert_eq!(config.get("diff.sub section.textconv"), None);
+        assert_eq!(config.get("user.email"), None);
+        // A key set without a value is empty, as `--get` prints it, and true as a boolean.
+        assert_eq!(config.get("core.bare"), Some(""));
+        assert_eq!(config.bool("core.bare"), Some(true));
+        assert_eq!(config.bool("merge.log"), Some(true));
+        assert_eq!(config.bool("merge.autoStash"), Some(false));
+        assert_eq!(config.bool("rebase.autoStash"), None);
+        assert_eq!(config.bool("commit.gpgsign"), None);
+        // Every `remote.<name>.<setting>` names a remote; `remote.pushDefault` doesn't.
+        assert_eq!(config.remotes(), ["a.b", "origin"]);
+        assert_eq!(parse_config(b""), Config::default());
+    }
+
+    #[test]
+    fn a_batch_of_objects_is_read_by_size() {
+        let out = b"0000000000000000000000000000000000000001 blob 3\nab\n\n\
+                    0000000000000000000000000000000000000002 blob 0\n\n\
+                    0000000000000000000000000000000000000003 blob 2\n\0\xff\n";
+        assert_eq!(
+            parse_batch(out, 3),
+            Some(vec![b"ab\n".to_vec(), Vec::new(), b"\0\xff".to_vec()])
+        );
+        assert_eq!(parse_batch(out, 4), None);
+        assert_eq!(
+            parse_batch(b"0000000000000000000000000000000000000001 missing\n", 1),
+            None
+        );
+        assert_eq!(parse_batch(b"garbage", 1), None);
+    }
+
+    #[test]
+    fn a_location_is_read_from_what_rev_parse_printed_before_it_stopped() {
+        let at = |git_dir: &str, common_dir: &str, work_tree: Option<&str>| Location {
+            git_dir: git_dir.into(),
+            common_dir: common_dir.into(),
+            work_tree: work_tree.map(PathBuf::from),
+        };
+        let work = "true\n/r/w/.git\n/r/w/.git\n/r/w\n";
+        assert_eq!(
+            parse_location(work, true),
+            Some(at("/r/w/.git", "/r/w/.git", Some("/r/w")))
+        );
+        assert_eq!(
+            parse_location(work, true).unwrap().root(),
+            Path::new("/r/w")
+        );
+        // A linked worktree keeps its refs in the main one's git dir.
+        let linked = "true\n/r/w/.git/worktrees/x\n/r/w/.git\n/r/x\n";
+        assert_eq!(
+            parse_location(linked, true),
+            Some(at("/r/w/.git/worktrees/x", "/r/w/.git", Some("/r/x")))
+        );
+        // Without a work tree `--show-toplevel` fails, after the rest has printed.
+        let bare = "false\n/r/b\n/r/b\n";
+        assert_eq!(parse_location(bare, false), Some(at("/r/b", "/r/b", None)));
+        assert_eq!(
+            parse_location(bare, false).unwrap().root(),
+            Path::new("/r/b")
+        );
+        // Not a repository: nothing printed. Or cut short some other way.
+        assert_eq!(parse_location("", false), None);
+        assert_eq!(parse_location("true\n/r/w/.git\n/r/w/.git\n", false), None);
+        assert_eq!(parse_location("true\n/r/w/.git\n", true), None);
+    }
 
     #[test]
     fn a_folder_git_does_not_open_says_why_in_gits_terms() {
