@@ -571,6 +571,14 @@ mod tests {
         let theirs = pushed_elsewhere(origin.path(), "theirs");
         let p = work.path();
         git(p, &["commit", "-q", "--allow-empty", "-m", "Mine"]);
+        // Git for Windows' installer sets `pull.rebase` in the system config: git is told how.
+        let config = parterre_core::git::Git::new(p);
+        if ["pull.rebase", "pull.ff", "branch.main.rebase"]
+            .iter()
+            .any(|key| config.query(&["config", "--get", key]).unwrap().is_some())
+        {
+            return;
+        }
         let mut h = Harness::new(work);
         h.until("the catalogue loads", |h| h.tool.catalog.is_some());
         let pull = Pull {

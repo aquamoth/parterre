@@ -131,6 +131,15 @@ fn push(r: &TestRepo, branch: &str) -> Action {
     }))
 }
 
+/// Whether git's config, as parterre's git reads it (the system's and the user's included),
+/// says how `git pull` reconciles a diverged `main`.
+fn told_how_to_pull(r: &TestRepo) -> bool {
+    let git = parterre_core::git::Git::new(r.path());
+    ["pull.rebase", "pull.ff", "branch.main.rebase"]
+        .iter()
+        .any(|key| git.query(&["config", "--get", key]).unwrap().is_some())
+}
+
 fn upstream(r: &TestRepo, branch: &str) -> Option<String> {
     let out = r.git(&[
         "for-each-ref",
@@ -238,6 +247,11 @@ fn pulling_a_diverged_branch_asks_how_when_git_isnt_told() {
     let theirs = push_from_other(&mut s, "theirs", "theirs\n");
     s.work.write("mine", b"mine\n");
     let mine = s.work.commit_all("mine");
+    if told_how_to_pull(&s.work) {
+        // Git for Windows' installer sets `pull.rebase` in the system config.
+        done(execute(&s.work, pull(&s.work, None), None));
+        return;
+    }
     let diverged: Diverged = match execute(&s.work, pull(&s.work, None), None) {
         Outcome::Diverged(d) => *d,
         other => panic!("expected the question: {other:?}"),
