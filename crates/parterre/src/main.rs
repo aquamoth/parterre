@@ -17,6 +17,7 @@ mod menu;
 mod raster;
 mod record;
 mod render;
+mod reveal;
 mod scene;
 mod script;
 mod settings;
@@ -381,11 +382,6 @@ fn main() -> ExitCode {
     // On Wayland a vsync'ed swap of a hidden window blocks the whole app (egui#5145); see
     // `frame_pacing`. eframe reads this once, when it creates the GL context.
     let vsync = !frame_pacing::wayland_session();
-    // Created invisible and shown once its first frame is painted: otherwise Windows shows it
-    // white, then at its unmaximized size, then black, before anything of parterre's (#309).
-    // Not on Wayland, where a hidden window is what the freeze above is about, and not in a
-    // scripted or recorded run, which paints from the first frame on.
-    let hidden_start = vsync && !scripted && record.is_none();
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(
@@ -393,7 +389,6 @@ fn main() -> ExitCode {
                     .as_ref()
                     .map_or_else(|| app::window_title(repo.as_ref()), app::Opening::title),
             )
-            .with_visible(!hidden_start)
             .with_app_id(settings::APP_ID)
             .with_inner_size([w, h])
             .with_min_inner_size([400.0, 300.0])
@@ -402,6 +397,22 @@ fn main() -> ExitCode {
         ..Default::default()
     };
     options.glow_options.vsync = vsync;
+    // An interactive window on Windows comes up cloaked, and unmaximized until it is: see
+    // `reveal`. The builder hook runs after eframe has restored the saved window state. A
+    // scripted or recorded run paints from its first frame on and is left to eframe.
+    let interactive = !scripted && record.is_none();
+    #[cfg(windows)]
+    let maximized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(windows)]
+    if interactive {
+        let maximized = maximized.clone();
+        options.window_builder = Some(Box::new(move |builder: egui::ViewportBuilder| {
+            if builder.maximized == Some(true) {
+                maximized.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            builder.with_maximized(false)
+        }));
+    }
     let mut automation = Automation::default();
     automation.fit = cli.fit;
     automation.zoom = cli.zoom;
@@ -424,14 +435,16 @@ fn main() -> ExitCode {
         settings::APP_ID,
         options,
         Box::new(move |cc| {
+            #[cfg(windows)]
+            let reveal = interactive
+                .then(|| {
+                    reveal::Reveal::start(cc, maximized.load(std::sync::atomic::Ordering::Relaxed))
+                })
+                .flatten();
+            #[cfg(not(windows))]
+            let reveal = None;
             Ok(Box::new(app::ParterreApp::new(
-                cc,
-                repo,
-                opening,
-                overrides,
-                automation,
-                vsync,
-                hidden_start,
+                cc, repo, opening, overrides, automation, vsync, reveal,
             )))
         }),
     );

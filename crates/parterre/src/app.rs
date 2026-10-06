@@ -49,6 +49,7 @@ use crate::file_dialog::Pending;
 use crate::frame_pacing::FrameLimiter;
 use crate::menu;
 use crate::render::{self, Marks};
+use crate::reveal::Reveal;
 use crate::scene::{FONT_SIZE, Scene, to_point};
 use crate::settings::{
     MOVES_KEY, PRIVACY_KEY, Privacy, RECENT_KEY, RememberedMoves, RepoSettings, Settings,
@@ -353,8 +354,8 @@ pub struct ParterreApp {
     watcher: Option<auto_reload::Watcher>,
     /// The repository named at start, still loading while the window came up (#309).
     opening: Option<Opening>,
-    /// Created invisible, to be shown once its first frame is painted (#309).
-    hidden: bool,
+    /// On Windows, the window cloaked until a frame at its final size is painted (#309).
+    reveal: Option<Reveal>,
     /// A reload the user asked for (F5), loading on a worker thread: the repository's path,
     /// and what came of it.
     reloading: Option<(PathBuf, std::sync::mpsc::Receiver<Result<Repo, String>>)>,
@@ -401,7 +402,7 @@ impl ParterreApp {
         overrides: impl FnOnce(&mut Settings),
         automation: Automation,
         vsync: bool,
-        hidden: bool,
+        reveal: Option<Reveal>,
     ) -> ParterreApp {
         crate::startup::mark("window created");
         let persist = !automation.is_active();
@@ -490,7 +491,7 @@ impl ParterreApp {
                 .then(|| (CORRUPT_SETTINGS.to_owned(), true))
                 .or_else(|| opening.as_ref().and_then(Opening::status)),
             opening,
-            hidden,
+            reveal,
             show_shortcuts: false,
             show_legend: false,
             show_settings: false,
@@ -3088,10 +3089,9 @@ impl eframe::App for ParterreApp {
         }
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
-        // Shown once the first frame, "Opening…" or the graph, has been painted (#309).
-        if self.hidden && ctx.cumulative_frame_nr() > 0 {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            self.hidden = false;
+        // Uncloaked once a frame, "Opening…" or the graph, has been painted (#309).
+        if self.reveal.as_mut().is_some_and(|r| r.finish(&ctx)) {
+            self.reveal = None;
         }
         crate::dialogs::set_look(
             &ctx,

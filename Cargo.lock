@@ -2700,6 +2700,7 @@ dependencies = [
  "parterre-highlight",
  "parterre-telemetry",
  "parterre-util",
+ "raw-window-handle",
  "rfd",
  "ron",
  "serde",
