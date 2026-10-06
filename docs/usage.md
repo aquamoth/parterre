@@ -139,8 +139,10 @@ after a change made elsewhere once it has lasted a moment, so a slow `git` in a 
 doesn't flash it.
 
 The banner's *Compare with working tree* lists HEAD against the working tree, as the graph's
-menu does, with each conflicted file's code from `git status` (`UU`, `AA`, `UD`, `DU`, …) in a
-box. *Conflicts only*, checked at first, lists just those; each drops out once resolved. While
+menu does. A conflicted file's status is a red box with what each side did to it, ours then
+theirs: `MM` both modified, `MD` modified by us and deleted by them, `AA` both added, `A·` only
+ours has it (as after both renamed a file differently), and so on; hover it for `git status`'s
+words. *Conflicts only*, checked at first, lists just those; each drops out once resolved. While
 resolving, *Swap sides* is gone, and so is *Since common ancestor* where it changes nothing. A
 file's menu opens it in your merge tool (`git mergetool`, left running on its own), or its folder
 in a terminal or the file manager. When no merge tool is configured, parterre lists the installed

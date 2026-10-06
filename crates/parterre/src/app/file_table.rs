@@ -16,7 +16,7 @@ use parterre_core::changed_files::{
 };
 use parterre_core::columns::{ColumnWidths, Layout};
 use parterre_core::compare::WorkingTree;
-use parterre_core::conflicts::Answer;
+use parterre_core::conflicts::{Answer, Conflict};
 use parterre_core::file_diff::GITLINK_MODE;
 use parterre_core::git::Git;
 use parterre_core::text::{elide_start, thousands};
@@ -137,8 +137,8 @@ impl FileTable {
         self.table(ui, c, name, owner, files, None, None, bar)
     }
 
-    /// [`FileTable::show`] for a list against the working tree: conflicted files show git's
-    /// code (`UU`, `UD`, …) as their status, and each row's menu opens the file's folder, and
+    /// [`FileTable::show`] for a list against the working tree: conflicted files show what
+    /// each side did (`MM`, `MD`, …, see [`Conflict::letters`]) as their status, and each row's menu opens the file's folder, and
     /// the merge tool or finishes the file, as its conflict allows.
     #[allow(clippy::too_many_arguments)]
     pub fn show_working_tree<'f>(
@@ -414,13 +414,7 @@ impl FileTable {
                     let conflict = tree.and_then(|t| t.conflict(&file.path));
                     match (badged, conflict) {
                         (_, Some(conflict)) => {
-                            boxed(
-                                ui,
-                                conflict.code(),
-                                false,
-                                c.removed,
-                                pos2(x[2] + CELL_PAD, y),
-                            );
+                            paint_conflict(ui, conflict, c, pos2(x[2] + CELL_PAD, y));
                         }
                         (Some(b), None) => paint_badges(ui, &b.badges, pos2(x[2] + CELL_PAD, y)),
                         (None, None) => put(
@@ -578,32 +572,67 @@ impl FileTable {
 fn paint_badges(ui: &Ui, badges: &[Badge], at: egui::Pos2) {
     let mut x = at.x;
     for badge in badges {
-        let text = badge.letter.to_string();
-        x += boxed(ui, &text, badge.filled, badge.color, pos2(x, at.y)) + 4.0;
+        let (letter, fill) = if badge.filled {
+            ((badge.letter, Color32::WHITE), Some(badge.color))
+        } else {
+            ((badge.letter, badge.color), None)
+        };
+        x += boxed(ui, &[letter], badge.color, fill, pos2(x, at.y)) + 4.0;
     }
 }
 
-/// `text` in a box from `at`, centred on its height: filled when `filled`, outlined
-/// otherwise. As wide as it is high for one letter, wider for more. Returns its width.
-fn boxed(ui: &Ui, text: &str, filled: bool, color: Color32, at: egui::Pos2) -> f32 {
+/// A conflict's letters, ours then theirs in their status's colour, boxed in red.
+fn paint_conflict(ui: &Ui, conflict: &Conflict, c: &Colors, at: egui::Pos2) {
+    let weak = ui.visuals().weak_text_color();
+    let letters = conflict.letters().map(|l| {
+        let color = match l {
+            'M' => c.modified,
+            'A' => c.added,
+            'D' => c.removed,
+            _ => weak,
+        };
+        (l, color)
+    });
+    boxed(ui, &letters, c.removed, None, at);
+}
+
+/// `letters` in their colours in a box from `at`, centred on its height, its border `border`
+/// and its inside `fill`. As wide as it is high for one letter, wider for more. Returns its
+/// width.
+fn boxed(
+    ui: &Ui,
+    letters: &[(char, Color32)],
+    border: Color32,
+    fill: Option<Color32>,
+    at: egui::Pos2,
+) -> f32 {
     const SIZE: f32 = 16.0;
-    let fg = if filled { Color32::WHITE } else { color };
-    let g = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), FontId::monospace(11.0), fg);
-    let width = (g.size().x + 6.0).max(SIZE);
-    let r = Rect::from_min_size(pos2(at.x, at.y - SIZE / 2.0), vec2(width, SIZE));
-    if filled {
-        ui.painter().rect_filled(r, 3.0, color);
-    } else {
-        ui.painter().rect_stroke(
-            r.shrink(0.5),
-            3.0,
-            Stroke::new(1.2, color),
-            egui::StrokeKind::Inside,
+    let mut job = LayoutJob::default();
+    for &(letter, color) in letters {
+        job.append(
+            letter.encode_utf8(&mut [0; 4]),
+            0.0,
+            TextFormat::simple(FontId::monospace(11.0), color),
         );
     }
-    ui.painter().galley(r.center() - g.size() / 2.0, g, fg);
+    let g = ui.painter().layout_job(job);
+    let width = (g.size().x + 6.0).max(SIZE);
+    let r = Rect::from_min_size(pos2(at.x, at.y - SIZE / 2.0), vec2(width, SIZE));
+    match fill {
+        Some(fill) => {
+            ui.painter().rect_filled(r, 3.0, fill);
+        }
+        None => {
+            ui.painter().rect_stroke(
+                r.shrink(0.5),
+                3.0,
+                Stroke::new(1.2, border),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+    ui.painter()
+        .galley(r.center() - g.size() / 2.0, g, Color32::PLACEHOLDER);
     width
 }
 
@@ -1228,11 +1257,11 @@ mod tests {
     }
 
     #[test]
-    fn conflicted_rows_show_git_s_codes() {
+    fn conflicted_rows_show_what_each_side_did() {
         let dir = super::super::tool_harness::stuck_merge();
         let t = Table::new(dir.path());
-        assert!(t.shows("UU"), "{:?}", t.texts);
-        assert!(t.shows("UD"));
+        assert!(t.shows("MM"), "{:?}", t.texts);
+        assert!(t.shows("MD"));
         // `gone.txt` is the same as HEAD's, which `git diff HEAD` leaves out.
         assert!(t.shows("gone.txt"));
     }

@@ -446,6 +446,8 @@ pub(super) struct Colors {
     pub(super) added: Color32,
     pub(super) removed: Color32,
     pub(super) renamed: Color32,
+    /// A modified file's `M`.
+    pub(super) modified: Color32,
     /// Behind where a find query is.
     pub(super) found: Color32,
     /// The graph column's lanes, in turn.
@@ -466,6 +468,7 @@ pub(super) fn colors(ui: &Ui) -> Colors {
             added: Color32::from_rgb(0x7b, 0xd8, 0x8f),
             removed: Color32::from_rgb(0xff, 0x8a, 0x80),
             renamed: Color32::from_rgb(0xd1, 0xa5, 0xff),
+            modified: Color32::from_rgb(0xe0, 0xa8, 0x40),
             found: Color32::from_rgba_unmultiplied(0xd0, 0x9a, 0x1c, 80),
             lanes: [
                 Color32::from_rgb(0xef, 0x53, 0x50),
@@ -490,6 +493,7 @@ pub(super) fn colors(ui: &Ui) -> Colors {
             added: Color32::from_rgb(0x2e, 0x7d, 0x32),
             removed: Color32::from_rgb(0xc6, 0x28, 0x28),
             renamed: Color32::from_rgb(0x6a, 0x1b, 0x9a),
+            modified: Color32::from_rgb(0xa8, 0x6a, 0x00),
             found: Color32::from_rgba_unmultiplied(0xff, 0xcc, 0x33, 130),
             lanes: [
                 Color32::from_rgb(0xd3, 0x2f, 0x2f),

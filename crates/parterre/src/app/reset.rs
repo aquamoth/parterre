@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use eframe::egui::{self, Color32, Id, RichText, Ui, ViewportId, vec2};
+use eframe::egui::{self, Id, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::command_text;
 use parterre_core::file_diff::FileDiffSpec;
 use parterre_core::reset::{self, FileOutcome, Mode, Preview};
@@ -288,7 +288,7 @@ impl ResetDialog {
         child.set_clip_rect(pane);
         let outcomes = preview.files(mode);
         let files: Vec<_> = outcomes.iter().map(|o| preview.changed_file(o)).collect();
-        let badges: Vec<_> = outcomes.iter().map(|o| badges(o, &c, &child)).collect();
+        let badges: Vec<_> = outcomes.iter().map(|o| badges(o, &c)).collect();
         let action = self.table.show_badged(
             &mut child,
             &c,
@@ -375,16 +375,11 @@ fn side(ui: &mut Ui, preview: &Preview, repo: &Repo, mode: &mut Mode, asked: &mu
 /// A file's Status column: what it is afterwards, as `git status --short` letters (filled when
 /// staged, outlined when on disk only, U untracked); a check mark for a file rewritten; a red
 /// ! for lost work, or the file git refuses on.
-fn badges(o: &FileOutcome, c: &Colors, ui: &Ui) -> Badges {
-    let amber = if ui.visuals().dark_mode {
-        Color32::from_rgb(0xe0, 0xa8, 0x40)
-    } else {
-        Color32::from_rgb(0xa8, 0x6a, 0x00)
-    };
+fn badges(o: &FileOutcome, c: &Colors) -> Badges {
     let color = |letter: char| match letter {
         'A' | 'U' | '✔' => c.added,
         'D' | '!' => c.removed,
-        _ => amber,
+        _ => c.modified,
     };
     let badge = |letter: char, filled: bool| Badge {
         letter,
