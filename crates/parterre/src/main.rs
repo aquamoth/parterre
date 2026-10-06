@@ -21,6 +21,7 @@ mod scene;
 mod script;
 mod settings;
 mod settings_file;
+mod startup;
 mod system_theme;
 mod text_size;
 mod theme;
@@ -35,7 +36,6 @@ mod widgets;
 #[cfg(test)]
 mod win_resource;
 
-use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -298,6 +298,7 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
 }
 
 fn main() -> ExitCode {
+    startup::begin();
     console::attach_parent();
     let mut cli = Cli::parse();
     if let Some(id) = cli.highlight.as_deref() {
@@ -335,25 +336,22 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let scripted = cli.screenshot.is_some() || script.is_some();
-    // Why the repository named on the command line didn't open, when the window says so.
-    let mut open_error = None;
-    let repo = match &cli.path {
-        Some(path) => match parterre_core::git::load_repo(path) {
-            Ok(repo) => Some(repo),
-            // In a terminal or a scripted run, say why and stop. Started from Explorer's menu, a
-            // desktop entry or a shortcut there is no one to read stderr, so the window opens
-            // and shows it.
-            Err(e) if cli.export.is_some() || scripted || std::io::stderr().is_terminal() => {
+    // The repository loads on a thread of its own while the window comes up, which hides most
+    // of the load behind the window's own start (#309); the window shows why if it fails.
+    // Started from a menu or file manager with none named, the current directory is tried.
+    let opening = app::Opening::start(cli.path.clone());
+    // An export has no window to wait in, and a scripted run says why it failed and stops
+    // before any window: those wait for the load here.
+    let (repo, opening) = if cli.export.is_some() || scripted {
+        match opening.wait() {
+            Ok(repo) => (repo, None),
+            Err(e) => {
                 eprintln!("parterre: {e}");
                 return ExitCode::FAILURE;
             }
-            Err(e) => {
-                open_error = Some(format!("Could not open {}: {e}", path.display()));
-                None
-            }
-        },
-        // Started from a menu or file manager, the current directory is seldom a repository.
-        None => parterre_core::git::load_repo(std::path::Path::new(".")).ok(),
+        }
+    } else {
+        (None, Some(opening))
     };
 
     if let Some(path) = cli.export.clone() {
@@ -375,7 +373,7 @@ fn main() -> ExitCode {
 
     // A screenshot run exits by itself and reports where it saved, as a recording does; an
     // interactive window must not be tied to the terminal it was started from.
-    if !scripted && record.is_none() {
+    if !scripted && record.is_none() && !startup::enabled() {
         console::detach();
     }
 
@@ -417,7 +415,7 @@ fn main() -> ExitCode {
         options,
         Box::new(move |cc| {
             Ok(Box::new(app::ParterreApp::new(
-                cc, repo, open_error, overrides, automation, vsync,
+                cc, repo, opening, overrides, automation, vsync,
             )))
         }),
     );

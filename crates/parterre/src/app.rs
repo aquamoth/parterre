@@ -351,6 +351,8 @@ pub struct ParterreApp {
     moves: RememberedMoves,
     /// Reloads when the refs change, if `settings.auto_reload` is on.
     watcher: Option<auto_reload::Watcher>,
+    /// The repository named at start, still loading while the window came up (#309).
+    opening: Option<Opening>,
     /// A reload the user asked for (F5), loading on a worker thread: the repository's path,
     /// and what came of it.
     reloading: Option<(PathBuf, std::sync::mpsc::Receiver<Result<Repo, String>>)>,
@@ -393,11 +395,12 @@ impl ParterreApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         repo: Option<Repo>,
-        open_error: Option<String>,
+        opening: Option<Opening>,
         overrides: impl FnOnce(&mut Settings),
         automation: Automation,
         vsync: bool,
     ) -> ParterreApp {
+        crate::startup::mark("window created");
         let persist = !automation.is_active();
         let storage = cc.storage.filter(|_| persist);
         let (mut settings, stored, corrupt) = settings_file::load(storage);
@@ -478,9 +481,10 @@ impl ParterreApp {
             pending_select: Vec::new(),
             drag: None,
             search: Search::default(),
-            status: open_error
-                .or_else(|| corrupt.then(|| CORRUPT_SETTINGS.to_owned()))
-                .map(|e| (e, true)),
+            status: corrupt
+                .then(|| (CORRUPT_SETTINGS.to_owned(), true))
+                .or_else(|| opening.as_ref().and_then(Opening::status)),
+            opening,
             show_shortcuts: false,
             show_legend: false,
             show_settings: false,
@@ -577,6 +581,7 @@ impl ParterreApp {
         } else {
             None
         };
+        crate::startup::mark("graph shown");
         self.scene = Some(scene);
         self.scene_key = Some(job.key);
         self.hovered = None;
@@ -952,6 +957,44 @@ impl ParterreApp {
                 Picked::ImportSettings => Pending::start(what, dialog.pick_file(), ctx),
                 _ => Pending::start(what, dialog.save_file(), ctx),
             });
+        }
+    }
+
+    /// Shows the repository that started loading before the window, once it is in (#309).
+    fn finish_opening(&mut self, ctx: &egui::Context) {
+        let Some(opening) = &self.opening else {
+            return;
+        };
+        let Some(result) = opening.poll() else {
+            // Nothing else may happen in the window meanwhile, so it looks again by itself.
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            return;
+        };
+        let opening = self.opening.take().expect("polled");
+        // The user has opened something else meanwhile.
+        if self.repo.is_some() {
+            return;
+        }
+        match result {
+            Ok(repo) => {
+                let corrupt = self
+                    .status
+                    .as_ref()
+                    .is_some_and(|(message, _)| message == CORRUPT_SETTINGS);
+                self.recent.add(&repo.path);
+                self.telemetry.opened(&repo);
+                self.show_repo(Some(repo));
+                if corrupt {
+                    self.status = Some((CORRUPT_SETTINGS.to_owned(), true));
+                }
+            }
+            Err(e) if opening.named => {
+                let message = format!("Could not open {}: {e}", opening.path.display());
+                eprintln!("parterre: {message}");
+                self.status = Some((message, true));
+            }
+            // The current directory, tried for want of a name, seldom is a repository.
+            Err(_) => self.status = None,
         }
     }
 
@@ -2765,6 +2808,60 @@ fn shortcuts(ui: &mut Ui) {
 }
 
 /// "Apps – parterre", or just "parterre" while no repository is open.
+/// The repository named at start, loading on a thread of its own while the window comes up
+/// (#309).
+pub struct Opening {
+    path: PathBuf,
+    /// Whether the user named the folder. Without a name the current directory is tried, and
+    /// nothing is said when it isn't a repository.
+    named: bool,
+    rx: std::sync::mpsc::Receiver<Result<Repo, String>>,
+}
+
+impl Opening {
+    /// Starts loading `path`, or the current directory if there is none.
+    pub fn start(path: Option<PathBuf>) -> Opening {
+        let named = path.is_some();
+        let path = path.unwrap_or_else(|| PathBuf::from("."));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = path.clone();
+        std::thread::spawn(move || {
+            let loaded = parterre_core::git::load_repo(&dir).map_err(|e| e.to_string());
+            crate::startup::mark("repository loaded");
+            let _ = tx.send(loaded);
+        });
+        Opening { path, named, rx }
+    }
+
+    /// Waits for the load: the repository, none when the unnamed current directory isn't one,
+    /// or why the named folder didn't open.
+    pub fn wait(self) -> Result<Option<Repo>, String> {
+        match self.rx.recv() {
+            Ok(Ok(repo)) => Ok(Some(repo)),
+            Ok(Err(e)) if self.named => Err(e),
+            Err(_) if self.named => Err("loading stopped unexpectedly".into()),
+            _ => Ok(None),
+        }
+    }
+
+    /// What came of the load, if it is done.
+    fn poll(&self) -> Option<Result<Repo, String>> {
+        match self.rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err("loading stopped unexpectedly".into()))
+            }
+        }
+    }
+
+    /// What the window says meanwhile.
+    fn status(&self) -> Option<(String, bool)> {
+        self.named
+            .then(|| (format!("Opening {}…", self.path.display()), false))
+    }
+}
+
 pub fn window_title(repo: Option<&Repo>) -> String {
     match repo {
         Some(repo) => format!("{} – parterre", repo.display_name()),
@@ -2945,6 +3042,7 @@ impl ParterreApp {
 
 impl eframe::App for ParterreApp {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        crate::startup::mark("first frame");
         // One pass paints the main window and every immediate viewport, so this paces them all.
         if let Some(limiter) = &mut self.frame_limiter {
             limiter.wait();
@@ -2965,6 +3063,7 @@ impl eframe::App for ParterreApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
         }
+        self.finish_opening(&ctx);
         self.auto_reload(&ctx);
         self.finish_reload(&ctx);
         self.branches.update(&ctx, self.repo.as_ref());
