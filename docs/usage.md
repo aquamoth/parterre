@@ -140,7 +140,8 @@ doesn't flash it.
 
 The banner's *Compare with working tree* lists HEAD against the working tree, as the graph's
 menu does, with each conflicted file's code from `git status` (`UU`, `AA`, `UD`, `DU`, …) in a
-box. *Conflicts only*, checked at first, lists just those; each drops out once resolved. A
+box. *Conflicts only*, checked at first, lists just those; each drops out once resolved. While
+resolving, *Swap sides* is gone, and so is *Since common ancestor* where it changes nothing. A
 file's menu opens it in your merge tool (`git mergetool`, left running on its own), or its folder
 in a terminal or the file manager. When no merge tool is configured, parterre lists the installed
 ones; *Remember this choice* sets `merge.tool` in your global git config. Any conflict but a
@@ -216,9 +217,9 @@ double-click one for its diff. Right-click a node for *Compare* › *HEAD*, *Wor
 uncommitted changes, staged or not; `F5` lists them again), *Upstream*, or with two nodes
 selected *Selected revisions*. To compare commits far apart, *Mark for comparison* one (from the
 node menu or a row in the log) and pick *Compare with marked* on the other, from any log. A
-range log's *Compare files* compares its two ends. Where the two histories forked, the window's
-*Since common ancestor* shows only what the right-hand side changed since then, as a pull request
-does. *Swap sides* turns a comparison of two commits round; the working tree stays on the right.
+range log's *Compare files* compares its two ends. The window's *Since common ancestor* shows
+only what the right-hand side changed since the two forked, as a pull request does; *Swap sides*
+turns the comparison round.
 
 ## Blame
 

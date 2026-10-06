@@ -79,6 +79,8 @@ pub struct CompareWindow {
     blames: Vec<(Arc<Repo>, BlameSpec)>,
     /// What working-tree rows asked for, for the app to take.
     pub requests: Vec<FileRequest>,
+    /// The working tree had conflicts when last listed: the window is resolving them.
+    conflicted: bool,
 }
 
 #[derive(Debug)]
@@ -179,9 +181,10 @@ impl CompareWindow {
         self.diffs.confirm_many(ui, Id::new("compare-many-diffs"));
     }
 
-    /// The two commits, one per line, and the button that swaps them; not the working tree,
-    /// which goes on the right as it does in `git diff <commit>`.
+    /// The two commits, one per line, and the button that swaps them, except while
+    /// resolving conflicts.
     fn header(&mut self, ui: &mut Ui, c: &Colors, env: &mut Env) {
+        let resolving = self.resolving();
         let Some(view) = &mut self.view else { return };
         let height = 2.0 * SIDE_ROW + 12.0;
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
@@ -195,7 +198,7 @@ impl CompareWindow {
                 .max_rect(rect.shrink2(vec2(8.0, 0.0)))
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
-        if !view.comparison.reads_working_tree() {
+        if !resolving {
             let swap = widgets::tip_explained(
                 widgets::icon_button(&mut tools, glyphs::SWAP, false),
                 "Swap sides",
@@ -215,9 +218,19 @@ impl CompareWindow {
         }
     }
 
-    /// The changed-files table, with the common-ancestor switch in its bar where the sides'
-    /// histories forked.
+    /// True while a side is the working tree and it has conflicts.
+    fn resolving(&self) -> bool {
+        self.conflicted
+            && self
+                .view
+                .as_ref()
+                .is_some_and(|v| v.comparison.reads_working_tree())
+    }
+
+    /// The changed-files table, with the common-ancestor switch in its bar; while resolving
+    /// conflicts, only where it changes what is compared.
     fn files(&mut self, ui: &mut Ui, c: &Colors, env: &mut Env) {
+        let resolving = self.resolving();
         let Some(view) = &mut self.view else { return };
         view.comparison.since_ancestor = env.settings.since_ancestor;
         let comparison = view.comparison;
@@ -230,10 +243,14 @@ impl CompareWindow {
         });
         let base = listed.and_then(|(base, files, _)| files.is_ok().then_some(*base));
         let tree = listed.and_then(|(_, _, tree)| tree.as_ref());
+        // Kept while the working tree is listed again, so the header doesn't flicker.
+        if listed.is_some() {
+            self.conflicted = tree.is_some_and(|t| !t.conflicts.is_empty());
+        }
         let weak = ui.visuals().weak_text_color();
         let abbrev = view.repo.abbrev_len;
         let since = &mut env.settings.since_ancestor;
-        let ancestor_matters = view.ancestor_matters;
+        let ancestor_matters = !resolving || view.ancestor_matters;
         let action = self.table.show_working_tree(
             ui,
             c,
