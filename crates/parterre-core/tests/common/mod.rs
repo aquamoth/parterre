@@ -42,7 +42,7 @@ pub fn configure(dir: &Path) {
 
 /// The hash in what `git commit` printed, `[main (root-commit) <hash>] <subject>`, in full
 /// with `core.abbrev=no`; nothing if a hook or an older git printed something else first.
-pub fn committed(out: &str) -> Option<String> {
+pub fn committed_hash(out: &str) -> Option<String> {
     let summary = out.lines().next()?.strip_prefix('[')?;
     let hash = summary.split_once("] ")?.0.rsplit(' ').next()?;
     let full = hash.len() >= 40 && hash.bytes().all(|b| b.is_ascii_hexdigit());
@@ -138,7 +138,7 @@ impl TestRepo {
             "-m",
             message,
         ]);
-        committed(&out).unwrap_or_else(|| self.git(&["rev-parse", "HEAD"]))
+        committed_hash(&out).unwrap_or_else(|| self.git(&["rev-parse", "HEAD"]))
     }
 
     /// Sets the clock (minutes after the base date) for the commits that follow; each commit

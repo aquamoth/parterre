@@ -43,8 +43,8 @@ pub fn init(dir: &Path) {
     let config = dir.join(".git").join("config");
     let mut file = std::fs::OpenOptions::new()
         .append(true)
-        .open(config)
-        .unwrap();
+        .open(&config)
+        .unwrap_or_else(|e| panic!("open {}: {e}", config.display()));
     std::io::Write::write_all(
         &mut file,
         b"[user]\n\tname = Test\n\temail = test@example.com\n[maintenance]\n\tauto = false\n",

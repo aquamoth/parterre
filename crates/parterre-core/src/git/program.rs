@@ -37,14 +37,10 @@ fn find() -> PathBuf {
     )
 }
 
-/// The folders of an install that hold the real `git.exe` under `bin\`, the likeliest build
-/// for this machine first. An install has one of them.
+/// The folders an install may hold the real `git.exe` under `bin\` of, one per build; an
+/// install has one of them.
 #[cfg(any(windows, test))]
-const BUILD_DIRS: &[&str] = if cfg!(target_arch = "aarch64") {
-    &["clangarm64", "mingw64", "mingw32"]
-} else {
-    &["mingw64", "mingw32", "clangarm64"]
-};
+const BUILD_DIRS: &[&str] = &["mingw64", "clangarm64", "mingw32"];
 
 /// The first `git.exe` on `path` (a PATH value), replaced by the real git of its install when
 /// it is a `cmd\` or `bin\` launcher; otherwise the real git, or else the launcher, of the
@@ -68,14 +64,16 @@ fn locate(
         .map(|dir| dir.join("git.exe"))
         .find(|exe| is_file(exe));
     if let Some(exe) = on_path {
+        // The launchers sit in `<install>\cmd` and `<install>\bin`; so does the real git of
+        // an install, under `<build>\bin`, which has no real git beside it.
         let dir = exe.parent();
-        let is_launcher = dir
+        let in_cmd_or_bin = dir
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
             .is_some_and(|name| {
                 name.eq_ignore_ascii_case("cmd") || name.eq_ignore_ascii_case("bin")
             });
-        if is_launcher && let Some(real) = dir.and_then(Path::parent).and_then(real_git) {
+        if in_cmd_or_bin && let Some(real) = dir.and_then(Path::parent).and_then(real_git) {
             return real;
         }
         return exe;
@@ -166,20 +164,6 @@ mod tests {
     }
 
     #[test]
-    fn the_likeliest_build_for_this_machine_is_preferred() {
-        let files = [
-            launcher("Git"),
-            real("Git", "mingw64"),
-            real("Git", "mingw32"),
-        ];
-        let cmd = Path::new("Git").join("cmd");
-        assert_eq!(
-            locate_with(&[&cmd], &[], &files),
-            real("Git", BUILD_DIRS[0])
-        );
-    }
-
-    #[test]
     fn git_on_path_is_otherwise_run_as_found() {
         // The real git itself.
         let bin = Path::new("Git").join("mingw64").join("bin");
@@ -229,6 +213,24 @@ mod tests {
                 &[launcher("second"), real("third", "mingw64")]
             ),
             launcher("second")
+        );
+    }
+
+    /// What this machine resolves: never a `cmd` launcher, which is what PATH usually leads
+    /// to and what the `windows-latest` runner's does (#309).
+    #[cfg(windows)]
+    #[test]
+    fn the_launcher_is_not_what_runs_here() {
+        let exe = find();
+        let folder = exe
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        assert!(
+            !folder.eq_ignore_ascii_case("cmd"),
+            "parterre would run the launcher {}",
+            exe.display()
         );
     }
 
