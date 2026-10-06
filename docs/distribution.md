@@ -14,6 +14,7 @@ before acting on an old fact.
 | winget | `Trustfall.Parterre`, moniker `parterre` | next | #16 |
 | Chocolatey | `parterre` | next | #17 |
 | .deb and .rpm on GitHub Releases | `parterre`, app ID `se.trustfall.parterre` | next | #18 |
+| macOS disk images on GitHub Releases | `parterre.app`, bundle ID `se.trustfall.parterre` | next | #90 |
 | Snap Store | `parterre` | next | #19 |
 | Flathub | `se.trustfall.parterre` | later | #21 |
 
@@ -35,8 +36,10 @@ approval (#20). Not planned for now:
 - **AppImage**: no name registry, so it claims nothing.
 - **ARM64** (Windows and Linux): a separate decision when someone asks. GitHub's ARM runners
   are free for public repositories.
-- **macOS installers**: none until someone with a Mac can test them. The tarballs stay.
-- **Code signing**: the MSI is unsigned for now (see [Windows](#windows)).
+- **A macOS installer package** (`.pkg`): a disk image is how a Mac app is installed. The
+  tarballs stay, for the terminal.
+- **Code signing**: the MSI is unsigned for now (see [Windows](#windows)), and the Mac app is
+  signed ad hoc only (see [macOS](#macos)).
 
 ## Identity
 
@@ -64,7 +67,7 @@ parterre runs the `git` command-line tool, so every package needs git:
 | .deb / .rpm | `Depends: git (>= 1:2.31)` / `Requires: git-core >= 2.31` (git without Perl and the GUIs, on Fedora and openSUSE) |
 | Snap | git bundled (the sandbox can't reach the host's git) |
 | Flathub | git bundled; the freedesktop runtime has none |
-| crates.io, zip, tarballs | documented in the README |
+| crates.io, zip, tarballs, macOS disk images | documented in the README |
 
 The minimum is git 2.31 (`parterre_core::git::MINIMUM_VERSION`,
 [research](research/git-version-support.md)). Every channel declares it, so that raising it
@@ -86,13 +89,13 @@ menu with *Download X.Y.Z*, which does what fits the channel parterre came throu
 
 | Channel | *Download* |
 |---|---|
-| MSI (also winget and Chocolatey, which install it), zip, tarballs, .deb, .rpm | opens that channel's own file of the release in the browser |
+| MSI (also winget and Chocolatey, which install it), zip, tarballs, macOS disk images, .deb, .rpm | opens that channel's own file of the release in the browser |
 | crates.io (`cargo install`), and any build without a channel | copies `cargo install --locked parterre` |
 | Snap, Flathub | nothing: their stores update parterre, and there is no check |
 
 - **The channel is stamped at build time.** Each packaging job in `release.yml` builds with
-  `PARTERRE_CHANNEL` set to `msi`, `zip`, `tarball`, `deb` or `rpm`, so the installer and the
-  packages each get a build of their own. Snap and Flatpak are told at run time by
+  `PARTERRE_CHANNEL` set to `msi`, `zip`, `tarball`, `dmg`, `deb` or `rpm`, so the installers
+  and the packages each get a build of their own. Snap and Flatpak are told at run time by
   `SNAP_NAME=parterre` and `FLATPAK_ID=se.trustfall.parterre`.
 - **Pre-releases:** a release build compares with the latest release, a release candidate (or
   a dev build) with the newest of any kind, so it hears of the next candidate and the final.
@@ -217,6 +220,26 @@ Sources:
 [cargo-deb](https://github.com/kornelski/cargo-deb),
 [cargo-generate-rpm](https://github.com/cat-in-136/cargo-generate-rpm),
 [AUR registration](https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/thread/MZKFOZTW6HX7SU2YZIQEWFLF4EMWTF4O/).
+
+## macOS
+
+- **A disk image per target** (decided 2026-10-06, #90): `parterre.app` beside a link to
+  `/Applications`, for Apple silicon and Intel, named like the tarballs. Not one universal app:
+  each target is built, its symbols uploaded and *Download* offered just as the tarballs are.
+  Details in [building.md](building.md#macos-app).
+- **Bundle ID `se.trustfall.parterre`**, the app ID of the Linux packages.
+- **Signed ad hoc, not notarized:**
+  - Apple silicon runs nothing unsigned; an ad hoc signature is enough for that.
+  - A download from GitHub is quarantined, so the first start says Apple could not verify it.
+    *System Settings › Privacy & Security › Open Anyway* opens it, once.
+- **Signing option if that changes:** a Developer ID and notarization, through the Apple
+  Developer Program: US$99 a year. Trustfall AB would enrol as an organisation, which needs a
+  D-U-N-S number. Then the app opens without the prompt.
+
+Sources:
+[Apple: apps from unknown developers](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac),
+[Apple Developer Program enrolment](https://developer.apple.com/programs/enroll/),
+[runner images](https://github.com/actions/runner-images).
 
 ## crates.io
 

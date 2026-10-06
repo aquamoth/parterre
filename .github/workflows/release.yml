@@ -1,11 +1,12 @@
 name: Release
 
 # Pushing a tag vX.Y.Z[-prerelease] publishes a GitHub Release with binaries for Linux, Windows
-# and macOS, the Windows installer, and .deb and .rpm packages, then the crates and the
-# Chocolatey package. PARTERRE_RELEASE_TAG supplies the binary's version; build.rs checks that
-# the tag points at the clean commit being built. The packages are installed on Linux and
-# Windows first, and nothing is published unless that passes. The Linux and macOS builds upload
-# their symbols to PostHog, for readable crash reports (#265). See docs/releasing.md.
+# and macOS, the Windows installer, the macOS disk images, and .deb and .rpm packages, then the
+# crates and the Chocolatey package. PARTERRE_RELEASE_TAG supplies the binary's version; build.rs
+# checks that the tag points at the clean commit being built. The packages are installed on
+# Linux, Windows and macOS first, and nothing is published unless that passes. The Linux and
+# macOS builds upload their symbols to PostHog, for readable crash reports (#265). See
+# docs/releasing.md.
 #
 # Started by hand on a branch (gh workflow run release.yml --ref BRANCH), it builds, packages and
 # installs the same way, and uploads the symbols, but publishes nothing, leaving the packages as
@@ -152,6 +153,15 @@ jobs:
               symbols/$channel
             packaging/linux/build-packages.sh --target ${{ matrix.target }} --only $channel dist
           done
+      # parterre.app in a disk image, from a build stamped dmg (packaging/macos/build-dmg.sh).
+      # The version is passed, since the Intel build can't run here to tell it.
+      - name: macOS disk image
+        if: runner.os == 'macOS'
+        run: |
+          PARTERRE_CHANNEL=dmg cargo build --release --locked --target ${{ matrix.target }}
+          mkdir -p symbols/dmg
+          cp -RL target/${{ matrix.target }}/release/parterre.dSYM symbols/dmg/
+          packaging/macos/build-dmg.sh --target ${{ matrix.target }} --version "$VERSION" dist
       # The installer, from the zip's files with a build stamped msi
       # (packaging/windows/build-msi.ps1).
       - name: Windows installer
@@ -242,6 +252,31 @@ jobs:
           $msi = Get-ChildItem dist\*.msi
           packaging\windows\test-msi.ps1 -Msi $msi.FullName -Scope ${{ matrix.scope }}
 
+  # Installs parterre.app from each disk image into /Applications, runs it, also started as
+  # Finder starts it, and removes it before it is published (packaging/macos/test-dmg.sh). The
+  # Intel image on an Intel runner, since Apple silicon can't be relied on to run it.
+  macos-install:
+    name: Install (macOS, ${{ matrix.target }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-26-intel, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: packaging/macos
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.target }}
+          path: dist
+      # The checkout is the repository the app opens.
+      - name: Install, run and remove
+        run: packaging/macos/test-dmg.sh dist/*.dmg .
+
   # The tag is on a commit of main, which CI has tested on all three systems, Linux in the same
   # Ubuntu 22.04 container as the build above. Instead of testing it again, wait for that run
   # and publish only if it passed (#236).
@@ -282,7 +317,7 @@ jobs:
 
   publish:
     name: Publish
-    needs: [build, linux-packages, windows-install, ci]
+    needs: [build, linux-packages, windows-install, macos-install, ci]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:

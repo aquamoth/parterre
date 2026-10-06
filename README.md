@@ -134,6 +134,7 @@ Download parterre for your system from the
 | Windows | `.msi` | Start menu entry, *Revision Graph* in Explorer's folder menu; no admin rights needed |
 | Debian, Ubuntu | `.deb` | menu entry, *Revision Graph* in Nautilus, Dolphin and Nemo |
 | Fedora, openSUSE | `.rpm` | the same |
+| macOS | `.dmg` (`aarch64` for Apple silicon, `x86_64` for Intel) | the app, to drag into Applications; not signed by Apple, so allow it once in *System Settings › Privacy & Security* |
 | Linux, macOS, Windows | `.tar.gz` / `.zip` | just the program: put `parterre` on your `PATH` |
 
 ```sh

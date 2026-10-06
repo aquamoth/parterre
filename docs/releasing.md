@@ -22,15 +22,18 @@ release filenames. Tag a clean commit on `main`; the version in the root `Cargo.
    symbols](#crash-report-symbols)).
    Windows also gets an installer built from the same files,
    `parterre-0.5.0-rc1-x86_64-pc-windows-msvc.msi` (see
-   [building.md](building.md#windows-installer)), and Linux a `.deb` and an `.rpm`,
+   [building.md](building.md#windows-installer)), Linux a `.deb` and an `.rpm`,
    `parterre_0.5.0-rc1_amd64.deb` and `parterre-0.5.0-rc1-1.x86_64.rpm` (see
-   [building.md](building.md#linux-packages)). The installer and each package get a binary of
-   their own, stamped with their channel for the update check
-   ([distribution.md](distribution.md#update-check)). Before the release is published they are
-   installed, run and removed: the `.deb` and `.rpm` on Debian 12, Ubuntu 22.04 and 24.04,
-   Fedora and openSUSE Leap 15.6, and the MSI on Windows per user and machine-wide. If any of
-   that fails, nothing is published. A tag with a pre-release part goes through all of it and
-   publishes a pre-release; its MSI has version `0.5.0`, since MSI versions are numbers only.
+   [building.md](building.md#linux-packages)), and each macOS target a disk image with the app,
+   `parterre-0.5.0-rc1-aarch64-apple-darwin.dmg` (see [building.md](building.md#macos-app)).
+   The installers and each package get a binary of their own, stamped with their channel for
+   the update check ([distribution.md](distribution.md#update-check)). Before the release is
+   published they are installed, run and removed: the `.deb` and `.rpm` on Debian 12, Ubuntu
+   22.04 and 24.04, Fedora and openSUSE Leap 15.6, the MSI on Windows per user and
+   machine-wide, and the disk images on Apple silicon and Intel Macs. If any of that fails,
+   nothing is published. A tag with a pre-release part goes through all of it and
+   publishes a pre-release; its MSI and Mac app have version `0.5.0`, since their versions are
+   numbers only.
    CI builds no packages, so a pre-release (or a run by hand, below) is where packaging is
    first tested.
 
@@ -73,9 +76,9 @@ guide](https://posthog.com/docs/error-tracking/upload-source-maps/rust):
   - **macOS:** with `CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed`, rustc writes
     `parterre.dSYM` before it strips the binary, which keeps its `LC_UUID`.
   - **Windows:** with `CARGO_PROFILE_RELEASE_STRIP=none`, the linker writes `parterre.pdb`.
-- The tarball, the `.deb`, the `.rpm`, the zip and the MSI each hold a build of their own
-  (stamped with its channel), so each has its own debug info: `symbols/<channel>/` on Linux
-  and macOS, `zip/` and `msi/` in the PDB archive.
+- The tarball, the disk image, the `.deb`, the `.rpm`, the zip and the MSI each hold a build of
+  their own (stamped with its channel), so each has its own debug info: `symbols/<channel>/`
+  on Linux and macOS, `zip/` and `msi/` in the PDB archive.
 - **Upload:** each Linux and macOS build job runs `posthog-cli symbol-sets upload` (pinned to a
   version and its checksum) on its `symbols/`, with `POSTHOG_CLI_HOST=https://eu.posthog.com`.
   The symbols are filed under the release `parterre` with the version of the file names.
@@ -97,8 +100,8 @@ Without them, in a fork, the upload is skipped with a warning and the release go
 To check that a release's symbols arrived:
 
 1. The log of each build job's *Upload symbols to PostHog* step lists every file with its debug
-   ID and ends with an upload summary: three files on Linux (tarball, deb, rpm), a dSYM on
-   macOS.
+   ID and ends with an upload summary: three files on Linux (tarball, deb, rpm), two dSYMs on
+   macOS (tarball, dmg).
 2. In PostHog, *Error tracking › Configuration › Symbol sets* lists them, under the release
    `parterre` and its version.
 3. A panic from one of the release's builds, with crash reports ticked, shows functions and

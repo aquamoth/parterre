@@ -12,6 +12,8 @@ pub enum Channel {
     Zip,
     /// The Linux and macOS tarballs.
     Tarball,
+    /// The macOS disk image with `parterre.app`.
+    Dmg,
     Deb,
     Rpm,
     /// `cargo install`, and any build without a stamp.
@@ -23,10 +25,11 @@ pub enum Channel {
 impl Channel {
     /// The channels whose packaging job stamps them into the build, by the name it sets
     /// `PARTERRE_CHANNEL` to (`.github/workflows/release.yml`).
-    pub const STAMPED: [Channel; 5] = [
+    pub const STAMPED: [Channel; 6] = [
         Channel::Msi,
         Channel::Zip,
         Channel::Tarball,
+        Channel::Dmg,
         Channel::Deb,
         Channel::Rpm,
     ];
@@ -36,6 +39,7 @@ impl Channel {
             Channel::Msi => "msi",
             Channel::Zip => "zip",
             Channel::Tarball => "tarball",
+            Channel::Dmg => "dmg",
             Channel::Deb => "deb",
             Channel::Rpm => "rpm",
             Channel::Cargo => "cargo",
