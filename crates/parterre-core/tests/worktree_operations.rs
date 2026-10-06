@@ -942,7 +942,7 @@ fn a_detached_worktree_has_no_branch_to_delete() {
 }
 
 #[test]
-fn the_branch_a_worktree_is_rebasing_goes_with_it() {
+fn the_branch_a_worktree_is_rebasing_is_never_deleted_with_it() {
     let (mut r, others, _) = repository();
     r.git(&["branch", "side"]);
     r.write("file", b"main\n");
@@ -960,17 +960,13 @@ fn the_branch_a_worktree_is_rebasing_goes_with_it() {
         .unwrap();
     assert!(!out.status.success());
     let mut w = warning(execute(&r, deletion(&r, "rebasing"), None));
-    let branch = w.deletions[0]
-        .branch
-        .clone()
-        .expect("the branch being rebased");
-    assert_eq!((branch.name.as_str(), branch.tip), ("side", side));
-    assert_eq!(branch.commits, [side]);
+    assert!(w.deletions[0].branch.is_none());
+    // Even asked to, it leaves the branch where it was.
     w.set_deletes_branches(true);
-    assert!(w.commits.contains(&side));
+    assert_eq!(w.commands.len(), 1, "no branch step");
     done(execute(&r, w.action.clone(), Some(&w)));
     assert!(!wt.exists());
-    assert!(!branch_exists(&r, "side"));
+    assert_eq!(oid(&r.git(&["rev-parse", "side"])), side);
 }
 
 #[test]

@@ -1056,7 +1056,7 @@ impl Deletion {
     }
 }
 
-/// A worktree's local branch: checked out there, or being rebased there.
+/// A worktree's local branch, checked out there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeBranch {
     pub name: String,
@@ -1775,12 +1775,10 @@ fn worktree_losses(
         .collect()
 }
 
-/// The local branch a worktree has checked out, or is rebasing, with its tip.
+/// The local branch a worktree has checked out, with its tip. A branch being rebased there
+/// has none: its tip isn't what the worktree shows, and *Abort* comes first.
 fn worktree_branch(catalog: &Catalog, wt: &Worktree) -> Option<BranchTip> {
-    let name = wt
-        .branch
-        .as_ref()
-        .or(wt.rebasing.as_ref().and_then(|r| r.branch.as_ref()))?;
+    let name = wt.branch.as_ref()?;
     catalog
         .locals
         .iter()
