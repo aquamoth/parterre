@@ -611,7 +611,8 @@ fn gh_token() -> Result<Token, ForgeError> {
     use std::time::{Duration, Instant};
 
     let mut cmd = Command::new("gh");
-    cmd.args(["auth", "token", "--hostname", "github.com"])
+    parterre_core::shell_path::apply(&mut cmd)
+        .args(["auth", "token", "--hostname", "github.com"])
         .env("GH_PROMPT_DISABLED", "1")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())

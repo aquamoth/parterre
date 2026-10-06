@@ -306,6 +306,8 @@ fn main() -> ExitCode {
         return ExitCode::from(parterre_highlight::serve(id));
     }
     cli.path = cli.path.take().map(repair_quoted_root);
+    // Started from the Dock, the shell's PATH is read while the window comes up (#326).
+    parterre_core::shell_path::start();
     let script = match cli.script.as_deref().map(read_script).transpose() {
         Ok(script) => script,
         Err(e) => {

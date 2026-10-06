@@ -34,6 +34,7 @@ pub mod reset;
 pub mod revert;
 pub mod revgraph;
 pub mod route;
+pub mod shell_path;
 pub mod text;
 pub mod text_size;
 pub mod upstream;
