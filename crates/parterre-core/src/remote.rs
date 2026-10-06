@@ -420,7 +420,8 @@ pub(crate) fn push(
 
 /// Deletes branches on their remotes, one by one. It always asks first ([`Warning`]): a
 /// confirmation when the commits are reached from elsewhere, else a warning listing those only
-/// they reach. A branch the remote moved since the last fetch is kept, and a fetch suggested.
+/// they reach. A branch the remote moved since the last fetch is kept, and a fetch suggested;
+/// one already gone there is as asked, and comes back as [`Report::attention`].
 pub(crate) fn delete_remote_branches(
     catalog: &Catalog,
     action: &crate::branches::Action,
@@ -493,39 +494,62 @@ pub(crate) fn delete_remote_branches(
             head: None,
         }));
     }
+    let (mut deleted, mut gone) = (Vec::new(), Vec::new());
     for b in branches {
         if run_live(&git, delete_remote_command(b), cancel, report, live)? {
+            deleted.push(b.name());
             continue;
         }
         let pushed = last_output(report);
         let Some(now) = ls_remote(&git, b, cancel)? else {
             return Err(Error::Failed(format!("{pushed}\n\n{NO_PROMPT}")));
         };
-        // Those before it went.
-        let deleted: Vec<String> = branches
-            .iter()
-            .take_while(|d| *d != b)
-            .map(RemoteBranchTip::name)
-            .collect();
-        let deleted = match deleted.as_slice() {
-            [] => String::new(),
-            [one] => format!(" {one} was deleted."),
-            many => format!(" {} were deleted.", many.join(", ")),
-        };
         let (name, remote) = (b.name(), &b.remote);
-        let moved = match now {
-            Some(tip) if tip == b.tip => {
-                return Err(Error::Failed(format!("{pushed}{deleted}")));
+        match now {
+            // Someone deleted it first: as asked.
+            None => {
+                gone.push(name);
+                continue;
             }
-            Some(_) => format!("{name} moved on {remote} since the last fetch."),
-            None => format!("{name} is already gone from {remote}."),
-        };
+            Some(tip) if tip == b.tip => {
+                let went = went(&deleted, &gone);
+                return Err(Error::Failed(format!("{pushed}{went}")));
+            }
+            Some(_) => {
+                report.suggest_fetch = true;
+                let went = went(&deleted, &gone);
+                return Err(Error::Failed(format!(
+                    "{name} moved on {remote} since the last fetch. Fetch, and look again.{went}"
+                )));
+            }
+        }
+    }
+    if !gone.is_empty() {
+        // The graph shows them until a fetch.
         report.suggest_fetch = true;
-        return Err(Error::Failed(format!(
-            "{moved} Fetch, and look again.{deleted}"
-        )));
+        let (title, it) = match gone.as_slice() {
+            [one] => (format!("{one} was already gone"), "it"),
+            many => (format!("{} were already gone", many.join(", ")), "them"),
+        };
+        report.attention = Some(Attention {
+            title,
+            message: format!(
+                "Someone deleted {it} on the remote first. Fetch to update the graph."
+            ),
+        });
     }
     Ok(None)
+}
+
+/// What a remote deletion that stopped partway did, as sentences after its error.
+fn went(deleted: &[String], gone: &[String]) -> String {
+    let said = |names: &[String], one: &str, many: &str| match names {
+        [] => String::new(),
+        [name] => format!(" {name} {one}."),
+        names => format!(" {} {many}.", names.join(", ")),
+    };
+    said(deleted, "was deleted", "were deleted")
+        + &said(gone, "was already gone", "were already gone")
 }
 
 /// Where the branch is on its remote now (`ls-remote`): `None` if git couldn't ask, `Some(None)`

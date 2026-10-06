@@ -909,6 +909,76 @@ fn a_remote_branch_that_moved_on_the_remote_unseen_is_kept_and_a_fetch_suggested
 }
 
 #[test]
+fn a_remote_branch_already_deleted_unseen_is_as_asked_with_a_fetch_suggested() {
+    let s = pushed_feature();
+    let w = warning(execute(&s.work, delete_remote(&s.work, &["feature"]), None));
+    s.other
+        .git(&["push", "-q", "origin", "--delete", "feature"]);
+    let report = done(execute(&s.work, w.action.clone(), Some(&w)));
+    let attention = report.attention.expect("a notification");
+    assert_eq!(attention.title, "origin/feature was already gone");
+    assert_eq!(
+        attention.message,
+        "Someone deleted it on the remote first. Fetch to update the graph."
+    );
+    assert!(report.suggest_fetch);
+    // Still in the graph until that fetch.
+    assert!(s.work.git(&["branch", "-r"]).contains("origin/feature"));
+}
+
+#[test]
+fn a_remote_branch_already_gone_doesnt_keep_the_others() {
+    let s = pushed_feature();
+    s.work
+        .git(&["push", "-q", "origin", "feature:copy", "feature:more"]);
+    s.work.git(&["fetch", "-q", "origin"]);
+    let w = warning(execute(
+        &s.work,
+        delete_remote(&s.work, &["copy", "feature", "more"]),
+        None,
+    ));
+    s.other
+        .git(&["push", "-q", "origin", "--delete", "copy", "more"]);
+    let report = done(execute(&s.work, w.action.clone(), Some(&w)));
+    assert_eq!(
+        report.attention.expect("a notification").title,
+        "origin/copy, origin/more were already gone"
+    );
+    assert_eq!(on_origin(&s, "feature"), None);
+}
+
+#[test]
+fn a_deletion_that_stops_partway_says_which_were_already_gone() {
+    let mut s = pushed_feature();
+    s.work.git(&["push", "-q", "origin", "feature:copy"]);
+    s.work.git(&["fetch", "-q", "origin"]);
+    let w = warning(execute(
+        &s.work,
+        delete_remote(&s.work, &["copy", "feature"]),
+        None,
+    ));
+    s.other.git(&["fetch", "-q", "origin"]);
+    s.other.git(&[
+        "checkout",
+        "-q",
+        "-b",
+        "feature",
+        "--track",
+        "origin/feature",
+    ]);
+    s.other.commit("theirs");
+    s.other.git(&["push", "-q", "origin", "feature", ":copy"]);
+    let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
+    assert_eq!(
+        error,
+        "origin/feature moved on origin since the last fetch. Fetch, and look again. \
+         origin/copy was already gone."
+    );
+    assert!(report.suggest_fetch);
+    assert!(on_origin(&s, "feature").is_some());
+}
+
+#[test]
 fn an_approval_from_before_the_commits_changed_asks_again() {
     let s = pushed_feature();
     let w = warning(execute(&s.work, delete_remote(&s.work, &["feature"]), None));
