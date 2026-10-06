@@ -60,6 +60,28 @@ The branch configured as a local branch's tracking target, against which git cou
 behind commits.
 _Avoid_: parent branch, remote counterpart
 
+**Fetching**:
+Bringing every remote's branches up to date as remote-tracking branches, and pruning those
+deleted there. Only remote-tracking branches move.
+_Avoid_: syncing, refreshing, reloading
+
+**Pulling**:
+Fetching the upstream's remote, then taking the upstream's new commits into the open
+worktree's branch with `git pull`: by fast-forward, merge or rebase, as git's config says, or,
+for a diverged branch git isn't told about, as the user chooses.
+_Avoid_: updating, syncing
+
+**Pushing**:
+Sending a local branch to the branch of the same name on a remote. The first push of a branch
+with no upstream makes that its upstream.
+_Avoid_: publishing, uploading
+
+**Force push**:
+A push that replaces commits on the remote's branch, only ever with a lease: git refuses it if
+the remote moved since the last fetch, or has commits the branch never had. A **replaced**
+commit has a copy on the branch; any other is lost.
+_Avoid_: overwrite, plain `--force`
+
 **Operation in progress**:
 A merge, rebase, cherry-pick or revert that git has started and left unfinished in a worktree.
 _Avoid_: running command, pending task

@@ -298,8 +298,15 @@ pub const PICK: Glyph = CHECK;
 pub const SQUASH: Glyph = &[Part::Path("M12 3v12M7 10l5 5 5-5M5 20h14")];
 pub const DROP: Glyph = CLOSE;
 
+/// Fetch: Lucide's cloud-download, what comes from the remotes.
+pub const FETCH: Glyph = &[
+    Part::Path("M12 13v8"),
+    Part::Path("m8 17 4 4 4-4"),
+    Part::Path("M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"),
+];
+
 /// Every glyph, for tests.
-pub const ALL: [Glyph; 50] = [
+pub const ALL: [Glyph; 51] = [
     MENU,
     SEARCH,
     PLUS,
@@ -350,6 +357,7 @@ pub const ALL: [Glyph; 50] = [
     SQUASH,
     PALETTE,
     WARNING,
+    FETCH,
 ];
 
 /// One stroke of a flattened path.

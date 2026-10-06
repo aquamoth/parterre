@@ -12,6 +12,7 @@ use parterre_core::branches::{
     Report, Warning, command_text,
 };
 use parterre_core::file_diff::FileDiffSpec;
+use parterre_core::remote::{Live, RemoteBranchTip};
 use parterre_core::reset::{Mode, Preview};
 use parterre_core::worktree_folder;
 use parterre_core::{Oid, RefKind, Repo};
@@ -20,6 +21,7 @@ use parterre_util::CancelTree;
 use super::cherry_pick::CherryPickDialog;
 use super::merge::MergeDialog;
 use super::rebase::{RebaseDialog, stuck_color};
+use super::remote::{PullDialog, PullRequestCheck, SetUpstreamDialog};
 use super::reset::ResetDialog;
 use super::revert::{RestoreDialog, RevertDialog};
 use crate::theme::Palette;
@@ -78,6 +80,10 @@ pub enum Request {
     Revert {
         commit: Oid,
     },
+    /// The dialog for setting local branch `branch`'s upstream.
+    SetUpstream {
+        branch: String,
+    },
 }
 
 /// One target gets a direct named item; several get the existing app's submenu treatment.
@@ -131,13 +137,14 @@ fn menu_for(
     worktrees: bool,
 ) -> Option<Request> {
     let branch = branch_section(ui, repo, commit, group, selection, catalog, busy);
+    let remote = catalog.and_then(|c| super::remote::section(ui, repo, commit, c, busy));
     let worktree = worktrees
         .then(|| worktree_section(ui, commit, group, catalog, busy))
         .flatten();
-    branch.or(worktree)
+    branch.or(remote).or(worktree)
 }
 
-fn loading_reason(busy: bool) -> &'static str {
+pub(super) fn loading_reason(busy: bool) -> &'static str {
     if busy {
         "A Git operation is running"
     } else {
@@ -279,25 +286,14 @@ fn branch_section(
         found.sort_by(|a, b| a.name.cmp(&b.name));
         found
     };
-    if group.len() > 1 && group.iter().all(|&c| !deletable(c).is_empty()) {
-        let all: Vec<BranchTip> = group.iter().flat_map(|&c| deletable(c)).collect();
-        let names: Vec<String> = all.iter().map(|b| b.name.clone()).collect();
-        let label = format!("Delete {} local branches", all.len());
-        let delete = Request::Run(Action::DeleteBranches(all));
-        all_item(ui, label, &names, delete, None, busy, &mut request);
-    } else {
-        let deletions: Vec<Target> = deletable(commit)
-            .into_iter()
-            .map(|b| {
-                (
-                    b.name.clone(),
-                    Request::Run(Action::DeleteBranches(vec![b])),
-                    None,
-                )
-            })
-            .collect();
-        target_menu(ui, "Delete branch", &deletions, busy, &mut request);
-    }
+    let deletions = Deletions {
+        verb: "Delete branch",
+        many: "local branches",
+        name: |b: &BranchTip| b.name.clone(),
+        delete: Action::DeleteBranches,
+    };
+    deletions.items(ui, commit, group, deletable, busy, &mut request);
+    remote_deletions(ui, repo, commit, group, catalog, busy, &mut request);
     rebase_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
     merge_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
     merge_into_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
@@ -318,6 +314,88 @@ fn branch_section(
         request = Some(revert);
     }
     request
+}
+
+/// *Delete remote branch* `origin/b` for each remote-tracking branch on the node, or *Delete N
+/// remote branches* when every node of a group has one.
+fn remote_deletions(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    group: &[Oid],
+    catalog: &Catalog,
+    busy: bool,
+    request: &mut Option<Request>,
+) {
+    let deletable = |commit: Oid| {
+        let mut found: Vec<RemoteBranchTip> = repo
+            .refs
+            .iter()
+            .filter(|r| {
+                r.kind == RefKind::RemoteBranch
+                    && !r.name.ends_with("/HEAD")
+                    && repo.commit(r.target).oid == commit
+                    && catalog
+                        .remotes
+                        .iter()
+                        .any(|b| b.name == r.name && b.tip == commit)
+            })
+            .filter_map(|r| {
+                let (remote, branch) = catalog.tracking_parts(&r.name)?;
+                Some(RemoteBranchTip {
+                    remote: remote.to_owned(),
+                    branch: branch.to_owned(),
+                    tip: commit,
+                })
+            })
+            .collect();
+        found.sort_by_key(RemoteBranchTip::name);
+        found
+    };
+    let deletions = Deletions {
+        verb: "Delete remote branch",
+        many: "remote branches",
+        name: RemoteBranchTip::name,
+        delete: Action::DeleteRemoteBranches,
+    };
+    deletions.items(ui, commit, group, deletable, busy, request);
+}
+
+/// Deleting what's at a node: one item each (*Delete branch* X), or, when every node of a
+/// group has some, one for them all (*Delete 3 branches*).
+struct Deletions<T> {
+    verb: &'static str,
+    /// What several are, after their count.
+    many: &'static str,
+    name: fn(&T) -> String,
+    delete: fn(Vec<T>) -> Action,
+}
+
+impl<T: Clone> Deletions<T> {
+    fn items(
+        &self,
+        ui: &mut Ui,
+        commit: Oid,
+        group: &[Oid],
+        at: impl Fn(Oid) -> Vec<T>,
+        busy: bool,
+        request: &mut Option<Request>,
+    ) {
+        let each: Vec<Vec<T>> = group.iter().map(|&c| at(c)).collect();
+        if group.len() > 1 && each.iter().all(|found| !found.is_empty()) {
+            let all: Vec<T> = each.into_iter().flatten().collect();
+            let names: Vec<String> = all.iter().map(self.name).collect();
+            let label = format!("Delete {} {}", all.len(), self.many);
+            let delete = Request::Run((self.delete)(all));
+            all_item(ui, label, &names, delete, None, busy, request);
+        } else {
+            let targets: Vec<Target> = at(commit)
+                .into_iter()
+                .map(|t| ((self.name)(&t), Request::Run((self.delete)(vec![t])), None))
+                .collect();
+            target_menu(ui, self.verb, &targets, busy, request);
+        }
+    }
 }
 
 /// *Rebase main onto X* for each branch on the node and, last, the commit itself, when it
@@ -742,7 +820,7 @@ pub fn revert_item(
 }
 
 /// A menu target: its name, what choosing it asks for, and why it's greyed out, if it is.
-type Target = (String, Request, Option<String>);
+pub(super) type Target = (String, Request, Option<String>);
 
 fn target_menu(
     ui: &mut Ui,
@@ -762,7 +840,7 @@ fn target_menu(
 }
 
 /// [`target_menu`], with a lone target's item labelled by `single`.
-fn target_menu_named(
+pub(super) fn target_menu_named(
     ui: &mut Ui,
     verb: &str,
     single: impl Fn(&str) -> String,
@@ -803,7 +881,7 @@ fn target_menu_named(
     }
 }
 
-fn capitalized(s: &str) -> String {
+pub(super) fn capitalized(s: &str) -> String {
     let mut chars = s.chars();
     chars
         .next()
@@ -1489,6 +1567,8 @@ struct Job {
     go_to: Option<PathBuf>,
     /// A revert's: where the branch was, for the log to follow it to the new commit.
     reverting: Option<Oid>,
+    /// A fetch's, pull's or push's: git's output as it comes.
+    live: Option<Live>,
 }
 
 /// A revert done: the log follows the branch from `from` to the new commit `to`, which is
@@ -1540,6 +1620,11 @@ fn operation(action: &Action) -> usage::Action {
         Action::Revert(_) => usage::Action::Revert,
         Action::RestoreStash(_) => usage::Action::RestoreStash,
         Action::Resolve(_) => usage::Action::ResolveConflict,
+        Action::Fetch => usage::Action::Fetch,
+        Action::Pull(_) => usage::Action::Pull,
+        Action::Push(_) => usage::Action::Push,
+        Action::SetUpstream(_) => usage::Action::SetUpstream,
+        Action::DeleteRemoteBranches(_) => usage::Action::DeleteRemoteBranch,
     }
 }
 
@@ -1552,6 +1637,8 @@ struct Loss {
     opener: ViewportId,
     /// The deletions whose changed files are listed, by index.
     show_files: std::collections::HashSet<usize>,
+    /// Remote branches': whether pull requests propose them.
+    checks: Option<PullRequestCheck>,
 }
 
 /// A reset's preview, being read for the dialog.
@@ -1615,6 +1702,9 @@ pub struct Tool {
     revert_loading: Option<RevertLoading>,
     /// Putting back the changes stashed for a revert.
     restore: Option<RestoreDialog>,
+    /// How to pull a diverged branch.
+    pull: Option<PullDialog>,
+    set_upstream: Option<SetUpstreamDialog>,
     /// A revert done, for the log to follow.
     pub reverted: Option<Reverted>,
     /// Diff windows asked for from a dialog.
@@ -1638,9 +1728,19 @@ pub struct Tool {
     looked_at: f64,
     /// The open worktree's conflicted files changed with the catalogue last loaded.
     pub conflicts_changed: bool,
+    /// `--pull-requests-from`'s list, asked instead of GitHub before deleting remote branches.
+    canned_pull_requests: Option<Arc<str>>,
 }
 
 impl Tool {
+    /// A tool that looks up pull requests in `json` (`--pull-requests-from`) rather than on
+    /// GitHub.
+    pub fn with_canned_pull_requests(json: Option<&str>) -> Tool {
+        let mut tool = Tool::default();
+        tool.canned_pull_requests = json.map(Arc::from);
+        tool
+    }
+
     pub fn busy(&self) -> bool {
         self.job.is_some()
     }
@@ -1691,6 +1791,8 @@ impl Tool {
                 self.revert = None;
                 self.revert_loading = None;
                 self.restore = None;
+                self.pull = None;
+                self.set_upstream = None;
                 self.catalog = None;
                 self.banner = BannerTimer::default();
                 self.look_at_once = true;
@@ -1807,12 +1909,22 @@ impl Tool {
                 Outcome::Warning(warning)
                     if self.repo.as_ref().is_some_and(|r| r.path == job.path) =>
                 {
+                    let checks = match &warning.action {
+                        Action::DeleteRemoteBranches(branches) => Some(PullRequestCheck::start(
+                            ctx,
+                            job.path.clone(),
+                            branches,
+                            self.canned_pull_requests.clone(),
+                        )),
+                        _ => None,
+                    };
                     self.warning = Some(Loss {
                         path: job.path,
                         warning,
                         fresh: true,
                         opener: job.opener,
                         show_files: Default::default(),
+                        checks,
                     });
                 }
                 Outcome::Warning(_) => self.notice(
@@ -1840,6 +1952,16 @@ impl Tool {
                 Outcome::Failed { error, report } => {
                     self.notice(ctx, job.path, job.label, report, Some(error.to_string()))
                 }
+                Outcome::Diverged(diverged) if here => {
+                    self.pull = Some(PullDialog::new(*diverged, job.opener));
+                }
+                Outcome::Diverged(_) => self.notice(
+                    ctx,
+                    job.path,
+                    job.label,
+                    Report::default(),
+                    Some("Open this repository again to pull.".into()),
+                ),
             }
         }
     }
@@ -1872,6 +1994,11 @@ impl Tool {
                 }
             }
             Request::GoTo(_) => unreachable!("handled above"),
+            Request::SetUpstream { branch } => {
+                if let Some(catalog) = &self.catalog {
+                    self.set_upstream = Some(SetUpstreamDialog::new(catalog, branch, opener));
+                }
+            }
             Request::Run(action) => self.run(ctx, repo.path.clone(), action, None, opener),
             Request::Reset { target, mode } => self.preview(ctx, target, mode, opener, false),
             Request::Rebase { onto, target } => {
@@ -2139,9 +2266,13 @@ impl Tool {
             Action::Revert(r) => Some(r.head),
             _ => None,
         };
+        let live = action.is_network().then(Live::default);
+        let mut branches = Branches::new(worker_path);
+        if let Some(live) = &live {
+            branches = branches.with_live(live.clone());
+        }
         std::thread::spawn(move || {
-            let outcome =
-                Branches::new(worker_path).execute(action, approval.as_ref(), &worker_cancel);
+            let outcome = branches.execute(action, approval.as_ref(), &worker_cancel);
             let _ = tx.send(outcome);
             ctx.request_repaint();
         });
@@ -2153,6 +2284,7 @@ impl Tool {
             rx,
             go_to: None,
             reverting,
+            live,
         });
     }
 
@@ -2226,8 +2358,68 @@ impl Tool {
         self.cherry_pick_dialog(ctx, palette, options);
         self.revert_dialog(ctx);
         self.restore_dialog(ctx);
+        self.pull_dialog(ctx);
+        self.set_upstream_dialog(ctx);
         self.loss_dialog(ctx);
+        self.network_window(ctx);
         self.notifications(ctx);
+    }
+
+    /// Whether a fetch can start now, or why not.
+    pub fn fetch_blocked(&self) -> Option<&'static str> {
+        match &self.catalog {
+            _ if self.busy() => Some(loading_reason(true)),
+            None => Some(loading_reason(false)),
+            Some(c) if c.remote_names.is_empty() => Some("This repository has no remote"),
+            Some(_) => None,
+        }
+    }
+
+    /// The running fetch, pull or push, once git has started: its output, in a window of its
+    /// own that locks the others.
+    fn network_window(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.job else { return };
+        let Some(live) = job.live.as_ref().filter(|l| !l.steps().is_empty()) else {
+            return;
+        };
+        if super::remote::network_window(ctx, &job.label, live, job.opener) {
+            job.cancel.cancel();
+        }
+    }
+
+    fn pull_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.pull.take() else {
+            return;
+        };
+        let Some(path) = self.repo.as_ref().map(|r| r.path.clone()) else {
+            return;
+        };
+        match dialog.show(ctx, self.busy()) {
+            dialogs::Answer::Primary => {
+                let action = Action::Pull(Box::new(dialog.pull()));
+                self.run(ctx, path, action, None, dialog.opener);
+            }
+            dialogs::Answer::Cancel => {}
+            dialogs::Answer::Open => self.pull = Some(dialog),
+        }
+    }
+
+    fn set_upstream_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.set_upstream.take() else {
+            return;
+        };
+        let Some(path) = self.repo.as_ref().map(|r| r.path.clone()) else {
+            return;
+        };
+        match dialog.show(ctx, self.busy()) {
+            dialogs::Answer::Primary => {
+                if let Some(action) = dialog.action() {
+                    self.run(ctx, path, action, None, dialog.opener);
+                }
+            }
+            dialogs::Answer::Cancel => {}
+            dialogs::Answer::Open => self.set_upstream = Some(dialog),
+        }
     }
 
     fn reset_dialog(&mut self, ctx: &egui::Context) {
@@ -2405,6 +2597,31 @@ impl Tool {
                 };
                 (format!("Delete {what}{cost}?"), button)
             }
+            Action::DeleteRemoteBranches(_) => {
+                let what = match warning.deletions.as_slice() {
+                    [one] => format!("remote branch {}", one.name),
+                    many => format!("{} remote branches", many.len()),
+                };
+                if confirmation {
+                    (format!("Delete {what}?"), "Delete")
+                } else {
+                    (
+                        format!("Delete {what} and lose {commits}?"),
+                        "Delete anyway",
+                    )
+                }
+            }
+            Action::Push(push) if confirmation => (
+                format!("Force push {} to {}?", push.branch, push.remote),
+                "Force push",
+            ),
+            Action::Push(push) => (
+                format!(
+                    "Force push {} to {} and lose {commits}?",
+                    push.branch, push.remote
+                ),
+                "Force push anyway",
+            ),
             _ => (
                 format!(
                     "Switch {} and lose {}?",
@@ -2423,8 +2640,18 @@ impl Tool {
         )];
         let mut show_log = None;
         let busy = self.busy();
+        let force_push = match &warning.action {
+            Action::Push(push) => Some(push),
+            _ => None,
+        };
+        let screen = match (&warning.action, force_push) {
+            (_, Some(_)) => crate::usage::Screen::ForcePush,
+            (Action::DeleteRemoteBranches(_), _) => crate::usage::Screen::DeleteRemoteBranch,
+            _ => crate::usage::Screen::LostWork,
+        };
+        let catalog = self.catalog.clone();
         let mut dialog = dialogs::Dialog::new("branch-loss", &title)
-            .screen(crate::usage::Screen::LostWork)
+            .screen(screen)
             .opener(loss.opener)
             .raise(loss.fresh)
             .resizable();
@@ -2432,8 +2659,14 @@ impl Tool {
             dialog = dialog.icon(TRIANGLE, true);
         }
         let show_files = &mut loss.show_files;
+        let checks = &mut loss.checks;
         let shown = dialog.show(ctx, |ui| {
             dialogs::fields(ui, |ui| {
+                if let (Action::DeleteRemoteBranches(branches), Some(checks)) =
+                    (&warning.action, checks.as_mut())
+                {
+                    super::remote::deletion_notes(ui, branches, catalog.as_deref(), checks);
+                }
                 let worktrees = matches!(warning.action, Action::DeleteWorktrees { .. });
                 match warning.deletions.as_slice() {
                     [one] if worktrees => {
@@ -2462,8 +2695,15 @@ impl Tool {
                     };
                     ui.checkbox(&mut deletes_branches, label);
                 }
-                let unreachable =
-                    "These commits are not reachable from any surviving branch, tag or worktree.";
+                let unreachable = match force_push {
+                    Some(push) => format!(
+                        "These commits on {}/{} are not on {}.",
+                        push.remote, push.branch, push.branch
+                    ),
+                    None => "These commits are not reachable from any surviving branch, tag or \
+                             worktree."
+                        .to_owned(),
+                };
                 let row = |ui: &mut Ui, content: &mut dyn FnMut(&mut Ui)| {
                     egui::Frame::new()
                         .fill(widgets::tones(ui).seg_bg)
@@ -2498,7 +2738,7 @@ impl Tool {
                         .as_ref()
                         .filter(|b| deletes_branches && !b.commits.is_empty());
                     if !several && (!d.commits.is_empty() || branch.is_some()) {
-                        ui.label(unreachable);
+                        ui.label(&unreachable);
                     }
                     if !d.commits.is_empty() {
                         row(ui, &mut |ui| {
@@ -2534,7 +2774,7 @@ impl Tool {
                 } else if let [one] = warning.deletions.as_slice() {
                     losses(ui, 0, one);
                 } else if !warning.commits.is_empty() {
-                    ui.label(unreachable);
+                    ui.label(&unreachable);
                     row(ui, &mut |ui| {
                         ui.label(&commits);
                         if ui.link("Show in log").clicked() {
@@ -2542,10 +2782,24 @@ impl Tool {
                         }
                     });
                 }
+                // A force push's copies: rebased, amended or resolved on the branch.
+                if !warning.replaced.is_empty() {
+                    row(ui, &mut |ui| {
+                        ui.label(plural(warning.replaced.len(), "replaced commit"))
+                            .on_hover_text("The branch has a copy of each");
+                        if ui.link("Show in log").clicked() {
+                            show_log = Some(warning.replaced.clone());
+                        }
+                    });
+                }
             });
             let commands = warning.commands.iter().map(|a| command_text(a)).collect::<Vec<_>>();
             dialogs::command_box(ui, &commands);
-            dialogs::actions(ui, button, !busy, !confirmation, loss.fresh && !confirmation)
+            // Changing a remote for everyone: Cancel has the focus even when nothing is lost.
+            let remote = checks.is_some();
+            let allowed = checks.as_ref().is_none_or(PullRequestCheck::allow);
+            let focus = loss.fresh && (remote || !confirmation);
+            dialogs::actions(ui, button, !busy && allowed, !confirmation, focus)
         });
         if let Some(commits) = show_log {
             self.log_request = Some((warning.repo.clone(), commits, true));
@@ -2582,7 +2836,12 @@ impl Tool {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_max_width(360.0);
-                if let Some(job) = &self.job {
+                let networking = self
+                    .job
+                    .as_ref()
+                    .and_then(|j| j.live.as_ref())
+                    .is_some_and(|l| !l.steps().is_empty());
+                if let Some(job) = self.job.as_ref().filter(|_| !networking) {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spinner();
@@ -2594,6 +2853,7 @@ impl Tool {
                     });
                 }
                 let mut remove = None;
+                let mut fetch = None;
                 for n in &self.notices {
                     let color = if n.attention {
                         stuck_color(ui)
@@ -2646,10 +2906,22 @@ impl Tool {
                                     self.details = Some(n.id);
                                 }
                             }
+                            // What failed is likely out of date.
+                            if n.report.suggest_fetch
+                                && ui
+                                    .add_enabled(self.job.is_none(), egui::Link::new("Fetch"))
+                                    .clicked()
+                            {
+                                fetch = Some((n.id, n.path.clone()));
+                            }
                         });
                 }
                 if let Some(id) = remove {
                     self.notices.retain(|n| n.id != id);
+                }
+                if let Some((id, path)) = fetch {
+                    self.notices.retain(|n| n.id != id);
+                    self.run(ctx, path, Action::Fetch, None, ViewportId::ROOT);
                 }
             });
         if let Some(n) = self.notices.iter().find(|n| Some(n.id) == self.details) {

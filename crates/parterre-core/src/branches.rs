@@ -194,6 +194,8 @@ pub struct Catalog {
     pub locals: Vec<LocalBranch>,
     pub remotes: Vec<RemoteBranch>,
     pub remote_names: Vec<String>,
+    /// Each remote's default branch, as its `<remote>/HEAD` names it: `origin/main`.
+    pub remote_defaults: Vec<String>,
     pub occupied: HashMap<String, PathBuf>,
     pub current: Option<String>,
     pub head: Option<Oid>,
@@ -270,7 +272,7 @@ impl Catalog {
                     Ok(String::new())
                 }
             });
-            let refs = git.run(&["for-each-ref", "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads", "refs/remotes", "refs/tags"]);
+            let refs = git.run(&["for-each-ref", "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(symref)", "refs/heads", "refs/remotes", "refs/tags"]);
             (
                 config.join().expect("config read"),
                 listing.join().expect("worktree listing"),
@@ -295,10 +297,11 @@ impl Catalog {
         remote_names.sort_by_key(|r| std::cmp::Reverse(r.len()));
         let mut locals = Vec::new();
         let mut remotes = Vec::new();
+        let mut remote_defaults = Vec::new();
         let mut roots = Vec::new();
         for line in refs.lines() {
             let f: Vec<_> = line.split('\0').collect();
-            if f.len() != 7 {
+            if f.len() != 8 {
                 return Err(Error::Invalid("Unexpected Git reference listing.".into()));
             }
             let tip = if f[2] == "commit" {
@@ -313,6 +316,12 @@ impl Catalog {
                 None
             };
             let Some(tip) = tip else { continue };
+            // `origin/HEAD` names the remote's default branch.
+            if f[0].starts_with("refs/remotes/")
+                && let Some(default) = f[7].strip_prefix("refs/remotes/")
+            {
+                remote_defaults.push(default.to_owned());
+            }
             roots.push((f[0].to_owned(), tip));
             if let Some(name) = f[0].strip_prefix("refs/heads/") {
                 let upstream = (!f[5].is_empty() && !f[6].is_empty()).then(|| {
@@ -481,6 +490,7 @@ impl Catalog {
         Ok(Self {
             locals,
             remotes,
+            remote_defaults,
             remote_names,
             occupied,
             current,
@@ -888,6 +898,16 @@ pub enum Action {
     RestoreStash(Oid),
     /// Finishes a conflicted file in the open worktree with one git command.
     Resolve(Box<crate::conflicts::Resolve>),
+    /// Fetches every remote, pruning what's gone from them.
+    Fetch,
+    /// Pulls into the open worktree's branch.
+    Pull(Box<crate::remote::Pull>),
+    /// Pushes a local branch to its own name on a remote.
+    Push(Box<crate::remote::Push>),
+    /// Sets a local branch's upstream.
+    SetUpstream(Box<crate::remote::SetUpstream>),
+    /// Deletes branches on their remotes, each still at the tip it was offered at.
+    DeleteRemoteBranches(Vec<crate::remote::RemoteBranchTip>),
 }
 
 impl Action {
@@ -922,7 +942,24 @@ impl Action {
             Self::Revert(r) => format!("Revert {} in {}", short(r.commit), r.name()),
             Self::RestoreStash(_) => "Restore stashed changes".into(),
             Self::Resolve(r) => r.label(),
+            Self::Fetch => "Fetch".into(),
+            Self::Pull(p) => format!("Pull {}", p.branch),
+            Self::Push(p) => format!("Push {} to {}", p.branch, p.remote),
+            Self::SetUpstream(s) => format!("Set upstream of {} to {}", s.branch, s.upstream),
+            Self::DeleteRemoteBranches(branches) => match branches.as_slice() {
+                [one] => format!("Delete remote branch {}", one.name()),
+                branches => format!("Delete {} remote branches", branches.len()),
+            },
         }
+    }
+
+    /// Fetching, pulling and pushing: they reach a remote, so their output is shown as it
+    /// comes, and they can be cancelled.
+    pub fn is_network(&self) -> bool {
+        matches!(
+            self,
+            Self::Fetch | Self::Pull(_) | Self::Push(_) | Self::DeleteRemoteBranches(_)
+        )
     }
 }
 
@@ -960,6 +997,8 @@ pub struct Report {
     pub stash: Option<Stashed>,
     /// The commit the operation made, for the log to select.
     pub created: Option<Oid>,
+    /// What went wrong is likely out of date: a fetch would show how things stand.
+    pub suggest_fetch: bool,
 }
 
 /// A stash entry parterre made, by its commit: other worktrees and sessions share the list.
@@ -994,12 +1033,15 @@ pub struct Warning {
     pub action: Action,
     /// Every commit lost.
     pub commits: Vec<Oid>,
+    /// A force push's: the remote's commits it replaces with copies the branch has.
+    pub replaced: Vec<Oid>,
     /// Each branch or worktree the action deletes, in its order, with what it loses. Empty for
     /// a switch.
     pub deletions: Vec<Deletion>,
     pub repo: Arc<Repo>,
     pub commands: Vec<Vec<String>>,
-    head: Option<Oid>,
+    /// The HEAD the warning was about, or, for a force push, the remote branch's tip.
+    pub(crate) head: Option<Oid>,
 }
 
 impl Warning {
@@ -1043,7 +1085,7 @@ pub struct Deletion {
     /// The worktree's local branch, which can go with it.
     pub branch: Option<WorktreeBranch>,
     /// The worktree's HEAD or the branch's tip.
-    head: Option<Oid>,
+    pub(crate) head: Option<Oid>,
 }
 
 impl Deletion {
@@ -1066,12 +1108,12 @@ pub struct WorktreeBranch {
 }
 
 /// Approved deletions, as loaded again just before running them.
-fn same_losses(approved: &[Deletion], now: &[Deletion]) -> bool {
+pub(crate) fn same_losses(approved: &[Deletion], now: &[Deletion]) -> bool {
     approved.len() == now.len() && approved.iter().zip(now).all(|(a, b)| a.same_loss(b))
 }
 
 /// Every commit the deletions lose, once.
-fn all_commits(deletions: &[Deletion]) -> Vec<Oid> {
+pub(crate) fn all_commits(deletions: &[Deletion]) -> Vec<Oid> {
     let mut commits: Vec<Oid> = deletions.iter().flat_map(|d| d.commits.clone()).collect();
     commits.sort_by_key(|o| o.to_hex());
     commits.dedup();
@@ -1082,17 +1124,33 @@ fn all_commits(deletions: &[Deletion]) -> Vec<Oid> {
 pub enum Outcome {
     Done(Report),
     Warning(Warning),
-    Failed { error: Error, report: Report },
+    Failed {
+        error: Error,
+        report: Report,
+    },
+    /// A pull that asks how to reconcile a diverged branch first.
+    Diverged(Box<crate::remote::Diverged>),
 }
 
 #[derive(Clone, Debug)]
 pub struct Branches {
     path: PathBuf,
+    /// Where the network commands' output goes as it comes.
+    live: Option<crate::remote::Live>,
 }
 
 impl Branches {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            live: None,
+        }
+    }
+
+    /// The network commands (fetch, pull, push) stream their output to `live`.
+    pub fn with_live(mut self, live: crate::remote::Live) -> Self {
+        self.live = Some(live);
+        self
     }
 
     /// Commands shown by the form. Execution freezes its start by full OID and validates again.
@@ -1171,6 +1229,14 @@ impl Branches {
             Action::Revert(r) => Ok(crate::revert::commands(r)),
             Action::RestoreStash(_) => Ok(vec![words(&["stash", "pop"])]),
             Action::Resolve(r) => Ok(r.conflict.commands(r.answer)),
+            Action::Fetch => Ok(vec![crate::remote::fetch_command()]),
+            Action::Pull(p) => Ok(vec![crate::remote::pull_command(p.how)]),
+            Action::Push(p) => Ok(vec![crate::remote::push_command(catalog, p, false)]),
+            Action::SetUpstream(s) => Ok(vec![crate::remote::set_upstream_command(s)]),
+            Action::DeleteRemoteBranches(branches) => Ok(branches
+                .iter()
+                .map(crate::remote::delete_remote_command)
+                .collect()),
         }
     }
 
@@ -1181,6 +1247,16 @@ impl Branches {
         cancel: &CancelTree,
     ) -> Outcome {
         let mut report = Report::default();
+        if let Action::Pull(pull) = &action {
+            let pulled = Catalog::load(&self.path).and_then(|catalog| {
+                crate::remote::pull(&catalog, pull, cancel, &mut report, self.live.as_ref())
+            });
+            return match pulled {
+                Ok(Some(diverged)) => Outcome::Diverged(Box::new(diverged)),
+                Ok(None) => Outcome::Done(report),
+                Err(error) => Outcome::Failed { error, report },
+            };
+        }
         let requested = action.clone();
         match self.execute_inner(action, approval, cancel, &mut report) {
             Ok(Some(warning)) => Outcome::Warning(warning),
@@ -1278,6 +1354,28 @@ impl Branches {
             crate::conflicts::execute(&catalog, resolve, cancel, report)?;
             return Ok(None);
         }
+        let live = self.live.as_ref();
+        match &action {
+            Action::Fetch => {
+                crate::remote::fetch(&catalog, cancel, report, live)?;
+                return Ok(None);
+            }
+            Action::Push(push) => {
+                return crate::remote::push(
+                    &catalog, &action, push, approval, cancel, report, live,
+                );
+            }
+            Action::SetUpstream(set) => {
+                crate::remote::set_upstream(&catalog, set, cancel, report)?;
+                return Ok(None);
+            }
+            Action::DeleteRemoteBranches(branches) => {
+                return crate::remote::delete_remote_branches(
+                    &catalog, &action, branches, approval, cancel, report, live,
+                );
+            }
+            _ => {}
+        }
         let mut commands = Self::commands(&catalog, &action)?;
         let switching = matches!(
             &action,
@@ -1332,7 +1430,12 @@ impl Branches {
             | Action::CherryPick(_)
             | Action::Revert(_)
             | Action::RestoreStash(_)
-            | Action::Resolve(_) => {
+            | Action::Resolve(_)
+            | Action::Fetch
+            | Action::Pull(_)
+            | Action::Push(_)
+            | Action::SetUpstream(_)
+            | Action::DeleteRemoteBranches(_) => {
                 unreachable!("handled above")
             }
             Action::Switch(name) => {
@@ -1384,6 +1487,7 @@ impl Branches {
                 return Ok(Some(Warning {
                     action,
                     commits,
+                    replaced: Vec::new(),
                     deletions: Vec::new(),
                     head: catalog.head,
                     repo,
@@ -1506,6 +1610,7 @@ impl Branches {
         let Some(approved) = approved else {
             return Ok(Some(Warning {
                 action: action.clone(),
+                replaced: Vec::new(),
                 head: catalog.head,
                 repo: Arc::new(git.load()?),
                 commands: worktree_commands(&deletions, branches),
@@ -1579,6 +1684,7 @@ impl Branches {
         }
         Ok(Some(Warning {
             action: Action::DeleteWorktrees { paths, branches },
+            replaced: Vec::new(),
             head: after.head,
             repo: Arc::new(git.load()?),
             commands: worktree_commands(&deletions, branches),
@@ -1606,6 +1712,7 @@ fn branch_warning(
     Ok(Some(Warning {
         action,
         commits,
+        replaced: Vec::new(),
         deletions,
         repo,
         commands: vec![force],

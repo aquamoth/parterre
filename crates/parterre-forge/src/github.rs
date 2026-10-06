@@ -131,6 +131,70 @@ pub fn load(git: &Git) -> Result<PullRequests, ForgeError> {
     })
 }
 
+/// Whether a branch about to be deleted on a remote is proposed by an open pull request (#318).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Proposed {
+    /// Its remote isn't on GitHub: there's nothing to ask.
+    NotOnGithub,
+    No,
+    Open(PullRequest),
+    /// GitHub couldn't be asked, and why.
+    Unknown(String),
+}
+
+/// For each remote branch, as `(remote, branch)`: whether an open pull request proposes it,
+/// into `origin`'s repository or the one it was forked from, from the repository its remote
+/// points at, a fork's too. Asks GitHub once, with pull requests shown or not, for the question
+/// before deleting them; `canned` is `--pull-requests-from`'s list, used instead. Run it on a
+/// worker thread.
+pub fn proposals(git: &Git, branches: &[(String, String)], canned: Option<&str>) -> Vec<Proposed> {
+    let urls = super::remote_urls(git).unwrap_or_default();
+    let repos: Vec<Option<GithubRepo>> = branches
+        .iter()
+        .map(|(remote, _)| {
+            let url = urls.iter().find(|(name, _)| name == remote)?;
+            GithubRepo::from_url(&url.1)
+        })
+        .collect();
+    if repos.iter().all(Option::is_none) {
+        return vec![Proposed::NotOnGithub; branches.len()];
+    }
+    let found = match canned {
+        Some(json) => load_canned(git, json).map(|p| p.list),
+        None => {
+            let mut names: Vec<String> = branches.iter().map(|(_, b)| b.clone()).collect();
+            names.sort();
+            names.dedup();
+            origin(git).ok_or(ForgeError::NoForge).and_then(|origin| {
+                with_api(|api| open_pull_requests_from(api, &origin, &names, true))
+                    .map(|found| found.list)
+            })
+        }
+    };
+    branches
+        .iter()
+        .zip(repos)
+        .map(|((_, branch), repo)| {
+            let Some(repo) = repo else {
+                return Proposed::NotOnGithub;
+            };
+            let list = match &found {
+                Ok(list) => list,
+                Err(e) => return Proposed::Unknown(e.to_string()),
+            };
+            let repo = repo.full_name();
+            let proposing = list.iter().find(|pr| {
+                pr.head_branch == *branch
+                    && pr
+                        .head_repo
+                        .as_deref()
+                        .is_some_and(|r| r.eq_ignore_ascii_case(&repo))
+            });
+            proposing.map_or(Proposed::No, |pr| Proposed::Open(pr.clone()))
+        })
+        .collect()
+}
+
 /// Pull requests from `json` instead of GitHub, for screenshots and demos without the network
 /// (`--pull-requests-from`): an array of `{"number", "title", "author", "draft", "head",
 /// "base"}`, where `head` and `base` are branches of `origin`, which must still point at
@@ -311,6 +375,17 @@ pub(crate) fn open_pull_requests(
     origin: &GithubRepo,
     branches: &[String],
 ) -> Result<Found, ForgeError> {
+    open_pull_requests_from(api, origin, branches, false)
+}
+
+/// [`open_pull_requests`], with the pull requests of every repository's `branches` when
+/// `any_head`, not only `origin`'s own: those of a fork among them.
+fn open_pull_requests_from(
+    api: &dyn Api,
+    origin: &GithubRepo,
+    branches: &[String],
+    any_head: bool,
+) -> Result<Found, ForgeError> {
     let mut found = Found {
         name: origin.full_name(),
         list: Vec::new(),
@@ -324,10 +399,11 @@ pub(crate) fn open_pull_requests(
         let repo = repository(&answer.body, origin)?;
         found.name = repo.name_with_owner.clone();
         let ours = |pr: &json::PullRequest| {
-            pr.head_repository.as_ref().is_some_and(|r| {
-                r.name_with_owner
-                    .eq_ignore_ascii_case(&repo.name_with_owner)
-            })
+            any_head
+                || pr.head_repository.as_ref().is_some_and(|r| {
+                    r.name_with_owner
+                        .eq_ignore_ascii_case(&repo.name_with_owner)
+                })
         };
         let into =
             |base: &str, connections: &std::collections::HashMap<String, json::Connection>| {
@@ -874,6 +950,21 @@ mod tests {
         let query = asked["query"].as_str().unwrap();
         assert!(query.contains("b1:pullRequests(states:OPEN,headRefName:$b1,first:100)"));
         assert!(!query.contains("a\""));
+    }
+
+    #[test]
+    fn asked_before_deleting_a_branch_it_keeps_every_repositorys_pull_requests() {
+        let body = format!(
+            r#"{{"data":{{"repository":{{"nameWithOwner":"o/r",
+                "b0":{{"nodes":[{}, {}]}},"parent":null}}}}}}"#,
+            pr(7, Some("o/r"), 'a'),
+            pr(8, Some("someone/fork"), 'b'),
+        );
+        let api = Fake::new(&[&body], None);
+        let origin = repo("o", "r").unwrap();
+        let found = open_pull_requests_from(&api, &origin, &["topic".into()], true).unwrap();
+        let heads: Vec<_> = found.list.iter().map(|p| p.head_repo.clone()).collect();
+        assert_eq!(heads, [Some("someone/fork".into()), Some("o/r".into())]);
     }
 
     #[test]

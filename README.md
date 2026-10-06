@@ -53,7 +53,8 @@ greyed out. Hover a label for the title, author and branches, and click it to op
 request in your browser. The node's menu opens it too.
 
 parterre asks GitHub only about the branches you have fetched, at most once a minute per
-repository, and keeps well inside your hourly API budget. Nothing is sent without signing in.
+repository, and once more before deleting a remote branch, and keeps well inside your hourly
+API budget. Nothing is sent without signing in.
 The update check, usage statistics and crash reports are in
 [What parterre sends](docs/privacy.md).
 
@@ -67,6 +68,13 @@ replaced them. The status bar shows `fix/cart-rounding 5|2` (ahead|behind), and 
 A branch that was rebased since it was pushed gets a **dashed arrow to its upstream**. A
 worktree in the middle of a rebase gets an **orange zigzag** from where it has got to back to
 the branch being rebased.
+
+**Fetch** every remote from the toolbar or with Ctrl+F5, **pull** the open worktree's branch,
+and **push** any local branch from its node. A push that would replace the remote's commits
+asks first, and says whether the branch has a copy of each; it forces only with a lease
+(`--force-with-lease --force-if-includes`). parterre has no password prompt of its own: use a
+credential helper or ssh-agent. **Delete** a remote branch from its node: parterre asks
+first, lists any commits only it has, and won't delete a branch with an open pull request.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/rebase-dark.png">

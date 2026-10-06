@@ -147,6 +147,10 @@ takes a branch, a tag or a hash prefix. A name that doesn't exist fails the run.
 | `revert:REF` | The revert of a commit on the current branch |
 | `merge-into:BRANCH` | The merge of the current branch into local branch BRANCH, as a pull request merges |
 | `cherry-pick:REF` | The cherry-pick of the commits of REF the current branch lacks, as the graph's menu offers it |
+| `fetch`, `pull` | Fetches every remote, or pulls the current branch, with the window showing git's output (and, for a diverged branch, the question how) |
+| `push:BRANCH[:REMOTE]` | Pushes a local branch to the first remote, or to REMOTE, asking first when it needs a force push |
+| `set-upstream:BRANCH` | The dialog setting a local branch's upstream |
+| `delete-remote-branch:REMOTE/BRANCH[,…]` | The question before deleting branches on their remotes |
 
 Everything else is done as a person would do it:
 

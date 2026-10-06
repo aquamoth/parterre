@@ -98,6 +98,14 @@ shot rebase window $'open rebase:feature/dark-mode\nwait 0.5'
 shot merge window $'open merge:feature/dark-mode\nwait 0.5'
 shot cherry-pick window $'open cherry-pick:feature/dark-mode\nwait 0.5'
 shot revert window $'open revert:v0.3.0\nwait 0.5'
+shot set-upstream window $'open set-upstream:feature/reports\nwait 0.5'
+# Pushed, then reworded: pushing it again replaces the commit on origin.
+git -C "$repo" push -q origin feature/reports
+git -C "$repo" switch -q feature/reports
+git -C "$repo" commit -q --amend -m "Describe the reports"
+git -C "$repo" switch -q main
+shot force-push window $'open push:feature/reports\nwait-for "Force push"'
+shot delete-remote-branch window $'open delete-remote-branch:origin/feature/search\nwait 0.5'
 git -C "$repo" worktree add -q "$work/demo-dark-mode" feature/dark-mode
 SHOT_REPO=$work/demo-dark-mode shot merge-into window \
     $'right-click node:main\nclick "Merge feature/dark-mode into main…"\nwait 0.5'

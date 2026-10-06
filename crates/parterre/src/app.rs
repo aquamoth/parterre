@@ -30,6 +30,7 @@ mod merge_tool;
 mod privacy;
 mod pull_requests;
 mod rebase;
+mod remote;
 mod reset;
 mod revert;
 mod settings_window;
@@ -482,7 +483,9 @@ impl ParterreApp {
             selection: Selection::default(),
             selected_edge: None,
             preview: None,
-            branches: branches::Tool::default(),
+            branches: branches::Tool::with_canned_pull_requests(
+                automation.pull_requests.as_deref(),
+            ),
             context_node: None,
             pending_select: Vec::new(),
             drag: None,
@@ -1049,6 +1052,23 @@ impl ParterreApp {
         self.reloading = Some((path, rx));
     }
 
+    /// Why a fetch can't start now, if it can't.
+    fn fetch_blocked(&self) -> Option<&'static str> {
+        match &self.repo {
+            None => Some("Open a repository first"),
+            Some(_) => self.branches.fetch_blocked(),
+        }
+    }
+
+    /// Ctrl+F5, the toolbar's button or the menu: fetches every remote, from the window
+    /// `opener`, once nothing else runs.
+    fn fetch(&mut self, ctx: &egui::Context, opener: egui::ViewportId) {
+        if self.fetch_blocked().is_none() {
+            let request = branches::Request::Run(parterre_core::branches::Action::Fetch);
+            self.branches.request(ctx, request, opener);
+        }
+    }
+
     /// Shows what the user's reload loaded, once no drag is going on, and says so in a
     /// notification: a graph that hasn't changed looks the same.
     fn finish_reload(&mut self, ctx: &egui::Context) {
@@ -1094,6 +1114,10 @@ impl ParterreApp {
             "legend" => self.show_legend = true,
             "first-run" => self.open_first_run_prompt(),
             "settings" => self.open_settings(self.settings_page),
+            "fetch" | "pull" => {
+                let repo = self.repo.clone().ok_or("no repository is open")?;
+                return self.open_branch_dialog(ctx, &repo, what, "");
+            }
             _ => {
                 let (kind, arg) = what
                     .split_once(':')
@@ -1150,6 +1174,10 @@ impl ParterreApp {
     /// dialog (`reset:REF`, or `reset:REF:MODE`), the rebase's (`rebase:REF`), the merge
     /// dialog (`merge:REF`), the cherry-pick's (`cherry-pick:REF`, the commits of REF the
     /// current branch lacks) or the revert's (`revert:REF`), once the branch information is in.
+    /// Also runs a fetch (`fetch`), a pull of the current branch (`pull`) or a push
+    /// (`push:BRANCH`, to the first remote, or `push:BRANCH:REMOTE`), and opens the upstream
+    /// dialog (`set-upstream:BRANCH`) or the question before deleting remote branches
+    /// (`delete-remote-branch:REMOTE/BRANCH`, or several: `A,B`).
     fn open_branch_dialog(
         &mut self,
         ctx: &egui::Context,
@@ -1221,6 +1249,70 @@ impl ParterreApp {
                 }
             }
             "add-worktree" => branches::Request::AddWorktree { start: oid(name)? },
+            "fetch" => branches::Request::Run(parterre_core::branches::Action::Fetch),
+            "pull" => {
+                let head = catalog.head.ok_or("HEAD has no commit")?;
+                let branch = parterre_core::remote::pull_offered(&catalog, head)
+                    .ok_or("the current branch has no upstream to pull")?;
+                branches::Request::Run(parterre_core::branches::Action::Pull(Box::new(
+                    parterre_core::remote::Pull {
+                        branch: branch.name.clone(),
+                        head,
+                        how: None,
+                    },
+                )))
+            }
+            "push" => {
+                let (branch, remote) = match name.split_once(':') {
+                    Some((branch, remote)) => (branch, Some(remote.to_owned())),
+                    None => (name, catalog.remote_names.iter().min().cloned()),
+                };
+                let tip = catalog
+                    .locals
+                    .iter()
+                    .find(|b| b.name == branch)
+                    .ok_or_else(|| format!("no local branch named {branch}"))?
+                    .tip;
+                branches::Request::Run(parterre_core::branches::Action::Push(Box::new(
+                    parterre_core::remote::Push {
+                        branch: branch.to_owned(),
+                        tip,
+                        remote: remote.ok_or("the repository has no remote")?,
+                    },
+                )))
+            }
+            "delete-remote-branch" => {
+                let branches = name
+                    .split(',')
+                    .map(|name| {
+                        let tip = catalog
+                            .remotes
+                            .iter()
+                            .find(|r| r.name == name)
+                            .ok_or_else(|| format!("no remote-tracking branch named {name}"))?
+                            .tip;
+                        let (remote, branch) = catalog
+                            .tracking_parts(name)
+                            .ok_or_else(|| format!("no remote in {name}"))?;
+                        Ok(parterre_core::remote::RemoteBranchTip {
+                            remote: remote.to_owned(),
+                            branch: branch.to_owned(),
+                            tip,
+                        })
+                    })
+                    .collect::<Result<_, String>>()?;
+                branches::Request::Run(parterre_core::branches::Action::DeleteRemoteBranches(
+                    branches,
+                ))
+            }
+            "set-upstream" => {
+                if !catalog.locals.iter().any(|b| b.name == name) {
+                    return Err(format!("no local branch named {name}"));
+                }
+                branches::Request::SetUpstream {
+                    branch: name.to_owned(),
+                }
+            }
             "create-branch" => branches::Request::Create {
                 start: oid(name)?,
                 track: None,
@@ -1511,20 +1603,21 @@ impl ParterreApp {
     fn handle_keys(&mut self, ctx: &egui::Context) {
         // Before the text fields, which do nothing with it. Held down, it reloads once.
         let f5 = ctx.input(|i| {
-            i.events.iter().any(|e| {
-                matches!(
-                    e,
-                    egui::Event::Key {
-                        key: Key::F5,
-                        pressed: true,
-                        repeat: false,
-                        ..
-                    }
-                )
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key: Key::F5,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } => Some(*modifiers),
+                _ => None,
             })
         });
-        if f5 {
-            self.reload_by_hand(ctx);
+        match f5 {
+            Some(m) if m.is_none() => self.reload_by_hand(ctx),
+            Some(m) if fetch_modifiers(m) => self.fetch(ctx, egui::ViewportId::ROOT),
+            _ => {}
         }
         if ctx.egui_wants_keyboard_input() {
             if ctx.input(|i| i.key_pressed(Key::Escape)) {
@@ -2810,6 +2903,7 @@ fn shortcuts(ui: &mut Ui) {
                         ("F3, N", "Next search hit"),
                         ("Ctrl+C", "Copy the selected commit's hash"),
                         ("F5", "Reload the repository"),
+                        ("Ctrl+F5", "Fetch every remote, in every window"),
                         ("Ctrl+O / Ctrl+W", "Open / close a folder"),
                         ("Ctrl+,", "Settings"),
                         (
@@ -3266,4 +3360,18 @@ impl eframe::App for ParterreApp {
 fn highlight_engine() -> parterre_highlight::Engine {
     use parterre_highlight::Engine;
     std::env::current_exe().map_or(Engine::Off, Engine::Child)
+}
+
+/// Ctrl (⌘ on macOS) alone, held with F5 to fetch in any window.
+fn fetch_modifiers(m: Modifiers) -> bool {
+    (m.ctrl || m.command) && !m.alt && !m.shift
+}
+
+/// A window's F5 this frame: alone it reloads (`.0`), with Ctrl it fetches (`.1`).
+fn f5_pressed(i: &egui::InputState) -> (bool, bool) {
+    let f5 = i.key_pressed(Key::F5);
+    (
+        f5 && i.modifiers.is_none(),
+        f5 && fetch_modifiers(i.modifiers),
+    )
 }
