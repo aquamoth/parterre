@@ -326,6 +326,8 @@ struct DiffWindow {
     title_theme: Option<egui::SystemTheme>,
     /// A blame window asked for (the toolbar's Blame): the file, and the line to choose.
     blame: Option<(BlameSpec, Option<usize>)>,
+    /// Ctrl+F5 was pressed: fetch.
+    fetch: bool,
     /// Once loaded, scroll to the change at this line (from 0) of the new version.
     goto: Option<usize>,
     find: Find,
@@ -410,6 +412,7 @@ impl DiffWindow {
             closed: false,
             title_theme: None,
             blame: None,
+            fetch: false,
             goto: None,
             find: Find::default(),
             top: 0,
@@ -1601,12 +1604,15 @@ impl DiffWindow {
                             .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
                     }
                 }
-                let (close, size) = ui.input(|i| {
+                let (close, size, fetch) = ui.input(|i| {
                     (
                         i.viewport().close_requested(),
                         i.viewport().inner_rect.map(|r| r.size()),
+                        super::f5_pressed(i).1,
                     )
                 });
+                // Ctrl+F5 fetches, as in every window.
+                self.fetch |= fetch;
                 if let Some(size) = size
                     && size.x > 0.0
                     && size.y > 0.0
@@ -2162,6 +2168,7 @@ impl ParterreApp {
     pub(super) fn diff_windows(&mut self, ctx: &egui::Context) {
         let settings = &mut self.settings;
         let mut blames = Vec::new();
+        let mut fetches = Vec::new();
         for window in &mut self.diffs.windows {
             window.show(
                 ctx,
@@ -2174,10 +2181,16 @@ impl ParterreApp {
             if let Some(blame) = window.blame.take() {
                 blames.push((window.repo.clone(), blame));
             }
+            if std::mem::take(&mut window.fetch) {
+                fetches.push(window.viewport_id());
+            }
         }
         self.diffs.windows.retain(|w| !w.closed);
         for (repo, (spec, line)) in blames {
             self.open_blame(repo, spec, line, ctx);
+        }
+        for window in fetches {
+            self.fetch(ctx, window);
         }
     }
 

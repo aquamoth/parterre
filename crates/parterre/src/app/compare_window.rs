@@ -471,13 +471,11 @@ impl ParterreApp {
                     }
                 }
                 // F5 reloads, Ctrl+F5 fetches, as in the main window.
-                let (close, size, reload, fetch) = ui.input(|i| {
-                    let f5 = i.key_pressed(Key::F5);
+                let (close, size, (reload, fetch)) = ui.input(|i| {
                     (
                         i.viewport().close_requested(),
                         i.viewport().inner_rect.map(|r| r.size()),
-                        f5 && i.modifiers.is_none(),
-                        f5 && super::fetch_modifiers(i.modifiers),
+                        super::f5_pressed(i),
                     )
                 });
                 if let Some(size) = size

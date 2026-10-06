@@ -933,11 +933,14 @@ impl Action {
             Self::Fetch => "Fetch".into(),
             Self::Pull(p) => format!("Pull {}", p.branch),
             Self::Push(p) => format!("Push {} to {}", p.branch, p.remote),
-            Self::SetUpstream(s) => match &s.upstream {
-                Some(upstream) => format!("Set upstream of {} to {upstream}", s.branch),
-                None => format!("Unset upstream of {}", s.branch),
-            },
+            Self::SetUpstream(s) => format!("Set upstream of {} to {}", s.branch, s.upstream),
         }
+    }
+
+    /// Fetching, pulling and pushing: they reach a remote, so their output is shown as it
+    /// comes, and they can be cancelled.
+    pub fn is_network(&self) -> bool {
+        matches!(self, Self::Fetch | Self::Pull(_) | Self::Push(_))
     }
 }
 

@@ -255,7 +255,13 @@ fn pulling_a_diverged_branch_asks_how_when_git_isnt_told() {
         pull(&s.work, Some(Reconcile::Rebase)),
         None,
     ));
-    assert_eq!(commands(&report), ["git pull --progress --rebase"]);
+    assert_eq!(
+        commands(&report),
+        [
+            "git fetch --progress --prune origin",
+            "git pull --progress --rebase"
+        ]
+    );
     assert_eq!(rev(&s.work, "main~1").to_hex(), theirs);
 }
 
@@ -270,7 +276,13 @@ fn pulling_a_diverged_branch_by_merge_makes_a_merge_commit() {
         pull(&s.work, Some(Reconcile::Merge)),
         None,
     ));
-    assert_eq!(commands(&report), ["git pull --progress --no-rebase"]);
+    assert_eq!(
+        commands(&report),
+        [
+            "git fetch --progress --prune origin",
+            "git pull --progress --no-rebase"
+        ]
+    );
     assert_eq!(rev(&s.work, "main^1").to_hex(), mine);
     assert_eq!(rev(&s.work, "main^2").to_hex(), theirs);
 }
@@ -645,25 +657,118 @@ fn pull_is_offered_on_the_open_worktrees_branch_with_an_upstream_only() {
 }
 
 #[test]
-fn setting_an_upstream_and_unsetting_it() {
+fn setting_an_upstream() {
     let s = setup();
     s.work.git(&["branch", "feature"]);
-    let set = |upstream: Option<&str>| {
-        Action::SetUpstream(Box::new(SetUpstream {
-            branch: "feature".into(),
-            upstream: upstream.map(str::to_owned),
-        }))
-    };
-    let report = done(execute(&s.work, set(Some("origin/main")), None));
+    let set = Action::SetUpstream(Box::new(SetUpstream {
+        branch: "feature".into(),
+        upstream: "origin/main".into(),
+    }));
+    let report = done(execute(&s.work, set, None));
     assert_eq!(
         commands(&report),
         ["git branch --set-upstream-to=refs/remotes/origin/main -- feature"]
     );
     assert_eq!(upstream(&s.work, "feature").as_deref(), Some("origin/main"));
-    let report = done(execute(&s.work, set(None), None));
+    let missing = Action::SetUpstream(Box::new(SetUpstream {
+        branch: "feature".into(),
+        upstream: "origin/nowhere".into(),
+    }));
+    let (error, report) = failed(execute(&s.work, missing, None));
+    assert!(error.contains("no remote-tracking branch"), "{error}");
+    assert!(report.steps.is_empty());
+}
+
+#[test]
+fn a_branch_behind_its_remote_has_nothing_to_push() {
+    let mut s = setup();
+    push_from_other(&mut s, "theirs", "theirs\n");
+    s.work.git(&["fetch", "-q", "origin"]);
+    let (error, report) = failed(execute(&s.work, push(&s.work, "main"), None));
+    assert!(error.contains("nothing to push"), "{error}");
+    assert!(report.steps.is_empty());
+}
+
+#[test]
+fn forcing_past_a_commit_the_branch_dropped_loses_it_once_approved() {
+    let mut s = setup();
+    s.work.branch("feature");
+    s.work.write("one", b"one\n");
+    s.work.commit_all("one");
+    s.work.write("two", b"two\n");
+    let two = s.work.commit_all("two");
+    s.work.git(&["push", "-q", "-u", "origin", "feature"]);
+    // `two` is dropped: the branch had it, so git's include check lets the push through.
+    s.work.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    s.work.write("three", b"three\n");
+    s.work.commit_all("three");
+    let w = warning(execute(&s.work, push(&s.work, "feature"), None));
+    assert_eq!(w.commits, vec![oid(&two)]);
+    assert!(w.replaced.is_empty());
+    done(execute(&s.work, w.action.clone(), Some(&w)));
     assert_eq!(
-        commands(&report),
-        ["git branch --unset-upstream -- feature"]
+        on_origin(&s, "feature"),
+        Some(rev(&s.work, "feature").to_hex())
     );
-    assert_eq!(upstream(&s.work, "feature"), None);
+}
+
+#[test]
+fn git_wont_force_past_commits_the_branch_never_had_and_says_why() {
+    let mut s = rebased_feature();
+    s.other.git(&["fetch", "-q", "origin"]);
+    s.other.git(&[
+        "checkout",
+        "-q",
+        "-b",
+        "feature",
+        "--track",
+        "origin/feature",
+    ]);
+    s.other.write("three", b"three\n");
+    let three = s.other.commit_all("three");
+    s.other.git(&["push", "-q", "origin", "feature"]);
+    s.work.git(&["fetch", "-q", "origin"]);
+    let w = warning(execute(&s.work, push(&s.work, "feature"), None));
+    let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
+    assert!(
+        error.starts_with("origin/feature has commits feature never had"),
+        "{error}"
+    );
+    assert_eq!(report.steps.len(), 2, "the push, then a fetch");
+    assert_eq!(on_origin(&s, "feature"), Some(three));
+}
+
+/// A pre-push hook that waits a minute, to cancel the push under.
+#[cfg(unix)]
+#[test]
+fn a_cancelled_push_stops_git_and_pushes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut s = setup();
+    let hook = s.work.path().join(".git/hooks/pre-push");
+    std::fs::write(&hook, "#!/bin/sh\necho checking\nsleep 60\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let before = on_origin(&s, "main");
+    s.work.commit("mine");
+    let cancel = CancelTree::default();
+    let live = Live::default();
+    let started = std::time::Instant::now();
+    let (canceller, watched) = (cancel.clone(), live.clone());
+    std::thread::spawn(move || {
+        while !watched
+            .steps()
+            .first()
+            .is_some_and(|s| s.1.contains("checking"))
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        canceller.cancel();
+    });
+    let out =
+        Branches::new(s.work.path())
+            .with_live(live)
+            .execute(push(&s.work, "main"), None, &cancel);
+    let (error, _) = failed(out);
+    assert_eq!(error, "Operation cancelled.");
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    assert_eq!(on_origin(&s, "main"), before);
 }

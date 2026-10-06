@@ -8,7 +8,6 @@ use parterre_core::remote::{self, Diverged, Live, Pull, Push, PushState, Reconci
 use parterre_core::{Oid, Repo};
 
 use super::branches::{Request, Target, capitalized, loading_reason, target_menu_named};
-use crate::theme::Palette;
 use crate::{dialogs, menu, widgets};
 
 /// *Pull* on the open worktree's branch, *Push* and *Set upstream…* for the local branches at
@@ -143,8 +142,7 @@ pub(super) fn network_window(
             let mut cancel = false;
             let size = vec2(ui.available_width(), 34.0);
             ui.allocate_ui_with_layout(size, Layout::right_to_left(Align::Center), |ui| {
-                cancel = widgets::text_button(ui, "Cancel").clicked()
-                    || ui.input(|i| i.key_pressed(egui::Key::Escape));
+                cancel = widgets::text_button(ui, "Cancel").clicked();
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| ui.spinner());
             });
             cancel
@@ -192,7 +190,7 @@ impl PullDialog {
                         "{} has diverged from {}",
                         d.pull.branch, d.upstream
                     ));
-                    counts(ui, d.ahead, d.behind);
+                    crate::upstreams::counts_ui(ui, d.ahead, d.behind);
                 });
                 for how in Reconcile::ALL {
                     let flag = command_text(&d.command(how));
@@ -214,23 +212,6 @@ impl PullDialog {
             shown.inner
         }
     }
-}
-
-/// git's ahead|behind counts, as the status bar shows them: ahead in green, behind in red.
-fn counts(ui: &mut Ui, ahead: usize, behind: usize) {
-    let palette = Palette::new(ui.visuals().dark_mode, &[]);
-    let weak = ui.visuals().weak_text_color();
-    let count = |n: usize, color| {
-        RichText::new(n.to_string())
-            .monospace()
-            .strong()
-            .color(color)
-    };
-    ui.spacing_mut().item_spacing.x = 0.0;
-    ui.label(count(ahead, palette.ahead)).on_hover_text("ahead");
-    ui.label(RichText::new("|").monospace().color(weak));
-    ui.label(count(behind, palette.lost))
-        .on_hover_text("behind");
 }
 
 /// A local branch's upstream: one of the remote-tracking branches, or none.
@@ -276,11 +257,16 @@ impl SetUpstreamDialog {
         }
     }
 
-    pub fn action(&self) -> Action {
-        Action::SetUpstream(Box::new(SetUpstream {
+    /// The upstream chosen, once one is.
+    fn set(&self) -> Option<SetUpstream> {
+        Some(SetUpstream {
             branch: self.branch.clone(),
-            upstream: self.upstream.clone(),
-        }))
+            upstream: self.upstream.clone()?,
+        })
+    }
+
+    pub fn action(&self) -> Option<Action> {
+        self.set().map(|set| Action::SetUpstream(Box::new(set)))
     }
 
     /// `busy` while another Git operation runs.
@@ -308,16 +294,14 @@ impl SetUpstreamDialog {
                         ui.weak(format!("Now {current}, which is gone."));
                     }
                 });
-                let action = self.action();
-                let Action::SetUpstream(set) = &action else {
-                    unreachable!("built above")
-                };
-                let command = command_text(&remote::set_upstream_command(set));
-                dialogs::command_box(ui, &[command]);
-                let unset = self.upstream.is_none() && self.current.is_some();
-                let label = if unset { "Unset" } else { "Set" };
-                let changed = self.upstream != self.current;
-                dialogs::actions(ui, label, changed && !busy, false, false)
+                let set = self.set();
+                let commands: Vec<String> = set
+                    .iter()
+                    .map(|set| command_text(&remote::set_upstream_command(set)))
+                    .collect();
+                dialogs::command_box(ui, &commands);
+                let changed = set.is_some() && self.upstream != self.current;
+                dialogs::actions(ui, "Set", changed && !busy, false, false)
             });
         self.fresh = false;
         if shown.should_close() {

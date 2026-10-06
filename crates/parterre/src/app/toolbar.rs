@@ -187,13 +187,14 @@ impl ParterreApp {
 
     /// Fetches every remote; greyed out without one, or while git runs.
     fn fetch_button(&mut self, ui: &mut Ui) {
-        let blocked = self.repo.as_ref().and(self.branches.fetch_blocked());
-        let enabled = self.repo.is_some() && blocked.is_none();
+        let blocked = self.fetch_blocked();
         let response = ui
-            .add_enabled_ui(enabled, |ui| widgets::icon_button(ui, glyphs::FETCH, false))
+            .add_enabled_ui(blocked.is_none(), |ui| {
+                widgets::icon_button(ui, glyphs::FETCH, false)
+            })
             .inner;
         let response = tip_explained(response, "Fetch", "Ctrl+F5", FETCH_TIP)
-            .on_disabled_hover_text(blocked.unwrap_or("Open a repository first"));
+            .on_disabled_hover_text(blocked.unwrap_or_default());
         if response.clicked() {
             self.fetch(ui.ctx(), egui::ViewportId::ROOT);
         }
@@ -403,8 +404,8 @@ impl ParterreApp {
         if reload.inner.clicked() {
             self.reload_by_hand(ui.ctx());
         }
-        let blocked = self.branches.fetch_blocked().filter(|_| has_repo);
-        let fetch = ui.add_enabled_ui(has_repo && blocked.is_none(), |ui| {
+        let blocked = self.fetch_blocked();
+        let fetch = ui.add_enabled_ui(blocked.is_none(), |ui| {
             menu::item(ui, "Fetch", "Ctrl+F5", Mark::None)
         });
         if let Some(why) = blocked {
@@ -654,7 +655,7 @@ pub(super) const WORKTREES_TIP: &str = "The repository's worktrees, marked with 
     the branches they have checked out, even where hidden, and other worktrees' detached \
     HEADs in a colour of their own. Right-click one to open it.";
 const FETCH_TIP: &str = "Fetch every remote, pruning the branches deleted there (git fetch \
-    --all --prune). Only the remote branches move.";
+    --all --prune). Only remote-tracking branches move.";
 pub(super) const REMEMBER_TIP: &str =
     "Keep nodes where you moved them, per repository, across runs and relayouts.";
 

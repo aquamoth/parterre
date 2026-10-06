@@ -48,8 +48,7 @@ impl Reconcile {
 pub struct Pull {
     pub branch: String,
     pub head: Oid,
-    /// Chosen by the user, when the branch had diverged and git's config didn't say. Fetched
-    /// already then.
+    /// Chosen by the user, when the branch had diverged and git's config didn't say.
     pub how: Option<Reconcile>,
 }
 
@@ -87,12 +86,12 @@ pub struct Push {
     pub remote: String,
 }
 
-/// `git branch --set-upstream-to`, or `--unset-upstream` for `None`.
+/// `git branch --set-upstream-to`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SetUpstream {
     pub branch: String,
     /// A remote-tracking branch, `origin/main`.
-    pub upstream: Option<String>,
+    pub upstream: String,
 }
 
 /// What pushing a branch to a remote would do, by the last fetch.
@@ -145,17 +144,14 @@ pub(crate) fn push_command(catalog: &Catalog, push: &Push, force: bool) -> Vec<S
     args
 }
 
-/// `git branch --set-upstream-to=…`, or `--unset-upstream`.
+/// `git branch --set-upstream-to=…`.
 pub fn set_upstream_command(set: &SetUpstream) -> Vec<String> {
-    match &set.upstream {
-        Some(upstream) => vec![
-            "branch".into(),
-            format!("--set-upstream-to=refs/remotes/{upstream}"),
-            "--".into(),
-            set.branch.clone(),
-        ],
-        None => words(&["branch", "--unset-upstream", "--", &set.branch]),
-    }
+    vec![
+        "branch".into(),
+        format!("--set-upstream-to=refs/remotes/{}", set.upstream),
+        "--".into(),
+        set.branch.clone(),
+    ]
 }
 
 /// The remotes, by name, with what pushing local branch `branch` to each would do, by the
@@ -215,8 +211,9 @@ pub(crate) fn fetch(
     Ok(())
 }
 
-/// Fetches the upstream's remote, then pulls, unless the branch has diverged and git's config
-/// doesn't say how to reconcile it: then the user is asked, with nothing changed but the fetch.
+/// Fetches the upstream's remote, then pulls, unless the branch has diverged and neither git's
+/// config nor the user says how to reconcile it: then the user is asked, with nothing changed
+/// but the fetch.
 /// A stop on conflicts comes back as [`Report::attention`].
 pub(crate) fn pull(
     catalog: &Catalog,
@@ -246,13 +243,14 @@ pub(crate) fn pull(
         return Err(Error::Invalid(format!("Branch {branch} has no upstream.")));
     };
     let git = Git::new(&catalog.root);
+    // Fetched here, so that a failure to reach the remote says what parterre can't do.
+    let remote = git.query(&["config", "--get", &format!("branch.{branch}.remote")])?;
+    if let Some(remote) = remote.filter(|r| catalog.remote_names.contains(r))
+        && !run_live(&git, fetch_remote_command(&remote), cancel, report, live)?
+    {
+        return Err(network_failure(report));
+    }
     if pull.how.is_none() {
-        let remote = git.query(&["config", "--get", &format!("branch.{branch}.remote")])?;
-        if let Some(remote) = remote.filter(|r| catalog.remote_names.contains(r))
-            && !run_live(&git, fetch_remote_command(&remote), cancel, report, live)?
-        {
-            return Err(network_failure(report));
-        }
         let range = format!("refs/heads/{branch}...{branch}@{{upstream}}");
         let counts = git.query(&["rev-list", "--left-right", "--count", &range, "--"])?;
         if let Some((ahead, behind)) = counts.as_deref().and_then(parse_counts) {
@@ -322,12 +320,20 @@ pub(crate) fn push(
     let git = Git::new(&catalog.root);
     let tracking = format!("refs/remotes/{}/{branch}", push.remote);
     let theirs = remote_tip(&git, &tracking)?;
+    if let Some(theirs) = theirs
+        && is_ancestor(&git, push.tip, theirs)?
+    {
+        return Err(Error::Invalid(format!(
+            "{}/{branch} has every commit of {branch}: there's nothing to push.",
+            push.remote
+        )));
+    }
     let force = match theirs {
         Some(theirs) => !is_ancestor(&git, theirs, push.tip)?,
         None => false,
     };
     if force {
-        let (lost, replaced) = replaced_or_lost(&git, branch, &tracking)?;
+        let (lost, replaced) = lost_and_replaced(&git, branch, &tracking)?;
         let approved =
             approval.is_some_and(|w| w.action == *action && w.head == theirs && w.commits == lost);
         if !approved {
@@ -362,10 +368,16 @@ pub(crate) fn push(
     )? {
         return Err(Error::Failed(format!("{pushed}\n\n{NO_PROMPT}")));
     }
+    let remote = &push.remote;
     match remote_tip(&git, &tracking)? {
-        Some(theirs) if !is_ancestor(&git, theirs, push.tip)? => Err(Error::Failed(format!(
-            "{}/{branch} has commits you don't have.",
-            push.remote
+        // The lease held, so it was `--force-if-includes`: the remote's commits were fetched,
+        // but never on the branch.
+        now if force && now == theirs => Err(Error::Failed(format!(
+            "{remote}/{branch} has commits {branch} never had, so git won't force push over \
+             them. Take them into {branch} first.\n\n{pushed}"
+        ))),
+        Some(now) if !is_ancestor(&git, now, push.tip)? => Err(Error::Failed(format!(
+            "{remote}/{branch} has commits you don't have."
         ))),
         _ => Err(Error::Failed(pushed)),
     }
@@ -373,7 +385,7 @@ pub(crate) fn push(
 
 /// The remote's commits a force push would replace, split into those with no copy on the
 /// branch (lost) and those with one (replaced), as the graph colours them.
-fn replaced_or_lost(
+fn lost_and_replaced(
     git: &Git,
     branch: &str,
     tracking: &str,
@@ -409,11 +421,10 @@ pub(crate) fn set_upstream(
             set.branch
         )));
     }
-    if let Some(upstream) = &set.upstream
-        && !catalog.remotes.iter().any(|r| r.name == *upstream)
-    {
+    if !catalog.remotes.iter().any(|r| r.name == set.upstream) {
         return Err(Error::Invalid(format!(
-            "There is no remote branch {upstream}. Fetch, or reload and try again."
+            "There is no remote-tracking branch {}. Fetch, or reload and try again.",
+            set.upstream
         )));
     }
     let git = Git::new(&catalog.root);

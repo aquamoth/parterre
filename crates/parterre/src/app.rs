@@ -1050,10 +1050,18 @@ impl ParterreApp {
         self.reloading = Some((path, rx));
     }
 
-    /// Ctrl+F5 (see [`fetch_modifiers`]), the toolbar's button or the menu: fetches every remote, from the window
+    /// Why a fetch can't start now, if it can't.
+    fn fetch_blocked(&self) -> Option<&'static str> {
+        match &self.repo {
+            None => Some("Open a repository first"),
+            Some(_) => self.branches.fetch_blocked(),
+        }
+    }
+
+    /// Ctrl+F5, the toolbar's button or the menu: fetches every remote, from the window
     /// `opener`, once nothing else runs.
     fn fetch(&mut self, ctx: &egui::Context, opener: egui::ViewportId) {
-        if self.branches.fetch_blocked().is_none() {
+        if self.fetch_blocked().is_none() {
             let request = branches::Request::Run(parterre_core::branches::Action::Fetch);
             self.branches.request(ctx, request, opener);
         }
@@ -3330,4 +3338,13 @@ fn highlight_engine() -> parterre_highlight::Engine {
 /// Ctrl (⌘ on macOS) alone, held with F5 to fetch in any window.
 fn fetch_modifiers(m: Modifiers) -> bool {
     (m.ctrl || m.command) && !m.alt && !m.shift
+}
+
+/// A window's F5 this frame: alone it reloads (`.0`), with Ctrl it fetches (`.1`).
+fn f5_pressed(i: &egui::InputState) -> (bool, bool) {
+    let f5 = i.key_pressed(Key::F5);
+    (
+        f5 && i.modifiers.is_none(),
+        f5 && fetch_modifiers(i.modifiers),
+    )
 }

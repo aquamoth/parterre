@@ -177,6 +177,9 @@ impl ParterreApp {
                 if closing {
                     self.show_settings = false;
                 }
+                if ui.input(|i| super::f5_pressed(i).1) {
+                    self.fetch(ui.ctx(), id);
+                }
                 // Embedded, it is in the main window, which reads the text size input.
                 text_size::read_input(ui, &mut self.settings.text_size, true);
             }

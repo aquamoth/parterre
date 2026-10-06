@@ -2172,8 +2172,7 @@ impl Tool {
             Action::Revert(r) => Some(r.head),
             _ => None,
         };
-        let live =
-            matches!(action, Action::Fetch | Action::Pull(_) | Action::Push(_)).then(Live::default);
+        let live = action.is_network().then(Live::default);
         let mut branches = Branches::new(worker_path);
         if let Some(live) = &live {
             branches = branches.with_live(live.clone());
@@ -2320,8 +2319,9 @@ impl Tool {
         };
         match dialog.show(ctx, self.busy()) {
             dialogs::Answer::Primary => {
-                let action = dialog.action();
-                self.run(ctx, path, action, None, dialog.opener);
+                if let Some(action) = dialog.action() {
+                    self.run(ctx, path, action, None, dialog.opener);
+                }
             }
             dialogs::Answer::Cancel => {}
             dialogs::Answer::Open => self.set_upstream = Some(dialog),

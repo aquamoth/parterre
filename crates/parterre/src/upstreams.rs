@@ -395,7 +395,6 @@ pub fn status_ui(
     else {
         return;
     };
-    let palette = Palette::new(ui.visuals().dark_mode, &[]);
     let weak = ui.visuals().weak_text_color();
     ui.label(RichText::new(&repo.refs[u.branch].name).color(weak))
         .on_hover_text(u.short_name());
@@ -405,20 +404,28 @@ pub fn status_ui(
         ui.label(RichText::new("gone").monospace().color(weak))
             .on_hover_text(u.short_name());
     } else {
-        let count = |n: usize, color: Color32| {
-            RichText::new(n.to_string())
-                .monospace()
-                .strong()
-                .color(if n == 0 { weak } else { color })
-        };
-        ui.label(count(u.ahead(), palette.ahead))
-            .on_hover_text("ahead");
-        ui.label(RichText::new("|").monospace().color(weak));
-        ui.label(count(u.behind(), palette.lost))
-            .on_hover_text("behind");
+        counts_ui(ui, u.ahead(), u.behind());
     }
     ui.spacing_mut().item_spacing.x = spacing;
     ui.separator();
+}
+
+/// git's ahead|behind counts, `3|2`: ahead in green, behind in red, a zero weak. Leaves the
+/// item spacing at zero.
+pub fn counts_ui(ui: &mut egui::Ui, ahead: usize, behind: usize) {
+    let palette = Palette::new(ui.visuals().dark_mode, &[]);
+    let weak = ui.visuals().weak_text_color();
+    let count = |n: usize, color: Color32| {
+        RichText::new(n.to_string())
+            .monospace()
+            .strong()
+            .color(if n == 0 { weak } else { color })
+    };
+    ui.spacing_mut().item_spacing.x = 0.0;
+    ui.label(count(ahead, palette.ahead)).on_hover_text("ahead");
+    ui.label(RichText::new("|").monospace().color(weak));
+    ui.label(count(behind, palette.lost))
+        .on_hover_text("behind");
 }
 
 /// The commits *Compare → Upstream* compares, from the upstream to the branch, or why there
