@@ -79,8 +79,6 @@ pub struct CompareWindow {
     blames: Vec<(Arc<Repo>, BlameSpec)>,
     /// What working-tree rows asked for, for the app to take.
     pub requests: Vec<FileRequest>,
-    /// The working tree had conflicts when last listed: the window is resolving them.
-    conflicted: bool,
 }
 
 #[derive(Debug)]
@@ -217,19 +215,9 @@ impl CompareWindow {
         }
     }
 
-    /// True while a side is the working tree and it has conflicts.
-    fn resolving(&self) -> bool {
-        self.conflicted
-            && self
-                .view
-                .as_ref()
-                .is_some_and(|v| v.comparison.reads_working_tree())
-    }
-
-    /// The changed-files table, with the common-ancestor switch in its bar; while resolving
-    /// conflicts, only where it changes what is compared.
+    /// The changed-files table, with the common-ancestor switch in its bar where it changes
+    /// what is compared.
     fn files(&mut self, ui: &mut Ui, c: &Colors, env: &mut Env) {
-        let resolving = self.resolving();
         let Some(view) = &mut self.view else { return };
         view.comparison.since_ancestor = env.settings.since_ancestor;
         let comparison = view.comparison;
@@ -242,14 +230,10 @@ impl CompareWindow {
         });
         let base = listed.and_then(|(base, files, _)| files.is_ok().then_some(*base));
         let tree = listed.and_then(|(_, _, tree)| tree.as_ref());
-        // Kept while the working tree is listed again, so the header doesn't flicker.
-        if listed.is_some() {
-            self.conflicted = tree.is_some_and(|t| !t.conflicts.is_empty());
-        }
         let weak = ui.visuals().weak_text_color();
         let abbrev = view.repo.abbrev_len;
         let since = &mut env.settings.since_ancestor;
-        let ancestor_matters = !resolving || view.ancestor_matters;
+        let ancestor_matters = view.ancestor_matters;
         let action = self.table.show_working_tree(
             ui,
             c,
