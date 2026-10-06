@@ -85,10 +85,12 @@ const LOG_FIELDS: usize = 9;
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 
-/// git with no arguments yet: piped output, the C locale, and no console window.
+/// git with no arguments yet: piped output, the C locale, the user's shell's `PATH` and no
+/// console window.
 fn git_command() -> Command {
     let mut cmd = Command::new(program());
-    cmd.env("LC_ALL", "C")
+    crate::shell_path::apply(&mut cmd)
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
