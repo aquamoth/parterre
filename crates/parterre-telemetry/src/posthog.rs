@@ -327,6 +327,7 @@ mod tests {
     use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
+    use std::time::Instant;
 
     const ID: &str = "6f1c2b7e-3a4d-4e8f-9b0a-1c2d3e4f5a6b";
     const SESSION: &str = "0199b0a4-5c00-7000-8000-000000000000";
@@ -490,6 +491,27 @@ mod tests {
     fn sent(received: &Receiver<Value>) -> Vec<Value> {
         let mut sent = Vec::new();
         while let Ok(body) = received.recv_timeout(Duration::from_millis(500)) {
+            assert_eq!(body["api_key"], TOKEN);
+            sent.extend(body["batch"].as_array().cloned().unwrap_or_default());
+        }
+        sent
+    }
+
+    /// The events PostHog was sent, up to the close's `Application Backgrounded`, waiting at
+    /// most 10 seconds: the sending thread may still be starting when [`Usage::close`] stops
+    /// waiting for it, as asking Windows for the locale and time zone now and then takes
+    /// seconds (#330).
+    fn sent_until_closed(received: &Receiver<Value>) -> Vec<Value> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut sent = Vec::new();
+        while !sent
+            .iter()
+            .any(|e: &Value| e["event"] == "Application Backgrounded")
+        {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let Ok(body) = received.recv_timeout(left) else {
+                panic!("not closed: {sent:?}");
+            };
             assert_eq!(body["api_key"], TOKEN);
             sent.extend(body["batch"].as_array().cloned().unwrap_or_default());
         }
@@ -767,7 +789,7 @@ mod tests {
         record(Feature::Menu(Menu::Node));
         record(Feature::Action(Action::Merge));
         usage.close();
-        let events = sent(&received);
+        let events = sent_until_closed(&received);
         let features: Vec<_> = events
             .iter()
             .filter_map(|e| {
@@ -785,11 +807,6 @@ mod tests {
         ] {
             assert!(features.contains(&expected), "{expected:?}: {features:?}");
         }
-        assert!(
-            events
-                .iter()
-                .any(|e| e["event"] == "Application Backgrounded")
-        );
         // All in the session the usage statistics started with, the feature events included.
         let session = events[0]["properties"]["$session_id"].clone();
         assert!(uuid::Uuid::parse_str(session.as_str().unwrap()).is_ok());
