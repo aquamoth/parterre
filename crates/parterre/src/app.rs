@@ -454,7 +454,9 @@ impl ParterreApp {
         // comes of loading them, nothing is said.
         let pull_requests_setting = settings.graph.show_pull_requests;
         ParterreApp {
-            title: window_title(repo.as_ref()),
+            title: opening
+                .as_ref()
+                .map_or_else(|| window_title(repo.as_ref()), Opening::title),
             repo: repo.map(Arc::new),
             recent,
             pick_folder: false,
@@ -2860,6 +2862,30 @@ impl Opening {
         self.named
             .then(|| (format!("Opening {}…", self.path.display()), false))
     }
+
+    /// The window's title meanwhile: the one the repository will have, so it doesn't change
+    /// when the repository is in.
+    pub fn title(&self) -> String {
+        if self.named {
+            format!("{} – parterre", name_and_place(&self.path).0)
+        } else {
+            window_title(None)
+        }
+    }
+
+    /// In place of the graph meanwhile: a word, centred, and nothing to click.
+    fn panel(&self, ui: &mut Ui) {
+        if !self.named {
+            return;
+        }
+        ui.add_space((ui.available_height() / 2.0 - 10.0).max(0.0));
+        ui.vertical_centered(|ui| {
+            ui.label(
+                RichText::new(format!("Opening {}…", name_and_place(&self.path).0))
+                    .color(ui.visuals().weak_text_color()),
+            );
+        });
+    }
 }
 
 pub fn window_title(repo: Option<&Repo>) -> String {
@@ -3058,7 +3084,10 @@ impl eframe::App for ParterreApp {
         );
         self.view.text_size = ctx.zoom_factor();
         self.graph_hovered = false;
-        let title = window_title(self.repo.as_deref());
+        let title = self
+            .opening
+            .as_ref()
+            .map_or_else(|| window_title(self.repo.as_deref()), Opening::title);
         if self.title != title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
@@ -3117,6 +3146,9 @@ impl eframe::App for ParterreApp {
         }
         if self.repo.is_some() {
             egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
+        } else if let Some(opening) = &self.opening {
+            // Not the welcome view: the repository is on its way (#309).
+            egui::CentralPanel::default().show(ui, |ui| opening.panel(ui));
         } else {
             egui::CentralPanel::default().show(ui, |ui| self.welcome(ui));
         }

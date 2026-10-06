@@ -383,7 +383,11 @@ fn main() -> ExitCode {
     let vsync = !frame_pacing::wayland_session();
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(app::window_title(repo.as_ref()))
+            .with_title(
+                opening
+                    .as_ref()
+                    .map_or_else(|| app::window_title(repo.as_ref()), app::Opening::title),
+            )
             .with_app_id(settings::APP_ID)
             .with_inner_size([w, h])
             .with_min_inner_size([400.0, 300.0])
