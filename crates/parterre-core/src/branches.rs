@@ -888,6 +888,14 @@ pub enum Action {
     RestoreStash(Oid),
     /// Finishes a conflicted file in the open worktree with one git command.
     Resolve(Box<crate::conflicts::Resolve>),
+    /// Fetches every remote, pruning what's gone from them.
+    Fetch,
+    /// Pulls into the open worktree's branch.
+    Pull(Box<crate::remote::Pull>),
+    /// Pushes a local branch to its own name on a remote.
+    Push(Box<crate::remote::Push>),
+    /// Sets or unsets a local branch's upstream.
+    SetUpstream(Box<crate::remote::SetUpstream>),
 }
 
 impl Action {
@@ -922,6 +930,13 @@ impl Action {
             Self::Revert(r) => format!("Revert {} in {}", short(r.commit), r.name()),
             Self::RestoreStash(_) => "Restore stashed changes".into(),
             Self::Resolve(r) => r.label(),
+            Self::Fetch => "Fetch".into(),
+            Self::Pull(p) => format!("Pull {}", p.branch),
+            Self::Push(p) => format!("Push {} to {}", p.branch, p.remote),
+            Self::SetUpstream(s) => match &s.upstream {
+                Some(upstream) => format!("Set upstream of {} to {upstream}", s.branch),
+                None => format!("Unset upstream of {}", s.branch),
+            },
         }
     }
 }
@@ -994,12 +1009,15 @@ pub struct Warning {
     pub action: Action,
     /// Every commit lost.
     pub commits: Vec<Oid>,
+    /// A force push's: the remote's commits it replaces with copies the branch has.
+    pub replaced: Vec<Oid>,
     /// Each branch or worktree the action deletes, in its order, with what it loses. Empty for
     /// a switch.
     pub deletions: Vec<Deletion>,
     pub repo: Arc<Repo>,
     pub commands: Vec<Vec<String>>,
-    head: Option<Oid>,
+    /// The HEAD the warning was about, or, for a force push, the remote branch's tip.
+    pub(crate) head: Option<Oid>,
 }
 
 impl Warning {
@@ -1082,17 +1100,33 @@ fn all_commits(deletions: &[Deletion]) -> Vec<Oid> {
 pub enum Outcome {
     Done(Report),
     Warning(Warning),
-    Failed { error: Error, report: Report },
+    Failed {
+        error: Error,
+        report: Report,
+    },
+    /// A pull that asks how to reconcile a diverged branch first.
+    Diverged(Box<crate::remote::Diverged>),
 }
 
 #[derive(Clone, Debug)]
 pub struct Branches {
     path: PathBuf,
+    /// Where the network commands' output goes as it comes.
+    live: Option<crate::remote::Live>,
 }
 
 impl Branches {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            live: None,
+        }
+    }
+
+    /// The network commands (fetch, pull, push) stream their output to `live`.
+    pub fn with_live(mut self, live: crate::remote::Live) -> Self {
+        self.live = Some(live);
+        self
     }
 
     /// Commands shown by the form. Execution freezes its start by full OID and validates again.
@@ -1171,6 +1205,10 @@ impl Branches {
             Action::Revert(r) => Ok(crate::revert::commands(r)),
             Action::RestoreStash(_) => Ok(vec![words(&["stash", "pop"])]),
             Action::Resolve(r) => Ok(r.conflict.commands(r.answer)),
+            Action::Fetch => Ok(vec![crate::remote::fetch_command()]),
+            Action::Pull(p) => Ok(vec![crate::remote::pull_command(p.how)]),
+            Action::Push(p) => Ok(vec![crate::remote::push_command(catalog, p, false)]),
+            Action::SetUpstream(s) => Ok(vec![crate::remote::set_upstream_command(s)]),
         }
     }
 
@@ -1181,6 +1219,16 @@ impl Branches {
         cancel: &CancelTree,
     ) -> Outcome {
         let mut report = Report::default();
+        if let Action::Pull(pull) = &action {
+            let pulled = Catalog::load(&self.path).and_then(|catalog| {
+                crate::remote::pull(&catalog, pull, cancel, &mut report, self.live.as_ref())
+            });
+            return match pulled {
+                Ok(Some(diverged)) => Outcome::Diverged(Box::new(diverged)),
+                Ok(None) => Outcome::Done(report),
+                Err(error) => Outcome::Failed { error, report },
+            };
+        }
         let requested = action.clone();
         match self.execute_inner(action, approval, cancel, &mut report) {
             Ok(Some(warning)) => Outcome::Warning(warning),
@@ -1278,6 +1326,23 @@ impl Branches {
             crate::conflicts::execute(&catalog, resolve, cancel, report)?;
             return Ok(None);
         }
+        let live = self.live.as_ref();
+        match &action {
+            Action::Fetch => {
+                crate::remote::fetch(&catalog, cancel, report, live)?;
+                return Ok(None);
+            }
+            Action::Push(push) => {
+                return crate::remote::push(
+                    &catalog, &action, push, approval, cancel, report, live,
+                );
+            }
+            Action::SetUpstream(set) => {
+                crate::remote::set_upstream(&catalog, set, cancel, report)?;
+                return Ok(None);
+            }
+            _ => {}
+        }
         let mut commands = Self::commands(&catalog, &action)?;
         let switching = matches!(
             &action,
@@ -1332,7 +1397,11 @@ impl Branches {
             | Action::CherryPick(_)
             | Action::Revert(_)
             | Action::RestoreStash(_)
-            | Action::Resolve(_) => {
+            | Action::Resolve(_)
+            | Action::Fetch
+            | Action::Pull(_)
+            | Action::Push(_)
+            | Action::SetUpstream(_) => {
                 unreachable!("handled above")
             }
             Action::Switch(name) => {
@@ -1384,6 +1453,7 @@ impl Branches {
                 return Ok(Some(Warning {
                     action,
                     commits,
+                    replaced: Vec::new(),
                     deletions: Vec::new(),
                     head: catalog.head,
                     repo,
@@ -1506,6 +1576,7 @@ impl Branches {
         let Some(approved) = approved else {
             return Ok(Some(Warning {
                 action: action.clone(),
+                replaced: Vec::new(),
                 head: catalog.head,
                 repo: Arc::new(git.load()?),
                 commands: worktree_commands(&deletions, branches),
@@ -1579,6 +1650,7 @@ impl Branches {
         }
         Ok(Some(Warning {
             action: Action::DeleteWorktrees { paths, branches },
+            replaced: Vec::new(),
             head: after.head,
             repo: Arc::new(git.load()?),
             commands: worktree_commands(&deletions, branches),
@@ -1606,6 +1678,7 @@ fn branch_warning(
     Ok(Some(Warning {
         action,
         commits,
+        replaced: Vec::new(),
         deletions,
         repo,
         commands: vec![force],

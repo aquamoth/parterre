@@ -28,6 +28,7 @@ pub mod pattern;
 pub mod physics;
 pub mod rebase;
 pub mod recent;
+pub mod remote;
 pub mod repo;
 pub mod reset;
 pub mod revert;

@@ -100,6 +100,8 @@ pub enum BlameRequest {
     Diff(Arc<Repo>, FileDiffSpec, usize),
     /// The log window, from a line's commit.
     Log(Oid),
+    /// Ctrl+F5: fetch, from this window.
+    Fetch(egui::ViewportId),
 }
 
 /// The open blame windows.
@@ -1998,11 +2000,14 @@ impl BlameWindow {
                             .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
                     }
                 }
-                let (close, size, reload) = ui.input(|i| {
+                // F5 blames again, Ctrl+F5 fetches, as in the main window.
+                let (close, size, reload, fetch) = ui.input(|i| {
+                    let f5 = i.key_pressed(Key::F5);
                     (
                         i.viewport().close_requested(),
                         i.viewport().inner_rect.map(|r| r.size()),
-                        i.key_pressed(Key::F5),
+                        f5 && i.modifiers.is_none(),
+                        f5 && super::fetch_modifiers(i.modifiers),
                     )
                 });
                 if let Some(size) = size
@@ -2013,6 +2018,9 @@ impl BlameWindow {
                 }
                 if reload {
                     self.reload(ui.ctx());
+                }
+                if fetch {
+                    requests.push(BlameRequest::Fetch(id));
                 }
                 // Keys go to the main window too when the window is embedded in it.
                 self.handle_keys(ui);
@@ -2454,6 +2462,7 @@ impl ParterreApp {
                     let settings = &self.settings.diff_window;
                     self.diffs.open_at(repo, spec, Some(line), settings, ctx);
                 }
+                BlameRequest::Fetch(window) => self.fetch(ctx, window),
                 BlameRequest::Log(oid) => {
                     let Some(repo) = self.repo.clone() else {
                         continue;

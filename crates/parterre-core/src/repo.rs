@@ -6,6 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -156,6 +157,8 @@ pub struct Repo {
     /// The local branches that have an upstream, in ref order.
     pub upstreams: Vec<Upstream>,
     by_oid: HashMap<Oid, CommitIx>,
+    /// Every commit's generation, worked out the first time it's needed.
+    generations: OnceLock<Vec<u32>>,
 }
 
 impl Repo {
@@ -176,7 +179,38 @@ impl Repo {
             default_branch: None,
             upstreams: Vec::new(),
             by_oid,
+            generations: OnceLock::new(),
         }
+    }
+
+    /// Every commit's generation, by [`CommitIx`]: one more than its highest parent's, 1 for a
+    /// root. A commit's ancestors all have lower generations than it, whatever their dates say.
+    pub fn generations(&self) -> &[u32] {
+        self.generations.get_or_init(|| generations_of(self))
+    }
+
+    /// True if `ancestor` is `from` or one of its ancestors, as `git merge-base --is-ancestor`
+    /// says: walks down from `from`, no lower than `ancestor`'s generation.
+    pub fn reaches(&self, from: CommitIx, ancestor: CommitIx) -> bool {
+        let generation = self.generations();
+        let floor = generation[ancestor.ix()];
+        let mut seen = vec![false; self.commits.len()];
+        let mut stack = vec![from];
+        while let Some(c) = stack.pop() {
+            if c == ancestor {
+                return true;
+            }
+            if std::mem::replace(&mut seen[c.ix()], true) {
+                continue;
+            }
+            stack.extend(
+                self.commit(c)
+                    .parents
+                    .iter()
+                    .filter(|p| generation[p.ix()] >= floor && !seen[p.ix()]),
+            );
+        }
+        false
     }
 
     pub fn commit(&self, ix: CommitIx) -> &Commit {
@@ -387,4 +421,36 @@ impl Repo {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.path.display().to_string())
     }
+}
+
+/// Every commit's generation (see [`Repo::generations`]).
+fn generations_of(repo: &Repo) -> Vec<u32> {
+    let n = repo.commits.len();
+    let mut generation = vec![0u32; n];
+    let mut stack = Vec::new();
+    for start in 0..n {
+        if generation[start] != 0 {
+            continue;
+        }
+        stack.push((start, false));
+        while let Some((c, expanded)) = stack.pop() {
+            if generation[c] != 0 {
+                continue;
+            }
+            let parents = &repo.commits[c].parents;
+            if expanded {
+                let highest = parents.iter().map(|p| generation[p.ix()]).max();
+                generation[c] = highest.unwrap_or(0) + 1;
+            } else {
+                stack.push((c, true));
+                stack.extend(
+                    parents
+                        .iter()
+                        .filter(|p| generation[p.ix()] == 0)
+                        .map(|p| (p.ix(), false)),
+                );
+            }
+        }
+    }
+    generation
 }

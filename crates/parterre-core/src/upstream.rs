@@ -117,7 +117,6 @@ pub fn load(git: &Git, repo: &Repo, configured: &[(String, String)]) -> Vec<Upst
         .enumerate()
         .map(|(i, r)| (r.full_name.as_str(), i))
         .collect();
-    let mut generations = None;
     let mut out = Vec::new();
     for (branch_name, name) in configured {
         let Some(&branch) = index.get(branch_name.as_str()) else {
@@ -134,8 +133,7 @@ pub fn load(git: &Git, repo: &Repo, configured: &[(String, String)]) -> Vec<Upst
         if let Some(u) = target {
             let (a, b) = (repo.refs[branch].target, repo.refs[u].target);
             if a != b {
-                let generations = generations.get_or_insert_with(|| generations_of(repo));
-                let (ahead, behind) = difference(repo, generations, a, b);
+                let (ahead, behind) = difference(repo, repo.generations(), a, b);
                 classify(git, repo, &mut upstream, ahead, behind);
             }
         }
@@ -204,39 +202,6 @@ fn copied_onto_branch(git: &Git, branch: &str, upstream: &str) -> HashSet<String
         .filter_map(|l| l.strip_prefix('='))
         .map(str::to_owned)
         .collect()
-}
-
-/// Every commit's generation: one more than its highest parent's, 1 for a root. A commit's
-/// ancestors all have lower generations than it, whatever their dates say.
-fn generations_of(repo: &Repo) -> Vec<u32> {
-    let n = repo.commits.len();
-    let mut generation = vec![0u32; n];
-    let mut stack = Vec::new();
-    for start in 0..n {
-        if generation[start] != 0 {
-            continue;
-        }
-        stack.push((start, false));
-        while let Some((c, expanded)) = stack.pop() {
-            if generation[c] != 0 {
-                continue;
-            }
-            let parents = &repo.commits[c].parents;
-            if expanded {
-                let highest = parents.iter().map(|p| generation[p.ix()]).max();
-                generation[c] = highest.unwrap_or(0) + 1;
-            } else {
-                stack.push((c, true));
-                stack.extend(
-                    parents
-                        .iter()
-                        .filter(|p| generation[p.ix()] == 0)
-                        .map(|p| (p.ix(), false)),
-                );
-            }
-        }
-    }
-    generation
 }
 
 /// The commits reachable from `a` but not from `b`, and from `b` but not from `a`, newest

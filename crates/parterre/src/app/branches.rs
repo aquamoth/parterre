@@ -12,6 +12,7 @@ use parterre_core::branches::{
     Report, Warning, command_text,
 };
 use parterre_core::file_diff::FileDiffSpec;
+use parterre_core::remote::Live;
 use parterre_core::reset::{Mode, Preview};
 use parterre_core::worktree_folder;
 use parterre_core::{Oid, RefKind, Repo};
@@ -20,6 +21,7 @@ use parterre_util::CancelTree;
 use super::cherry_pick::CherryPickDialog;
 use super::merge::MergeDialog;
 use super::rebase::{RebaseDialog, stuck_color};
+use super::remote::{PullDialog, SetUpstreamDialog};
 use super::reset::ResetDialog;
 use super::revert::{RestoreDialog, RevertDialog};
 use crate::theme::Palette;
@@ -78,6 +80,10 @@ pub enum Request {
     Revert {
         commit: Oid,
     },
+    /// The dialog for setting local branch `branch`'s upstream.
+    SetUpstream {
+        branch: String,
+    },
 }
 
 /// One target gets a direct named item; several get the existing app's submenu treatment.
@@ -131,13 +137,14 @@ fn menu_for(
     worktrees: bool,
 ) -> Option<Request> {
     let branch = branch_section(ui, repo, commit, group, selection, catalog, busy);
+    let remote = catalog.and_then(|c| super::remote::section(ui, repo, commit, c, busy));
     let worktree = worktrees
         .then(|| worktree_section(ui, commit, group, catalog, busy))
         .flatten();
-    branch.or(worktree)
+    branch.or(remote).or(worktree)
 }
 
-fn loading_reason(busy: bool) -> &'static str {
+pub(super) fn loading_reason(busy: bool) -> &'static str {
     if busy {
         "A Git operation is running"
     } else {
@@ -742,7 +749,7 @@ pub fn revert_item(
 }
 
 /// A menu target: its name, what choosing it asks for, and why it's greyed out, if it is.
-type Target = (String, Request, Option<String>);
+pub(super) type Target = (String, Request, Option<String>);
 
 fn target_menu(
     ui: &mut Ui,
@@ -762,7 +769,7 @@ fn target_menu(
 }
 
 /// [`target_menu`], with a lone target's item labelled by `single`.
-fn target_menu_named(
+pub(super) fn target_menu_named(
     ui: &mut Ui,
     verb: &str,
     single: impl Fn(&str) -> String,
@@ -803,7 +810,7 @@ fn target_menu_named(
     }
 }
 
-fn capitalized(s: &str) -> String {
+pub(super) fn capitalized(s: &str) -> String {
     let mut chars = s.chars();
     chars
         .next()
@@ -1489,6 +1496,8 @@ struct Job {
     go_to: Option<PathBuf>,
     /// A revert's: where the branch was, for the log to follow it to the new commit.
     reverting: Option<Oid>,
+    /// A fetch's, pull's or push's: git's output as it comes.
+    live: Option<Live>,
 }
 
 /// A revert done: the log follows the branch from `from` to the new commit `to`, which is
@@ -1540,6 +1549,10 @@ fn operation(action: &Action) -> usage::Action {
         Action::Revert(_) => usage::Action::Revert,
         Action::RestoreStash(_) => usage::Action::RestoreStash,
         Action::Resolve(_) => usage::Action::ResolveConflict,
+        Action::Fetch => usage::Action::Fetch,
+        Action::Pull(_) => usage::Action::Pull,
+        Action::Push(_) => usage::Action::Push,
+        Action::SetUpstream(_) => usage::Action::SetUpstream,
     }
 }
 
@@ -1615,6 +1628,9 @@ pub struct Tool {
     revert_loading: Option<RevertLoading>,
     /// Putting back the changes stashed for a revert.
     restore: Option<RestoreDialog>,
+    /// How to pull a diverged branch.
+    pull: Option<PullDialog>,
+    set_upstream: Option<SetUpstreamDialog>,
     /// A revert done, for the log to follow.
     pub reverted: Option<Reverted>,
     /// Diff windows asked for from a dialog.
@@ -1691,6 +1707,8 @@ impl Tool {
                 self.revert = None;
                 self.revert_loading = None;
                 self.restore = None;
+                self.pull = None;
+                self.set_upstream = None;
                 self.catalog = None;
                 self.banner = BannerTimer::default();
                 self.look_at_once = true;
@@ -1840,6 +1858,16 @@ impl Tool {
                 Outcome::Failed { error, report } => {
                     self.notice(ctx, job.path, job.label, report, Some(error.to_string()))
                 }
+                Outcome::Diverged(diverged) if here => {
+                    self.pull = Some(PullDialog::new(*diverged, job.opener));
+                }
+                Outcome::Diverged(_) => self.notice(
+                    ctx,
+                    job.path,
+                    job.label,
+                    Report::default(),
+                    Some("Open this repository again to pull.".into()),
+                ),
             }
         }
     }
@@ -1872,6 +1900,11 @@ impl Tool {
                 }
             }
             Request::GoTo(_) => unreachable!("handled above"),
+            Request::SetUpstream { branch } => {
+                if let Some(catalog) = &self.catalog {
+                    self.set_upstream = Some(SetUpstreamDialog::new(catalog, branch, opener));
+                }
+            }
             Request::Run(action) => self.run(ctx, repo.path.clone(), action, None, opener),
             Request::Reset { target, mode } => self.preview(ctx, target, mode, opener, false),
             Request::Rebase { onto, target } => {
@@ -2139,9 +2172,14 @@ impl Tool {
             Action::Revert(r) => Some(r.head),
             _ => None,
         };
+        let live =
+            matches!(action, Action::Fetch | Action::Pull(_) | Action::Push(_)).then(Live::default);
+        let mut branches = Branches::new(worker_path);
+        if let Some(live) = &live {
+            branches = branches.with_live(live.clone());
+        }
         std::thread::spawn(move || {
-            let outcome =
-                Branches::new(worker_path).execute(action, approval.as_ref(), &worker_cancel);
+            let outcome = branches.execute(action, approval.as_ref(), &worker_cancel);
             let _ = tx.send(outcome);
             ctx.request_repaint();
         });
@@ -2153,6 +2191,7 @@ impl Tool {
             rx,
             go_to: None,
             reverting,
+            live,
         });
     }
 
@@ -2226,8 +2265,67 @@ impl Tool {
         self.cherry_pick_dialog(ctx, palette, options);
         self.revert_dialog(ctx);
         self.restore_dialog(ctx);
+        self.pull_dialog(ctx);
+        self.set_upstream_dialog(ctx);
         self.loss_dialog(ctx);
+        self.network_window(ctx);
         self.notifications(ctx);
+    }
+
+    /// Whether a fetch can start now, or why not.
+    pub fn fetch_blocked(&self) -> Option<&'static str> {
+        match &self.catalog {
+            _ if self.busy() => Some(loading_reason(true)),
+            None => Some(loading_reason(false)),
+            Some(c) if c.remote_names.is_empty() => Some("This repository has no remote"),
+            Some(_) => None,
+        }
+    }
+
+    /// The running fetch, pull or push, once git has started: its output, in a window of its
+    /// own that locks the others.
+    fn network_window(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.job else { return };
+        let Some(live) = job.live.as_ref().filter(|l| !l.steps().is_empty()) else {
+            return;
+        };
+        if super::remote::network_window(ctx, &job.label, live, job.opener) {
+            job.cancel.cancel();
+        }
+    }
+
+    fn pull_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.pull.take() else {
+            return;
+        };
+        let Some(path) = self.repo.as_ref().map(|r| r.path.clone()) else {
+            return;
+        };
+        match dialog.show(ctx, self.busy()) {
+            dialogs::Answer::Primary => {
+                let action = Action::Pull(Box::new(dialog.pull()));
+                self.run(ctx, path, action, None, dialog.opener);
+            }
+            dialogs::Answer::Cancel => {}
+            dialogs::Answer::Open => self.pull = Some(dialog),
+        }
+    }
+
+    fn set_upstream_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.set_upstream.take() else {
+            return;
+        };
+        let Some(path) = self.repo.as_ref().map(|r| r.path.clone()) else {
+            return;
+        };
+        match dialog.show(ctx, self.busy()) {
+            dialogs::Answer::Primary => {
+                let action = dialog.action();
+                self.run(ctx, path, action, None, dialog.opener);
+            }
+            dialogs::Answer::Cancel => {}
+            dialogs::Answer::Open => self.set_upstream = Some(dialog),
+        }
     }
 
     fn reset_dialog(&mut self, ctx: &egui::Context) {
@@ -2405,6 +2503,17 @@ impl Tool {
                 };
                 (format!("Delete {what}{cost}?"), button)
             }
+            Action::Push(push) if confirmation => (
+                format!("Force push {} to {}?", push.branch, push.remote),
+                "Force push",
+            ),
+            Action::Push(push) => (
+                format!(
+                    "Force push {} to {} and lose {commits}?",
+                    push.branch, push.remote
+                ),
+                "Force push anyway",
+            ),
             _ => (
                 format!(
                     "Switch {} and lose {}?",
@@ -2423,8 +2532,16 @@ impl Tool {
         )];
         let mut show_log = None;
         let busy = self.busy();
+        let force_push = match &warning.action {
+            Action::Push(push) => Some(push),
+            _ => None,
+        };
+        let screen = match force_push {
+            Some(_) => crate::usage::Screen::ForcePush,
+            None => crate::usage::Screen::LostWork,
+        };
         let mut dialog = dialogs::Dialog::new("branch-loss", &title)
-            .screen(crate::usage::Screen::LostWork)
+            .screen(screen)
             .opener(loss.opener)
             .raise(loss.fresh)
             .resizable();
@@ -2462,8 +2579,15 @@ impl Tool {
                     };
                     ui.checkbox(&mut deletes_branches, label);
                 }
-                let unreachable =
-                    "These commits are not reachable from any surviving branch, tag or worktree.";
+                let unreachable = match force_push {
+                    Some(push) => format!(
+                        "These commits on {}/{} are not on {}.",
+                        push.remote, push.branch, push.branch
+                    ),
+                    None => "These commits are not reachable from any surviving branch, tag or \
+                             worktree."
+                        .to_owned(),
+                };
                 let row = |ui: &mut Ui, content: &mut dyn FnMut(&mut Ui)| {
                     egui::Frame::new()
                         .fill(widgets::tones(ui).seg_bg)
@@ -2498,7 +2622,7 @@ impl Tool {
                         .as_ref()
                         .filter(|b| deletes_branches && !b.commits.is_empty());
                     if !several && (!d.commits.is_empty() || branch.is_some()) {
-                        ui.label(unreachable);
+                        ui.label(&unreachable);
                     }
                     if !d.commits.is_empty() {
                         row(ui, &mut |ui| {
@@ -2534,11 +2658,21 @@ impl Tool {
                 } else if let [one] = warning.deletions.as_slice() {
                     losses(ui, 0, one);
                 } else if !warning.commits.is_empty() {
-                    ui.label(unreachable);
+                    ui.label(&unreachable);
                     row(ui, &mut |ui| {
                         ui.label(&commits);
                         if ui.link("Show in log").clicked() {
                             show_log = Some(warning.commits.clone());
+                        }
+                    });
+                }
+                // A force push's copies: rebased, amended or resolved on the branch.
+                if !warning.replaced.is_empty() {
+                    row(ui, &mut |ui| {
+                        ui.label(plural(warning.replaced.len(), "replaced commit"))
+                            .on_hover_text("The branch has a copy of each");
+                        if ui.link("Show in log").clicked() {
+                            show_log = Some(warning.replaced.clone());
                         }
                     });
                 }
@@ -2582,7 +2716,12 @@ impl Tool {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_max_width(360.0);
-                if let Some(job) = &self.job {
+                let networking = self
+                    .job
+                    .as_ref()
+                    .and_then(|j| j.live.as_ref())
+                    .is_some_and(|l| !l.steps().is_empty());
+                if let Some(job) = self.job.as_ref().filter(|_| !networking) {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spinner();

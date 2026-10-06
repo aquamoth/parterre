@@ -57,6 +57,13 @@ names! {
         MergeTool => "merge_tool",
         /// What a git operation printed.
         OperationDetails => "operation_details",
+        /// A fetch, pull or push running, with git's output.
+        Network => "network",
+        /// How to pull a branch that has diverged.
+        PullDiverged => "pull_diverged",
+        /// The question before a force push.
+        ForcePush => "force_push",
+        SetUpstream => "set_upstream",
         /// The question before opening many diff windows at once.
         OpenDiffs => "open_diffs",
         PullRequestsError => "pull_requests_error",
@@ -105,6 +112,10 @@ names! {
         /// Keep, delete or take a side of a conflicted file.
         ResolveConflict => "resolve_conflict",
         OpenMergeTool => "open_merge_tool",
+        Fetch => "fetch",
+        Pull => "pull",
+        Push => "push",
+        SetUpstream => "set_upstream",
         OpenRepository => "open_repository",
         CloseRepository => "close_repository",
         Reload => "reload",

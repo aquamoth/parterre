@@ -68,6 +68,12 @@ A branch that was rebased since it was pushed gets a **dashed arrow to its upstr
 worktree in the middle of a rebase gets an **orange zigzag** from where it has got to back to
 the branch being rebased.
 
+**Fetch** every remote from the toolbar or with Ctrl+F5, **pull** the open worktree's branch,
+and **push** any local branch from its node. A push that would replace the remote's commits
+asks first, and says whether the branch has a copy of each; it forces only with a lease
+(`--force-with-lease --force-if-includes`). parterre has no password prompt of its own: use a
+credential helper or ssh-agent.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/rebase-dark.png">
   <img alt="fix/cart-rounding, rebased onto main but not pushed, is selected: a dashed arrow runs to origin/fix/cart-rounding, its new commits are green and the replaced ones grey dashed. On the left, an orange zigzag joins feature/checkout-redesign to its worktree, which is stopped part-way through a rebase" src="docs/images/0.6/rebase-light.png">

@@ -80,6 +80,7 @@ impl ParterreApp {
                     self.main_menu(ui);
                 });
             });
+            self.fetch_button(ui);
             gap(ui);
 
             let g = &mut self.settings.graph;
@@ -181,6 +182,20 @@ impl ParterreApp {
             .on_disabled_hover_text(NO_PULL_REQUESTS_TIP);
         if response.clicked() {
             self.toggle_pull_requests();
+        }
+    }
+
+    /// Fetches every remote; greyed out without one, or while git runs.
+    fn fetch_button(&mut self, ui: &mut Ui) {
+        let blocked = self.repo.as_ref().and(self.branches.fetch_blocked());
+        let enabled = self.repo.is_some() && blocked.is_none();
+        let response = ui
+            .add_enabled_ui(enabled, |ui| widgets::icon_button(ui, glyphs::FETCH, false))
+            .inner;
+        let response = tip_explained(response, "Fetch", "Ctrl+F5", FETCH_TIP)
+            .on_disabled_hover_text(blocked.unwrap_or("Open a repository first"));
+        if response.clicked() {
+            self.fetch(ui.ctx(), egui::ViewportId::ROOT);
         }
     }
 
@@ -387,6 +402,16 @@ impl ParterreApp {
         let reload = ui.add_enabled_ui(has_repo, |ui| menu::item(ui, "Reload", "F5", Mark::None));
         if reload.inner.clicked() {
             self.reload_by_hand(ui.ctx());
+        }
+        let blocked = self.branches.fetch_blocked().filter(|_| has_repo);
+        let fetch = ui.add_enabled_ui(has_repo && blocked.is_none(), |ui| {
+            menu::item(ui, "Fetch", "Ctrl+F5", Mark::None)
+        });
+        if let Some(why) = blocked {
+            fetch.response.on_disabled_hover_text(why);
+        }
+        if fetch.inner.clicked() {
+            self.fetch(ui.ctx(), egui::ViewportId::ROOT);
         }
         let auto = self.settings.auto_reload;
         if menu::item(ui, "Reload automatically", "", Mark::Check(auto)).clicked() {
@@ -628,6 +653,8 @@ pub(super) const NO_PULL_REQUESTS_TIP: &str =
 pub(super) const WORKTREES_TIP: &str = "The repository's worktrees, marked with a folder: \
     the branches they have checked out, even where hidden, and other worktrees' detached \
     HEADs in a colour of their own. Right-click one to open it.";
+const FETCH_TIP: &str = "Fetch every remote, pruning the branches deleted there (git fetch \
+    --all --prune). Only the remote branches move.";
 pub(super) const REMEMBER_TIP: &str =
     "Keep nodes where you moved them, per repository, across runs and relayouts.";
 
