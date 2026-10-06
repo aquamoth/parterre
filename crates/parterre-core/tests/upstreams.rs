@@ -13,7 +13,7 @@ use tempfile::TempDir;
 /// date.
 fn git_in(dir: &Path, minutes: u32, args: &[&str]) -> String {
     let date = format!("{} +0000", 1_700_000_000 + minutes * 60);
-    let out = Command::new("git")
+    let out = Command::new(parterre_core::git::program())
         .current_dir(dir)
         .args(args)
         .env("GIT_AUTHOR_DATE", &date)
@@ -379,7 +379,7 @@ fn a_conflict_resolved_in_a_rebase_still_replaces() {
     s.repo.write("clash.txt", b"main's version\n");
     s.repo.commit_all("Main clashes");
     s.repo.git(&["switch", "-q", "clash"]);
-    let rebase = Command::new("git")
+    let rebase = Command::new(parterre_core::git::program())
         .current_dir(s.repo.path())
         .args(["rebase", "-q", "main"])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

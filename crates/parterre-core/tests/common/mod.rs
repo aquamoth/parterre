@@ -1,4 +1,8 @@
 //! Builds throwaway git repositories with scripted histories for integration tests.
+//!
+//! With the git parterre itself runs (`parterre_core::git::program()`: on Windows the real
+//! `git.exe`, not the `cmd\git.exe` launcher), and in as few git calls as will do: starting
+//! git is what the suite's time goes on, on Windows above all (#309).
 
 #![allow(dead_code)]
 
@@ -18,6 +22,33 @@ pub fn read_text(path: &Path) -> String {
         .replace("\r\n", "\n")
 }
 
+/// Gives the repository at `dir` the test identity and turns signing off, written to its config
+/// file at once rather than with a `git config` call each. parterre's own git reads the
+/// identity from the repository: CI has no global one. Automatic maintenance is off too: git
+/// starts it as a process of its own after every commit.
+pub fn configure(dir: &Path) {
+    let config = dir.join(".git").join("config");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&config)
+        .unwrap_or_else(|e| panic!("open {}: {e}", config.display()));
+    file.write_all(
+        b"[user]\n\tname = Test\n\temail = test@example.com\n\
+          [commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n\
+          [maintenance]\n\tauto = false\n",
+    )
+    .expect("write config");
+}
+
+/// The hash in what `git commit` printed, `[main (root-commit) <hash>] <subject>`, in full
+/// with `core.abbrev=no`; nothing if a hook or an older git printed something else first.
+pub fn committed(out: &str) -> Option<String> {
+    let summary = out.lines().next()?.strip_prefix('[')?;
+    let hash = summary.split_once("] ")?.0.rsplit(' ').next()?;
+    let full = hash.len() >= 40 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+    full.then(|| hash.to_owned())
+}
+
 pub struct TestRepo {
     pub dir: TempDir,
     clock: u32,
@@ -28,10 +59,7 @@ impl TestRepo {
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = TestRepo { dir, clock: 0 };
         repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@example.com"]);
-        repo.git(&["config", "commit.gpgsign", "false"]);
-        repo.git(&["config", "tag.gpgsign", "false"]);
+        configure(repo.path());
         repo
     }
 
@@ -41,7 +69,7 @@ impl TestRepo {
 
     pub fn git(&self, args: &[&str]) -> String {
         let date = format!("{} +0000", 1_700_000_000 + self.clock * 60);
-        let out = Command::new("git")
+        let out = Command::new(parterre_core::git::program())
             .current_dir(self.dir.path())
             .args(args)
             .env("GIT_AUTHOR_DATE", &date)
@@ -60,7 +88,7 @@ impl TestRepo {
 
     /// Runs git with `input` on its standard input; returns its trimmed output.
     pub fn git_with_input(&self, args: &[&str], input: &[u8]) -> String {
-        let mut child = Command::new("git")
+        let mut child = Command::new(parterre_core::git::program())
             .current_dir(self.dir.path())
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -102,8 +130,15 @@ impl TestRepo {
     /// Makes an empty commit with `message` as subject and returns its hash.
     pub fn commit(&mut self, message: &str) -> String {
         self.clock += 1;
-        self.git(&["commit", "-q", "--allow-empty", "-m", message]);
-        self.git(&["rev-parse", "HEAD"])
+        let out = self.git(&[
+            "-c",
+            "core.abbrev=no",
+            "commit",
+            "--allow-empty",
+            "-m",
+            message,
+        ]);
+        committed(&out).unwrap_or_else(|| self.git(&["rev-parse", "HEAD"]))
     }
 
     /// Sets the clock (minutes after the base date) for the commits that follow; each commit

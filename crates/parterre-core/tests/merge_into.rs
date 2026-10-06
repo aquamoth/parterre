@@ -54,7 +54,7 @@ impl Pr {
 
     /// Git in the open worktree.
     fn here(&self, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = Command::new(parterre_core::git::program())
             .current_dir(&self.wt)
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -90,7 +90,7 @@ impl Pr {
     /// The main worktree's uncommitted changes, as parterre's git sees them: with the system
     /// config, whose `core.autocrlf` it checked the files out with (#182).
     fn main_status(&self) -> String {
-        let out = Command::new("git")
+        let out = Command::new(parterre_core::git::program())
             .current_dir(self.r.path())
             .args(["status", "--porcelain"])
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -526,7 +526,7 @@ fn a_branch_whose_worktree_has_an_operation_in_progress_takes_no_merge() {
     pr.r.write("mine", b"side\n");
     pr.r.commit_all("side mine");
     pr.r.checkout("main");
-    let out = Command::new("git")
+    let out = Command::new(parterre_core::git::program())
         .current_dir(pr.r.path())
         .args(["merge", "-q", "side"])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

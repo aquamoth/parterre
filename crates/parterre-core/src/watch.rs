@@ -17,7 +17,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::git::{Git, GitError};
+use crate::git::{Git, GitError, Location};
 
 /// Where one repository keeps its refs.
 #[derive(Clone, Debug)]
@@ -31,7 +31,11 @@ pub struct RefStorage {
 impl RefStorage {
     /// Finds the ref storage of the repository containing `dir`.
     pub fn locate(dir: &Path) -> Result<RefStorage, GitError> {
-        let (git_dir, common) = Git::new(dir).git_dirs()?;
+        let Location {
+            git_dir,
+            common_dir: common,
+            ..
+        } = Git::new(dir).location()?;
         let mut paths = vec![
             git_dir.join("HEAD"),
             // The main worktree's HEAD, when this is a linked one.

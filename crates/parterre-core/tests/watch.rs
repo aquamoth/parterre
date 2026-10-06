@@ -92,7 +92,7 @@ fn fingerprint_follows_other_worktrees() {
     let wt_arg = wt.to_string_lossy().into_owned();
     let storage = RefStorage::locate(r.path()).expect("locate");
     let in_wt = |args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = std::process::Command::new(parterre_core::git::program())
             .current_dir(&wt)
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")

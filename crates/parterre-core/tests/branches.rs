@@ -460,7 +460,7 @@ fn rebase_and_bisect_reserve_a_branch_even_when_head_is_detached() {
         let wt = tempfile::tempdir().unwrap();
         let path = wt.path().join("linked");
         r.git(&["worktree", "add", "--detach", path.to_str().unwrap(), &hash]);
-        let dir = std::process::Command::new("git")
+        let dir = std::process::Command::new(parterre_core::git::program())
             .args([
                 "-C",
                 path.to_str().unwrap(),

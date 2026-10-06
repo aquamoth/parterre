@@ -506,8 +506,8 @@ mod tests {
 
     use super::super::branches::{self, Request};
     use super::super::tool_harness::{
-        Harness, banner_click, banner_texts, before_merge, git, load, menu, merge_stops, read,
-        stuck_merge, write,
+        Harness, banner_click, banner_texts, before_merge, git, init, load, menu, merge_stops,
+        read, stuck_merge, write,
     };
 
     fn commit(dir: &Path, path: &str, text: &str, message: &str) {
@@ -520,11 +520,7 @@ mod tests {
     fn repository() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        // A rebase commits, and parterre's own git reads the identity from the repository,
-        // not from the harness's environment: CI has no global one.
-        git(p, &["config", "user.name", "Test"]);
-        git(p, &["config", "user.email", "test@example.com"]);
+        init(p);
         commit(p, "file", "base\n", "base");
         git(p, &["branch", "up"]);
         commit(p, "fix", "fixed\n", "fix");
@@ -824,7 +820,7 @@ mod tests {
         git(p, &["switch", "-q", "main"]);
         git(p, &["branch", "other", "up"]);
         let up = rev(p, "up");
-        let out = std::process::Command::new("git")
+        let out = std::process::Command::new(parterre_core::git::program())
             .current_dir(p)
             .args(["rebase", "up"])
             .env("GIT_CONFIG_GLOBAL", "/dev/null")

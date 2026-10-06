@@ -220,15 +220,12 @@ pub struct Catalog {
 impl Catalog {
     pub fn load(path: &Path) -> Result<Self, Error> {
         let git = Git::new(path);
-        let root = git.repo_root()?;
-        let has_working_tree = git.run(&["rev-parse", "--is-inside-work-tree"])?.trim() == "true";
+        let location = git.location()?;
+        let root = location.root().to_owned();
+        let has_working_tree = location.work_tree.is_some();
         let current = git
             .query(&["symbolic-ref", "--quiet", "HEAD"])?
             .map(|s| s.trim_start_matches("refs/heads/").to_owned());
-        let head = git
-            .query(&["rev-parse", "--verify", "HEAD^{commit}"])?
-            .map(|s| parse_oid(&s))
-            .transpose()?;
         let auto_setup_rebase = matches!(
             git.query(&["config", "--get", "branch.autoSetupRebase"])?
                 .as_deref(),
@@ -284,6 +281,21 @@ impl Catalog {
         }
         locals.sort_by(|a, b| a.name.cmp(&b.name));
         remotes.sort_by(|a, b| a.name.cmp(&b.name));
+        // HEAD's commit: its branch's, as listed, when it is on a branch; otherwise (detached,
+        // or on an unborn branch, which has none) asked of git. One call fewer as a rule (#309).
+        let listed = current.as_ref().and_then(|name| {
+            roots
+                .iter()
+                .find(|(r, _)| r.strip_prefix("refs/heads/") == Some(name))
+                .map(|(_, tip)| *tip)
+        });
+        let head = match listed {
+            Some(tip) => Some(tip),
+            None => git
+                .query(&["rev-parse", "--verify", "HEAD^{commit}"])?
+                .map(|s| parse_oid(&s))
+                .transpose()?,
+        };
         let mut occupied = HashMap::new();
         let mut uses = Vec::new();
         // Unlike the viewer's compatibility fallback, safety checks propagate listing errors.
@@ -320,10 +332,7 @@ impl Catalog {
             .find_map(|s| s.strip_prefix("worktree "))
             .map(PathBuf::from)
             .unwrap_or_else(|| root.clone());
-        let common = PathBuf::from(
-            git.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?
-                .trim(),
-        );
+        let common = location.common_dir;
         // Each linked worktree's administrative folder, by the worktree's own folder.
         let mut admins = vec![(main_place.clone(), common.clone())];
         let linked = common.join("worktrees");

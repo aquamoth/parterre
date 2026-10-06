@@ -26,6 +26,9 @@ Commands (Rust from `~/.cargo/bin`):
   A test must not write under `.git/refs` by hand: Git 3.0 makes new repositories reftable
   (#228). To check once, run the tests with git built `WITH_BREAKING_CHANGES=YesPlease` first
   on `PATH`; CI doesn't (#251).
+  The test helpers run the git parterre resolved, `parterre_core::git::program()` (on Windows
+  the real `git.exe`, not the `cmd\git.exe` launcher), and spend as few git starts as will
+  do: that is what the suite's time goes on (#309).
 - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all` before committing.
 - `cargo run --release -p parterre-core --example stats -- <repo>` – graph sizes and timings.
 - Automation, for checking visuals without a human (`docs/automation.md`):
