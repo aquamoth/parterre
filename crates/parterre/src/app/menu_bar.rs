@@ -291,6 +291,8 @@ pub struct State {
     pub front: Front,
     /// A text field has the keyboard in the window in front: Cut, Paste and Select All are its.
     pub text_focus: bool,
+    /// A modal dialog locks the windows: nothing but Quit until it is answered.
+    pub locked: bool,
     pub has_repo: bool,
     /// The recent folders, the open one left out.
     pub recent: Vec<PathBuf>,
@@ -403,7 +405,23 @@ pub fn build(state: &State) -> Vec<Menu> {
     let mut help = titled(Kind::Help, "Help", help_menu(state));
     help.accent = !mac && state.newer.is_some();
     menus.push(help);
+    if state.locked {
+        for menu in &mut menus {
+            lock(&mut menu.entries);
+        }
+    }
     menus
+}
+
+/// Greys out every item but Quit, while a modal dialog waits for its answer.
+fn lock(entries: &mut [Entry]) {
+    for entry in entries {
+        match entry {
+            Entry::Item(item) if !matches!(item.command, Command::Quit) => item.enabled = false,
+            Entry::Submenu(submenu) => lock(&mut submenu.entries),
+            _ => {}
+        }
+    }
 }
 
 /// While another window is in front, what only the graph does is greyed out.
@@ -800,6 +818,7 @@ mod tests {
             platform,
             front: Front::Graph,
             text_focus: false,
+            locked: false,
             has_repo: true,
             recent: vec![PathBuf::from("/src/a/app"), PathBuf::from("/src/b/app")],
             can_undo: true,
@@ -990,6 +1009,18 @@ mod tests {
         assert!(!item_labelled(git, "Show log").enabled);
         let layout = &find(&menus, Kind::Layout).entries;
         assert!(!item_labelled(layout, "Remember Moved Nodes").enabled);
+    }
+
+    #[test]
+    fn a_modal_dialog_leaves_only_quit() {
+        let mut s = state(Platform::Mac);
+        s.locked = true;
+        let menus = build(&s);
+        let app = &find(&menus, Kind::App).entries;
+        assert!(item_labelled(app, "Quit parterre").enabled);
+        assert!(!item_labelled(app, "Settings…").enabled);
+        let file = &find(&menus, Kind::File).entries;
+        assert!(!item_labelled(file, "Open Folder…").enabled);
     }
 
     #[test]

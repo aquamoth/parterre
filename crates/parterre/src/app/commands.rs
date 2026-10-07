@@ -126,6 +126,7 @@ impl ParterreApp {
             platform: Platform::CURRENT,
             front,
             text_focus,
+            locked: crate::dialogs::ModalLock::locked(ctx),
             has_repo: self.repo.is_some(),
             recent,
             can_undo,

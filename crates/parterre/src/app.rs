@@ -1677,6 +1677,10 @@ impl ParterreApp {
         if pressed(keys::SETTINGS) {
             self.open_settings(self.settings_page);
         }
+        // File › Quit on Linux; macOS's menu bar takes ⌘Q, Windows has Alt+F4.
+        if keys::Platform::CURRENT == keys::Platform::Linux && pressed(keys::QUIT) {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+        }
         if pressed(keys::COPY) {
             self.copy_selected_hash(ctx);
         }
@@ -2898,9 +2902,9 @@ fn shortcut_rows() -> Vec<(String, &'static str)> {
         ),
         (
             "Right-click a node".into(),
-            "Show log, compare (with HEAD, the working tree, two nodes, or the commit marked \
-             for comparison), open its pull requests, copy hash or refs, select its subtree, \
-             return it to the layout",
+            "Mark it for comparison, or compare it with the marked commit; open its pull \
+             requests or folder; copy its ref names or folder; select its subtree; return it to \
+             the layout. The Git menu has the rest, for the selected node",
         ),
     ]
 }

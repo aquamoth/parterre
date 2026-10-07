@@ -663,6 +663,12 @@ pub struct ModalLock {
 }
 
 impl ModalLock {
+    /// Whether a modal dialog locks the other windows now.
+    pub fn locked(ctx: &egui::Context) -> bool {
+        ctx.with_plugin(|lock: &mut ModalLock| lock.modal.is_some())
+            .unwrap_or(false)
+    }
+
     /// Notes the modal dialog shown this frame. Returns whether to bring it forward, or `None`
     /// without the plugin (in tests).
     fn shown(ctx: &egui::Context, viewport: ViewportId) -> Option<bool> {
