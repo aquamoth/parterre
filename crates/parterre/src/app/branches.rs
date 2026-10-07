@@ -495,7 +495,7 @@ pub(super) fn rebase_offer(
 
 /// *Rebase main onto X* for each branch on the node and, last, the commit itself, when it
 /// would really rebase; greyed out while the open worktree is stuck. The log's rows have it
-/// too, through [`node_menu`].
+/// too, through [`row_node_menu`]; the graph's Git menu takes the same offers.
 fn rebase_targets(
     ui: &mut Ui,
     repo: &Repo,
@@ -551,7 +551,7 @@ pub(super) fn merge_offer(
 
 /// *Merge X into main…* for each branch on the node and, last, the commit itself, when there's
 /// something to merge; greyed out while the open worktree is stuck. The log's rows have it
-/// too, through [`node_menu`].
+/// too, through [`row_node_menu`]; the graph's Git menu takes the same offers.
 fn merge_targets(
     ui: &mut Ui,
     repo: &Repo,

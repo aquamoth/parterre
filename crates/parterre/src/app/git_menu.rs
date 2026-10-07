@@ -150,7 +150,7 @@ impl ParterreApp {
         let mut entries = Vec::new();
         entries.extend(self.history(&c, &group));
         entries.push(Entry::Separator);
-        entries.extend(worktree_section(&c, commit, &group));
+        entries.extend(worktree_section(&c, commit));
         entries.push(Entry::Separator);
         entries.extend(branch_section(&c, self, commit, &group));
         entries.push(Entry::Separator);
@@ -340,7 +340,7 @@ impl ParterreApp {
     }
 }
 
-fn worktree_section(c: &Ctx, commit: Option<Oid>, group_nodes: &[usize]) -> Vec<Entry> {
+fn worktree_section(c: &Ctx, commit: Option<Oid>) -> Vec<Entry> {
     let p = c.p;
     let mut entries = vec![Entry::Heading(case(p, "Worktree"))];
     let (Some(catalog), Some(commit)) = (c.catalog, commit) else {
@@ -366,7 +366,6 @@ fn worktree_section(c: &Ctx, commit: Option<Oid>, group_nodes: &[usize]) -> Vec<
         .blocked(c.blocked())
         .into(),
     );
-    let _ = group_nodes;
     entries.push(targets(
         c,
         case(p, "Delete worktree"),

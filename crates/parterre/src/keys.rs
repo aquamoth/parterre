@@ -80,6 +80,7 @@ impl Shortcut {
                 Key::Comma | Key::Plus | Key::Minus | Key::Equals | Key::Period => {
                     self.key.symbol_or_name()
                 }
+                Key::Escape => "Esc",
                 key => key.name(),
             });
             label
@@ -212,13 +213,18 @@ pub fn reload_and_fetch(input: &mut InputState) -> (bool, bool) {
     (reload, fetch)
 }
 
-/// The reload key named in tips: ⌘R on macOS, where F5 needs fn; F5 elsewhere, where it is
-/// the familiar one.
-pub fn reload_label() -> String {
-    match Platform::CURRENT {
-        Platform::Mac => RELOAD.label(),
-        Platform::Windows | Platform::Linux => RELOAD_F5.label(),
+/// The reload key named in menus and tips: ⌘R on macOS, where F5 needs fn; F5 elsewhere,
+/// where it is the familiar one.
+pub fn reload_shown_on(platform: Platform) -> Shortcut {
+    match platform {
+        Platform::Mac => RELOAD,
+        Platform::Windows | Platform::Linux => RELOAD_F5,
     }
+}
+
+/// [`reload_shown_on`] this platform, as written.
+pub fn reload_label() -> String {
+    reload_shown_on(Platform::CURRENT).label()
 }
 
 /// The keys of a find field's previous, next and clear buttons: Shift+Enter or the previous
@@ -307,7 +313,7 @@ mod tests {
         assert_eq!(close_window_on(Platform::Mac).label_on(Platform::Mac), "⌘W");
         assert_eq!(
             close_window_on(Platform::Linux).label_on(Platform::Linux),
-            "Escape"
+            "Esc"
         );
         assert_eq!(RELOAD.label_on(Platform::Mac), "⌘R");
         assert_eq!(RELOAD.label_on(Platform::Windows), "Ctrl+R");

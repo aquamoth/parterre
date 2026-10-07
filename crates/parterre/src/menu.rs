@@ -1,4 +1,5 @@
-//! The look of menus (the ☰ menu and the canvas's context menu) and of the toolbar's popovers.
+//! The look of menus (the menu bar's on Windows and Linux, and the canvas's context menu) and of
+//! the toolbar's popovers.
 //!
 //! egui's own menus are compact, with a small corner radius and a hard, offset shadow. These
 //! follow current desktop menus instead (GNOME, Chrome): rounder, a soft shadow, roomy rows

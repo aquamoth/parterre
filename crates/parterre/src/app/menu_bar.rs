@@ -449,11 +449,7 @@ fn item(p: Platform, label: &str, command: Command) -> Item {
 fn app_menu(state: &State) -> Vec<Entry> {
     let p = state.platform;
     let mut entries: Vec<Entry> = vec![item(p, "About parterre", Command::About).into()];
-    if let Some(version) = &state.newer {
-        let mut download = Item::new(format!("Download {version}"), Command::Download);
-        download.accent = true;
-        entries.push(download.into());
-    }
+    entries.extend(download(state));
     entries.extend([
         Entry::Separator,
         item(p, "Settings…", Command::Settings)
@@ -478,6 +474,14 @@ fn app_menu(state: &State) -> Vec<Entry> {
             .into(),
     ]);
     entries
+}
+
+/// *Download ‹version›*, in the accent colour, while a newer release is out (#258).
+fn download(state: &State) -> Option<Entry> {
+    let version = state.newer.as_ref()?;
+    let mut item = Item::new(format!("Download {version}"), Command::Download);
+    item.accent = true;
+    Some(item.into())
 }
 
 fn file_menu(state: &State) -> Vec<Entry> {
@@ -584,7 +588,7 @@ fn edit_menu(state: &State) -> Vec<Entry> {
             .enabled(state.can_undo)
             .into(),
         item(p, "Redo move", Command::Redo)
-            .key(keys::redo())
+            .key(keys::redo_on(p))
             .enabled(state.can_redo)
             .into(),
     ];
@@ -618,10 +622,10 @@ fn edit_menu(state: &State) -> Vec<Entry> {
     let find = vec![
         item(p, "Find…", Command::Find).key(keys::FIND).into(),
         item(p, "Find next", Command::FindNext)
-            .key(keys::find_next())
+            .key(keys::find_next_on(p))
             .into(),
         item(p, "Find previous", Command::FindPrevious)
-            .key(keys::find_previous())
+            .key(keys::find_previous_on(p))
             .into(),
     ];
     if mac {
@@ -635,8 +639,7 @@ fn edit_menu(state: &State) -> Vec<Entry> {
 fn view_menu(state: &State) -> Vec<Entry> {
     let p = state.platform;
     let mac = p == Platform::Mac;
-    let graph = state.front == Front::Graph;
-    let reload_key = if mac { keys::RELOAD } else { keys::RELOAD_F5 };
+    let reload_key = keys::reload_shown_on(p);
     let mut entries = vec![
         item(p, "Reload", Command::Reload)
             .key(reload_key)
@@ -745,7 +748,6 @@ fn view_menu(state: &State) -> Vec<Entry> {
         entries.push(Entry::Separator);
         entries.push(Entry::System(System::FullScreen));
     }
-    let _ = graph;
     entries
 }
 
@@ -794,10 +796,8 @@ fn help_menu(state: &State) -> Vec<Entry> {
     let p = state.platform;
     let mac = p == Platform::Mac;
     let mut entries = Vec::new();
-    if !mac && let Some(version) = &state.newer {
-        let mut download = Item::new(format!("Download {version}"), Command::Download);
-        download.accent = true;
-        entries.push(download.into());
+    if !mac && let Some(download) = download(state) {
+        entries.push(download);
         entries.push(Entry::Separator);
     }
     entries.push(item(p, "Keyboard and mouse", Command::KeyboardAndMouse).into());

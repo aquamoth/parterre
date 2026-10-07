@@ -214,7 +214,7 @@ pub mod cli {
     //! parterre.app, so that a new copy of the app keeps it working. Asks for an administrator's
     //! password, through macOS's own prompt, when `/usr/local/bin` can't be written.
 
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::mpsc::{Receiver, channel};
 
     /// Where the link goes.
@@ -267,7 +267,7 @@ pub mod cli {
     }
 
     /// The same, as an administrator: macOS asks for the password.
-    fn link_as_administrator(program: &PathBuf) -> Result<(), String> {
+    fn link_as_administrator(program: &Path) -> Result<(), String> {
         const SCRIPT: &str = r#"on run argv
     do shell script "mkdir -p /usr/local/bin && ln -sfn " & quoted form of item 1 of argv & " /usr/local/bin/parterre" with prompt "parterre wants to put its command line tool in /usr/local/bin." with administrator privileges
 end run"#;
