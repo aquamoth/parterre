@@ -45,6 +45,7 @@ use super::commit_table::{CommitList, CommitTable, Row, Select};
 use super::compare_window::CompareRequest;
 use super::file_table::{DiffQueue, FileTable, Lister, Listing};
 use super::{Details, ParterreApp};
+use crate::keys;
 use crate::settings::LogWindowSettings;
 use crate::text_size;
 use crate::theme::{Palette, text_on};
@@ -662,7 +663,7 @@ impl LogWindow {
             width,
             hint: "Find subjects, hashes",
             count: &count,
-            keys: ["Shift+Enter, Shift+F3", "Enter, F3", "Esc"],
+            keys: &keys::find_field_keys(),
             focus,
             select: focus,
         };
@@ -678,21 +679,21 @@ impl LogWindow {
         }
     }
 
-    /// Ctrl+F finds, F3 and Shift+F3 go to the next and previous place, and Esc in the find
-    /// field leaves it; elsewhere Esc closes. The arrow keys, Page Up/Down, Home and End move
+    /// Ctrl+F finds, F3 and Shift+F3 (⌘G and ⇧⌘G on macOS) go to the next and previous place,
+    /// and Esc in the find field leaves it; elsewhere Esc (⌘W on macOS) closes. The arrow keys, Page Up/Down, Home and End move
     /// the selection, only while no text field has the keyboard.
     fn handle_keys(&mut self, ui: &Ui) {
         let id = Self::find_id();
         // egui drops the focus on Esc before the frame starts.
         let in_find = ui.memory(|m| m.has_focus(id) || m.had_focus_last_frame(id));
-        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
+        if ui.input_mut(|i| keys::FIND.consume(i)) {
             self.open_find();
         }
-        // Shift+F3 first: a plain F3 would match it too.
+        // The previous one first: egui takes F3 for Shift+F3 too.
         let (previous, next) = ui.input_mut(|i| {
             (
-                i.consume_key(Modifiers::SHIFT, Key::F3),
-                i.consume_key(Modifiers::NONE, Key::F3),
+                keys::find_previous().consume(i),
+                keys::find_next().consume(i),
             )
         });
         if previous || next {
@@ -737,7 +738,7 @@ impl LogWindow {
         {
             view.list.select(Some(target.min(n - 1)));
         }
-        if ui.input(|i| i.key_pressed(Key::Escape)) {
+        if ui.input_mut(|i| keys::close_window().consume(i)) {
             self.view = None;
         }
     }
@@ -1175,7 +1176,10 @@ fn row_menu(ui: &mut Ui, commit: &Commit, env: &MenuEnv) -> Option<CompareReques
     // As the graph's Compare revisions on two nodes; the mark is left alone.
     let compare = ui
         .add_enabled(pair.is_some(), egui::Button::new("Compare revisions"))
-        .on_disabled_hover_text("Ctrl+click a second commit first");
+        .on_disabled_hover_text(format!(
+            "{} a second commit first",
+            keys::with_command("click")
+        ));
     if compare.clicked()
         && let Some((first, second)) = pair
     {
@@ -1772,12 +1776,12 @@ impl ParterreApp {
                             .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
                     }
                 }
-                // F5 reloads, Ctrl+F5 fetches, as in the main window.
-                let (close, size, (reload, fetch)) = ui.input(|i| {
+                // Reload and fetch, as in the main window.
+                let (close, size, (reload, fetch)) = ui.input_mut(|i| {
                     (
                         i.viewport().close_requested(),
                         i.viewport().inner_rect.map(|r| r.size()),
-                        super::f5_pressed(i),
+                        crate::keys::reload_and_fetch(i),
                     )
                 });
                 if let Some(size) = size

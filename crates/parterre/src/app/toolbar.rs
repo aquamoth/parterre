@@ -16,6 +16,7 @@ use parterre_core::revgraph::Simplification;
 
 use super::{ParterreApp, SettingsPage};
 use crate::export::Format;
+use crate::keys;
 use crate::menu::{self, Mark};
 use crate::usage::{self, Menu};
 use crate::widgets::{self, tip, tip_explained};
@@ -138,7 +139,7 @@ impl ParterreApp {
                     self.settings.show_overview = !overview;
                 }
                 let response = widgets::icon_button(ui, glyphs::HEAD, false);
-                if tip(response, "Go to HEAD", "Home").clicked() {
+                if tip(response, "Go to HEAD", &keys::GO_TO_HEAD.label()).clicked() {
                     usage::action(usage::Action::GoToHead);
                     self.go_to_head();
                 }
@@ -193,7 +194,7 @@ impl ParterreApp {
                 widgets::icon_button(ui, glyphs::FETCH, false)
             })
             .inner;
-        let response = tip_explained(response, "Fetch", "Ctrl+F5", FETCH_TIP)
+        let response = tip_explained(response, "Fetch", &keys::fetch().label(), FETCH_TIP)
             .on_disabled_hover_text(blocked.unwrap_or_default());
         if response.clicked() {
             self.fetch(ui.ctx(), egui::ViewportId::ROOT);
@@ -223,7 +224,7 @@ impl ParterreApp {
             width,
             hint: "Find commits, branches, tags",
             count: &count,
-            keys: ["Shift+Enter", "Enter", "Esc"],
+            keys: &crate::keys::find_field_keys(),
             focus: std::mem::take(&mut self.search.request_focus),
             select: false,
         };
@@ -289,7 +290,7 @@ impl ParterreApp {
             if tip(
                 widgets::icon_button(ui, glyphs::MINUS, false),
                 "Zoom out",
-                "−",
+                &keys::ZOOM_OUT.label(),
             )
             .clicked()
             {
@@ -298,17 +299,19 @@ impl ParterreApp {
             if tip(
                 widgets::icon_button(ui, glyphs::PLUS, false),
                 "Zoom in",
-                "+",
+                &keys::ZOOM_IN.label(),
             )
             .clicked()
             {
                 self.zoom_by(1.0 / 0.8);
             }
-            if tip(widgets::text_button(ui, "Fit"), "Fit the whole graph", "F").clicked() {
+            let fit = widgets::text_button(ui, "Fit");
+            if tip(fit, "Zoom to fit", &keys::ZOOM_TO_FIT.label()).clicked() {
                 usage::action(usage::Action::Fit);
                 self.fit();
             }
-            if tip(widgets::text_button(ui, "Reset"), "Zoom to 100%", "0").clicked() {
+            let actual = widgets::text_button(ui, "100%");
+            if tip(actual, "Actual size", &keys::ACTUAL_SIZE.label()).clicked() {
                 self.zoom_by(1.0 / self.view.zoom);
             }
         });
@@ -328,14 +331,14 @@ impl ParterreApp {
         let response = ui.add_enabled_ui(displaced, |ui| {
             widgets::text_button(ui, "Return all nodes to layout")
         });
-        if tip(response.inner, "Return all nodes to layout", "R").clicked() {
+        if tip(response.inner, "Return all nodes to layout", "").clicked() {
             self.reset_positions();
         }
     }
 
     fn main_menu(&mut self, ui: &mut Ui) {
         usage::menu(ui.ctx(), Menu::Main);
-        if menu::item(ui, "Open folder…", "Ctrl+O", Mark::None).clicked() {
+        if menu::item(ui, "Open folder…", &keys::OPEN.label(), Mark::None).clicked() {
             self.pick_folder = true;
         }
         // The repository shown is left out: it is open already.
@@ -374,7 +377,7 @@ impl ParterreApp {
             }
         }
         let close = ui.add_enabled_ui(self.repo.is_some(), |ui| {
-            menu::item(ui, "Close folder", "Ctrl+W", Mark::None)
+            menu::item(ui, "Close folder", &keys::CLOSE.label(), Mark::None)
         });
         if close.inner.clicked() {
             self.close_folder();
@@ -386,13 +389,13 @@ impl ParterreApp {
             .as_ref()
             .map_or((false, false), |s| (s.net.can_undo(), s.net.can_redo()));
         let undo = ui.add_enabled_ui(can_undo, |ui| {
-            menu::item(ui, "Undo move", "Ctrl+Z", Mark::None)
+            menu::item(ui, "Undo move", &keys::UNDO.label(), Mark::None)
         });
         if undo.inner.clicked() {
             self.undo();
         }
         let redo = ui.add_enabled_ui(can_redo, |ui| {
-            menu::item(ui, "Redo move", "Ctrl+Shift+Z", Mark::None)
+            menu::item(ui, "Redo move", &keys::redo().label(), Mark::None)
         });
         if redo.inner.clicked() {
             self.redo();
@@ -400,13 +403,15 @@ impl ParterreApp {
         menu::separator(ui);
 
         let has_repo = open.is_some();
-        let reload = ui.add_enabled_ui(has_repo, |ui| menu::item(ui, "Reload", "F5", Mark::None));
+        let reload = ui.add_enabled_ui(has_repo, |ui| {
+            menu::item(ui, "Reload", &keys::reload_label(), Mark::None)
+        });
         if reload.inner.clicked() {
             self.reload_by_hand(ui.ctx());
         }
         let blocked = self.fetch_blocked();
         let fetch = ui.add_enabled_ui(blocked.is_none(), |ui| {
-            menu::item(ui, "Fetch", "Ctrl+F5", Mark::None)
+            menu::item(ui, "Fetch", &keys::fetch().label(), Mark::None)
         });
         if let Some(why) = blocked {
             fetch.response.on_disabled_hover_text(why);
@@ -483,21 +488,21 @@ impl ParterreApp {
             }
         });
         menu::submenu(ui, "Zoom", |ui| {
-            if menu::item(ui, "Zoom in", "+", Mark::None).clicked() {
+            if menu::item(ui, "Zoom in", &keys::ZOOM_IN.label(), Mark::None).clicked() {
                 self.zoom_by(1.0 / 0.8);
             }
-            if menu::item(ui, "Zoom out", "−", Mark::None).clicked() {
+            if menu::item(ui, "Zoom out", &keys::ZOOM_OUT.label(), Mark::None).clicked() {
                 self.zoom_by(0.8);
             }
-            if menu::item(ui, "Zoom to 100%", "0", Mark::None).clicked() {
+            if menu::item(ui, "Actual size", &keys::ACTUAL_SIZE.label(), Mark::None).clicked() {
                 self.zoom_by(1.0 / self.view.zoom);
             }
-            if menu::item(ui, "Fit the whole graph", "F", Mark::None).clicked() {
+            if menu::item(ui, "Zoom to fit", &keys::ZOOM_TO_FIT.label(), Mark::None).clicked() {
                 usage::action(usage::Action::Fit);
                 self.fit();
             }
         });
-        if menu::item(ui, "Go to HEAD", "Home", Mark::None).clicked() {
+        if menu::item(ui, "Go to HEAD", &keys::GO_TO_HEAD.label(), Mark::None).clicked() {
             usage::action(usage::Action::GoToHead);
             self.go_to_head();
         }
@@ -520,7 +525,7 @@ impl ParterreApp {
             }
             let displaced = self.scene.as_ref().is_some_and(|s| s.net.any_displaced());
             let response = ui.add_enabled_ui(displaced, |ui| {
-                menu::item(ui, "Return all nodes to layout", "R", Mark::None)
+                menu::item(ui, "Return all nodes to layout", "", Mark::None)
             });
             if response.inner.clicked() {
                 self.reset_positions();
@@ -542,7 +547,7 @@ impl ParterreApp {
         }
         menu::separator(ui);
 
-        if menu::item(ui, "Settings…", "Ctrl+,", Mark::None).clicked() {
+        if menu::item(ui, "Settings…", &keys::SETTINGS.label(), Mark::None).clicked() {
             self.open_settings(self.settings_page);
         }
         if menu::item(ui, "Keyboard and mouse", "", Mark::None).clicked() {

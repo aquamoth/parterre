@@ -266,8 +266,12 @@ impl RebaseDialog {
                         .inner
                         .on_hover_text(tip)
                         .on_disabled_hover_text(match disabled {
-                            Some(why) if any => why,
-                            _ => "Select commits first: Ctrl+ or Shift+click",
+                            Some(why) if any => why.to_owned(),
+                            _ => format!(
+                                "Select commits first: {} or {}",
+                                crate::keys::with_command("click"),
+                                crate::keys::with_shift("click")
+                            ),
                         });
                     if button.clicked() {
                         chosen = Some(todo);

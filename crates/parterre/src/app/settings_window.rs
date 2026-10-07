@@ -172,12 +172,13 @@ impl ParterreApp {
                 {
                     self.settings.settings_window.size = [size.x, size.y];
                 }
-                let closing = ui
-                    .input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape));
+                let closing = ui.input_mut(|i| {
+                    i.viewport().close_requested() || crate::keys::close_window().consume(i)
+                });
                 if closing {
                     self.show_settings = false;
                 }
-                if ui.input(|i| super::f5_pressed(i).1) {
+                if ui.input_mut(|i| crate::keys::fetch().consume(i)) {
                     self.fetch(ui.ctx(), id);
                 }
                 // Embedded, it is in the main window, which reads the text size input.

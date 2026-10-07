@@ -43,6 +43,7 @@ use parterre_highlight::{self as highlight, Engine, Spans};
 use parterre_util::Cancel;
 
 use super::ParterreApp;
+use crate::keys;
 use crate::settings::{DiffForm, DiffWindowSettings};
 use crate::text_size;
 use crate::widgets;
@@ -652,7 +653,7 @@ impl DiffWindow {
             width,
             hint: "Find in the diff",
             count: &count,
-            keys: ["Shift+Enter, Shift+F3", "Enter, F3", "Esc"],
+            keys: &keys::find_field_keys(),
             focus,
             select: focus,
         };
@@ -693,22 +694,22 @@ impl DiffWindow {
         self.jump = Some(target);
     }
 
-    /// Ctrl+F finds, F3 and Shift+F3 go to the next and previous place, and Esc in the find
-    /// field leaves it; elsewhere Esc closes. Ctrl+D switches the form; Ctrl+Down/Up and
+    /// Ctrl+F finds, F3 and Shift+F3 (⌘G and ⇧⌘G on macOS) go to the next and previous place,
+    /// and Esc in the find field leaves it; elsewhere Esc (⌘W on macOS) closes. Ctrl+D switches the form; Ctrl+Down/Up and
     /// F7/Shift+F7 move between changes; Ctrl+A chooses every line. While the find field has
     /// the focus, other keys are its own.
     fn handle_keys(&mut self, ui: &Ui, settings: &mut DiffWindowSettings) {
         let id = self.find_id();
         // egui drops the focus on Esc before the frame starts.
         let in_find = ui.memory(|m| m.has_focus(id) || m.had_focus_last_frame(id));
-        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
+        if ui.input_mut(|i| keys::FIND.consume(i)) {
             self.open_find();
         }
-        // Shift+F3 first: a plain F3 would match it too.
+        // The previous one first: egui takes F3 for Shift+F3 too.
         let (previous, next) = ui.input_mut(|i| {
             (
-                i.consume_key(Modifiers::SHIFT, Key::F3),
-                i.consume_key(Modifiers::NONE, Key::F3),
+                keys::find_previous().consume(i),
+                keys::find_next().consume(i),
             )
         });
         if previous || next {
@@ -735,7 +736,7 @@ impl DiffWindow {
                     || i.consume_key(Modifiers::SHIFT, Key::F7),
                 i.consume_key(Modifiers::COMMAND, Key::ArrowDown)
                     || i.consume_key(Modifiers::NONE, Key::F7),
-                i.key_pressed(Key::Escape),
+                keys::close_window().consume(i),
             )
         });
         if form {
@@ -826,7 +827,7 @@ impl DiffWindow {
                 DiffForm::SideBySide => "Side by side",
                 DiffForm::Unified => "Unified",
             };
-            widgets::tip(r, text, "Ctrl+D")
+            widgets::tip(r, text, &keys::Shortcut::command(Key::D).label())
         });
         if let Some(form) = picked {
             self.set_form(form);
@@ -841,7 +842,7 @@ impl DiffWindow {
                 widgets::tip(
                     widgets::icon_button(ui, glyphs::CHEVRON_UP, false),
                     "Previous change",
-                    "Ctrl+Up",
+                    &keys::Shortcut::command(Key::ArrowUp).label(),
                 )
             })
             .inner;
@@ -850,7 +851,7 @@ impl DiffWindow {
                 widgets::tip(
                     widgets::icon_button(ui, glyphs::CHEVRON_DOWN, false),
                     "Next change",
-                    "Ctrl+Down",
+                    &keys::Shortcut::command(Key::ArrowDown).label(),
                 )
             })
             .inner;
@@ -1604,14 +1605,14 @@ impl DiffWindow {
                             .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
                     }
                 }
-                let (close, size, fetch) = ui.input(|i| {
+                let (close, size, fetch) = ui.input_mut(|i| {
                     (
                         i.viewport().close_requested(),
                         i.viewport().inner_rect.map(|r| r.size()),
-                        super::f5_pressed(i).1,
+                        crate::keys::fetch().consume(i),
                     )
                 });
-                // Ctrl+F5 fetches, as in every window.
+                // Fetch, as in every window.
                 self.fetch |= fetch;
                 if let Some(size) = size
                     && size.x > 0.0

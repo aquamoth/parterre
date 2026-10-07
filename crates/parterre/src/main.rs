@@ -13,6 +13,7 @@ mod file_dialog;
 mod file_manager;
 mod frame_pacing;
 mod icon;
+mod keys;
 mod menu;
 mod raster;
 mod record;

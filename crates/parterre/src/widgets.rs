@@ -509,7 +509,7 @@ pub struct Find<'a> {
     /// While there is a query: how many places it was found at, e.g. "3 of 12".
     pub count: &'a str,
     /// The shortcuts the tooltips of the previous, next and clear buttons name.
-    pub keys: [&'a str; 3],
+    pub keys: &'a [String; 3],
     /// Take the focus in this frame; `select` also selects the query, so typing replaces it.
     pub focus: bool,
     pub select: bool,
@@ -527,7 +527,7 @@ pub struct Found {
     pub cleared: bool,
 }
 
-/// A find field for `query`: a magnifier, the query (a hint and "Ctrl+F" while empty, if there
+/// A find field for `query`: a magnifier, the query (a hint and Ctrl+F or ⌘F while empty, if there
 /// is room), and while there is one, the count and buttons for the previous and next place and
 /// for clearing. Enter keeps the focus. A paste leaves out the line break it ends with.
 pub fn find_field(ui: &mut Ui, find: &Find, query: &mut String) -> Found {
@@ -620,11 +620,16 @@ pub fn find_field(ui: &mut Ui, find: &Find, query: &mut String) -> Found {
                         .corner_radius(4)
                         .inner_margin(egui::Margin::symmetric(4, 0))
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Ctrl+F").small().weak())
+                            ui.label(
+                                egui::RichText::new(crate::keys::FIND.label())
+                                    .small()
+                                    .weak(),
+                            )
                         });
                     return;
                 }
                 let [previous, next, clear] = find.keys;
+                let (previous, next, clear) = (previous.as_str(), next.as_str(), clear.as_str());
                 if tip(mini_button(ui, glyphs::CLOSE), "Clear", clear).clicked() {
                     found.cleared = true;
                 }

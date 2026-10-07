@@ -33,7 +33,7 @@ parterre --help                    # all options
 ```
 
 The installers also add *Revision Graph* to the folder menu of Explorer, Nautilus, Dolphin
-and Nemo. `Ctrl+O` opens another folder, and the ☰ menu lists the recent ones.
+and Nemo. `Ctrl+O` (`⌘O` on macOS) opens another folder, and the ☰ menu lists the recent ones.
 
 ## The graph
 
@@ -49,25 +49,27 @@ look around.
 |---|---|
 | Drag a node | Move it, with the rest of the selection it belongs to. In *Adapt*, the graph gives way and keeps children above their parents. |
 | `1` / `2` / `3` | Drag mode *Adapt* (the graph gives way) / *Free* (nothing else moves) / *Subtree* (take along everything that grows out of it) |
-| Click, `Ctrl`+click, `Shift`+click a node | Select it / toggle it / add it to the selection |
+| Click, `Ctrl`+click (`⌘`-click on macOS), `Shift`+click a node | Select it / toggle it / add it to the selection |
 | `Shift`+drag the background | Select the nodes in a rectangle |
 | Hover / click an edge | List the commits collapsed into it / keep it highlighted while you look around |
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo a move |
+| `Ctrl+Z` / `Ctrl+Y` on Windows, `Ctrl+Shift+Z` on Linux (`⌘Z` / `⇧⌘Z` on macOS) | Undo / redo a move |
 | Drag the background, wheel, Shift+wheel | Pan |
-| Ctrl+wheel, pinch, `+` `-` `0` | Zoom |
-| Ctrl+wheel, pinch anywhere but over the graph | Text size of every window (also *Settings → Appearance*, and `Ctrl`+`+` `-` `0` in the log, compare, diff, blame and settings windows). The graph keeps its own zoom. |
-| `F`, double-click the background | Fit the whole graph |
-| `Home` / `H` | Go to HEAD |
-| `Ctrl+F`, then `Enter` / `F3` | Find branches, tags, hashes, subjects or authors |
+| Ctrl+wheel (`⌘`+wheel on macOS), pinch, `Ctrl`+`+` `-` `0` (`⌘+` `⌘−` `⌘0`) | Zoom |
+| Ctrl+wheel (`⌘`+wheel), pinch anywhere but over the graph | Text size of every window (also *Settings → Appearance*, and `Ctrl`+`+` `-` `0` (`⌘+` `⌘−` `⌘0`) in the log, compare, diff, blame and settings windows). The graph keeps its own zoom. |
+| `F`, double-click the background | Zoom to fit the whole graph |
+| `H` | Go to HEAD |
+| `Ctrl+F` (`⌘F` on macOS), then `Enter` / `Shift+Enter` | Find branches, tags, hashes, subjects or authors |
+| `F3` / `Shift+F3` (`⌘G` / `⇧⌘G` on macOS) | Next / previous search hit, in every window that finds |
 | `L`, double-click a node | Show log: the node's history, or with two nodes selected the commits between them (first..second) |
-| `Ctrl+C` | Copy the selected commit's hash |
+| `Ctrl+C` (`⌘C` on macOS) | Copy the selected commit's hash |
 | Click a pull request's number | Open the pull request on GitHub |
 | Right-click a node | Show log; compare; create, switch to or delete a branch; rebase, merge, cherry-pick or reset; add, go to or delete a worktree; open its pull requests or its worktree's folder; copy its hash, ref names or folder; select its subtree; return it to the layout |
-| `R` | Return all nodes to the layout |
 | `Esc` | Clear the selection |
-| `F5` | Reload the repository (it also reloads by itself when branches, tags or HEAD change) |
-| `Ctrl+O` / `Ctrl+W` | Open / close a folder |
-| `Ctrl+,` | Settings |
+| `F5`, `Ctrl+R` (`⌘R` on macOS) | Reload the repository (it also reloads by itself when branches, tags or HEAD change), in every window that reloads |
+| `Ctrl+F5` (`⇧⌘F` on macOS) | Fetch every remote, from any window |
+| `Ctrl+O` / `Ctrl+W` (`⌘O` / `⌘W` on macOS) | Open / close a folder |
+| `Ctrl+,` (`⌘,` on macOS) | Settings |
+| `Esc` (`⌘W` on macOS) | Close the log, compare, diff, blame or settings window |
 
 When you drag a node, edges at moved nodes are routed afresh through the gaps between nodes, so
 they lose bends they no longer need and go around nodes that are now in the way. With
@@ -182,8 +184,8 @@ log's branch labels ↑3 ↓2, and *Compare → Upstream* compares the two. On b
 
 *Show log* opens a window listing a node's history, or the commits between two selected nodes,
 like TortoiseGit's log: a graph column, the selected commit's message and the files it changed,
-which you can sort and filter. The arrow keys move through the commits, `Ctrl+F` finds, `F5`
-reloads and `Esc` closes it. Right-click a row for the same actions as on a node, and to
+which you can sort and filter. The arrow keys move through the commits, `Ctrl+F` (`⌘F` on
+macOS) finds, `F5` or `Ctrl+R` (`⌘R`) reloads and `Esc` (`⌘W`) closes it. Right-click a row for the same actions as on a node, and to
 revert the commit or copy its subject.
 
 Four layouts arrange its panes: stacked as in TortoiseGit, side by side, details and files
@@ -194,16 +196,17 @@ the dividers between the panes are remembered for each layout.
 
 Double-click a changed file, or select some (`Ctrl`+click, `Shift`+click) and press `Enter`, to
 see its diff in a window of its own; several can be open at once. The diff is side by side or
-unified (`Ctrl+D`), with changed words marked, unchanged stretches folded (click a fold to open
+unified (`Ctrl+D`, `⌘D` on macOS), with changed words marked, unchanged stretches folded (click a fold to open
 it), an overview of the changes on the right, and long lines that scroll sideways. Code is
 coloured by syntax, as in VS Code, for Markdown, Java, C#, Rust, TypeScript, Python, SQL,
 Protocol Buffers and a dozen more languages, in the blame window too; the palette button in
 either toolbar turns it off, for both, as does *Syntax colour* in *Settings → Appearance*.
-`Ctrl+Down` / `Ctrl+Up` (or `F7` / `Shift+F7`) move between changes, and `Ctrl+F` finds. The
+`Ctrl+Down` / `Ctrl+Up` (`⌘↓` / `⌘↑`, or `F7` / `Shift+F7`) move between changes, and `Ctrl+F`
+(`⌘F`) finds. The
 toolbar also picks how changed words are found and whether whitespace counts.
 
 Drag over the old or the new text (double-click for a word, `Shift`+click to extend, `Ctrl+A`
-for all) or click line numbers for whole lines, then `Ctrl+C` copies it as it is in the file,
+(`⌘A`) for all) or click line numbers for whole lines, then `Ctrl+C` (`⌘C`) copies it as it is in the file,
 tabs kept. In the unified form you choose one version: the one of the line you start on (a
 removed line, or the old numbers, for the old version; `Ctrl` on an unchanged line for the old
 one too), shown by its line number lighting up on the row under the pointer. Lines of the other
@@ -235,9 +238,11 @@ the commit under the pointer.
 
 Right-click a line to *Blame previous revision* (the file as it was before that commit, in a new
 window, at that line), *Show changes* (that commit's diff of the file, at the line), *Show log*
-from the commit, or copy its hash. Drag or `Shift`+click to choose lines, `Ctrl+C` to copy them.
+from the commit, or copy its hash. Drag or `Shift`+click to choose lines, `Ctrl+C` (`⌘C` on
+macOS) to copy them. `Ctrl+G` (`⌃G`) goes to a line.
 The toolbar says whether whitespace changes and moved or copied lines count (`git blame -w`,
-`-M`, `-C`). Blaming the working tree marks the lines you haven't committed; `F5` blames again.
+`-M`, `-C`). Blaming the working tree marks the lines you haven't committed; `F5` or `Ctrl+R` (`⌘R`) blames
+again.
 
 Below the text, the **history pane** lists the commits that changed the file up to the blamed
 revision, like the log: graph, hash (in its lines' shade), subject, author, date. Commits from
@@ -250,7 +255,7 @@ double-click), *Show log* or copy its hash. Drag the divider to resize the pane,
 
 ## Settings
 
-`Ctrl+,` opens the settings; the graph follows every change while they are open.
+`Ctrl+,` (`⌘,` on macOS) opens the settings; the graph follows every change while they are open.
 
 - **Per repository:** filters are kept for each repository, and shared by its worktrees.
 - **Shared with a team:** *Settings → Manage* exports parterre's own settings, or a

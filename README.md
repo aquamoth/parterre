@@ -69,7 +69,7 @@ A branch that was rebased since it was pushed gets a **dashed arrow to its upstr
 worktree in the middle of a rebase gets an **orange zigzag** from where it has got to back to
 the branch being rebased.
 
-**Fetch** every remote from the toolbar or with Ctrl+F5, **pull** the open worktree's branch,
+**Fetch** every remote from the toolbar or with `Ctrl+F5` (`⇧⌘F` on macOS), **pull** the open worktree's branch,
 and **push** any local branch from its node. A push that would replace the remote's commits
 asks first, and says whether the branch has a copy of each; it forces only with a lease
 (`--force-with-lease --force-if-includes`). parterre has no password prompt of its own: use a
@@ -85,13 +85,13 @@ first, lists any commits only it has, and won't delete a branch with an open pul
 
 Drag a node and the graph gives way, as if held by weak magnets: neighbours follow along their
 edges and nodes in the way move aside. Edges find new routes through the gaps. You can also
-move only the selected nodes, or a whole subtree, undo with `Ctrl+Z`, and press `R` to put
-everything back. Turn on *Remember moved nodes* (*Settings → Dragging*) to keep your
+move only the selected nodes, or a whole subtree, undo with `Ctrl+Z` (`⌘Z` on macOS), and put
+everything back with *Layout › Return all nodes to layout*. Turn on *Remember moved nodes* (*Settings → Dragging*) to keep your
 arrangement for each repository.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/drag-dark.gif">
-  <img alt="Dragging nodes: the graph gives way, a subtree moves as one, and R returns everything to the layout" src="docs/images/0.6/drag-light.gif">
+  <img alt="Dragging nodes: the graph gives way, a subtree moves as one, and Return all nodes to layout puts everything back" src="docs/images/0.6/drag-light.gif">
 </picture>
 
 ## History, diffs and blame
@@ -166,10 +166,10 @@ parterre ~/src/other --worktrees   # another one, with its worktrees shown
 | Double-click a node, or `L` | Show its log |
 | Right-click a node | Compare, branch, merge, rebase, worktrees, open, copy |
 | Drag a node; `1` `2` `3` | Move it; the graph gives way / only the selection / the whole subtree |
-| `F`, `Home` | Fit the whole graph, go to HEAD |
-| `Ctrl+F` | Find branches, tags, hashes, subjects or authors |
-| `F5` | Reload (parterre also reloads by itself when refs change) |
-| `Ctrl+,` | Settings |
+| `F`, `H` | Zoom to fit the whole graph, go to HEAD |
+| `Ctrl+F` (`⌘F` on macOS) | Find branches, tags, hashes, subjects or authors |
+| `F5`, `Ctrl+R` (`⌘R` on macOS) | Reload (parterre also reloads by itself when refs change) |
+| `Ctrl+,` (`⌘,` on macOS) | Settings |
 
 A few command-line options:
 

@@ -234,7 +234,11 @@ impl CherryPickDialog {
                     let (glyph, color, _) = pick_icon(ui, picked);
                     let button = crate::widgets::icon_text_button(ui, glyph, color, label)
                         .on_hover_text(tip)
-                        .on_disabled_hover_text("Select commits first: Ctrl+ or Shift+click");
+                        .on_disabled_hover_text(format!(
+                            "Select commits first: {} or {}",
+                            crate::keys::with_command("click"),
+                            crate::keys::with_shift("click")
+                        ));
                     if button.clicked() {
                         chosen = Some(picked);
                     }
