@@ -2718,7 +2718,12 @@ mod tests {
         assert_eq!(w.find.current, Some(1));
         assert!(has_find_focus(&ctx, &w));
         for _ in 0..3 {
-            frame(&ctx, &mut w, &mut settings, vec![key(Key::F3)]);
+            frame(
+                &ctx,
+                &mut w,
+                &mut settings,
+                vec![crate::keys::find_next().event()],
+            );
         }
         assert_eq!(w.find.current, Some(0));
         let shift = Modifiers::SHIFT;
@@ -2726,13 +2731,18 @@ mod tests {
             &ctx,
             &mut w,
             &mut settings,
-            vec![key_with(Key::F3, shift)],
+            vec![crate::keys::find_previous().event()],
             shift,
         );
         assert_eq!(w.find.current, Some(3));
         // F3 works outside the field too.
         ctx.memory_mut(|m| m.surrender_focus(w.find_id()));
-        frame(&ctx, &mut w, &mut settings, vec![key(Key::F3)]);
+        frame(
+            &ctx,
+            &mut w,
+            &mut settings,
+            vec![crate::keys::find_next().event()],
+        );
         assert_eq!(w.find.current, Some(0));
 
         // The other form finds in its own rows.
@@ -2778,7 +2788,12 @@ mod tests {
         frame(&ctx, &mut w, &mut settings, Vec::new());
         frame(&ctx, &mut w, &mut settings, Vec::new());
         assert!(w.top < 10, "at the first change, top {}", w.top);
-        frame(&ctx, &mut w, &mut settings, vec![key(Key::F3)]);
+        frame(
+            &ctx,
+            &mut w,
+            &mut settings,
+            vec![crate::keys::find_next().event()],
+        );
         for _ in 0..2 {
             frame(&ctx, &mut w, &mut settings, Vec::new());
         }
@@ -2800,7 +2815,12 @@ mod tests {
         assert!(!has_find_focus(&ctx, &w));
         assert_eq!(w.find.query, "");
         assert!(w.find.matches.is_empty());
-        frame(&ctx, &mut w, &mut settings, vec![key(Key::Escape)]);
+        frame(
+            &ctx,
+            &mut w,
+            &mut settings,
+            vec![crate::keys::close_window().event()],
+        );
         assert!(w.closed);
     }
 

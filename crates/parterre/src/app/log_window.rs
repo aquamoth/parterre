@@ -2236,11 +2236,15 @@ mod tests {
         frame(&ctx, &mut w, vec![key(Key::Enter)]);
         assert_eq!(selected(&w), Some(4));
         assert!(has_find_focus(&ctx));
-        frame(&ctx, &mut w, vec![key(Key::F3)]);
+        frame(&ctx, &mut w, vec![crate::keys::find_next().event()]);
         assert_eq!(selected(&w), Some(0));
         let shift = Modifiers::SHIFT;
         let held = egui::Event::ModifiersChanged(shift);
-        frame(&ctx, &mut w, vec![held, key_with(Key::F3, shift)]);
+        frame(
+            &ctx,
+            &mut w,
+            vec![held, crate::keys::find_previous().event()],
+        );
         frame(
             &ctx,
             &mut w,
@@ -2250,7 +2254,7 @@ mod tests {
         // From a row that isn't a place, F3 goes to the next one after it.
         w.view.as_mut().unwrap().list.select(Some(1));
         ctx.memory_mut(|m| m.surrender_focus(LogWindow::find_id()));
-        frame(&ctx, &mut w, vec![key(Key::F3)]);
+        frame(&ctx, &mut w, vec![crate::keys::find_next().event()]);
         assert_eq!(selected(&w), Some(2));
 
         // The start of a hash: commit 3's is "3aaa…".
@@ -2276,7 +2280,7 @@ mod tests {
         frame(&ctx, &mut w, vec![key_with(Key::F, Modifiers::COMMAND)]);
         assert_eq!(w.find.query, "o");
         frame(&ctx, &mut w, vec![key(Key::Escape)]);
-        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        frame(&ctx, &mut w, vec![crate::keys::close_window().event()]);
         assert!(!w.is_open());
     }
 }

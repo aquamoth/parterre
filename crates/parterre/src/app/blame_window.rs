@@ -3416,10 +3416,10 @@ mod tests {
         frame(&ctx, &mut w, vec![key(Key::Enter)]);
         assert_eq!(w.find.current, Some(1));
         assert!(has_find_focus(&ctx, &w));
-        frame(&ctx, &mut w, vec![key(Key::F3)]);
-        frame(&ctx, &mut w, vec![key(Key::F3)]);
+        frame(&ctx, &mut w, vec![crate::keys::find_next().event()]);
+        frame(&ctx, &mut w, vec![crate::keys::find_next().event()]);
         assert_eq!(w.find.current, Some(0));
-        frame(&ctx, &mut w, vec![shift(Key::F3)]);
+        frame(&ctx, &mut w, vec![crate::keys::find_previous().event()]);
         assert_eq!(w.find.current, Some(2));
         let held = egui::Event::ModifiersChanged;
         frame(
@@ -3443,7 +3443,7 @@ mod tests {
         // F3 works outside the field too.
         w.find.current = None;
         ctx.memory_mut(|m| m.surrender_focus(w.find_id()));
-        frame(&ctx, &mut w, vec![key(Key::F3)]);
+        frame(&ctx, &mut w, vec![crate::keys::find_next().event()]);
         assert_eq!(w.find.current, Some(0));
     }
 
@@ -3509,7 +3509,7 @@ mod tests {
         assert!(!has_find_focus(&ctx, &w));
         assert_eq!(w.find.query, "");
         assert!(w.find.matches.is_empty());
-        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        frame(&ctx, &mut w, vec![crate::keys::close_window().event()]);
         assert!(w.closed);
     }
 
@@ -3565,7 +3565,7 @@ mod tests {
 
     /// Ctrl+G, a frame for the popup to size itself, then `text` typed into its field.
     fn go_to(ctx: &egui::Context, w: &mut BlameWindow, text: &str) {
-        frame(ctx, w, vec![ctrl(Key::G)]);
+        frame(ctx, w, vec![crate::keys::go_to_line().event()]);
         frame(ctx, w, Vec::new());
         frame(ctx, w, vec![egui::Event::Text(text.into())]);
     }
@@ -3673,13 +3673,13 @@ mod tests {
         assert!(!w.closed);
         assert!(!has_go_to_focus(&ctx, &w));
         assert_eq!(span(&w), None);
-        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        frame(&ctx, &mut w, vec![crate::keys::close_window().event()]);
         assert!(w.closed);
 
         // Not before there are lines to go to.
         let mut w = window();
         w.load = Load::Failed("no".into());
-        frame(&ctx, &mut w, vec![ctrl(Key::G)]);
+        frame(&ctx, &mut w, vec![crate::keys::go_to_line().event()]);
         assert!(!w.go_to.open);
     }
 

@@ -87,6 +87,18 @@ impl Shortcut {
         }
     }
 
+    /// The key press it stands for, for the tests.
+    #[cfg(test)]
+    pub fn event(self) -> egui::Event {
+        egui::Event::Key {
+            key: self.key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: self.modifiers,
+        }
+    }
+
     /// Whether it was pressed this frame, taking the press so that nothing else acts on it.
     /// egui ignores a Shift held besides: take the Shift-variants first.
     pub fn consume(self, input: &mut InputState) -> bool {
