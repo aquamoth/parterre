@@ -33,7 +33,8 @@ parterre --help                    # all options
 ```
 
 The installers also add *Revision Graph* to the folder menu of Explorer, Nautilus, Dolphin
-and Nemo. `Ctrl+O` (`⌘O` on macOS) opens another folder, and the ☰ menu lists the recent ones.
+and Nemo. `Ctrl+O` (`⌘O` on macOS) opens another folder, as does dropping a folder (or a file in
+it) on the window from a file manager, and the ☰ menu lists the recent ones.
 
 ## The graph
 

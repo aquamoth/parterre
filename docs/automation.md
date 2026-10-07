@@ -106,6 +106,8 @@ printf 'open about\nscreenshot about.png window\n' | parterre ~/repo --script -
 | `wait SECONDS` | Waits, e.g. for the physics to settle after a drag |
 | `wait-for T` | Waits until `T` shows |
 | `open WHAT` | Opens a window or dialog directly, see [below](#open) |
+| `drag-file PATH` | Drags a file or folder from elsewhere over the window, until `drop-file` |
+| `drop-file` | Drops it, as from a file manager |
 | `screenshot FILE [window\|popup]` | Saves a PNG: the whole window, only the topmost window (a dialog), or only the open menus and popovers |
 
 `#` starts a comment. Quoted text may hold `\"` and `\\`.

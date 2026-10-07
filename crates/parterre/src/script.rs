@@ -67,6 +67,10 @@ pub enum Step {
     Type(String),
     /// Open a window or dialog directly, e.g. `about` or `log:main`; see `docs/automation.md`.
     Open(String),
+    /// Drag a file or folder from elsewhere over the window, until [`Step::DropFile`].
+    DragFile(PathBuf),
+    /// Drop what [`Step::DragFile`] dragged.
+    DropFile,
     Screenshot(PathBuf, Crop),
 }
 
@@ -209,6 +213,14 @@ fn step(words: &[String]) -> Result<Step, String> {
         "open" => {
             count(1)?;
             Step::Open(args[0].clone())
+        }
+        "drag-file" => {
+            count(1)?;
+            Step::DragFile(PathBuf::from(quoted(&args[0]).unwrap_or(&args[0])))
+        }
+        "drop-file" => {
+            count(0)?;
+            Step::DropFile
         }
         "screenshot" => {
             if args.is_empty() || args.len() > 2 {
@@ -368,6 +380,11 @@ mod tests {
         );
         assert_eq!(one("key Ctrl++"), Step::Key(Modifiers::CTRL, Key::Plus));
         assert_eq!(one("key F5"), Step::Key(Modifiers::NONE, Key::F5));
+        assert_eq!(
+            one("drag-file \"/tmp/a repo\""),
+            Step::DragFile(PathBuf::from("/tmp/a repo"))
+        );
+        assert_eq!(one("drop-file"), Step::DropFile);
     }
 
     #[test]

@@ -31,7 +31,12 @@ pub struct Tones {
 }
 
 pub fn tones(ui: &Ui) -> Tones {
-    if ui.visuals().dark_mode {
+    tones_of(ui.visuals().dark_mode)
+}
+
+/// [`tones`] of the dark or the light theme.
+pub fn tones_of(dark: bool) -> Tones {
+    if dark {
         Tones {
             on_bg: Color32::from_rgb(0x21, 0x3a, 0x57),
             on_fg: Color32::from_rgb(0x8e, 0xc2, 0xff),

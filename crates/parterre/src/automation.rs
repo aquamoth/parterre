@@ -54,6 +54,20 @@ pub struct Automation {
     frame_times: Vec<Instant>,
 }
 
+/// A file or folder a script drops on the window.
+#[derive(Debug)]
+struct Dropped(PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        std::fs::read(&self.0).map_err(|e| e.to_string())
+    }
+}
+
 /// Why a screenshot was taken.
 #[derive(Debug)]
 enum Shot {
@@ -80,6 +94,15 @@ impl Automation {
         raw.predicted_dt = 1.0 / 60.0;
         raw.events
             .extend(runner.queue.pop_front().unwrap_or_default());
+        if let Some(path) = &runner.dragged {
+            raw.hovered_files = vec![egui::HoveredFile {
+                path: Some(path.clone()),
+                ..Default::default()
+            }];
+        }
+        if let Some(path) = runner.dropped.take() {
+            raw.dropped_files = vec![Arc::new(Dropped(path))];
+        }
     }
 
     /// Automated runs step the physics at a fixed rate so they are reproducible.
@@ -389,6 +412,10 @@ pub struct Runner {
     finished: bool,
     /// Done or failed: the window is closing.
     ended: bool,
+    /// A file or folder dragged over the window (`drag-file`).
+    dragged: Option<PathBuf>,
+    /// The one dropped (`drop-file`), for the coming frame.
+    dropped: Option<PathBuf>,
 }
 
 impl Runner {
@@ -403,6 +430,8 @@ impl Runner {
             shots: 0,
             finished: false,
             ended: false,
+            dragged: None,
+            dropped: None,
         }
     }
 
@@ -550,6 +579,14 @@ impl Runner {
             Step::Open(what) => {
                 self.hold = 12;
                 return Action::Open(what);
+            }
+            Step::DragFile(path) => {
+                self.dragged = Some(path);
+                self.queue.extend(empty(20));
+            }
+            Step::DropFile => {
+                self.dropped = self.dragged.take();
+                self.queue.extend(empty(20));
             }
             Step::Screenshot(path, crop) => {
                 self.shots += 1;

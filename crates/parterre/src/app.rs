@@ -22,6 +22,7 @@ mod column_borders;
 mod commit_table;
 mod compare_window;
 mod diff_window;
+mod file_drop;
 mod file_table;
 mod log_window;
 mod merge;
@@ -3314,6 +3315,7 @@ impl eframe::App for ParterreApp {
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         self.about_window(&ctx);
+        self.file_drop(&ctx);
         // Over everything else.
         self.first_run_prompt(&ctx, frame);
         let palette = Palette::new(
