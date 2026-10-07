@@ -1,25 +1,25 @@
-//! The toolbar, its popovers and the ☰ menu. The toolbar keeps what is used every day; the
-//! menu offers all of it again, in the toolbar's order, and the rest besides. Chosen on
-//! 2026-09-26; the prototype is on the branch `prototype/menus`.
-
-use std::path::{Path, PathBuf};
+//! The toolbar and its popovers: what is used every day. The menu bar (`menu_bar`) offers all
+//! of it again, and the rest besides. Chosen on 2026-09-26; the prototype is on the branch
+//! `prototype/menus`.
 
 use eframe::egui::{
-    self, Align, Id, Key, Layout, Margin, Popup, PopupCloseBehavior, RectAlign, Response, RichText,
-    Sense, Stroke, Ui, vec2,
+    self, Align, Id, Key, Layout, Margin, Popup, PopupCloseBehavior, RectAlign, Response, Sense,
+    Stroke, Ui, vec2,
 };
 use parterre_core::glyphs::{self, Glyph};
-use parterre_core::layout::Direction;
 use parterre_core::physics::DragModel;
-use parterre_core::recent::same_path;
 use parterre_core::revgraph::Simplification;
 
-use super::{ParterreApp, SettingsPage};
-use crate::export::Format;
+use super::ParterreApp;
 use crate::keys;
-use crate::menu::{self, Mark};
+use crate::menu;
 use crate::usage::{self, Menu};
 use crate::widgets::{self, tip, tip_explained};
+
+/// `text` in the menus' case on this platform (Title Case on macOS).
+fn case(text: &str) -> String {
+    super::menu_bar::case(keys::Platform::CURRENT, text)
+}
 
 const SHOW: [(Simplification, Glyph, &str); 3] = [
     (
@@ -46,7 +46,6 @@ const DRAG: [(DragModel, Glyph, &str); 3] = [
     (DragModel::Subtree, glyphs::SUBTREE, "3"),
 ];
 
-const MENU_ID: &str = "main-menu";
 const FILTER_ID: &str = "filter-popover";
 const ZOOM_ID: &str = "zoom-popover";
 const DRAG_ID: &str = "drag-popover";
@@ -57,10 +56,9 @@ pub fn popup_id(name: &str) -> Id {
     toolbar_button_id(name).with("popup")
 }
 
-/// The toolbar button that opens `menu`, `filter`, `zoom` or `drag`, for a script to click.
+/// The toolbar button that opens `filter`, `zoom` or `drag`, for a script to click.
 pub fn toolbar_button_id(name: &str) -> Id {
     let id = match name {
-        "menu" => MENU_ID,
         "filter" => FILTER_ID,
         "zoom" => ZOOM_ID,
         _ => DRAG_ID,
@@ -72,15 +70,6 @@ impl ParterreApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let newer = self.newer_release().is_some();
-            let menu_button = widgets::menu_button(ui, Id::new(MENU_ID), newer);
-            let menu_button = tip(menu_button, "Menu", "");
-            Popup::menu(&menu_button).style(menu::style).show(|ui| {
-                menu::fit_window(ui, |ui| {
-                    ui.set_min_width(menu::MIN_WIDTH);
-                    self.main_menu(ui);
-                });
-            });
             self.fetch_button(ui);
             gap(ui);
 
@@ -289,7 +278,7 @@ impl ParterreApp {
             self.zoom_field(ui);
             if tip(
                 widgets::icon_button(ui, glyphs::MINUS, false),
-                "Zoom out",
+                &case("Zoom out"),
                 &keys::ZOOM_OUT.label(),
             )
             .clicked()
@@ -298,20 +287,21 @@ impl ParterreApp {
             }
             if tip(
                 widgets::icon_button(ui, glyphs::PLUS, false),
-                "Zoom in",
+                &case("Zoom in"),
                 &keys::ZOOM_IN.label(),
             )
             .clicked()
             {
                 self.zoom_by(1.0 / 0.8);
             }
-            let fit = widgets::text_button(ui, "Fit");
-            if tip(fit, "Zoom to fit", &keys::ZOOM_TO_FIT.label()).clicked() {
+            // As the View menu names them.
+            let fit = widgets::text_button(ui, &case("Zoom to fit"));
+            if tip(fit, "", &keys::ZOOM_TO_FIT.label()).clicked() {
                 usage::action(usage::Action::Fit);
                 self.fit();
             }
-            let actual = widgets::text_button(ui, "100%");
-            if tip(actual, "Actual size", &keys::ACTUAL_SIZE.label()).clicked() {
+            let actual = widgets::text_button(ui, &case("Actual size"));
+            if tip(actual, "", &keys::ACTUAL_SIZE.label()).clicked() {
                 self.zoom_by(1.0 / self.view.zoom);
             }
         });
@@ -334,252 +324,6 @@ impl ParterreApp {
         if tip(response.inner, "Return all nodes to layout", "").clicked() {
             self.reset_positions();
         }
-    }
-
-    fn main_menu(&mut self, ui: &mut Ui) {
-        usage::menu(ui.ctx(), Menu::Main);
-        if menu::item(ui, "Open folder…", &keys::OPEN.label(), Mark::None).clicked() {
-            self.pick_folder = true;
-        }
-        // The repository shown is left out: it is open already.
-        let open = self.repo.as_ref().map(|r| r.path.clone());
-        let recent: Vec<PathBuf> = self
-            .recent
-            .iter()
-            .filter(|p| open.as_deref().is_none_or(|o| !same_path(p, o)))
-            .map(Path::to_path_buf)
-            .collect();
-        let mut picked = None;
-        let mut clear = false;
-        ui.add_enabled_ui(!recent.is_empty(), |ui| {
-            menu::submenu(ui, "Recent folders", |ui| {
-                for path in &recent {
-                    // The folder it is in, where the shortcut would go, tells same names apart.
-                    let (name, place) = super::name_and_place(path);
-                    if menu::item(ui, &name, &place, Mark::None).clicked() {
-                        picked = Some(path.clone());
-                    }
-                }
-                menu::separator(ui);
-                if menu::item(ui, "Clear recent folders", "", Mark::None).clicked() {
-                    clear = true;
-                }
-            });
-        });
-        if let Some(path) = picked {
-            self.open_folder(&path);
-        }
-        if clear {
-            self.recent.clear();
-            // The open one comes back, so that it is listed once another is opened.
-            if let Some(open) = &open {
-                self.recent.add(open);
-            }
-        }
-        let close = ui.add_enabled_ui(self.repo.is_some(), |ui| {
-            menu::item(ui, "Close folder", &keys::CLOSE.label(), Mark::None)
-        });
-        if close.inner.clicked() {
-            self.close_folder();
-        }
-        menu::separator(ui);
-
-        let (can_undo, can_redo) = self
-            .scene
-            .as_ref()
-            .map_or((false, false), |s| (s.net.can_undo(), s.net.can_redo()));
-        let undo = ui.add_enabled_ui(can_undo, |ui| {
-            menu::item(ui, "Undo move", &keys::UNDO.label(), Mark::None)
-        });
-        if undo.inner.clicked() {
-            self.undo();
-        }
-        let redo = ui.add_enabled_ui(can_redo, |ui| {
-            menu::item(ui, "Redo move", &keys::redo().label(), Mark::None)
-        });
-        if redo.inner.clicked() {
-            self.redo();
-        }
-        menu::separator(ui);
-
-        let has_repo = open.is_some();
-        let reload = ui.add_enabled_ui(has_repo, |ui| {
-            menu::item(ui, "Reload", &keys::reload_label(), Mark::None)
-        });
-        if reload.inner.clicked() {
-            self.reload_by_hand(ui.ctx());
-        }
-        let blocked = self.fetch_blocked();
-        let fetch = ui.add_enabled_ui(blocked.is_none(), |ui| {
-            menu::item(ui, "Fetch", &keys::fetch().label(), Mark::None)
-        });
-        if let Some(why) = blocked {
-            fetch.response.on_disabled_hover_text(why);
-        }
-        if fetch.inner.clicked() {
-            self.fetch(ui.ctx(), egui::ViewportId::ROOT);
-        }
-        let auto = self.settings.auto_reload;
-        if menu::item(ui, "Reload automatically", "", Mark::Check(auto)).clicked() {
-            self.settings.auto_reload = !auto;
-        }
-        // One item per format rather than a file-type list in the save dialog: rfd doesn't say
-        // which type was picked, and macOS shows no list at all.
-        ui.add_enabled_ui(has_repo, |ui| {
-            menu::submenu(ui, "Export", |ui| {
-                for format in Format::ALL {
-                    let label = format!("{}…", format.name());
-                    if menu::item(ui, &label, "", Mark::None).clicked() {
-                        self.export = Some(format);
-                    }
-                }
-            });
-        });
-        menu::separator(ui);
-
-        // In the toolbar's order.
-        menu::submenu(ui, "Show", |ui| {
-            let g = &mut self.settings.graph;
-            for s in Simplification::ALL {
-                if menu::item(ui, s.label(), "", Mark::Radio(g.simplification == s)).clicked() {
-                    g.simplification = s;
-                }
-            }
-            menu::separator(ui);
-            for (on, label) in [
-                (&mut g.show_local_branches, "Local branches"),
-                (&mut g.show_remote_branches, "Remote branches"),
-                (&mut g.show_tags, "Tags"),
-                (&mut g.show_stash, "Stash"),
-                (&mut g.show_other_refs, "Other refs"),
-            ] {
-                if menu::item(ui, label, "", Mark::Check(*on)).clicked() {
-                    *on = !*on;
-                }
-            }
-            let available = self.pull_requests.origin().is_some();
-            let on = self.pull_requests_active();
-            let item = ui.add_enabled_ui(available, |ui| {
-                menu::item(ui, "Pull requests", "", Mark::Check(on))
-            });
-            let item = item.inner.on_disabled_hover_text(NO_PULL_REQUESTS_TIP);
-            if item.clicked() {
-                self.toggle_pull_requests();
-            }
-            let on = self.settings.graph.show_worktrees;
-            if menu::item(ui, "Worktrees", "", Mark::Check(on)).clicked() {
-                self.settings.graph.show_worktrees = !on;
-            }
-        });
-        menu::submenu(ui, "Filter", |ui| {
-            let g = &mut self.settings.graph;
-            for (on, label) in [
-                (&mut g.current_branch_only, "Current branch only"),
-                (&mut g.first_parent_only, "First parent only"),
-            ] {
-                if menu::item(ui, label, "", Mark::Check(*on)).clicked() {
-                    *on = !*on;
-                }
-            }
-            menu::separator(ui);
-            let more = "Branch filter and hidden branches…";
-            if menu::item(ui, more, "", Mark::None).clicked() {
-                self.open_settings(SettingsPage::Filters);
-            }
-        });
-        menu::submenu(ui, "Zoom", |ui| {
-            if menu::item(ui, "Zoom in", &keys::ZOOM_IN.label(), Mark::None).clicked() {
-                self.zoom_by(1.0 / 0.8);
-            }
-            if menu::item(ui, "Zoom out", &keys::ZOOM_OUT.label(), Mark::None).clicked() {
-                self.zoom_by(0.8);
-            }
-            if menu::item(ui, "Actual size", &keys::ACTUAL_SIZE.label(), Mark::None).clicked() {
-                self.zoom_by(1.0 / self.view.zoom);
-            }
-            if menu::item(ui, "Zoom to fit", &keys::ZOOM_TO_FIT.label(), Mark::None).clicked() {
-                usage::action(usage::Action::Fit);
-                self.fit();
-            }
-        });
-        if menu::item(ui, "Go to HEAD", &keys::GO_TO_HEAD.label(), Mark::None).clicked() {
-            usage::action(usage::Action::GoToHead);
-            self.go_to_head();
-        }
-        let overview = &mut self.settings.show_overview;
-        if menu::item(ui, "Overview map", "", Mark::Check(*overview)).clicked() {
-            *overview = !*overview;
-        }
-        menu::submenu(ui, "Drag", |ui| {
-            for (m, _, key) in DRAG {
-                let mark = Mark::Radio(self.settings.net.model == m);
-                if menu::item(ui, m.label(), key, mark).clicked() {
-                    self.set_drag_model(m);
-                }
-            }
-            menu::separator(ui);
-            let remember = self.settings.remember_moves;
-            let clicked = menu::item(ui, "Remember moved nodes", "", Mark::Check(remember));
-            if clicked.clicked() {
-                self.set_remember_moves(!remember);
-            }
-            let displaced = self.scene.as_ref().is_some_and(|s| s.net.any_displaced());
-            let response = ui.add_enabled_ui(displaced, |ui| {
-                menu::item(ui, "Return all nodes to layout", "", Mark::None)
-            });
-            if response.inner.clicked() {
-                self.reset_positions();
-            }
-        });
-        menu::separator(ui);
-
-        menu::submenu(ui, "Newest commits", |ui| {
-            let direction = &mut self.settings.layout.direction;
-            for d in Direction::ALL {
-                if menu::item(ui, d.label(), "", Mark::Radio(*direction == d)).clicked() {
-                    *direction = d;
-                }
-            }
-        });
-        let status = &mut self.settings.show_status_bar;
-        if menu::item(ui, "Status bar", "", Mark::Check(*status)).clicked() {
-            *status = !*status;
-        }
-        menu::separator(ui);
-
-        if menu::item(ui, "Settings…", &keys::SETTINGS.label(), Mark::None).clicked() {
-            self.open_settings(self.settings_page);
-        }
-        if menu::item(ui, "Keyboard and mouse", "", Mark::None).clicked() {
-            self.show_shortcuts = true;
-        }
-        if menu::item(ui, "Legend", "", Mark::None).clicked() {
-            self.show_legend = true;
-        }
-        if menu::item(ui, "About parterre", "", Mark::None).clicked() {
-            self.show_about = true;
-        }
-        // While a newer release is out (#258), just above this build's version.
-        if let Some(update) = self.newer_release() {
-            menu::separator(ui);
-            let label = RichText::new(format!("Download {}", update.version))
-                .color(widgets::tones(ui).accent)
-                .strong();
-            if menu::item(ui, label, "", Mark::None).clicked() {
-                self.download(ui.ctx(), &update.download);
-            }
-        }
-        // For users who start parterre from a file manager or Start menu (#68).
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_space(36.0);
-            ui.label(
-                RichText::new(format!("parterre {}", crate::VERSION))
-                    .small()
-                    .weak(),
-            );
-        });
-        ui.add_space(2.0);
     }
 
     /// The zoom level, which can be typed over: "70" or "70%" zooms to 70 %, on Enter or when

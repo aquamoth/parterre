@@ -3,6 +3,23 @@
 <!-- parterre.app's Info.plist. packaging/macos/build-dmg.sh fills in the @…@ values. -->
 <plist version="1.0">
 <dict>
+	<!-- Folders, as a viewer and not their default app: dropped on the Dock icon or opened
+	     with Open With (#336). -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folder</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
@@ -29,6 +46,29 @@
 	<string>@MINIMUM_SYSTEM_VERSION@</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<!-- Revision Graph in Finder's menu of a folder, under Services or Quick Actions (#337),
+	     answered by revisionGraph:userData:error: (src/macos.rs). An empty required context
+	     turns it on from the start. -->
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Revision Graph</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>revisionGraph</string>
+			<key>NSPortName</key>
+			<string>parterre</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSHumanReadableCopyright</key>
 	<string>@COPYRIGHT@</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>

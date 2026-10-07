@@ -134,11 +134,17 @@ Download parterre for your system from the
 | Windows | `.msi` | Start menu entry, *Revision Graph* in Explorer's folder menu; no admin rights needed |
 | Debian, Ubuntu | `.deb` | menu entry, *Revision Graph* in Nautilus, Dolphin and Nemo |
 | Fedora, openSUSE | `.rpm` | the same |
-| macOS | `.dmg` (`aarch64` for Apple silicon, `x86_64` for Intel) | the app, to drag into Applications; not signed by Apple, so allow it once in *System Settings › Privacy & Security* |
+| macOS | `.dmg` (`aarch64` for Apple silicon, `x86_64` for Intel) | the app, to drag into Applications, and *Revision Graph* in Finder's *Services* for folders; not signed by Apple, so allow it once in *System Settings › Privacy & Security* |
 | Linux, macOS, Windows | `.tar.gz` / `.zip` | just the program: put `parterre` on your `PATH` |
 
 ```sh
 sudo apt install ./parterre_*_amd64.deb      # or: sudo dnf install ./parterre-*.x86_64.rpm
+```
+
+On macOS, *parterre › Install Command Line Tool…* puts `parterre` on your `PATH`, as this does:
+
+```sh
+sudo ln -s /Applications/parterre.app/Contents/MacOS/parterre /usr/local/bin/parterre
 ```
 
 With a Rust toolchain:
@@ -164,7 +170,8 @@ parterre ~/src/other --worktrees   # another one, with its worktrees shown
 | Do | To |
 |---|---|
 | Double-click a node, or `L` | Show its log |
-| Right-click a node | Compare, branch, merge, rebase, worktrees, open, copy |
+| The *Git* menu | Compare, branch, merge, rebase, worktrees, fetch, pull, push: on the selected node |
+| Right-click a node | Mark it for comparison, open its pull requests or folder, copy |
 | Drag a node; `1` `2` `3` | Move it; the graph gives way / only the selection / the whole subtree |
 | `F`, `H` | Zoom to fit the whole graph, go to HEAD |
 | `Ctrl+F` (`⌘F` on macOS) | Find branches, tags, hashes, subjects or authors |

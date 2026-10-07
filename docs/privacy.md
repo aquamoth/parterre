@@ -40,7 +40,7 @@ On unless you untick them. Sent to PostHog as parterre is used, with the
 | `Application Opened` | every start |
 | `Application Backgrounded` | closing parterre |
 | `$screen` | a window or dialog opens: its name, such as `log`, `diff`, `settings`, `merge` or `reset` |
-| `menu_view` | a menu opens: which one, such as the ☰ menu, a node's context menu or the zoom popover |
+| `menu_view` | a menu opens: which one, such as the File menu, a node's context menu or the zoom popover |
 | `action_run` | you start something: what, such as `merge`, `create_branch`, `reload`, `export`, `fit` or `find`; not whether it succeeded |
 
 Every event carries:

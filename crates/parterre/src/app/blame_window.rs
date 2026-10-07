@@ -1993,6 +1993,7 @@ impl BlameWindow {
         }
         let mut requests = Vec::new();
         ctx.show_viewport_immediate(id, builder, |ui, class| {
+            super::commands::window_begin(ui);
             self.poll(ui.ctx());
             if class != egui::ViewportClass::EmbeddedWindow {
                 if self.title_theme != window_theme {

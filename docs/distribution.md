@@ -84,8 +84,10 @@ release. Switching to a git library (gitoxide) would be a large rewrite; see
 ## Update check
 
 parterre asks GitHub's releases API at start and then once a day whether a newer release is out
-(#226, #258). It sends nothing of its own. A newer one turns the ☰ icon bold blue and ends the
-menu with *Download X.Y.Z*, which does what fits the channel parterre came through:
+(#226, #258). It sends nothing of its own. A newer one is told of once, in a dialog (#345), and
+until then *Download X.Y.Z* heads the *Help* menu, whose title turns blue (on macOS it is under
+*About parterre*, and the Dock icon gets a badge). It does what fits the channel parterre came
+through:
 
 | Channel | *Download* |
 |---|---|
@@ -228,6 +230,14 @@ Sources:
   each target is built, its symbols uploaded and *Download* offered just as the tarballs are.
   Details in [building.md](building.md#macos-app).
 - **Bundle ID `se.trustfall.parterre`**, the app ID of the Linux packages.
+- **Folders, from Finder** (#336, #337): the app declares folders as a document type, as a
+  viewer of rank *Alternate*, so Finder offers it under *Open With* and the Dock takes a folder
+  dropped on it, without parterre becoming the default for folders. A service, *Revision
+  Graph*, puts it in a folder's *Services* (or *Quick Actions*) menu, once the app is in
+  Applications; no installer is needed for either.
+- **On the `PATH`:** *parterre › Install Command Line Tool…* links `/usr/local/bin/parterre` to
+  the program in the app, asking for an administrator's password where needed (#341), as GitHub
+  Desktop and Sourcetree do. The link points into the app, so a new copy of the app keeps it.
 - **Signed ad hoc, not notarized:**
   - Apple silicon runs nothing unsigned; an ad hoc signature is enough for that.
   - A download from GitHub is quarantined, so the first start says Apple could not verify it.

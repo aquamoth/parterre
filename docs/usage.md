@@ -34,14 +34,16 @@ parterre --help                    # all options
 
 The installers also add *Revision Graph* to the folder menu of Explorer, Nautilus, Dolphin
 and Nemo. `Ctrl+O` (`⌘O` on macOS) opens another folder, as does dropping a folder (or a file in
-it) on the window from a file manager, and the ☰ menu lists the recent ones.
+it) on the window from a file manager, and *File › Open recent* lists the recent ones. On macOS,
+drop a folder on parterre's Dock icon, choose parterre in Finder's *Open With*, or pick
+*Revision Graph* in the *Services* (or *Quick Actions*) of a folder's menu in Finder.
 
 ## The graph
 
 parterre shows the commits that have a branch, a tag or a worktree on them, and leaves out the
 commits in between, as TortoiseGit's revision graph does. *Labelled forks* adds the commits
 where their histories fork apart: a branch that merged its base back in forks off at the latest
-such merge, as if rebased. *Branchings and merges* (in the ☰ menu) adds every fork point and
+such merge, as if rebased. *Branchings and merges* (in the *View* menu) adds every fork point and
 merge, as TortoiseGit's "Show branchings and merges" does, and *All commits* shows everything.
 Hover an edge to list the commits collapsed into it; click it to keep it highlighted while you
 look around.
@@ -64,7 +66,8 @@ look around.
 | `L`, double-click a node | Show log: the node's history, or with two nodes selected the commits between them (first..second) |
 | `Ctrl+C` (`⌘C` on macOS) | Copy the selected commit's hash |
 | Click a pull request's number | Open the pull request on GitHub |
-| Right-click a node | Show log; compare; create, switch to or delete a branch; rebase, merge, cherry-pick or reset; add, go to or delete a worktree; open its pull requests or its worktree's folder; copy its hash, ref names or folder; select its subtree; return it to the layout |
+| The *Git* menu | On the selected node: show log; compare with HEAD, the working tree or the upstream (with two nodes, with each other); go to, add or delete a worktree; switch to it, set an upstream, create, reset to or delete a branch; merge, cherry-pick or rebase; fetch, pull or push |
+| Right-click a node | Mark it for comparison, or compare it with the marked commit; open its pull requests or its worktree's folder; copy its ref names or folder; select its subtree; return it to the layout |
 | `Esc` | Clear the selection |
 | `F5`, `Ctrl+R` (`⌘R` on macOS) | Reload the repository (it also reloads by itself when branches, tags or HEAD change), in every window that reloads |
 | `Ctrl+F5` (`⇧⌘F` on macOS) | Fetch every remote, from any window |
@@ -77,8 +80,12 @@ they lose bends they no longer need and go around nodes that are now in the way.
 *Remember moved nodes* on (*Settings → Dragging*), parterre keeps your arrangement for each
 repository; new commits keep their place beside a moved parent.
 
-The toolbar holds what you use every day, the ☰ menu has all of that and more, and *Settings*
-the rest. The graph shows every change while the settings are open. Besides TortoiseGit's
+The toolbar holds what you use every day, the menu bar has all of that and more, and *Settings*
+the rest. The menu bar is *File*, *Edit*, *View*, *Git*, *Layout* and *Help*, above the toolbar
+on Windows and Linux; on macOS it is the system's, with *parterre* (Settings, *Install Command
+Line Tool…*) and *Window* besides. Its commands act on the window in front: with the log in
+front, *Find* finds in the log and *Close Window* closes it, and what only the graph does is
+greyed out. The graph shows every change while the settings are open. Besides TortoiseGit's
 options (branchings and merges, local and remote branches, tags, arrows towards merges, zoom,
 the overview map and export), there are:
 
@@ -104,9 +111,9 @@ and it opens as wide as you left it last time.
 with a folder, first on its commit, in the graph and in the log, in cyan: the branches they
 have checked out, even where hidden, and detached ones with the folder's name in italics. The
 open worktree's branch stays red, as HEAD. A worktree whose folder is gone gets a crossed-out
-folder and a greyer fill. From a node's menu:
+folder and a greyer fill. From the *Git* menu, on the selected node:
 
-- *Add worktree here…* makes a new worktree at the commit, on a new branch that can track a
+- *Add worktree at X…* makes a new worktree at the commit, on a new branch that can track a
   remote one, in a folder next to the repository's (`<repo>.worktrees/` unless you pick
   another). Tick *Go to new worktree* to make it the open one.
 - *Go to worktree* makes another worktree the open one. The layout, the view, moved nodes and
@@ -117,8 +124,8 @@ folder and a greyer fill. From a node's menu:
   too; the question then counts the commits only those branches had.
 - *Open* › *File system* / *Terminal* opens its folder; *Copy* copies the folder's path.
 
-**Branches:** *Create branch here…* (optionally switching to it), *Switch to* a branch or a
-commit (detached), and *Delete branch*. With several nodes selected that all have local
+**Branches:** *Create branch at X…* (optionally switching to it), *Switch to* a branch or a
+commit (detached), and *Delete*. With several nodes selected that all have local
 branches, *Delete N local branches* deletes them all. It asks first only when that loses commits,
 and then it lists each branch's.
 
@@ -186,7 +193,7 @@ log's branch labels ↑3 ↓2, and *Compare → Upstream* compares the two. On b
 *Show log* opens a window listing a node's history, or the commits between two selected nodes,
 like TortoiseGit's log: a graph column, the selected commit's message and the files it changed,
 which you can sort and filter. The arrow keys move through the commits, `Ctrl+F` (`⌘F` on
-macOS) finds, `F5` or `Ctrl+R` (`⌘R`) reloads and `Esc` (`⌘W`) closes it. Right-click a row for the same actions as on a node, and to
+macOS) finds, `F5` or `Ctrl+R` (`⌘R`) reloads and `Esc` (`⌘W`) closes it. Right-click a row for the actions the *Git* menu has for a node, and to
 revert the commit or copy its subject.
 
 Four layouts arrange its panes: stacked as in TortoiseGit, side by side, details and files
@@ -219,10 +226,11 @@ what changed instead.
 ## Comparing commits
 
 Comparing two commits lists the files they differ in, in a window with the same table;
-double-click one for its diff. Right-click a node for *Compare* › *HEAD*, *Working tree* (your
-uncommitted changes, staged or not; `F5` lists them again), *Upstream*, or with two nodes
-selected *Selected revisions*. To compare commits far apart, *Mark for comparison* one (from the
-node menu or a row in the log) and pick *Compare with marked* on the other, from any log. A
+double-click one for its diff. The *Git* menu has *Compare with HEAD*, *Compare with working tree* (your
+uncommitted changes, staged or not; `F5` lists them again), *Compare with* the upstream, or
+with two nodes selected *Compare X with Y*. To compare commits far apart, *Mark for comparison*
+one (right-click its node, or a row in the log) and pick *Compare with marked* on the other,
+from any log. A
 range log's *Compare files* compares its two ends. Where the two histories forked, the window's
 *Since common ancestor* shows only what the right-hand side changed since then, as a pull request
 does (the working tree forks where HEAD does). *Swap sides* turns a comparison of two commits
@@ -278,5 +286,5 @@ Colours follow TortoiseGit:
 | Pull requests | blue, grey for drafts |
 | Commits without refs | pale lavender, showing an 8-digit hash |
 
-Colours chosen per branch name replace these, except for the current branch. *Legend* in the
-☰ menu shows them all.
+Colours chosen per branch name replace these, except for the current branch. *Help › Legend*
+shows them all.

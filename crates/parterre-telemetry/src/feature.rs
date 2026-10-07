@@ -79,8 +79,16 @@ names! {
 names! {
     /// A menu or toolbar popover, as `menu_view`'s `menu`.
     Menu {
-        /// ☰
-        Main => "main",
+        /// The menu bar's: the application menu (macOS), File, Edit, View, Git, Layout,
+        /// Window (macOS) and Help.
+        AppMenu => "app_menu",
+        FileMenu => "file_menu",
+        EditMenu => "edit_menu",
+        ViewMenu => "view_menu",
+        GitMenu => "git_menu",
+        LayoutMenu => "layout_menu",
+        WindowMenu => "window_menu",
+        HelpMenu => "help_menu",
         Filter => "filter",
         Zoom => "zoom",
         Drag => "drag",
@@ -550,7 +558,7 @@ pub(crate) mod tests {
     #[test]
     fn a_test_sink_keeps_what_is_recorded_on_its_thread() {
         let fit = Feature::Action(Action::Fit);
-        let main = Feature::Menu(Menu::Main);
+        let main = Feature::Menu(Menu::FileMenu);
         let (inner, outer) = recording(|| {
             record(fit);
             let ((), inner) = recording(|| record(main));

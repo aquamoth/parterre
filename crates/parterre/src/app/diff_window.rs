@@ -1596,6 +1596,7 @@ impl DiffWindow {
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
         }
         ctx.show_viewport_immediate(id, builder, |ui, class| {
+            super::commands::window_begin(ui);
             self.poll();
             if class != egui::ViewportClass::EmbeddedWindow {
                 if self.title_theme != window_theme {

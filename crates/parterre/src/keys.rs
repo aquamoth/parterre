@@ -96,7 +96,11 @@ impl Shortcut {
 pub const OPEN: Shortcut = Shortcut::command(Key::O);
 pub const CLOSE: Shortcut = Shortcut::command(Key::W);
 pub const SETTINGS: Shortcut = Shortcut::command(Key::Comma);
+pub const QUIT: Shortcut = Shortcut::command(Key::Q);
 pub const UNDO: Shortcut = Shortcut::command(Key::Z);
+pub const CUT: Shortcut = Shortcut::command(Key::X);
+pub const PASTE: Shortcut = Shortcut::command(Key::V);
+pub const SELECT_ALL: Shortcut = Shortcut::command(Key::A);
 pub const COPY: Shortcut = Shortcut::command(Key::C);
 pub const FIND: Shortcut = Shortcut::command(Key::F);
 pub const ZOOM_IN: Shortcut = Shortcut::command(Key::Plus);

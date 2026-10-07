@@ -52,6 +52,50 @@ winit = { version = "0.30", default-features = false, features = ["wayland-csd-a
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 
+# The menu bar, the Dock icon's badge, folders opened from Finder and the Dock, the Services
+# menu and the input method (src/macos.rs, src/app/menu_bar/macos.rs): AppKit through the same
+# objc2 crates eframe, winit and rfd use. raw-window-handle to reach the window's view.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSAppleEventDescriptor",
+    "NSAppleEventManager",
+    "NSArray",
+    "NSAttributedString",
+    "NSDictionary",
+    "NSGeometry",
+    "NSNotification",
+    "NSObject",
+    "NSString",
+    "NSURL",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSAttributedString",
+    "NSCell",
+    "NSColor",
+    "NSDockTile",
+    "NSEvent",
+    "NSFont",
+    "NSGraphics",
+    "NSImage",
+    "NSMenu",
+    "NSMenuItem",
+    "NSPasteboard",
+    "NSPasteboardItem",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSText",
+    "NSTextInputContext",
+    "NSUserInterfaceItemIdentification",
+    "NSView",
+    "NSWindow",
+    "NSWorkspace",
+] }
+raw-window-handle = "0.6"
+
 [dev-dependencies]
 tempfile.workspace = true
 

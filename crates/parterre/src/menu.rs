@@ -104,7 +104,8 @@ pub enum Mark {
     Radio(bool),
 }
 
-const MARK: f32 = 16.0;
+/// The room left of a menu item's label for its mark.
+pub const MARK: f32 = 16.0;
 
 /// A menu item: room on the left for a check mark or radio dot, so that the labels of a menu
 /// line up, and `shortcut` on the right.
@@ -127,6 +128,7 @@ pub fn item(ui: &mut Ui, label: impl Into<WidgetText>, shortcut: &str, mark: Mar
 }
 
 /// An item opening a submenu, lined up with [`item`]s, with a chevron on the right.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn submenu(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui)) {
     let button = Button::new((Atom::custom(Id::new("menu-mark"), Vec2::splat(MARK)), label));
     submenu_button(ui, button, content);

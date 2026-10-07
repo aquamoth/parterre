@@ -23,7 +23,7 @@ pub enum Target {
     Node(String),
     /// The empty spot of the canvas farthest from any node.
     Canvas,
-    /// A toolbar button: `menu`, `filter`, `zoom` or `drag`.
+    /// A toolbar button: `filter`, `zoom` or `drag`.
     Toolbar(String),
     /// A point of the window, in points from its top left.
     Point(Vec2),
@@ -256,9 +256,9 @@ fn target(word: &str) -> Result<Target, String> {
     }
     if let Some(name) = word.strip_prefix("toolbar:") {
         return match name {
-            "menu" | "filter" | "zoom" | "drag" => Ok(Target::Toolbar(name.to_owned())),
+            "filter" | "zoom" | "drag" => Ok(Target::Toolbar(name.to_owned())),
             _ => Err(format!(
-                "unknown toolbar button {name}: menu, filter, zoom or drag"
+                "unknown toolbar button {name}: filter, zoom or drag"
             )),
         };
     }
@@ -357,8 +357,8 @@ mod tests {
             Step::Hover(Target::Text("canvas".into()))
         );
         assert_eq!(
-            one("hover toolbar:menu"),
-            Step::Hover(Target::Toolbar("menu".into()))
+            one("hover toolbar:zoom"),
+            Step::Hover(Target::Toolbar("zoom".into()))
         );
         assert_eq!(
             one("drag 10,20 -30,4.5"),

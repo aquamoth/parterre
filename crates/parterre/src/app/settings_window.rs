@@ -147,6 +147,7 @@ impl ParterreApp {
             ctx.request_repaint();
         }
         ctx.show_viewport_immediate(id, builder, |ui, class| {
+            super::commands::window_begin(ui);
             if class != egui::ViewportClass::EmbeddedWindow {
                 // Its own title bar, too, in parterre's theme.
                 if self.settings_window_theme != self.window_theme {

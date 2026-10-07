@@ -1767,6 +1767,7 @@ impl ParterreApp {
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
         }
         ctx.show_viewport_immediate(id, builder, |ui, class| {
+            super::commands::window_begin(ui);
             let embedded = class == egui::ViewportClass::EmbeddedWindow;
             if !embedded {
                 if self.log.title_theme != self.window_theme {

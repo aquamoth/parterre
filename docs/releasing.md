@@ -185,7 +185,7 @@ the three at it.
 
 ## Version strings
 
-`parterre --version` and the foot of the ☰ menu show which build is running:
+`parterre --version` and *About parterre* show which build is running:
 
 | Build | Version |
 |---|---|

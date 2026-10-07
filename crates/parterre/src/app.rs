@@ -19,12 +19,15 @@ mod blame_window;
 mod branches;
 mod cherry_pick;
 mod column_borders;
+mod commands;
 mod commit_table;
 mod compare_window;
 mod diff_window;
 mod file_drop;
 mod file_table;
+mod git_menu;
 mod log_window;
+mod menu_bar;
 mod merge;
 mod merge_tool;
 mod privacy;
@@ -390,6 +393,15 @@ pub struct ParterreApp {
     automation: Automation,
     /// Caps the frame rate where vsync is off (Wayland, see `frame_pacing`).
     frame_limiter: Option<FrameLimiter>,
+    /// The system's menu bar (macOS).
+    #[cfg(target_os = "macos")]
+    native_menu: menu_bar::macos::NativeMenu,
+    /// *Install Command Line Tool…* running (macOS).
+    #[cfg(target_os = "macos")]
+    cli_install: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// The input method's indicator, only while a text field has the keyboard (macOS, #342).
+    #[cfg(target_os = "macos")]
+    input_method: crate::macos::InputMethod,
 }
 
 impl std::fmt::Debug for ParterreApp {
@@ -546,6 +558,12 @@ impl ParterreApp {
             zoom_text: String::new(),
             automation,
             frame_limiter,
+            #[cfg(target_os = "macos")]
+            native_menu: Default::default(),
+            #[cfg(target_os = "macos")]
+            cli_install: None,
+            #[cfg(target_os = "macos")]
+            input_method: Default::default(),
         }
     }
 
@@ -1124,7 +1142,7 @@ impl ParterreApp {
     /// while it can't be opened yet: the dialogs of the branch tool wait for its information.
     fn open_named(&mut self, ctx: &egui::Context, what: &str) -> Result<bool, String> {
         match what {
-            "menu" | "filter" | "zoom" | "drag" => egui::Popup::open_id(ctx, popup_id(what)),
+            "filter" | "zoom" | "drag" => egui::Popup::open_id(ctx, popup_id(what)),
             "about" => self.show_about = true,
             "new-release" => {
                 self.release_dialog = Some(self.newer_release().ok_or("no --newer-release")?);
@@ -1144,6 +1162,11 @@ impl ParterreApp {
                 if kind == "settings" {
                     let page = SettingsPage::named(arg).ok_or("no such settings page")?;
                     self.open_settings(page);
+                    return Ok(true);
+                }
+                // A menu of the menu bar, by its title: `menu:file`.
+                if kind == "menu" {
+                    egui::Popup::open_id(ctx, menu_bar::bar::popup_id(arg));
                     return Ok(true);
                 }
                 // As if the file had been picked in the file dialog.
@@ -2259,7 +2282,7 @@ impl ParterreApp {
             && !self.pull_requests.needs_sign_in()
             && self.pull_requests.list().is_some();
         let worktrees_shown = self.settings.graph.show_worktrees;
-        let upstreams_shown = self.settings.graph.show_upstreams;
+        let case = |text: &str| menu_bar::case(keys::Platform::CURRENT, text);
         egui::Popup::context_menu(&response)
             .style(menu::style)
             .show(|ui| {
@@ -2267,133 +2290,58 @@ impl ParterreApp {
                     ui.set_min_width(menu::MIN_WIDTH);
                     let Some(node) = context_node else {
                         usage::menu(ui.ctx(), usage::Menu::Canvas);
-                        let fit = item("Zoom to Fit", &keys::ZOOM_TO_FIT.label());
+                        let fit = item(&case("Zoom to fit"), &keys::ZOOM_TO_FIT.label());
                         if ui.add(fit).clicked() {
                             action = Some(MenuAction::Fit);
                             ui.close();
                         }
-                        if ui.add(item("Return all nodes to layout", "")).clicked() {
+                        let reset = item(&case("Return all nodes to layout"), "");
+                        if ui.add(reset).clicked() {
                             action = Some(MenuAction::ResetAll);
                             ui.close();
                         }
                         return;
                     };
                     usage::menu(ui.ctx(), usage::Menu::Node);
-                    // Greyed out rather than left out, so the menu keeps its shape.
-                    let show_log = ui
-                        .add_enabled(group.len() <= 2, item("Show log", &keys::SHOW_LOG.label()))
-                        .on_disabled_hover_text("Select one or two nodes");
-                    if show_log.clicked() {
-                        action = Some(MenuAction::ShowLog(group.clone()));
+                    // What acts on the selection is in the menu bar's Git menu (#339); here
+                    // what concerns this node alone.
+                    let n = &scene.graph.nodes[node];
+                    let oid = scene.repo.commit(n.commit).oid;
+                    // To compare commits far apart: mark one, compare the other with it.
+                    let is_marked = marked.as_ref().is_some_and(|(m, _)| *m == oid);
+                    let (text, mark) = if is_marked {
+                        ("Clear the mark", None)
+                    } else {
+                        ("Mark for comparison", Some(oid))
+                    };
+                    let mark_item = ui
+                        .add_enabled(group.len() == 1, egui::Button::new(case(text)))
+                        .on_disabled_hover_text("Select one node");
+                    if mark_item.clicked() {
+                        action = Some(MenuAction::Compare(CompareRequest::Mark(mark)));
                         ui.close();
                     }
-                    let n = &scene.graph.nodes[node];
-                    let oid_of = |n: usize| scene.repo.commit(scene.graph.nodes[n].commit).oid;
-                    let oid = oid_of(node);
-                    menu::plain_submenu(ui, "Compare", |ui| {
-                        // Two nodes: with each other, in selection order; one: with HEAD.
-                        let head = scene.repo.head_commit().map(|c| scene.repo.commit(c).oid);
-                        let (label, pair) = match *group.as_slice() {
-                            [a, b] => ("Selected revisions", Some((oid_of(a), oid_of(b)))),
-                            [_] => ("HEAD", head.filter(|&h| h != oid).map(|h| (oid, h))),
-                            _ => ("Selected revisions", None),
-                        };
-                        let why = if group.len() > 2 {
-                            "Select one or two nodes"
-                        } else {
-                            "This is HEAD"
-                        };
-                        let compare = ui
-                            .add_enabled(pair.is_some(), egui::Button::new(label))
-                            .on_disabled_hover_text(why);
-                        if compare.clicked()
-                            && let Some((a, b)) = pair
-                        {
-                            action = Some(MenuAction::Compare(CompareRequest::Compare(a, b)));
-                            ui.close();
-                        }
-                        let working_tree = scene.repo.has_working_tree;
-                        let why = if !working_tree {
-                            "A bare repository has no working tree"
-                        } else {
-                            "Select one node"
-                        };
-                        let with_working_tree = ui
-                            .add_enabled(
-                                group.len() == 1 && working_tree,
-                                egui::Button::new("Working tree"),
-                            )
-                            .on_disabled_hover_text(why);
-                        if with_working_tree.clicked() {
-                            action = Some(MenuAction::Compare(CompareRequest::WorkingTree(oid)));
-                            ui.close();
-                        }
-                        // Each branch on the node against its upstream, from the upstream.
-                        let upstreams = match *group.as_slice() {
-                            [_] if upstreams_shown => crate::upstreams::compare_items(scene, node),
-                            _ => Vec::new(),
-                        };
-                        for (u, pair) in upstreams {
-                            let label = format!("Upstream ({})", u.short_name());
-                            let item = ui
-                                .add_enabled(pair.is_ok(), egui::Button::new(label))
-                                .on_disabled_hover_text(pair.err().unwrap_or_default());
-                            if item.clicked()
-                                && let Ok((up, branch)) = pair
-                            {
-                                action =
-                                    Some(MenuAction::Compare(CompareRequest::Compare(up, branch)));
-                                ui.close();
-                            }
-                        }
-                        menu::separator(ui);
-                        let is_marked = marked.as_ref().is_some_and(|(m, _)| *m == oid);
-                        let (text, mark) = if is_marked {
-                            ("Clear the mark", None)
-                        } else {
-                            ("Mark for comparison", Some(oid))
-                        };
-                        let mark_item = ui
-                            .add_enabled(group.len() == 1, egui::Button::new(text))
-                            .on_disabled_hover_text("Select one node");
-                        if mark_item.clicked() {
-                            action = Some(MenuAction::Compare(CompareRequest::Mark(mark)));
-                            ui.close();
-                        }
-                        let other = marked
-                            .as_ref()
-                            .filter(|(m, _)| *m != oid && group.len() == 1);
-                        let label = other.map_or("Compare with marked".to_owned(), |(_, name)| {
-                            format!("Compare with marked ({name})")
-                        });
-                        let why = if group.len() > 1 {
-                            "Select one node"
-                        } else if is_marked {
-                            "This is the marked commit"
-                        } else {
-                            "Mark a commit for comparison first"
-                        };
-                        let with_marked = ui
-                            .add_enabled(other.is_some(), egui::Button::new(label))
-                            .on_disabled_hover_text(why);
-                        if with_marked.clicked()
-                            && let Some(&(m, _)) = other
-                        {
-                            action = Some(MenuAction::Compare(CompareRequest::Compare(m, oid)));
-                            ui.close();
-                        }
+                    let other = marked
+                        .as_ref()
+                        .filter(|(m, _)| *m != oid && group.len() == 1);
+                    let label = other.map_or(case("Compare with marked"), |(_, name)| {
+                        format!("{} ({name})", case("Compare with marked"))
                     });
-                    let group_oids: Vec<Oid> = group.iter().map(|&n| oid_of(n)).collect();
-                    if let Some(request) = branches::node_menu(
-                        ui,
-                        &scene.repo,
-                        oid,
-                        &group_oids,
-                        self.branches.catalog.as_deref(),
-                        self.branches.busy(),
-                        worktrees_shown,
-                    ) {
-                        action = Some(MenuAction::Branch(request));
+                    let why = if group.len() > 1 {
+                        "Select one node"
+                    } else if is_marked {
+                        "This is the marked commit"
+                    } else {
+                        "Mark a commit for comparison first"
+                    };
+                    let with_marked = ui
+                        .add_enabled(other.is_some(), egui::Button::new(label))
+                        .on_disabled_hover_text(why);
+                    if with_marked.clicked()
+                        && let Some(&(m, _)) = other
+                    {
+                        action = Some(MenuAction::Compare(CompareRequest::Compare(m, oid)));
+                        ui.close();
                     }
                     // The worktrees shown on the node, the open one at HEAD among them. Hidden,
                     // the open one is still at HEAD.
@@ -2411,10 +2359,10 @@ impl ParterreApp {
                     menu::separator(ui);
                     // Greyed out rather than left out, so the menu keeps its shape.
                     if !(pull_requests_shown || folders_shown) {
-                        ui.add_enabled(false, egui::Button::new("Open"))
+                        ui.add_enabled(false, egui::Button::new(case("Open")))
                             .on_disabled_hover_text("Show pull requests or worktrees to open them");
                     } else {
-                        menu::plain_submenu(ui, "Open", |ui| {
+                        menu::plain_submenu(ui, &case("Open"), |ui| {
                             if pull_requests_shown {
                                 let mut open_item = |ui: &mut Ui, label: &str, i: usize| {
                                     let pr = &scene.pull_requests[i];
@@ -2426,28 +2374,34 @@ impl ParterreApp {
                                 let number = |i: usize| scene.pull_requests[i].number;
                                 match n.pull_requests.as_slice() {
                                     [] => {
-                                        ui.add_enabled(false, egui::Button::new("Pull request"))
-                                            .on_disabled_hover_text(
-                                                "No open pull request's head is here",
-                                            );
+                                        ui.add_enabled(
+                                            false,
+                                            egui::Button::new(case("Pull request")),
+                                        )
+                                        .on_disabled_hover_text(
+                                            "No open pull request's head is here",
+                                        );
                                     }
                                     &[i] => {
                                         open_item(ui, &format!("Pull request #{}", number(i)), i)
                                     }
-                                    several => menu::plain_submenu(ui, "Pull request", |ui| {
-                                        for &i in several {
-                                            open_item(ui, &format!("#{}", number(i)), i);
-                                        }
-                                    }),
+                                    several => {
+                                        menu::plain_submenu(ui, &case("Pull request"), |ui| {
+                                            for &i in several {
+                                                open_item(ui, &format!("#{}", number(i)), i);
+                                            }
+                                        })
+                                    }
                                 }
                             }
                             if !folders_shown {
                                 return;
                             }
                             for (what, opener) in [
-                                ("File system", Opener::FileManager),
-                                ("Terminal", Opener::Terminal),
+                                (case("File system"), Opener::FileManager),
+                                (case("Terminal"), Opener::Terminal),
                             ] {
+                                let what = what.as_str();
                                 // One worktree: the item opens it. Several: a submenu names them.
                                 let mut open_item =
                                     |ui: &mut Ui, label: &str, w: &parterre_core::Worktree| {
@@ -2484,19 +2438,9 @@ impl ParterreApp {
                         });
                     }
                     let commit = scene.repo.commit(n.commit);
-                    menu::plain_submenu(ui, "Copy", |ui| {
-                        // Right-clicking selects the node, so Ctrl+C would copy the same hash.
-                        let copy_hash = if group.len() > 1 {
-                            String::new()
-                        } else {
-                            keys::COPY.label()
-                        };
-                        if ui.add(item("Commit hash", &copy_hash)).clicked() {
-                            usage::action(usage::Action::Copy);
-                            ui.ctx().copy_text(commit.oid.to_hex());
-                            ui.close();
-                        }
-                        if ui.button("Ref names").clicked() {
+                    // The hash is Edit › Copy's.
+                    menu::plain_submenu(ui, &case("Copy"), |ui| {
+                        if ui.button(case("Ref names")).clicked() {
                             usage::action(usage::Action::Copy);
                             let names: Vec<&str> = n
                                 .refs
@@ -2521,8 +2465,8 @@ impl ParterreApp {
                         };
                         match worktrees.as_slice() {
                             [] => {}
-                            [w] => copy_path(ui, "Folder path", w),
-                            several => menu::plain_submenu(ui, "Folder path", |ui| {
+                            [w] => copy_path(ui, &case("Folder path"), w),
+                            several => menu::plain_submenu(ui, &case("Folder path"), |ui| {
                                 for w in several {
                                     copy_path(ui, &w.name(), w);
                                 }
@@ -2531,7 +2475,7 @@ impl ParterreApp {
                     });
                     menu::separator(ui);
                     if ui
-                        .button("Select subtree")
+                        .button(case("Select subtree"))
                         .on_hover_text(
                             "Select everything that grows out of this (first-parent descendants)",
                         )
@@ -2546,9 +2490,9 @@ impl ParterreApp {
                         .filter(|&n| scene.net.is_displaced(n))
                         .collect();
                     let label = if group.len() > 1 {
-                        "Return selection to layout"
+                        case("Return selection to layout")
                     } else {
-                        "Return node to layout"
+                        case("Return node to layout")
                     };
                     // Greyed out rather than left out, so the menu keeps its shape.
                     if ui
@@ -2558,7 +2502,7 @@ impl ParterreApp {
                         action = Some(MenuAction::ReturnToLayout(displaced));
                         ui.close();
                     }
-                    if ui.button("Centre view here").clicked() {
+                    if ui.button(case("Centre view here")).clicked() {
                         action = Some(MenuAction::Center(node));
                         ui.close();
                     }
@@ -2581,10 +2525,6 @@ impl ParterreApp {
             Some(MenuAction::Center(node)) => self.center_on(node),
             Some(MenuAction::ShowLog(nodes)) => self.show_log(&nodes),
             Some(MenuAction::Compare(request)) => self.compare_request(request),
-            Some(MenuAction::Branch(request)) => {
-                self.branches
-                    .request(&response.ctx, request, egui::ViewportId::ROOT)
-            }
             Some(MenuAction::OpenPullRequest(url)) => {
                 usage::action(usage::Action::OpenPullRequest);
                 if let Err(e) = crate::browser::open(&url) {
@@ -2965,7 +2905,6 @@ fn shortcut_rows() -> Vec<(String, &'static str)> {
     ]
 }
 
-/// "Apps – parterre", or just "parterre" while no repository is open.
 /// The repository named at start, loading on a thread of its own while the window comes up
 /// (#309).
 pub struct Opening {
@@ -3023,7 +2962,7 @@ impl Opening {
     /// when the repository is in.
     pub fn title(&self) -> String {
         if self.named {
-            format!("{} – parterre", name_and_place(&self.path).0)
+            format!("{} – Revision Graph", name_and_place(&self.path).0)
         } else {
             window_title(None)
         }
@@ -3044,9 +2983,11 @@ fn opening_panel(ui: &mut Ui, name: &str) {
     });
 }
 
+/// "Apps – Revision Graph", as the log is "main – Log" (#339), or "parterre" while no
+/// repository is open.
 pub fn window_title(repo: Option<&Repo>) -> String {
     match repo {
-        Some(repo) => format!("{} – parterre", repo.display_name()),
+        Some(repo) => format!("{} – Revision Graph", repo.display_name()),
         None => "parterre".to_owned(),
     }
 }
@@ -3169,7 +3110,6 @@ enum MenuAction {
     ShowLog(Vec<usize>),
     /// Mark a commit for comparison, or compare two.
     Compare(CompareRequest),
-    Branch(branches::Request),
     /// Open a pull request's page in the browser.
     OpenPullRequest(String),
     /// Open a worktree's folder in the file manager or a terminal.
@@ -3253,6 +3193,15 @@ impl eframe::App for ParterreApp {
             self.title = title;
         }
         self.finish_opening(&ctx);
+        // A folder dropped on the Dock icon, opened with parterre, or its service (#336, #337).
+        #[cfg(target_os = "macos")]
+        if let Some(path) = crate::macos::take_opened(&ctx).into_iter().next() {
+            self.open_folder(&path);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        #[cfg(target_os = "macos")]
+        self.input_method
+            .update(frame, ctx.egui_wants_keyboard_input());
         self.auto_reload(&ctx);
         self.finish_reload(&ctx);
         self.branches.update(&ctx, self.repo.as_ref());
@@ -3288,6 +3237,7 @@ impl eframe::App for ParterreApp {
         self.view_before = self.view;
         self.handle_keys(&ctx);
 
+        self.menu_bar(ui);
         egui::Panel::top("toolbar")
             .frame(
                 egui::Frame::side_top_panel(&ctx.global_style())
@@ -3377,6 +3327,10 @@ impl eframe::App for ParterreApp {
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.automation.inject_input(raw_input);
+        // What the menu bar did in this window (macOS: Copy in the find field, and the like).
+        raw_input
+            .events
+            .extend(commands::take_injected(ctx, egui::ViewportId::ROOT));
         // Before eframe sees a close request: the main window stays while a modal dialog is up.
         crate::dialogs::ModalLock::filter(ctx, raw_input);
     }

@@ -86,10 +86,10 @@ pub enum Request {
     },
 }
 
-/// One target gets a direct named item; several get the existing app's submenu treatment.
-/// The worktree section follows the branch section while `worktrees` are shown. `group` is the
-/// selection the node is in: when every node of several has worktrees to delete, one item
-/// deletes them all.
+/// What the graph's node menu offered before the Git menu took it over (#339): the branch,
+/// remote and worktree sections for `commit`, in the selection `group`. The tests check the
+/// offers through it.
+#[cfg(test)]
 pub fn node_menu(
     ui: &mut Ui,
     repo: &Repo,
@@ -102,8 +102,9 @@ pub fn node_menu(
     menu_for(ui, repo, commit, group, None, catalog, busy, worktrees)
 }
 
-/// [`node_menu`] for a row of the log, where *Cherry-pick* takes the `selection`, as listed,
-/// rather than everything the branch lacks.
+/// The menu of a row of the log: its branches, remotes and worktrees, as the graph's Git menu
+/// has them (`git_menu`), where *Cherry-pick* takes the `selection`, as listed, rather than
+/// everything the branch lacks.
 pub fn row_node_menu(
     ui: &mut Ui,
     repo: &Repo,
@@ -181,8 +182,53 @@ fn branch_section(
     let Some(catalog) = catalog else {
         return request;
     };
-    let refs: Vec<_> = repo
-        .refs
+    let refs = refs_at(repo, commit, catalog);
+    let switches = switch_targets(repo, commit, &refs, catalog);
+    target_menu(ui, "Switch to", &switches, busy, &mut request);
+    let deletions = Deletions {
+        verb: "Delete branch",
+        many: "local branches",
+        name: |b: &BranchTip| b.name.clone(),
+        delete: Action::DeleteBranches,
+    };
+    deletions.items(
+        ui,
+        commit,
+        group,
+        |c| deletable_locals(repo, catalog, c),
+        busy,
+        &mut request,
+    );
+    remote_deletions(ui, repo, commit, group, catalog, busy, &mut request);
+    rebase_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
+    merge_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
+    merge_into_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
+    let picked = match selection {
+        Some(selection) => cherry_pick_selection(ui, repo, selection, catalog, busy),
+        None => cherry_pick_lacking(ui, repo, commit, &refs, catalog, busy),
+    };
+    if let Some(pick) = picked {
+        request = Some(pick);
+    }
+    if let Some(reset) = reset_item(ui, commit, Some(catalog), busy) {
+        request = Some(reset);
+    }
+    // A log row's: commits are acted on one by one there.
+    if selection.is_some()
+        && let Some(revert) = revert_item(ui, repo, commit, catalog, busy)
+    {
+        request = Some(revert);
+    }
+    request
+}
+
+/// The local and remote-tracking branches at `commit`, as the catalog has them there too.
+pub(super) fn refs_at<'a>(
+    repo: &'a Repo,
+    commit: Oid,
+    catalog: &Catalog,
+) -> Vec<&'a parterre_core::GitRef> {
+    repo.refs
         .iter()
         .filter(|r| repo.commit(r.target).oid == commit)
         .filter(|r| match r.kind {
@@ -196,11 +242,22 @@ fn branch_section(
                 .any(|b| b.name == r.name && b.tip == commit),
             _ => false,
         })
-        .collect();
+        .collect()
+}
+
+/// *Switch to*: each local branch at `commit` (or tracking a remote one there) that is
+/// checked out nowhere, a new branch tracking a remote one nothing tracks, and last the commit
+/// itself, detached. Greyed out while the open worktree is stuck.
+pub(super) fn switch_targets(
+    repo: &Repo,
+    commit: Oid,
+    refs: &[&parterre_core::GitRef],
+    catalog: &Catalog,
+) -> Vec<Target> {
     let mut switches: Vec<Target> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     if catalog.has_working_tree {
-        for r in &refs {
+        for r in refs {
             let candidates: Vec<&str> = match r.kind {
                 RefKind::LocalBranch => vec![r.name.as_str()],
                 RefKind::RemoteBranch => catalog.trackers(&r.name),
@@ -262,58 +319,62 @@ fn branch_section(
             target.2 = Some(reason.clone());
         }
     }
-    target_menu(ui, "Switch to", &switches, busy, &mut request);
-    // The local branches at a commit that are checked out nowhere.
-    let deletable = |commit: Oid| {
-        let mut found: Vec<BranchTip> = repo
-            .refs
-            .iter()
-            .filter(|r| {
-                r.kind == RefKind::LocalBranch
-                    && repo.commit(r.target).oid == commit
-                    && catalog
-                        .locals
-                        .iter()
-                        .any(|b| b.name == r.name && b.tip == commit)
-                    && catalog.current.as_ref() != Some(&r.name)
-                    && !catalog.occupied.contains_key(&r.name)
-            })
-            .map(|r| BranchTip {
-                name: r.name.clone(),
+    switches
+}
+
+/// The local branches at `commit` that are checked out nowhere.
+pub(super) fn deletable_locals(repo: &Repo, catalog: &Catalog, commit: Oid) -> Vec<BranchTip> {
+    let mut found: Vec<BranchTip> = repo
+        .refs
+        .iter()
+        .filter(|r| {
+            r.kind == RefKind::LocalBranch
+                && repo.commit(r.target).oid == commit
+                && catalog
+                    .locals
+                    .iter()
+                    .any(|b| b.name == r.name && b.tip == commit)
+                && catalog.current.as_ref() != Some(&r.name)
+                && !catalog.occupied.contains_key(&r.name)
+        })
+        .map(|r| BranchTip {
+            name: r.name.clone(),
+            tip: commit,
+        })
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
+/// The remote-tracking branches at `commit`, their remotes' HEADs left out.
+pub(super) fn deletable_remotes(
+    repo: &Repo,
+    catalog: &Catalog,
+    commit: Oid,
+) -> Vec<RemoteBranchTip> {
+    let mut found: Vec<RemoteBranchTip> = repo
+        .refs
+        .iter()
+        .filter(|r| {
+            r.kind == RefKind::RemoteBranch
+                && !r.name.ends_with("/HEAD")
+                && repo.commit(r.target).oid == commit
+                && catalog
+                    .remotes
+                    .iter()
+                    .any(|b| b.name == r.name && b.tip == commit)
+        })
+        .filter_map(|r| {
+            let (remote, branch) = catalog.tracking_parts(&r.name)?;
+            Some(RemoteBranchTip {
+                remote: remote.to_owned(),
+                branch: branch.to_owned(),
                 tip: commit,
             })
-            .collect();
-        found.sort_by(|a, b| a.name.cmp(&b.name));
-        found
-    };
-    let deletions = Deletions {
-        verb: "Delete branch",
-        many: "local branches",
-        name: |b: &BranchTip| b.name.clone(),
-        delete: Action::DeleteBranches,
-    };
-    deletions.items(ui, commit, group, deletable, busy, &mut request);
-    remote_deletions(ui, repo, commit, group, catalog, busy, &mut request);
-    rebase_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
-    merge_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
-    merge_into_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
-    let picked = match selection {
-        Some(selection) => cherry_pick_selection(ui, repo, selection, catalog, busy),
-        None => cherry_pick_lacking(ui, repo, commit, &refs, catalog, busy),
-    };
-    if let Some(pick) = picked {
-        request = Some(pick);
-    }
-    if let Some(reset) = reset_item(ui, commit, Some(catalog), busy) {
-        request = Some(reset);
-    }
-    // A log row's: commits are acted on one by one there.
-    if selection.is_some()
-        && let Some(revert) = revert_item(ui, repo, commit, catalog, busy)
-    {
-        request = Some(revert);
-    }
-    request
+        })
+        .collect();
+    found.sort_by_key(RemoteBranchTip::name);
+    found
 }
 
 /// *Delete remote branch* `origin/b` for each remote-tracking branch on the node, or *Delete N
@@ -327,38 +388,20 @@ fn remote_deletions(
     busy: bool,
     request: &mut Option<Request>,
 ) {
-    let deletable = |commit: Oid| {
-        let mut found: Vec<RemoteBranchTip> = repo
-            .refs
-            .iter()
-            .filter(|r| {
-                r.kind == RefKind::RemoteBranch
-                    && !r.name.ends_with("/HEAD")
-                    && repo.commit(r.target).oid == commit
-                    && catalog
-                        .remotes
-                        .iter()
-                        .any(|b| b.name == r.name && b.tip == commit)
-            })
-            .filter_map(|r| {
-                let (remote, branch) = catalog.tracking_parts(&r.name)?;
-                Some(RemoteBranchTip {
-                    remote: remote.to_owned(),
-                    branch: branch.to_owned(),
-                    tip: commit,
-                })
-            })
-            .collect();
-        found.sort_by_key(RemoteBranchTip::name);
-        found
-    };
     let deletions = Deletions {
         verb: "Delete remote branch",
         many: "remote branches",
         name: RemoteBranchTip::name,
         delete: Action::DeleteRemoteBranches,
     };
-    deletions.items(ui, commit, group, deletable, busy, request);
+    deletions.items(
+        ui,
+        commit,
+        group,
+        |c| deletable_remotes(repo, catalog, c),
+        busy,
+        request,
+    );
 }
 
 /// Deleting what's at a node: one item each (*Delete branch* X), or, when every node of a
@@ -398,18 +441,8 @@ impl<T: Clone> Deletions<T> {
     }
 }
 
-/// *Rebase main onto X* for each branch on the node and, last, the commit itself, when it
-/// would really rebase; greyed out while the open worktree is stuck. The log's rows have it
-/// too, through [`node_menu`].
-fn rebase_targets(
-    ui: &mut Ui,
-    repo: &Repo,
-    commit: Oid,
-    refs: &[&parterre_core::GitRef],
-    catalog: &Catalog,
-    busy: bool,
-    request: &mut Option<Request>,
-) {
+/// The branch names at a node, its remotes' HEADs and the current branch left out, sorted.
+fn names_at<'a>(refs: &[&'a parterre_core::GitRef], catalog: &Catalog) -> Vec<&'a str> {
     let mut names: Vec<&str> = refs
         .iter()
         .filter(|r| !r.name.ends_with("/HEAD"))
@@ -418,15 +451,23 @@ fn rebase_targets(
         .collect();
     names.sort_unstable();
     names.dedup();
+    names
+}
+
+/// *Rebase main onto X*: the branch rebased, and each branch on the node and last the commit
+/// itself as targets, when it would really rebase. Greyed out while the open worktree is stuck.
+pub(super) fn rebase_offer(
+    repo: &Repo,
+    commit: Oid,
+    refs: &[&parterre_core::GitRef],
+    catalog: &Catalog,
+) -> Option<(String, Vec<Target>)> {
     let stuck = catalog.stuck().map(|s| s.reason());
     let branch = match &stuck {
         Some(_) => stuck_branch(catalog),
-        None => match rebase::offered(repo, catalog, commit) {
-            Some(branch) => branch.to_owned(),
-            None => return,
-        },
+        None => rebase::offered(repo, catalog, commit)?.to_owned(),
     };
-    let mut targets: Vec<Target> = names
+    let mut targets: Vec<Target> = names_at(refs, catalog)
         .iter()
         .map(|name| {
             (
@@ -449,19 +490,13 @@ fn rebase_targets(
         },
         stuck,
     ));
-    target_menu(
-        ui,
-        &format!("Rebase {branch} onto"),
-        &targets,
-        busy,
-        request,
-    );
+    Some((branch, targets))
 }
 
-/// *Merge X into main…* for each branch on the node and, last, the commit itself, when there's
-/// something to merge; greyed out while the open worktree is stuck. The log's rows have it
+/// *Rebase main onto X* for each branch on the node and, last, the commit itself, when it
+/// would really rebase; greyed out while the open worktree is stuck. The log's rows have it
 /// too, through [`node_menu`].
-fn merge_targets(
+fn rebase_targets(
     ui: &mut Ui,
     repo: &Repo,
     commit: Oid,
@@ -470,23 +505,27 @@ fn merge_targets(
     busy: bool,
     request: &mut Option<Request>,
 ) {
-    let mut names: Vec<&str> = refs
-        .iter()
-        .filter(|r| !r.name.ends_with("/HEAD"))
-        .map(|r| r.name.as_str())
-        .filter(|name| catalog.current.as_deref() != Some(*name))
-        .collect();
-    names.sort_unstable();
-    names.dedup();
+    if let Some((branch, targets)) = rebase_offer(repo, commit, refs, catalog) {
+        let verb = format!("Rebase {branch} onto");
+        target_menu(ui, &verb, &targets, busy, request);
+    }
+}
+
+/// *Merge X into main…*: the branch merged into, and each branch on the node and last the
+/// commit itself as what is merged, when there's something to merge. Greyed out while the open
+/// worktree is stuck.
+pub(super) fn merge_offer(
+    repo: &Repo,
+    commit: Oid,
+    refs: &[&parterre_core::GitRef],
+    catalog: &Catalog,
+) -> Option<(String, Vec<Target>)> {
     let stuck = catalog.stuck().map(|s| s.reason());
     let branch = match &stuck {
         Some(_) => stuck_branch(catalog),
-        None => match merge::offered(repo, catalog, commit) {
-            Some(branch) => branch.to_owned(),
-            None => return,
-        },
+        None => merge::offered(repo, catalog, commit)?.to_owned(),
     };
-    let mut targets: Vec<Target> = names
+    let mut targets: Vec<Target> = names_at(refs, catalog)
         .iter()
         .map(|name| {
             (
@@ -507,6 +546,24 @@ fn merge_targets(
         },
         stuck,
     ));
+    Some((branch, targets))
+}
+
+/// *Merge X into main…* for each branch on the node and, last, the commit itself, when there's
+/// something to merge; greyed out while the open worktree is stuck. The log's rows have it
+/// too, through [`node_menu`].
+fn merge_targets(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    refs: &[&parterre_core::GitRef],
+    catalog: &Catalog,
+    busy: bool,
+    request: &mut Option<Request>,
+) {
+    let Some((branch, targets)) = merge_offer(repo, commit, refs, catalog) else {
+        return;
+    };
     let into = format!(" into {branch}…");
     target_menu_named(
         ui,
@@ -518,20 +575,16 @@ fn merge_targets(
     );
 }
 
-/// *Merge feature into main…* for each local branch on the node that lacks commits of the open
-/// worktree's branch, as a pull request merges; greyed out while the open worktree is stuck.
-fn merge_into_targets(
-    ui: &mut Ui,
+/// *Merge main into feature…*: the open worktree's branch, and each local branch on the node
+/// that lacks its commits, as a pull request merges. Greyed out while the open worktree is
+/// stuck.
+pub(super) fn merge_into_offer(
     repo: &Repo,
     commit: Oid,
     refs: &[&parterre_core::GitRef],
     catalog: &Catalog,
-    busy: bool,
-    request: &mut Option<Request>,
-) {
-    let Some(source) = merge::offered_into(repo, catalog, commit) else {
-        return;
-    };
+) -> Option<(String, Vec<Target>)> {
+    let source = merge::offered_into(repo, catalog, commit)?;
     let stuck = catalog.stuck().map(|s| s.reason());
     let mut names: Vec<&str> = refs
         .iter()
@@ -547,6 +600,23 @@ fn merge_into_targets(
             (into.clone(), Request::MergeInto { into }, stuck.clone())
         })
         .collect();
+    Some((source.to_owned(), targets))
+}
+
+/// *Merge feature into main…* for each local branch on the node that lacks commits of the open
+/// worktree's branch, as a pull request merges; greyed out while the open worktree is stuck.
+fn merge_into_targets(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    refs: &[&parterre_core::GitRef],
+    catalog: &Catalog,
+    busy: bool,
+    request: &mut Option<Request>,
+) {
+    let Some((source, targets)) = merge_into_offer(repo, commit, refs, catalog) else {
+        return;
+    };
     target_menu_named(
         ui,
         &format!("Merge {source} into"),
@@ -558,16 +628,14 @@ fn merge_into_targets(
 }
 
 /// *Cherry-pick feature onto main…*: every commit of the node main lacks, named after a branch
-/// on the node (a local one first), or its short hash; greyed out while the open worktree is
-/// stuck.
-fn cherry_pick_lacking(
-    ui: &mut Ui,
+/// on the node (a local one first), or its short hash: that name, the branch picked onto, and
+/// the request. Greyed out while the open worktree is stuck.
+pub(super) fn cherry_pick_offer(
     repo: &Repo,
     commit: Oid,
     refs: &[&parterre_core::GitRef],
     catalog: &Catalog,
-    busy: bool,
-) -> Option<Request> {
+) -> Option<(String, String, Request)> {
     let branch = match catalog.stuck() {
         Some(_) => stuck_branch(catalog),
         None => cherry_pick::offered(repo, catalog, commit)?.to_owned(),
@@ -582,11 +650,26 @@ fn cherry_pick_lacking(
         .first()
         .map(|r| r.name.clone())
         .unwrap_or_else(|| commit.short(repo.abbrev_len.max(7)));
-    let label = format!("Cherry-pick {name} onto {branch}…");
     let request = Request::CherryPick {
         picks: cherry_pick::Picks::Lacking(commit),
-        name: Some(name),
+        name: Some(name.clone()),
     };
+    Some((name, branch, request))
+}
+
+/// *Cherry-pick feature onto main…*: every commit of the node main lacks, named after a branch
+/// on the node (a local one first), or its short hash; greyed out while the open worktree is
+/// stuck.
+fn cherry_pick_lacking(
+    ui: &mut Ui,
+    repo: &Repo,
+    commit: Oid,
+    refs: &[&parterre_core::GitRef],
+    catalog: &Catalog,
+    busy: bool,
+) -> Option<Request> {
+    let (name, branch, request) = cherry_pick_offer(repo, commit, refs, catalog)?;
+    let label = format!("Cherry-pick {name} onto {branch}…");
     cherry_pick_item(ui, label, request, catalog, busy)
 }
 
@@ -636,7 +719,7 @@ fn cherry_pick_item(
 }
 
 /// The branch a stuck worktree is rebasing, else its branch, for greyed-out labels.
-fn stuck_branch(catalog: &Catalog) -> String {
+pub(super) fn stuck_branch(catalog: &Catalog) -> String {
     catalog
         .worktrees
         .iter()
@@ -672,38 +755,9 @@ fn worktree_section(
     let Some(catalog) = catalog else {
         return request;
     };
-    let mut others: Vec<_> = catalog
-        .worktrees
-        .iter()
-        .filter(|w| !w.open && w.head == Some(commit))
-        .collect();
-    others.sort_by_key(|w| w.name());
-    let go_to: Vec<Target> = others
-        .iter()
-        .map(|w| {
-            (
-                w.name(),
-                Request::GoTo(w.path.clone()),
-                w.missing.then(|| "Its folder is gone".to_owned()),
-            )
-        })
-        .collect();
+    let go_to = go_to_targets(catalog, commit);
     target_menu(ui, "Go to worktree", &go_to, false, &mut request);
-    // An operation in progress there doesn't keep one: deleting it ends that too.
-    let locked = |w: &parterre_core::branches::Worktree| match &w.locked {
-        Some(reason) if reason.is_empty() => Some("Locked".to_owned()),
-        Some(reason) => Some(format!("Locked: {reason}")),
-        None => None,
-    };
-    let deletable = |commit: Oid| {
-        let mut found: Vec<_> = catalog
-            .worktrees
-            .iter()
-            .filter(|w| !w.open && !w.main && w.head == Some(commit))
-            .collect();
-        found.sort_by_key(|w| w.name());
-        found
-    };
+    let deletable = |commit: Oid| deletable_worktrees(catalog, commit);
     if group.len() > 1 && group.iter().all(|&c| !deletable(c).is_empty()) {
         let all: Vec<_> = group.iter().flat_map(|&c| deletable(c)).collect();
         let blocked = all.iter().find_map(|w| {
@@ -723,7 +777,54 @@ fn worktree_section(
         all_item(ui, label, &names, delete, blocked, busy, &mut request);
         return request;
     }
-    let deletions: Vec<Target> = deletable(commit)
+    let deletions = worktree_deletions(catalog, commit);
+    target_menu(ui, "Delete worktree", &deletions, busy, &mut request);
+    request
+}
+
+/// *Go to worktree*: the other worktrees at `commit`; greyed out where the folder is gone.
+pub(super) fn go_to_targets(catalog: &Catalog, commit: Oid) -> Vec<Target> {
+    let mut others: Vec<_> = catalog
+        .worktrees
+        .iter()
+        .filter(|w| !w.open && w.head == Some(commit))
+        .collect();
+    others.sort_by_key(|w| w.name());
+    others
+        .iter()
+        .map(|w| {
+            (
+                w.name(),
+                Request::GoTo(w.path.clone()),
+                w.missing.then(|| "Its folder is gone".to_owned()),
+            )
+        })
+        .collect()
+}
+
+/// The worktrees at `commit` that can be deleted: neither the open one nor the main one.
+pub(super) fn deletable_worktrees(
+    catalog: &Catalog,
+    commit: Oid,
+) -> Vec<&parterre_core::branches::Worktree> {
+    let mut found: Vec<_> = catalog
+        .worktrees
+        .iter()
+        .filter(|w| !w.open && !w.main && w.head == Some(commit))
+        .collect();
+    found.sort_by_key(|w| w.name());
+    found
+}
+
+/// *Delete worktree*: each of [`deletable_worktrees`], greyed out while locked. An operation in
+/// progress there doesn't keep one: deleting it ends that too.
+pub(super) fn worktree_deletions(catalog: &Catalog, commit: Oid) -> Vec<Target> {
+    let locked = |w: &parterre_core::branches::Worktree| match &w.locked {
+        Some(reason) if reason.is_empty() => Some("Locked".to_owned()),
+        Some(reason) => Some(format!("Locked: {reason}")),
+        None => None,
+    };
+    deletable_worktrees(catalog, commit)
         .into_iter()
         .map(|w| {
             (
@@ -735,9 +836,7 @@ fn worktree_section(
                 locked(w),
             )
         })
-        .collect();
-    target_menu(ui, "Delete worktree", &deletions, busy, &mut request);
-    request
+        .collect()
 }
 
 /// One item for what every node of a group has, such as *Delete 3 worktrees*, naming them on

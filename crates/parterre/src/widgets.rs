@@ -331,19 +331,6 @@ pub fn popover_button(ui: &mut Ui, id: Id, glyph: Option<Glyph>, on: bool) -> Re
     response
 }
 
-/// The ☰ menu's [`popover_button`], its icon bold and blue while `marked`: a newer release is
-/// out (#258).
-pub fn menu_button(ui: &mut Ui, id: Id, marked: bool) -> Response {
-    if !marked {
-        return popover_button(ui, id, Some(glyphs::MENU), false);
-    }
-    let (rect, response) = popover_button_area(ui, id, Vec2::splat(BUTTON), false);
-    let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
-    let accent = tones(ui).accent;
-    paint_glyph_weighted(ui.painter(), icon, glyphs::MENU, accent, 1.8);
-    response
-}
-
 /// The room and background of a [`popover_button`].
 fn popover_button_area(ui: &mut Ui, id: Id, size: Vec2, on: bool) -> (Rect, Response) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
