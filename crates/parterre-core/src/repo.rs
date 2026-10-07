@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
+use crate::git::Listing;
 use crate::oid::Oid;
 use crate::upstream::Upstream;
 
@@ -156,6 +157,8 @@ pub struct Repo {
     pub default_branch: Option<String>,
     /// The local branches that have an upstream, in ref order.
     pub upstreams: Vec<Upstream>,
+    /// What git listed of the refs and worktrees, for the branch catalogue (#310).
+    pub(crate) listing: Listing,
     by_oid: HashMap<Oid, CommitIx>,
     /// Every commit's generation, worked out the first time it's needed.
     generations: OnceLock<Vec<u32>>,
@@ -178,6 +181,7 @@ impl Repo {
             worktrees: Vec::new(),
             default_branch: None,
             upstreams: Vec::new(),
+            listing: Listing::default(),
             by_oid,
             generations: OnceLock::new(),
         }

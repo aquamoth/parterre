@@ -19,6 +19,7 @@ use crate::file_diff::{Content, FileDiffSpec, LoadedDiff, Rev, Version, decode};
 use crate::file_history::{self, FileLog};
 use crate::oid::Oid;
 use crate::repo::{Commit, CommitIx, DEFAULT_ABBREV_LEN, GitRef, Head, RefKind, Repo, Worktree};
+use crate::worktree_folder::same_path;
 
 mod program;
 mod version;
@@ -154,7 +155,7 @@ fn not_opened(dir: &Path, stderr: &str) -> GitError {
 }
 
 /// Where the repository around a folder keeps things, from one `rev-parse`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Location {
     /// The git dir: a work tree's `.git`, a linked worktree's `.git/worktrees/<name>`, or a
     /// bare repository itself.
@@ -509,74 +510,16 @@ impl Git {
     /// a concurrent fetch cannot leave refs pointing at commits that were not loaded.
     pub fn load(&self) -> Result<Repo, GitError> {
         let location = self.location()?;
-        let root = location.root().to_owned();
-        let has_working_tree = location.work_tree.is_some();
-        let git = Git::new(&root);
+        let git = Git::new(location.root());
+        let listing = git.list(location)?;
+        let root = listing.location.root().to_owned();
+        let has_working_tree = listing.location.work_tree.is_some();
+        let (head_branch, head_oid) = (&listing.head_branch, listing.head);
 
-        let ref_format = format!(
-            "--format=%(refname){FIELD}%(objecttype){FIELD}%(objectname){FIELD}%(*objecttype){FIELD}%(*objectname){FIELD}%(symref){FIELD}%(upstream)"
-        );
-        let (listing, worktrees) = std::thread::scope(|s| {
-            // Listed alongside the refs, and before the walk, which starts from their HEADs
-            // too. A git that can't list them (before 2.7) gives none.
-            let worktrees = s.spawn(|| git.run(&["worktree", "list", "--porcelain"]));
-            (git.run(&["for-each-ref", &ref_format]), worktrees.join())
-        });
-        let (mut raw_refs, default_branch) = parse_refs(&listing?);
-        let raw_worktrees = match worktrees {
-            Ok(Ok(out)) => parse_worktrees(&out),
-            _ => Vec::new(),
-        };
-        // Tags of tags: let git peel them all the way to a commit.
-        let nested: Vec<usize> = (0..raw_refs.len())
-            .filter(|&i| raw_refs[i].commit.is_none())
-            .collect();
-        if !nested.is_empty() {
-            let input: String = nested
-                .iter()
-                .map(|&i| format!("{}^{{commit}}\n", raw_refs[i].full_name))
-                .collect();
-            let out = git.run_with_input(&["cat-file", "--batch-check"], input)?;
-            for (&i, line) in nested.iter().zip(out.lines()) {
-                if let Some((oid, "commit")) = line
-                    .split_once(' ')
-                    .map(|(o, rest)| (o, rest.split(' ').next().unwrap_or("")))
-                {
-                    raw_refs[i].commit = Oid::from_hex(oid);
-                }
-            }
-        }
-        raw_refs.retain(|r| r.commit.is_some());
-
-        // HEAD's branch and commit are in the worktree listing, for the open worktree. Without
-        // one to match (a bare repository, or inside a `.git` folder) git is asked: the branch,
-        // and its commit unless the ref listing has it (#309).
-        let open = raw_worktrees
-            .iter()
-            .filter(|_| has_working_tree)
-            .find(|w| same_folder(Path::new(&w.path), &root));
-        let (head_branch, head_oid) = match open {
-            Some(w) => (w.branch.clone(), w.head),
-            None => {
-                let branch = git.query(&["symbolic-ref", "-q", "HEAD"])?;
-                let listed = branch
-                    .as_deref()
-                    .and_then(|branch| raw_refs.iter().find(|r| r.full_name == branch))
-                    .and_then(|r| r.commit);
-                let oid = match listed {
-                    Some(oid) => Some(oid),
-                    None => git
-                        .query(&["rev-parse", "-q", "--verify", "HEAD^{commit}"])?
-                        .and_then(|s| Oid::from_hex(&s)),
-                };
-                (branch, oid)
-            }
-        };
-
-        let mut starts: Vec<Oid> = raw_refs.iter().filter_map(|r| r.commit).collect();
+        let mut starts: Vec<Oid> = listing.refs.iter().map(|r| r.commit).collect();
         starts.extend(head_oid);
         // Other worktrees' detached HEADs, which no ref may reach.
-        starts.extend(raw_worktrees.iter().filter_map(|w| w.head));
+        starts.extend(listing.worktrees.iter().filter_map(|w| w.head));
         starts.sort_unstable();
         starts.dedup();
         let (log, abbrev_len) = std::thread::scope(|s| {
@@ -605,7 +548,7 @@ impl Git {
         let (commits, by_oid) = log?;
 
         let lookup = |oid: &Oid| by_oid.get(oid).copied();
-        let head = match (&head_branch, head_oid) {
+        let head = match (head_branch, head_oid) {
             (Some(branch), target) => Head::Branch {
                 name: branch.clone(),
                 target: target.and_then(|o| lookup(&o)),
@@ -620,19 +563,21 @@ impl Git {
             }
         };
 
-        let configured: Vec<(String, String)> = raw_refs
+        let configured: Vec<(String, String)> = listing
+            .refs
             .iter()
             .filter(|r| r.full_name.starts_with("refs/heads/"))
             .filter_map(|r| Some((r.full_name.clone(), r.upstream.clone()?)))
             .collect();
-        let mut refs: Vec<GitRef> = raw_refs
-            .into_iter()
+        let mut refs: Vec<GitRef> = listing
+            .refs
+            .iter()
             .filter_map(|r| {
-                let target = lookup(&r.commit?)?;
+                let target = lookup(&r.commit)?;
                 let (kind, name) = classify_ref(&r.full_name);
                 Some(GitRef {
                     is_head: Some(r.full_name.as_str()) == head_branch.as_deref(),
-                    full_name: r.full_name,
+                    full_name: r.full_name.clone(),
                     name,
                     kind,
                     target,
@@ -650,29 +595,161 @@ impl Git {
                 is_head: true,
             });
         }
-        let worktrees = raw_worktrees
-            .into_iter()
+        let worktrees = listing
+            .worktrees
+            .iter()
             .filter(|w| !w.bare)
             .map(|w| {
-                let path = PathBuf::from(w.path);
+                let path = PathBuf::from(&w.path);
                 Worktree {
                     head: w.head.and_then(|o| lookup(&o)),
-                    branch: w.branch,
-                    locked: w.locked,
+                    branch: w.branch.clone(),
+                    locked: w.locked.is_some(),
                     // A locked worktree is never prunable, even with its folder gone.
                     missing: w.prunable || !path.is_dir(),
-                    open: has_working_tree && same_folder(&path, &root),
+                    open: has_working_tree && same_path(&path, &root),
                     path,
                 }
             })
             .collect();
+        let default_branch = listing
+            .symrefs
+            .iter()
+            .find(|(name, _)| name == "refs/remotes/origin/HEAD")
+            .map(|(_, target)| target.clone());
         let mut repo = Repo::new(root, commits, refs, head);
         repo.abbrev_len = abbrev_len;
         repo.has_working_tree = has_working_tree;
         repo.worktrees = worktrees;
         repo.default_branch = default_branch;
         repo.upstreams = crate::upstream::load(&git, &repo, &configured);
+        repo.listing = listing;
         Ok(repo)
+    }
+
+    /// The refs and worktrees of the repository at `location`, and HEAD: what [`Git::load`]
+    /// walks the log from, and what the branch catalogue is built from (#310). Run in its
+    /// root.
+    pub(crate) fn list(&self, location: Location) -> Result<Listing, GitError> {
+        let root = location.root().to_owned();
+        let ref_format = format!(
+            "--format=%(refname){FIELD}%(objecttype){FIELD}%(objectname){FIELD}%(*objecttype){FIELD}%(*objectname){FIELD}%(symref){FIELD}%(upstream){FIELD}%(upstream:remotename){FIELD}%(upstream:remoteref)"
+        );
+        let (listing, worktrees) = std::thread::scope(|s| {
+            // Listed alongside the refs, and before the walk, which starts from their HEADs
+            // too.
+            let worktrees = s.spawn(|| self.worktrees(&root));
+            (
+                self.run(&["for-each-ref", &ref_format]),
+                worktrees.join().expect("worktree listing"),
+            )
+        });
+        let (mut raw_refs, symrefs) = parse_refs(&listing?);
+        // Tags of tags: let git peel them all the way to a commit.
+        let nested: Vec<usize> = (0..raw_refs.len())
+            .filter(|&i| raw_refs[i].commit.is_none())
+            .collect();
+        if !nested.is_empty() {
+            let input: String = nested
+                .iter()
+                .map(|&i| format!("{}^{{commit}}\n", raw_refs[i].full_name))
+                .collect();
+            let out = self.run_with_input(&["cat-file", "--batch-check"], input)?;
+            for (&i, line) in nested.iter().zip(out.lines()) {
+                if let Some((oid, "commit")) = line
+                    .split_once(' ')
+                    .map(|(o, rest)| (o, rest.split(' ').next().unwrap_or("")))
+                {
+                    raw_refs[i].commit = Oid::from_hex(oid);
+                }
+            }
+        }
+        let refs: Vec<ListedRef> = raw_refs
+            .into_iter()
+            .filter_map(|r| {
+                Some(ListedRef {
+                    commit: r.commit?,
+                    full_name: r.full_name,
+                    annotated: r.annotated,
+                    upstream: r.upstream,
+                    upstream_remote: r.upstream_remote,
+                })
+            })
+            .collect();
+        let (worktrees, worktree_error) = match worktrees {
+            Ok(worktrees) => (worktrees, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+
+        // HEAD's branch and commit are in the worktree listing, for the open worktree. Without
+        // one to match (a bare repository, or inside a `.git` folder) git is asked: the branch,
+        // and its commit unless the ref listing has it (#309).
+        let open = worktrees
+            .iter()
+            .filter(|_| location.work_tree.is_some())
+            .find(|w| same_path(Path::new(&w.path), &root));
+        let (head_branch, head) = match open {
+            Some(w) => (w.branch.clone(), w.head),
+            None => {
+                let branch = self.query(&["symbolic-ref", "-q", "HEAD"])?;
+                let listed = branch
+                    .as_deref()
+                    .and_then(|branch| refs.iter().find(|r| r.full_name == branch))
+                    .map(|r| r.commit);
+                let oid = match listed {
+                    Some(oid) => Some(oid),
+                    None => self
+                        .query(&["rev-parse", "-q", "--verify", "HEAD^{commit}"])?
+                        .and_then(|s| Oid::from_hex(&s)),
+                };
+                (branch, oid)
+            }
+        };
+        Ok(Listing {
+            location,
+            refs,
+            symrefs,
+            worktrees,
+            worktree_error,
+            head_branch,
+            head,
+        })
+    }
+
+    /// `git worktree list --porcelain -z`'s worktrees, or the older form's where git lacks
+    /// `-z` (before 2.36: Ubuntu 22.04 has 2.34). An error where the older form can't be read
+    /// safely: a path with a newline in it splits its lines.
+    fn worktrees(&self, root: &Path) -> Result<Vec<ListedWorktree>, String> {
+        match self.run(&["worktree", "list", "--porcelain", "-z"]) {
+            Ok(listing) => Ok(parse_worktrees(&listing)),
+            Err(GitError::Failed { .. }) => {
+                let plain = self
+                    .run(&["worktree", "list", "--porcelain"])
+                    .map_err(|e| e.to_string())?;
+                if root.to_string_lossy().contains(['\n', '\r'])
+                    || plain.lines().any(|line| {
+                        !matches!(
+                            line.split(' ').next(),
+                            Some(
+                                "" | "worktree"
+                                    | "HEAD"
+                                    | "branch"
+                                    | "bare"
+                                    | "detached"
+                                    | "locked"
+                                    | "prunable"
+                            )
+                        )
+                    })
+                {
+                    return Err("Cannot safely read worktree paths with this Git version. \
+                                Update Git to 2.36 or newer."
+                        .into());
+                }
+                Ok(parse_worktrees(&plain.replace('\n', "\0")))
+            }
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     /// git's abbreviation length for the repository, as `%h` would print it (`core.abbrev`,
@@ -1239,6 +1316,40 @@ fn parse_log(log: &str) -> Result<(Vec<Commit>, HashMap<Oid, CommitIx>), GitErro
     Ok((commits, by_oid))
 }
 
+/// What git lists of a repository's refs and worktrees, and its HEAD: read once, by
+/// [`Git::load`], and kept in the [`Repo`] for the branch catalogue to be built from, so the
+/// catalogue agrees with the graph (#310).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Listing {
+    pub location: Location,
+    /// The refs that point at commits, tags peeled; notes and symbolic refs left out.
+    pub refs: Vec<ListedRef>,
+    /// The symbolic refs and the refs they point at: `refs/remotes/origin/HEAD` at
+    /// `refs/remotes/origin/main`.
+    pub symrefs: Vec<(String, String)>,
+    /// Every worktree, the main one first, a bare main repository's too.
+    pub worktrees: Vec<ListedWorktree>,
+    /// Why the worktrees couldn't be read, if they couldn't: there are none then.
+    pub worktree_error: Option<String>,
+    /// The branch HEAD is on (`refs/heads/main`), if any.
+    pub head_branch: Option<String>,
+    /// HEAD's commit: none for an unborn branch.
+    pub head: Option<Oid>,
+}
+
+/// A ref in a [`Listing`].
+#[derive(Clone, Debug)]
+pub(crate) struct ListedRef {
+    pub full_name: String,
+    /// The commit it points at, tags peeled.
+    pub commit: Oid,
+    pub annotated: bool,
+    /// A local branch's upstream (`refs/remotes/origin/topic`), whether it exists or not.
+    pub upstream: Option<String>,
+    /// That upstream's remote, and its name there: `origin` and `refs/heads/topic`.
+    pub upstream_remote: Option<(String, String)>,
+}
+
 /// A ref as listed by `for-each-ref`, before its commit is looked up.
 #[derive(Debug)]
 struct RawRef {
@@ -1247,15 +1358,15 @@ struct RawRef {
     /// peeling.
     commit: Option<Oid>,
     annotated: bool,
-    /// A local branch's upstream (`refs/remotes/origin/topic`), whether it exists or not.
     upstream: Option<String>,
+    upstream_remote: Option<(String, String)>,
 }
 
-/// Parses `for-each-ref` output, and the branch `origin/HEAD` points at. Symbolic refs
-/// (duplicates), notes, and refs to trees or blobs are skipped.
-fn parse_refs(out: &str) -> (Vec<RawRef>, Option<String>) {
+/// Parses `for-each-ref` output, and the symbolic refs with what they point at. Symbolic refs
+/// (duplicates), notes, and refs to trees or blobs are left out of the refs.
+fn parse_refs(out: &str) -> (Vec<RawRef>, Vec<(String, String)>) {
     let mut refs = Vec::new();
-    let mut default_branch = None;
+    let mut symrefs = Vec::new();
     for line in out.lines() {
         let f: Vec<&str> = line.split(FIELD).collect();
         let [
@@ -1266,15 +1377,18 @@ fn parse_refs(out: &str) -> (Vec<RawRef>, Option<String>) {
             peeled,
             symref,
             upstream,
+            remote,
+            remote_ref,
         ] = f[..]
         else {
             continue;
         };
-        if full_name == "refs/remotes/origin/HEAD" && !symref.is_empty() {
-            default_branch = Some(symref.to_owned());
-        }
         // e.g. refs/remotes/origin/HEAD -> origin/main: a duplicate label.
-        if !symref.is_empty() || full_name.starts_with("refs/notes/") {
+        if !symref.is_empty() {
+            symrefs.push((full_name.to_owned(), symref.to_owned()));
+            continue;
+        }
+        if full_name.starts_with("refs/notes/") {
             continue;
         }
         let (annotated, commit) = match (obj_type, peeled_type) {
@@ -1289,37 +1403,40 @@ fn parse_refs(out: &str) -> (Vec<RawRef>, Option<String>) {
             commit,
             annotated,
             upstream: (!upstream.is_empty()).then(|| upstream.to_owned()),
+            upstream_remote: (!remote.is_empty() && !remote_ref.is_empty())
+                .then(|| (remote.to_owned(), remote_ref.to_owned())),
         });
     }
-    (refs, default_branch)
+    (refs, symrefs)
 }
 
-/// A worktree as listed by `git worktree list --porcelain`, before its commit is looked up.
-#[derive(Debug, PartialEq, Eq)]
-struct RawWorktree {
-    path: String,
+/// A worktree in a [`Listing`], as `git worktree list --porcelain` lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListedWorktree {
+    pub path: String,
     /// `None` for an unborn branch (git lists the null id) and for a bare repository.
-    head: Option<Oid>,
-    branch: Option<String>,
-    bare: bool,
-    locked: bool,
-    prunable: bool,
+    pub head: Option<Oid>,
+    /// `refs/heads/main`; `None` when detached.
+    pub branch: Option<String>,
+    pub bare: bool,
+    /// The lock's reason (empty when none was given), when it's locked.
+    pub locked: Option<String>,
+    pub prunable: bool,
 }
 
-/// Parses `git worktree list --porcelain`: one record per worktree, a line per attribute.
-/// Not `-z`, which git lacks before 2.36 (Ubuntu 22.04 has 2.34), so a path with a newline in
-/// it can't be read. `locked` and `prunable` are listed from git 2.31 on.
-fn parse_worktrees(out: &str) -> Vec<RawWorktree> {
-    let mut worktrees: Vec<RawWorktree> = Vec::new();
-    for line in out.lines() {
-        let (label, value) = line.split_once(' ').unwrap_or((line, ""));
+/// Parses `git worktree list --porcelain -z`: a NUL after each attribute, and another after
+/// each worktree's. `locked` and `prunable` are listed from git 2.31 on.
+fn parse_worktrees(out: &str) -> Vec<ListedWorktree> {
+    let mut worktrees: Vec<ListedWorktree> = Vec::new();
+    for field in out.split('\0') {
+        let (label, value) = field.split_once(' ').unwrap_or((field, ""));
         if label == "worktree" {
-            worktrees.push(RawWorktree {
+            worktrees.push(ListedWorktree {
                 path: value.to_owned(),
                 head: None,
                 branch: None,
                 bare: false,
-                locked: false,
+                locked: None,
                 prunable: false,
             });
             continue;
@@ -1331,22 +1448,12 @@ fn parse_worktrees(out: &str) -> Vec<RawWorktree> {
             "HEAD" => w.head = Oid::from_hex(value).filter(|_| value.bytes().any(|b| b != b'0')),
             "branch" => w.branch = Some(value.to_owned()),
             "bare" => w.bare = true,
-            "locked" => w.locked = true,
+            "locked" => w.locked = Some(value.to_owned()),
             "prunable" => w.prunable = true,
             _ => {}
         }
     }
     worktrees
-}
-
-/// True if `a` and `b` are the same folder. git prints both paths the same way, but a symlink
-/// or a letter's case on Windows can come between them.
-fn same_folder(a: &Path, b: &Path) -> bool {
-    a == b
-        || matches!(
-            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
-            (Ok(a), Ok(b)) if a == b
-        )
 }
 
 /// Classifies a full ref name and produces its display name.
@@ -1567,7 +1674,7 @@ mod tests {
             "bare",
             "",
         ]
-        .join("\n");
+        .join("\0");
         let w = parse_worktrees(&out);
         assert_eq!(w.len(), 4);
         assert_eq!(w[0].path, "C:/src/main");
@@ -1577,9 +1684,10 @@ mod tests {
             (w[1].path.as_str(), w[1].branch.as_deref()),
             ("C:/src/wt space/ö", None)
         );
-        assert!(w[1].locked && !w[1].prunable);
+        assert_eq!(w[1].locked.as_deref(), Some("on usb"));
+        assert!(!w[1].prunable);
         assert_eq!(w[2].head, None, "an unborn branch has no head");
-        assert!(w[2].prunable && !w[2].locked);
+        assert!(w[2].prunable && w[2].locked.is_none());
         assert!(w[3].bare && w[3].head.is_none());
     }
 

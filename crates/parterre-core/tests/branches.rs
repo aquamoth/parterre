@@ -1000,3 +1000,100 @@ fn remotes_are_named_as_git_remote_lists_them() {
     assert_eq!(detached.current, None);
     assert_eq!(detached.head, Some(tip));
 }
+
+/// The fields of a catalogue that git's state decides, in an order that compares.
+fn listed(c: &Catalog) -> String {
+    let mut occupied: Vec<_> = c.occupied.iter().collect();
+    occupied.sort();
+    format!(
+        "locals {:?}\nremotes {:?}\nremote names {:?}\ndefaults {:?}\noccupied {occupied:?}\n\
+         current {:?}\nhead {:?}\nwork tree {}\nworktrees {:?}\nmain {:?}\nroot {:?}\n\
+         conflicted {:?}\nstuck {:?}",
+        c.locals,
+        c.remotes,
+        c.remote_names,
+        c.remote_defaults,
+        c.current,
+        c.head,
+        c.has_working_tree,
+        c.worktrees,
+        c.main,
+        c.root,
+        c.conflicted,
+        c.stuck(),
+    )
+}
+
+#[test]
+fn the_catalogue_of_the_graphs_snapshot_is_the_one_git_lists() {
+    let mut r = TestRepo::new();
+    let base = r.commit("base");
+    r.branch("topic");
+    let topic = r.commit("on topic");
+    r.checkout("main");
+    r.git(&["remote", "add", "origin", "https://example.invalid/origin"]);
+    r.git(&["update-ref", "refs/remotes/origin/main", &base]);
+    r.git(&["update-ref", "refs/remotes/origin/topic", &topic]);
+    r.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ]);
+    r.git(&["branch", "-q", "-u", "origin/main", "main"]);
+    // An upstream that was never fetched.
+    r.git(&["config", "branch.topic.remote", "origin"]);
+    r.git(&["config", "branch.topic.merge", "refs/heads/elsewhere"]);
+    r.git(&["tag", "-a", "-m", "release", "v1", &base]);
+    r.git(&["tag", "-a", "-m", "of a tag", "v1-again", "v1"]);
+    let others = tempfile::tempdir().unwrap();
+    let locked = others.path().join("locked");
+    r.git(&["worktree", "add", "-q", &locked.to_string_lossy(), "topic"]);
+    r.git(&[
+        "worktree",
+        "lock",
+        "--reason",
+        "on a USB stick",
+        &locked.to_string_lossy(),
+    ]);
+    let detached = others.path().join("detached");
+    r.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        &detached.to_string_lossy(),
+        &base,
+    ]);
+    let catalog = Catalog::of(&r.load()).unwrap();
+    assert_eq!(listed(&catalog), listed(&Catalog::load(r.path()).unwrap()));
+    let main = catalog.locals.iter().find(|b| b.name == "main").unwrap();
+    assert_eq!(main.upstream.as_deref(), Some("origin/main"));
+    let topic = catalog.locals.iter().find(|b| b.name == "topic").unwrap();
+    assert_eq!(topic.upstream.as_deref(), Some("origin/elsewhere"));
+    assert_eq!(catalog.remote_defaults, ["origin/main"]);
+    let w = |name: &str| catalog.worktrees.iter().find(|w| w.name() == name).unwrap();
+    assert_eq!(w("locked").locked.as_deref(), Some("on a USB stick"));
+    assert_eq!(w("detached").head, Some(oid(&base)));
+    assert_eq!(catalog.occupied.get("topic"), Some(&w("locked").path));
+
+    // From a linked worktree, and from a bare repository.
+    let linked = Catalog::of(&parterre_core::git::load_repo(&detached).unwrap()).unwrap();
+    assert_eq!(listed(&linked), listed(&Catalog::load(&detached).unwrap()));
+    let bare = tempfile::tempdir().unwrap();
+    let bare = bare.path().join("bare.git");
+    r.git(&["clone", "-q", "--bare", ".", &bare.to_string_lossy()]);
+    let of_bare = Catalog::of(&parterre_core::git::load_repo(&bare).unwrap()).unwrap();
+    assert_eq!(listed(&of_bare), listed(&Catalog::load(&bare).unwrap()));
+}
+
+#[test]
+fn the_catalogue_of_the_graphs_snapshot_agrees_with_the_graph() {
+    let mut r = TestRepo::new();
+    r.commit("base");
+    let repo = r.load();
+    r.git(&["branch", "later"]);
+    // The branch made since the graph loaded shows in neither, until both load again.
+    let catalog = Catalog::of(&repo).unwrap();
+    assert!(catalog.locals.iter().all(|b| b.name != "later"));
+    assert!(exists(&r, "later"));
+}

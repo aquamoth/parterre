@@ -294,10 +294,9 @@ pub fn menu(
 }
 
 pub fn load(dir: &Path) -> (Repo, Catalog) {
-    (
-        parterre_core::git::load_repo(dir).unwrap(),
-        Catalog::load(dir).unwrap(),
-    )
+    let repo = parterre_core::git::load_repo(dir).unwrap();
+    let catalog = Catalog::of(&repo).unwrap();
+    (repo, catalog)
 }
 
 /// The texts `banner` shows for the repository at `dir`.

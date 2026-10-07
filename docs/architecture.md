@@ -13,7 +13,8 @@ crates/parterre-core   GUI-free; everything testable lives here
   git.rs               run `git log` / `git for-each-ref` / `git worktree list`, parse into a
                        Repo; changed files of a commit (`git diff-tree`)
   repo.rs              Repo snapshot: commits (with parent indices), refs, HEAD, worktrees,
-                       git's hash length
+                       git's hash length, and git's listing of the refs and worktrees, which
+                       the branch catalogue is built from (#310)
   log.rs               log query: tips and exclusions → commits in `git log --date-order`
                        order, from the snapshot alone
   log_layout.rs        the log window's four fixed layouts and their divider positions

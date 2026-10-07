@@ -6,7 +6,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::git::{Git, GitError};
+use crate::git::{Config, Git, GitError, Listing};
 use crate::{Oid, Repo};
 
 #[derive(Clone, Debug)]
@@ -219,71 +219,61 @@ pub struct Catalog {
     uses: Vec<(String, PathBuf)>,
 }
 
-/// `git worktree list --porcelain -z`'s listing, or the older form's made to look the same.
-/// Unlike the viewer's compatibility fallback, safety checks propagate listing errors.
-fn worktree_listing(git: &Git, root: &Path) -> Result<String, Error> {
-    match git.run(&["worktree", "list", "--porcelain", "-z"]) {
-        Ok(listing) => Ok(listing),
-        Err(GitError::Failed { .. }) => {
-            // Git 2.34 lacks -z. Never turn a failed listing into an empty catalogue;
-            // retry its older form, rejecting unrecognised fields (e.g. a split path).
-            let plain = git.run(&["worktree", "list", "--porcelain"])?;
-            if root.to_string_lossy().contains(['\n', '\r'])
-                || plain.lines().any(|line| {
-                    !matches!(
-                        line.split(' ').next(),
-                        Some(
-                            "" | "worktree"
-                                | "HEAD"
-                                | "branch"
-                                | "bare"
-                                | "detached"
-                                | "locked"
-                                | "prunable"
-                        )
-                    )
-                })
-            {
-                return Err(Error::Invalid("Cannot safely read worktree paths with this Git version. Update Git to 2.36 or newer.".into()));
-            }
-            Ok(plain.replace('\n', "\0"))
-        }
-        Err(error) => Err(error.into()),
-    }
+/// git's settings, and the open worktree's conflicted files as `diff -z` names them.
+fn config_and_conflicts(
+    git: &Git,
+    has_working_tree: bool,
+) -> (Result<Config, GitError>, Result<String, GitError>) {
+    std::thread::scope(|s| {
+        let config = s.spawn(|| git.config());
+        // Conflicted files outlive an operation: an autostash or `git stash pop` that
+        // conflicted leaves them with none in progress.
+        let conflicted = if has_working_tree {
+            git.run(&["diff", "--name-only", "-z", "--diff-filter=U"])
+        } else {
+            Ok(String::new())
+        };
+        (config.join().expect("config read"), conflicted)
+    })
 }
 
 impl Catalog {
+    /// Reads the catalogue from git, for an operation to check what it does against.
     pub fn load(path: &Path) -> Result<Self, Error> {
-        let git = Git::new(path);
-        let location = git.location()?;
+        let location = Git::new(path).location()?;
+        let git = Git::new(location.root());
+        let has_working_tree = location.work_tree.is_some();
+        // The listings at once rather than one after the other: each is a git start, which on
+        // Windows is most of what it costs (#309).
+        let (listing, (config, conflicted)) = std::thread::scope(|s| {
+            let rest = s.spawn(|| config_and_conflicts(&git, has_working_tree));
+            (git.list(location), rest.join().expect("config read"))
+        });
+        Self::build(&git, &listing?, config?, conflicted?)
+    }
+
+    /// The catalogue of the graph's snapshot `repo`: its refs, worktrees and HEAD, as the
+    /// graph shows them, with the settings and conflicted files git is asked for (#310).
+    pub fn of(repo: &Repo) -> Result<Self, Error> {
+        let git = Git::new(&repo.path);
+        let (config, conflicted) = config_and_conflicts(&git, repo.has_working_tree);
+        Self::build(&git, &repo.listing, config?, conflicted?)
+    }
+
+    fn build(
+        git: &Git,
+        listing: &Listing,
+        config: Config,
+        conflicted: String,
+    ) -> Result<Self, Error> {
+        if let Some(error) = &listing.worktree_error {
+            // Never an empty catalogue for worktrees that couldn't be read.
+            return Err(Error::Invalid(error.clone()));
+        }
+        let location = &listing.location;
         let root = location.root().to_owned();
         let has_working_tree = location.work_tree.is_some();
-        // The four listings at once rather than one after the other: each is a git start,
-        // which on Windows is most of what it costs (#309).
-        let (config, listing, conflicted, refs) = std::thread::scope(|s| {
-            let config = s.spawn(|| git.config());
-            let listing = s.spawn(|| worktree_listing(&git, &root));
-            let conflicted = s.spawn(|| {
-                // Conflicted files outlive an operation: an autostash or `git stash pop` that
-                // conflicted leaves them with none in progress.
-                if has_working_tree {
-                    git.run(&["diff", "--name-only", "-z", "--diff-filter=U"])
-                } else {
-                    Ok(String::new())
-                }
-            });
-            let refs = git.run(&["for-each-ref", "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(symref)", "refs/heads", "refs/remotes", "refs/tags"]);
-            (
-                config.join().expect("config read"),
-                listing.join().expect("worktree listing"),
-                conflicted.join().expect("conflict listing"),
-                refs,
-            )
-        });
-        let config = config?;
-        let listing = listing?;
-        let refs = refs?;
-        let conflicted: Vec<String> = conflicted?
+        let conflicted: Vec<String> = conflicted
             .split('\0')
             .filter(|p| !p.is_empty())
             .map(str::to_owned)
@@ -297,64 +287,50 @@ impl Catalog {
         remote_names.sort_by_key(|r| std::cmp::Reverse(r.len()));
         let mut locals = Vec::new();
         let mut remotes = Vec::new();
-        let mut remote_defaults = Vec::new();
         let mut roots = Vec::new();
-        for line in refs.lines() {
-            let f: Vec<_> = line.split('\0').collect();
-            if f.len() != 8 {
-                return Err(Error::Invalid("Unexpected Git reference listing.".into()));
-            }
-            let tip = if f[2] == "commit" {
-                Some(parse_oid(f[1])?)
-            } else if f[4] == "commit" {
-                Some(parse_oid(f[3])?)
-            } else if f[2] == "tag" {
-                git.query(&["rev-parse", "--verify", &format!("{}^{{commit}}", f[0])])?
-                    .map(|s| parse_oid(&s))
-                    .transpose()?
-            } else {
-                None
-            };
-            let Some(tip) = tip else { continue };
-            // `origin/HEAD` names the remote's default branch.
-            if f[0].starts_with("refs/remotes/")
-                && let Some(default) = f[7].strip_prefix("refs/remotes/")
-            {
-                remote_defaults.push(default.to_owned());
-            }
-            roots.push((f[0].to_owned(), tip));
-            if let Some(name) = f[0].strip_prefix("refs/heads/") {
-                let upstream = (!f[5].is_empty() && !f[6].is_empty()).then(|| {
-                    format!(
-                        "{}/{}",
-                        f[5],
-                        f[6].strip_prefix("refs/heads/").unwrap_or(f[6])
-                    )
+        // `origin/HEAD` names the remote's default branch.
+        let remote_defaults = listing
+            .symrefs
+            .iter()
+            .filter(|(name, _)| name.starts_with("refs/remotes/"))
+            .filter_map(|(_, target)| target.strip_prefix("refs/remotes/"))
+            .map(str::to_owned)
+            .collect();
+        for r in &listing.refs {
+            let name = r.full_name.as_str();
+            let tip = r.commit;
+            if let Some(name) = name.strip_prefix("refs/heads/") {
+                let upstream = r.upstream_remote.as_ref().map(|(remote, branch)| {
+                    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+                    format!("{remote}/{branch}")
                 });
                 locals.push(LocalBranch {
                     name: name.to_owned(),
                     tip,
                     upstream,
                 });
-            } else if let Some(name) = f[0].strip_prefix("refs/remotes/")
-                && !name.ends_with("/HEAD")
-            {
-                remotes.push(RemoteBranch {
-                    name: name.to_owned(),
-                    tip,
-                });
+            } else if let Some(short) = name.strip_prefix("refs/remotes/") {
+                if !short.ends_with("/HEAD") {
+                    remotes.push(RemoteBranch {
+                        name: short.to_owned(),
+                        tip,
+                    });
+                }
+            } else if !name.starts_with("refs/tags/") {
+                continue;
             }
+            roots.push((name.to_owned(), tip));
         }
         locals.sort_by(|a, b| a.name.cmp(&b.name));
         remotes.sort_by(|a, b| a.name.cmp(&b.name));
         let mut occupied = HashMap::new();
         let mut uses = Vec::new();
         let main_place = listing
-            .split('\0')
-            .find_map(|s| s.strip_prefix("worktree "))
-            .map(PathBuf::from)
+            .worktrees
+            .first()
+            .map(|w| PathBuf::from(&w.path))
             .unwrap_or_else(|| root.clone());
-        let common = location.common_dir;
+        let common = &location.common_dir;
         // Each linked worktree's administrative folder, by the worktree's own folder.
         let mut admins = vec![(main_place.clone(), common.clone())];
         let linked = common.join("worktrees");
@@ -375,75 +351,31 @@ impl Catalog {
             Err(e) => return Err(io_error(&linked, e)),
         }
         let reftable = common.join("reftable").is_dir();
-        let mut records: Vec<Vec<&str>> = vec![Vec::new()];
-        for field in listing.split('\0') {
-            if field.is_empty() {
-                records.push(Vec::new());
-            } else {
-                records.last_mut().expect("never empty").push(field);
-            }
-        }
-        // HEAD's branch and commit are in the open worktree's record. Without one to match (a
-        // bare repository, or inside a `.git` folder) git is asked (#309).
-        let open_record = records.iter().filter(|_| has_working_tree).find(|record| {
-            record.iter().any(|f| {
-                f.strip_prefix("worktree ")
-                    .is_some_and(|p| crate::worktree_folder::same_path(Path::new(p), &root))
-            })
-        });
-        let (current, head) = match open_record {
-            Some(record) => (
-                record
-                    .iter()
-                    .find_map(|f| f.strip_prefix("branch refs/heads/"))
-                    .map(str::to_owned),
-                record
-                    .iter()
-                    .find_map(|f| f.strip_prefix("HEAD "))
-                    .filter(|oid| !oid.bytes().all(|b| b == b'0'))
-                    .map(parse_oid)
-                    .transpose()?,
-            ),
-            None => (
-                git.query(&["symbolic-ref", "--quiet", "HEAD"])?
-                    .map(|s| s.trim_start_matches("refs/heads/").to_owned()),
-                git.query(&["rev-parse", "--verify", "HEAD^{commit}"])?
-                    .map(|s| parse_oid(&s))
-                    .transpose()?,
-            ),
-        };
+        let current = listing
+            .head_branch
+            .as_deref()
+            .map(|b| b.trim_start_matches("refs/heads/").to_owned());
         let mut worktrees = Vec::new();
         let mut heads = Vec::new();
-        for record in records.iter().filter(|r| !r.is_empty()) {
-            let Some(path) = record.iter().find_map(|f| f.strip_prefix("worktree ")) else {
-                return Err(Error::Invalid("Unexpected Git worktree listing.".into()));
-            };
-            let path = PathBuf::from(path);
-            let head = record
-                .iter()
-                .find_map(|f| f.strip_prefix("HEAD "))
-                .filter(|oid| !oid.bytes().all(|b| b == b'0'))
-                .map(parse_oid)
-                .transpose()?;
+        for listed in &listing.worktrees {
+            let path = PathBuf::from(&listed.path);
+            let head = listed.head;
             if let Some(head) = head {
                 heads.push((path.clone(), head));
             }
-            let branch = record
-                .iter()
-                .find_map(|f| f.strip_prefix("branch refs/heads/"))
+            let branch = listed
+                .branch
+                .as_deref()
+                .and_then(|b| b.strip_prefix("refs/heads/"))
                 .map(str::to_owned);
             if let Some(name) = &branch {
                 occupied.insert(name.clone(), path.clone());
                 uses.push((name.clone(), path.clone()));
             }
-            if record.contains(&"bare") {
+            if listed.bare {
                 continue;
             }
-            let locked = record.iter().find_map(|f| {
-                (*f == "locked")
-                    .then(String::new)
-                    .or_else(|| f.strip_prefix("locked ").map(str::to_owned))
-            });
+            let locked = listed.locked.clone();
             let admin = admins
                 .iter()
                 .find(|(p, _)| crate::worktree_folder::same_path(p, &path))
@@ -459,7 +391,7 @@ impl Catalog {
             });
             let picking = admin
                 .as_deref()
-                .and_then(|a| picking(&git, a, reftable, head));
+                .and_then(|a| picking(git, a, reftable, head));
             let reverting = admin
                 .as_deref()
                 .filter(|_| in_progress == Some("a revert"))
@@ -486,7 +418,7 @@ impl Catalog {
             .iter()
             .find(|w| w.open)
             .and_then(|w| w.reverting)
-            .and_then(|oid| crate::revert::stash_entry(&git, oid));
+            .and_then(|oid| crate::revert::stash_entry(git, oid));
         Ok(Self {
             locals,
             remotes,
@@ -494,7 +426,7 @@ impl Catalog {
             remote_names,
             occupied,
             current,
-            head,
+            head: listing.head,
             has_working_tree,
             worktrees,
             main: main_place,
