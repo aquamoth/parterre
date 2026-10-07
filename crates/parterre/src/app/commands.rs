@@ -179,6 +179,8 @@ impl ParterreApp {
             }
             Command::Close => self.close_folder(),
             Command::Export(format) => self.export = Some(format),
+            Command::Undo if text => inject(ctx, ViewportId::ROOT, vec![key_event(keys::UNDO)]),
+            Command::Redo if text => inject(ctx, ViewportId::ROOT, vec![key_event(keys::redo())]),
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
             // In the find field, the field's; else the selected commit's hash.

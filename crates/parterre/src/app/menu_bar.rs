@@ -429,11 +429,17 @@ fn graph_only(state: &State, mut entries: Vec<Entry>) -> Vec<Entry> {
     if state.front == Front::Graph {
         return entries;
     }
+    // Fetch is every window's: it fetches from the window in front.
     fn grey(entries: &mut [Entry]) {
         for entry in entries {
             match entry {
-                Entry::Item(item) => item.enabled = false,
-                Entry::Submenu(submenu) => submenu.enabled = false,
+                Entry::Item(item) if !matches!(item.command, Command::Fetch) => {
+                    item.enabled = false
+                }
+                Entry::Submenu(submenu) => {
+                    submenu.enabled = false;
+                    grey(&mut submenu.entries);
+                }
                 _ => {}
             }
         }
@@ -582,14 +588,20 @@ fn edit_menu(state: &State) -> Vec<Entry> {
     let p = state.platform;
     let mac = p == Platform::Mac;
     let graph = state.front == Front::Graph;
+    // In a text field, its own undo, as the keys would be without the menu bar.
+    let (undo, redo) = if state.text_focus && graph {
+        ("Undo", "Redo")
+    } else {
+        ("Undo move", "Redo move")
+    };
     let moves = vec![
-        item(p, "Undo move", Command::Undo)
+        item(p, undo, Command::Undo)
             .key(keys::UNDO)
-            .enabled(state.can_undo)
+            .enabled(state.can_undo || state.text_focus)
             .into(),
-        item(p, "Redo move", Command::Redo)
+        item(p, redo, Command::Redo)
             .key(keys::redo_on(p))
-            .enabled(state.can_redo)
+            .enabled(state.can_redo || state.text_focus)
             .into(),
     ];
     let mut entries = graph_only(state, moves);
@@ -836,7 +848,10 @@ mod tests {
             drag: DragModel::Adapt,
             direction: Direction::NewestTop,
             newer: None,
-            git: vec![Item::new("Show log", Command::ShowLog).into()],
+            git: vec![
+                Item::new("Show log", Command::ShowLog).into(),
+                Item::new("Fetch", Command::Fetch).into(),
+            ],
         }
     }
 
@@ -1007,6 +1022,18 @@ mod tests {
         assert!(!item_labelled(view, "Go to HEAD").enabled);
         let git = &find(&menus, Kind::Git).entries;
         assert!(!item_labelled(git, "Show log").enabled);
+        // Every window fetches; a submenu's items grey with it.
+        assert!(item_labelled(git, "Fetch").enabled);
+        let Some(Entry::Submenu(show)) = view
+            .iter()
+            .find(|e| matches!(e, Entry::Submenu(s) if s.label == "Show"))
+        else {
+            panic!("no Show");
+        };
+        assert!(show.entries.iter().all(|e| match e {
+            Entry::Item(i) => !i.enabled,
+            _ => true,
+        }));
         let layout = &find(&menus, Kind::Layout).entries;
         assert!(!item_labelled(layout, "Remember Moved Nodes").enabled);
     }

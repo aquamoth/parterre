@@ -34,7 +34,8 @@ parterre --help                    # all options
 
 The installers also add *Revision Graph* to the folder menu of Explorer, Nautilus, Dolphin
 and Nemo. `Ctrl+O` (`⌘O` on macOS) opens another folder, as does dropping a folder (or a file in
-it) on the window from a file manager, and *File › Open recent* lists the recent ones. On macOS,
+it) on the window from a file manager (on Windows, macOS and X11; not yet on Wayland, where winit
+0.30 takes no drops), and *File › Open recent* lists the recent ones. On macOS,
 drop a folder on parterre's Dock icon, choose parterre in Finder's *Open With*, or pick
 *Revision Graph* in the *Services* (or *Quick Actions*) of a folder's menu in Finder.
 
