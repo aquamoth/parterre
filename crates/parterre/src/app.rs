@@ -929,6 +929,12 @@ impl ParterreApp {
             .or_else(|| self.recent.iter().next());
         if let Some(dir) = near.and_then(Path::parent) {
             dialog = dialog.set_directory(dir);
+        } else if cfg!(target_os = "macos")
+            && let Some(home) = std::env::home_dir()
+        {
+            // macOS's panel would start in Documents, where repositories seldom are, and
+            // its sidebar lacks the home folder (#338).
+            dialog = dialog.set_directory(home);
         }
         dialog
     }
