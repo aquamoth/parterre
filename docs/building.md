@@ -76,7 +76,7 @@ Windows was installed.
 Release builds use the GUI subsystem (no console window), and git is started with
 `CREATE_NO_WINDOW` so no console flashes. To still show `--help`, errors and `--export` output
 in a terminal, the program attaches to its parent's console at startup
-(`crates/parterre/src/console.rs`, the workspace's only `unsafe`). It releases the console
+(`crates/parterre/src/console.rs`, one of the few places with `unsafe`). It releases the console
 before opening an interactive window, so closing the terminal doesn't close the window.
 Shells don't wait for GUI programs, so the output may appear after the next prompt; press
 Enter to get a fresh prompt. Debug builds are ordinary console programs.

@@ -1,4 +1,5 @@
-//! The look of menus (the ☰ menu and the canvas's context menu) and of the toolbar's popovers.
+//! The look of menus (the menu bar's on Windows and Linux, and the canvas's context menu) and of
+//! the toolbar's popovers.
 //!
 //! egui's own menus are compact, with a small corner radius and a hard, offset shadow. These
 //! follow current desktop menus instead (GNOME, Chrome): rounder, a soft shadow, roomy rows
@@ -104,7 +105,8 @@ pub enum Mark {
     Radio(bool),
 }
 
-const MARK: f32 = 16.0;
+/// The room left of a menu item's label for its mark.
+pub const MARK: f32 = 16.0;
 
 /// A menu item: room on the left for a check mark or radio dot, so that the labels of a menu
 /// line up, and `shortcut` on the right.
@@ -126,20 +128,46 @@ pub fn item(ui: &mut Ui, label: impl Into<WidgetText>, shortcut: &str, mark: Mar
     laid_out.response
 }
 
-/// An item opening a submenu, lined up with [`item`]s, with a chevron on the right.
-pub fn submenu(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui)) {
-    let button = Button::new((Atom::custom(Id::new("menu-mark"), Vec2::splat(MARK)), label));
-    submenu_button(ui, button, content);
+/// An item opening a submenu, lined up with [`item`]s, with a chevron on the right. `open`
+/// opens or closes it, as the keyboard does in the menu bar; `None` leaves it to the pointer.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn submenu(
+    ui: &mut Ui,
+    label: impl Into<WidgetText>,
+    open: Option<bool>,
+    content: impl FnOnce(&mut Ui),
+) {
+    let button = Button::new((
+        Atom::custom(Id::new("menu-mark"), Vec2::splat(MARK)),
+        label.into(),
+    ));
+    submenu_button(ui, button, open, content);
 }
 
 /// An item opening a submenu, lined up with plain buttons (a node's menu), with a chevron on
 /// the right.
 pub fn plain_submenu(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui)) {
-    submenu_button(ui, Button::new(label), content);
+    submenu_button(ui, Button::new(label), None, content);
 }
 
-fn submenu_button(ui: &mut Ui, button: Button, content: impl FnOnce(&mut Ui)) {
+fn submenu_button(ui: &mut Ui, button: Button, open: Option<bool>, content: impl FnOnce(&mut Ui)) {
+    use egui::containers::menu::{MenuState, SubMenu};
     const ARROW: f32 = 12.0;
+    if let Some(open) = open {
+        // The id egui's submenu button gives itself, next.
+        let submenu = SubMenu::id_from_widget_id(ui.next_auto_id());
+        if open {
+            // Shown, as far as egui's menu state knows, so that it isn't closed at once.
+            MenuState::mark_shown(ui.ctx(), submenu);
+        }
+        MenuState::from_ui(ui, |state, _| {
+            if open {
+                state.open_item = Some(submenu);
+            } else if state.open_item == Some(submenu) {
+                state.open_item = None;
+            }
+        });
+    }
     let button = button.right_text(Atom::custom(Id::new("menu-arrow"), Vec2::splat(ARROW)));
     let (response, _) = egui::containers::menu::SubMenuButton::from_button(button)
         .ui(ui, |ui| fit_window(ui, content));

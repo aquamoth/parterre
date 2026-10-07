@@ -33,14 +33,18 @@ parterre --help                    # all options
 ```
 
 The installers also add *Revision Graph* to the folder menu of Explorer, Nautilus, Dolphin
-and Nemo. `Ctrl+O` opens another folder, and the ☰ menu lists the recent ones.
+and Nemo. `Ctrl+O` (`⌘O` on macOS) opens another folder, as does dropping a folder (or a file in
+it) on the window from a file manager (on Windows, macOS and X11; not yet on Wayland, where winit
+0.30 takes no drops), and *File › Open recent* lists the recent ones. On macOS,
+drop a folder on parterre's Dock icon, choose parterre in Finder's *Open With*, or pick
+*Revision Graph* in the *Services* (or *Quick Actions*) of a folder's menu in Finder.
 
 ## The graph
 
 parterre shows the commits that have a branch, a tag or a worktree on them, and leaves out the
 commits in between, as TortoiseGit's revision graph does. *Labelled forks* adds the commits
 where their histories fork apart: a branch that merged its base back in forks off at the latest
-such merge, as if rebased. *Branchings and merges* (in the ☰ menu) adds every fork point and
+such merge, as if rebased. *Branchings and merges* (in the *View* menu) adds every fork point and
 merge, as TortoiseGit's "Show branchings and merges" does, and *All commits* shows everything.
 Hover an edge to list the commits collapsed into it; click it to keep it highlighted while you
 look around.
@@ -49,33 +53,41 @@ look around.
 |---|---|
 | Drag a node | Move it, with the rest of the selection it belongs to. In *Adapt*, the graph gives way and keeps children above their parents. |
 | `1` / `2` / `3` | Drag mode *Adapt* (the graph gives way) / *Free* (nothing else moves) / *Subtree* (take along everything that grows out of it) |
-| Click, `Ctrl`+click, `Shift`+click a node | Select it / toggle it / add it to the selection |
+| Click, `Ctrl`+click (`⌘`-click on macOS), `Shift`+click a node | Select it / toggle it / add it to the selection |
 | `Shift`+drag the background | Select the nodes in a rectangle |
 | Hover / click an edge | List the commits collapsed into it / keep it highlighted while you look around |
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo a move |
+| `Ctrl+Z` / `Ctrl+Y` on Windows, `Ctrl+Shift+Z` on Linux (`⌘Z` / `⇧⌘Z` on macOS) | Undo / redo a move |
 | Drag the background, wheel, Shift+wheel | Pan |
-| Ctrl+wheel, pinch, `+` `-` `0` | Zoom |
-| Ctrl+wheel, pinch anywhere but over the graph | Text size of every window (also *Settings → Appearance*, and `Ctrl`+`+` `-` `0` in the log, compare, diff, blame and settings windows). The graph keeps its own zoom. |
-| `F`, double-click the background | Fit the whole graph |
-| `Home` / `H` | Go to HEAD |
-| `Ctrl+F`, then `Enter` / `F3` | Find branches, tags, hashes, subjects or authors |
+| Ctrl+wheel (`⌘`+wheel on macOS), pinch, `Ctrl`+`+` `-` `0` (`⌘+` `⌘−` `⌘0`) | Zoom |
+| Ctrl+wheel (`⌘`+wheel), pinch anywhere but over the graph | Text size of every window (also *Settings → Appearance*, and `Ctrl`+`+` `-` `0` (`⌘+` `⌘−` `⌘0`) in the log, compare, diff, blame and settings windows). The graph keeps its own zoom. |
+| `F`, double-click the background | Zoom to fit the whole graph |
+| `H` | Go to HEAD |
+| `Ctrl+F` (`⌘F` on macOS), then `Enter` / `Shift+Enter` | Find branches, tags, hashes, subjects or authors |
+| `F3` / `Shift+F3` (`⌘G` / `⇧⌘G` on macOS) | Next / previous search hit, in every window that finds |
 | `L`, double-click a node | Show log: the node's history, or with two nodes selected the commits between them (first..second) |
-| `Ctrl+C` | Copy the selected commit's hash |
+| `Ctrl+C` (`⌘C` on macOS) | Copy the selected commit's hash |
 | Click a pull request's number | Open the pull request on GitHub |
+| The *Git* menu | On the selected node: show log; compare with HEAD, the working tree or the upstream (with two nodes, with each other); go to, add or delete a worktree; switch to it, set an upstream, create, reset to or delete a branch; merge, cherry-pick or rebase; fetch, pull or push |
 | Right-click a node | Show log; compare; create, switch to or delete a branch; rebase, merge, cherry-pick or reset; add, go to or delete a worktree; open its pull requests or its worktree's folder; copy its hash, ref names or folder; select its subtree; return it to the layout |
-| `R` | Return all nodes to the layout |
 | `Esc` | Clear the selection |
-| `F5` | Reload the repository (it also reloads by itself when branches, tags or HEAD change) |
-| `Ctrl+O` / `Ctrl+W` | Open / close a folder |
-| `Ctrl+,` | Settings |
+| `F5`, `Ctrl+R` (`⌘R` on macOS) | Reload the repository (it also reloads by itself when branches, tags or HEAD change), in every window that reloads |
+| `Ctrl+F5` (`⇧⌘F` on macOS) | Fetch every remote, from any window |
+| `Ctrl+O` / `Ctrl+W` (`⌘O` / `⌘W` on macOS) | Open / close a folder |
+| `Ctrl+,` (`⌘,` on macOS) | Settings |
+| `Esc` (`⌘W` on macOS) | Close the log, compare, diff, blame or settings window |
+| `Alt`+letter, `F10` or `Alt` alone (`⌃F2`, `⇧⌘/` on macOS) | The menu bar from the keyboard: `Alt` with a menu's underlined letter opens it and a letter in it chooses an item; the arrow keys move, `Enter` chooses, `Esc` closes. On macOS, `⌃F2` reaches the menu bar and `⇧⌘/` searches every menu for a command by name |
 
 When you drag a node, edges at moved nodes are routed afresh through the gaps between nodes, so
 they lose bends they no longer need and go around nodes that are now in the way. With
 *Remember moved nodes* on (*Settings → Dragging*), parterre keeps your arrangement for each
 repository; new commits keep their place beside a moved parent.
 
-The toolbar holds what you use every day, the ☰ menu has all of that and more, and *Settings*
-the rest. The graph shows every change while the settings are open. Besides TortoiseGit's
+The toolbar holds what you use every day, the menu bar has all of that and more, and *Settings*
+the rest. The menu bar is *File*, *Edit*, *View*, *Git*, *Layout* and *Help*, above the toolbar
+on Windows and Linux; on macOS it is the system's, with *parterre* (Settings, *Install Command
+Line Tool…*) and *Window* besides. Its commands act on the window in front: with the log in
+front, *Find* finds in the log and *Close Window* closes it, and what only the graph does is
+greyed out. The graph shows every change while the settings are open. Besides TortoiseGit's
 options (branchings and merges, local and remote branches, tags, arrows towards merges, zoom,
 the overview map and export), there are:
 
@@ -101,7 +113,7 @@ and it opens as wide as you left it last time.
 with a folder, first on its commit, in the graph and in the log, in cyan: the branches they
 have checked out, even where hidden, and detached ones with the folder's name in italics. The
 open worktree's branch stays red, as HEAD. A worktree whose folder is gone gets a crossed-out
-folder and a greyer fill. From a node's menu:
+folder and a greyer fill. From a node's menu (or the *Git* menu, on the selected node):
 
 - *Add worktree here…* makes a new worktree at the commit, on a new branch that can track a
   remote one, in a folder next to the repository's (`<repo>.worktrees/` unless you pick
@@ -182,8 +194,8 @@ log's branch labels ↑3 ↓2, and *Compare → Upstream* compares the two. On b
 
 *Show log* opens a window listing a node's history, or the commits between two selected nodes,
 like TortoiseGit's log: a graph column, the selected commit's message and the files it changed,
-which you can sort and filter. The arrow keys move through the commits, `Ctrl+F` finds, `F5`
-reloads and `Esc` closes it. Right-click a row for the same actions as on a node, and to
+which you can sort and filter. The arrow keys move through the commits, `Ctrl+F` (`⌘F` on
+macOS) finds, `F5` or `Ctrl+R` (`⌘R`) reloads and `Esc` (`⌘W`) closes it. Right-click a row for the same actions as on a node, and to
 revert the commit or copy its subject.
 
 Four layouts arrange its panes: stacked as in TortoiseGit, side by side, details and files
@@ -194,16 +206,17 @@ the dividers between the panes are remembered for each layout.
 
 Double-click a changed file, or select some (`Ctrl`+click, `Shift`+click) and press `Enter`, to
 see its diff in a window of its own; several can be open at once. The diff is side by side or
-unified (`Ctrl+D`), with changed words marked, unchanged stretches folded (click a fold to open
+unified (`Ctrl+D`, `⌘D` on macOS), with changed words marked, unchanged stretches folded (click a fold to open
 it), an overview of the changes on the right, and long lines that scroll sideways. Code is
 coloured by syntax, as in VS Code, for Markdown, Java, C#, Rust, TypeScript, Python, SQL,
 Protocol Buffers and a dozen more languages, in the blame window too; the palette button in
 either toolbar turns it off, for both, as does *Syntax colour* in *Settings → Appearance*.
-`Ctrl+Down` / `Ctrl+Up` (or `F7` / `Shift+F7`) move between changes, and `Ctrl+F` finds. The
+`Ctrl+Down` / `Ctrl+Up` (`⌘↓` / `⌘↑`, or `F7` / `Shift+F7`) move between changes, and `Ctrl+F`
+(`⌘F`) finds. The
 toolbar also picks how changed words are found and whether whitespace counts.
 
 Drag over the old or the new text (double-click for a word, `Shift`+click to extend, `Ctrl+A`
-for all) or click line numbers for whole lines, then `Ctrl+C` copies it as it is in the file,
+(`⌘A`) for all) or click line numbers for whole lines, then `Ctrl+C` (`⌘C`) copies it as it is in the file,
 tabs kept. In the unified form you choose one version: the one of the line you start on (a
 removed line, or the old numbers, for the old version; `Ctrl` on an unchanged line for the old
 one too), shown by its line number lighting up on the row under the pointer. Lines of the other
@@ -217,8 +230,9 @@ what changed instead.
 Comparing two commits lists the files they differ in, in a window with the same table;
 double-click one for its diff. Right-click a node for *Compare* › *HEAD*, *Working tree* (your
 uncommitted changes, staged or not; `F5` lists them again), *Upstream*, or with two nodes
-selected *Selected revisions*. To compare commits far apart, *Mark for comparison* one (from the
-node menu or a row in the log) and pick *Compare with marked* on the other, from any log. A
+selected *Selected revisions* (the *Git* menu has them too). To compare commits far apart,
+*Mark for comparison* one (from the node menu or a row in the log) and pick *Compare with
+marked* on the other, from any log. A
 range log's *Compare files* compares its two ends. Where the two histories forked, the window's
 *Since common ancestor* shows only what the right-hand side changed since then, as a pull request
 does (the working tree forks where HEAD does). *Swap sides* turns a comparison of two commits
@@ -235,9 +249,11 @@ the commit under the pointer.
 
 Right-click a line to *Blame previous revision* (the file as it was before that commit, in a new
 window, at that line), *Show changes* (that commit's diff of the file, at the line), *Show log*
-from the commit, or copy its hash. Drag or `Shift`+click to choose lines, `Ctrl+C` to copy them.
+from the commit, or copy its hash. Drag or `Shift`+click to choose lines, `Ctrl+C` (`⌘C` on
+macOS) to copy them. `Ctrl+G` (`⌃G`) goes to a line.
 The toolbar says whether whitespace changes and moved or copied lines count (`git blame -w`,
-`-M`, `-C`). Blaming the working tree marks the lines you haven't committed; `F5` blames again.
+`-M`, `-C`). Blaming the working tree marks the lines you haven't committed; `F5` or `Ctrl+R` (`⌘R`) blames
+again.
 
 Below the text, the **history pane** lists the commits that changed the file up to the blamed
 revision, like the log: graph, hash (in its lines' shade), subject, author, date. Commits from
@@ -250,7 +266,7 @@ double-click), *Show log* or copy its hash. Drag the divider to resize the pane,
 
 ## Settings
 
-`Ctrl+,` opens the settings; the graph follows every change while they are open.
+`Ctrl+,` (`⌘,` on macOS) opens the settings; the graph follows every change while they are open.
 
 - **Per repository:** filters are kept for each repository, and shared by its worktrees.
 - **Shared with a team:** *Settings → Manage* exports parterre's own settings, or a
@@ -272,5 +288,5 @@ Colours follow TortoiseGit:
 | Pull requests | blue, grey for drafts |
 | Commits without refs | pale lavender, showing an 8-digit hash |
 
-Colours chosen per branch name replace these, except for the current branch. *Legend* in the
-☰ menu shows them all.
+Colours chosen per branch name replace these, except for the current branch. *Help › Legend*
+shows them all.

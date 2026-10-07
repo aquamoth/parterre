@@ -68,6 +68,7 @@ use super::diff_window::{
 };
 use super::log_window::{self, Bar, DIVIDER, HEADING, cell, divider};
 use super::{Details, ParterreApp};
+use crate::keys;
 use crate::settings::{BlameWindowSettings, Settings};
 use crate::text_size;
 use crate::theme::Palette;
@@ -909,29 +910,29 @@ impl BlameWindow {
         }
     }
 
-    /// Ctrl+F finds, F3 and Shift+F3 go to the next and previous place, and Esc in the find
-    /// field leaves it; Ctrl+G asks for a line to go to, and Esc then closes the popup;
-    /// elsewhere Esc closes. Ctrl+A chooses every line; `Up`/`Down` step through the history
+    /// Ctrl+F finds, F3 and Shift+F3 (⌘G and ⇧⌘G on macOS) go to the next and previous place,
+    /// and Esc in the find field leaves it; Ctrl+G (⌃G on macOS) asks for a line to go to, and
+    /// Esc then closes the popup; elsewhere Esc (⌘W on macOS) closes. Ctrl+A chooses every line; `Up`/`Down` step through the history
     /// pane wherever the pointer is, while it shows. While the find field or the popup has the
     /// focus, other keys are its own.
     fn handle_keys(&mut self, ui: &Ui) {
         let id = self.find_id();
         // egui drops the focus on Esc before the frame starts.
         let in_find = ui.memory(|m| m.has_focus(id) || m.had_focus_last_frame(id));
-        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
-            self.open_find();
-        }
-        // Shift+F3 first: a plain F3 would match it too.
+        // The previous place first: egui takes F3 for Shift+F3 too, and ⌘G for ⇧⌘G.
         let (previous, next) = ui.input_mut(|i| {
             (
-                i.consume_key(Modifiers::SHIFT, Key::F3),
-                i.consume_key(Modifiers::NONE, Key::F3),
+                keys::find_previous().consume(i),
+                keys::find_next().consume(i),
             )
         });
         if previous || next {
             self.find_step(next);
         }
-        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::G)) {
+        if ui.input_mut(|i| keys::FIND.consume(i)) {
+            self.open_find();
+        }
+        if ui.input_mut(|i| keys::go_to_line().consume(i)) {
             self.open_go_to();
         }
         if self.go_to.open {
@@ -967,7 +968,7 @@ impl BlameWindow {
                 self.step(by);
             }
         }
-        if ui.input(|i| i.key_pressed(Key::Escape)) {
+        if ui.input_mut(|i| keys::close_window().consume(i)) {
             self.closed = true;
         }
     }
@@ -1095,7 +1096,8 @@ impl BlameWindow {
         widgets::syntax_button(ui, syntax);
         if self.spec.reads_working_tree() {
             ui.add_space(14.0);
-            ui.label(RichText::new("F5 blames again").size(12.0).color(weak));
+            let text = format!("{} blames again", keys::reload_label());
+            ui.label(RichText::new(text).size(12.0).color(weak));
         }
 
         let find = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1221,7 +1223,7 @@ impl BlameWindow {
             width,
             hint: "Find in the file",
             count: &count,
-            keys: ["Shift+Enter, Shift+F3", "Enter, F3", "Esc"],
+            keys: &keys::find_field_keys(),
             focus,
             select: focus,
         };
@@ -1991,6 +1993,7 @@ impl BlameWindow {
         }
         let mut requests = Vec::new();
         ctx.show_viewport_immediate(id, builder, |ui, class| {
+            super::commands::window_begin(ui);
             self.poll(ui.ctx());
             if class != egui::ViewportClass::EmbeddedWindow {
                 if self.title_theme != window_theme {
@@ -2000,12 +2003,12 @@ impl BlameWindow {
                             .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
                     }
                 }
-                // F5 blames again, Ctrl+F5 fetches, as in the main window.
-                let (close, size, (reload, fetch)) = ui.input(|i| {
+                // Reload blames again, and fetch, as in the main window.
+                let (close, size, (reload, fetch)) = ui.input_mut(|i| {
                     (
                         i.viewport().close_requested(),
                         i.viewport().inner_rect.map(|r| r.size()),
-                        super::f5_pressed(i),
+                        crate::keys::reload_and_fetch(i),
                     )
                 });
                 if let Some(size) = size
@@ -3413,10 +3416,10 @@ mod tests {
         frame(&ctx, &mut w, vec![key(Key::Enter)]);
         assert_eq!(w.find.current, Some(1));
         assert!(has_find_focus(&ctx, &w));
-        frame(&ctx, &mut w, vec![key(Key::F3)]);
-        frame(&ctx, &mut w, vec![key(Key::F3)]);
+        frame(&ctx, &mut w, vec![crate::keys::find_next().event()]);
+        frame(&ctx, &mut w, vec![crate::keys::find_next().event()]);
         assert_eq!(w.find.current, Some(0));
-        frame(&ctx, &mut w, vec![shift(Key::F3)]);
+        frame(&ctx, &mut w, vec![crate::keys::find_previous().event()]);
         assert_eq!(w.find.current, Some(2));
         let held = egui::Event::ModifiersChanged;
         frame(
@@ -3440,7 +3443,7 @@ mod tests {
         // F3 works outside the field too.
         w.find.current = None;
         ctx.memory_mut(|m| m.surrender_focus(w.find_id()));
-        frame(&ctx, &mut w, vec![key(Key::F3)]);
+        frame(&ctx, &mut w, vec![crate::keys::find_next().event()]);
         assert_eq!(w.find.current, Some(0));
     }
 
@@ -3506,7 +3509,7 @@ mod tests {
         assert!(!has_find_focus(&ctx, &w));
         assert_eq!(w.find.query, "");
         assert!(w.find.matches.is_empty());
-        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        frame(&ctx, &mut w, vec![crate::keys::close_window().event()]);
         assert!(w.closed);
     }
 
@@ -3562,7 +3565,7 @@ mod tests {
 
     /// Ctrl+G, a frame for the popup to size itself, then `text` typed into its field.
     fn go_to(ctx: &egui::Context, w: &mut BlameWindow, text: &str) {
-        frame(ctx, w, vec![ctrl(Key::G)]);
+        frame(ctx, w, vec![crate::keys::go_to_line().event()]);
         frame(ctx, w, Vec::new());
         frame(ctx, w, vec![egui::Event::Text(text.into())]);
     }
@@ -3670,13 +3673,13 @@ mod tests {
         assert!(!w.closed);
         assert!(!has_go_to_focus(&ctx, &w));
         assert_eq!(span(&w), None);
-        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        frame(&ctx, &mut w, vec![crate::keys::close_window().event()]);
         assert!(w.closed);
 
         // Not before there are lines to go to.
         let mut w = window();
         w.load = Load::Failed("no".into());
-        frame(&ctx, &mut w, vec![ctrl(Key::G)]);
+        frame(&ctx, &mut w, vec![crate::keys::go_to_line().event()]);
         assert!(!w.go_to.open);
     }
 

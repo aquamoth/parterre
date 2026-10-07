@@ -25,7 +25,8 @@ This builds the debug binary and makes a demo repository with a change to a file
 worktree. Then it saves one PNG for each of these into `/tmp/shots`, in about 15 seconds:
 
 - the main window: as opened, fitted, after dragging a node, and while searching
-- the ☰ menu and each of its submenus, and the menu while a newer release is out
+- each menu of the menu bar (a node selected for the Git menu), View › Show, and Help while a
+  newer release is out
 - the toolbar popovers
 - the context menus of a node and of the canvas, with their submenus
 - every settings page, and Privacy with `DO_NOT_TRACK` set
@@ -79,10 +80,11 @@ for them.
 line:
 
 ```text
-# Branch off a tag from its context menu.
-right-click node:v0.2.0
-screenshot context-menu.png popup
-click "Create branch here…"
+# Branch off a tag from the Git menu.
+click node:v0.2.0
+click "Git"
+screenshot git-menu.png popup
+click "Create branch at v0.2.0…"
 type "feature/demo"
 screenshot create-branch.png window
 click "Create"
@@ -106,6 +108,8 @@ printf 'open about\nscreenshot about.png window\n' | parterre ~/repo --script -
 | `wait SECONDS` | Waits, e.g. for the physics to settle after a drag |
 | `wait-for T` | Waits until `T` shows |
 | `open WHAT` | Opens a window or dialog directly, see [below](#open) |
+| `drag-file PATH` | Drags a file or folder from elsewhere over the window, until `drop-file` |
+| `drop-file` | Drops it, as from a file manager |
 | `screenshot FILE [window\|popup]` | Saves a PNG: the whole window, only the topmost window (a dialog), or only the open menus and popovers |
 
 `#` starts a comment. Quoted text may hold `\"` and `\\`.
@@ -117,7 +121,8 @@ Pointer steps aim where a person would:
 - `"text"`: text on screen. The topmost exact match wins, else the topmost text containing it.
 - `node:REF`: the node of a branch, tag or hash prefix. It must be in view.
 - `canvas`: the empty spot of the graph farthest from any node.
-- `toolbar:menu` (or `filter`, `zoom`, `drag`): the toolbar's menu and popover buttons.
+- `toolbar:filter` (or `zoom`, `drag`): the toolbar's popover buttons. A menu of the menu bar is
+  clicked by its title, `click "File"`.
 - `X,Y`: a point, in points from the window's top left.
 
 A step waits up to 15 seconds for its target. If the target never shows, the run fails. The
@@ -131,10 +136,12 @@ takes a branch, a tag or a hash prefix. A name that doesn't exist fails the run.
 
 | `open …` | Shows |
 | --- | --- |
-| `menu`, `filter`, `zoom`, `drag` | The ☰ menu or a toolbar popover |
+| `menu:NAME` | A menu of the menu bar by its title, e.g. `menu:git` (Windows and Linux, where parterre draws it) |
+| `filter`, `zoom`, `drag` | A toolbar popover |
 | `settings`, `settings:PAGE` | The settings, at `appearance`, `branchcolours`, `graph`, `filters`, `dragging`, `privacy`, `advanced` or `manage` |
 | `export-settings:FILE`, `import-settings:FILE` | The settings' Manage page, as if FILE had been picked to export to (written at once) or import from (the dialog asking what to import) |
 | `about`, `shortcuts`, `legend` | About parterre, Keyboard and mouse, the legend |
+| `new-release` | The dialog telling of a newer release, with `--newer-release` |
 | `first-run` | The first-run prompt about usage statistics and crash reports, as at the first start |
 | `log:REF`, `log:FIRST..SECOND` | The log of a commit, or of a range (as if the nodes were selected in that order) |
 | `compare:FIRST..SECOND` | The compare window; `SECOND` may be `WORKING_TREE` |
@@ -157,6 +164,7 @@ Everything else is done as a person would do it:
 - select a node with `click node:REF`;
 - mark one for comparison through its context menu: `right-click node:REF`, `hover "Compare"`,
   `click "Mark for comparison"`;
+- use the Git menu on a node: `click node:REF`, `click "Git"`, `click "Create branch at REF…"`;
 - drag a node with `drag node:REF DX,DY`, then `wait 1.5` for the physics.
 
 ## Recordings
@@ -202,7 +210,7 @@ runs start from the defaults otherwise.
 | `--log-layout a\|b\|c\|d` | The log window's layout: `stacked`, `side-by-side`, `details-below`, `files-right` |
 | `--diff-form side\|unified`, `--diff-words`, `--diff-whitespace`, `--diff-unfolded` | The diff window's settings |
 | `--no-syntax-colour` | Plain text in the diff and blame windows, as their toolbar button gives |
-| `--newer-release VERSION` | A newer release out, e.g. `0.7.0`: the bold blue ☰ icon and *Download 0.7.0* in the menu |
+| `--newer-release VERSION` | A newer release out, e.g. `0.7.0`: the blue *Help* menu and *Download 0.7.0* in it (on macOS in the parterre menu, and a badge on the Dock icon). The dialog telling of it shows only when opened (`open new-release`) |
 
 Scripted runs never ask GitHub for newer releases: `--newer-release` is the only answer they
 get. *Download* does what it does for the build being run, which for one without a channel

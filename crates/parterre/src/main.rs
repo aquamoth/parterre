@@ -13,6 +13,9 @@ mod file_dialog;
 mod file_manager;
 mod frame_pacing;
 mod icon;
+mod keys;
+#[cfg(target_os = "macos")]
+mod macos;
 mod menu;
 mod raster;
 mod record;
@@ -434,6 +437,9 @@ fn main() -> ExitCode {
     }
     automation.record = record.map(|(path, format)| record::Recorder::new(path, format));
     let overrides = move |s: &mut settings::Settings| apply_cli(&cli, s);
+    // Before the window: Finder's request to open a folder comes as parterre starts (#336).
+    #[cfg(target_os = "macos")]
+    macos::listen();
     let result = eframe::run_native(
         settings::APP_ID,
         options,

@@ -97,10 +97,22 @@ crates/parterre-telemetry
 crates/parterre        the binary (eframe/egui)
   build.rs             asks git for the commit and sets the version string
   main.rs              CLI (clap), window setup
+  keys.rs              one key per action and platform, and its label (⌘O, Ctrl+O)
+  macos.rs             folders opened from Finder and the Dock, the Services menu, the
+                       clipboard, Install Command Line Tool, the input method (macOS)
   version.rs           release/dev version strings (runs in build.rs; see docs/releasing.md)
   app.rs               canvas interaction, search, status bar, windows, opening folders
-    toolbar.rs         the toolbar, its popovers and the ☰ menu
-    updates.rs         the update check as the settings say, and *Download* in the ☰ menu
+    toolbar.rs         the toolbar and its popovers
+    menu_bar.rs        the menu bar (#339): the menus as a tree of entries built from the
+                       app's state each frame, in each platform's case
+      bar.rs           drawn by egui above the toolbar (Windows, Linux)
+      macos.rs         the system's menu bar, built with AppKit (macOS)
+    commands.rs        what the menu bar's items do, on the window in front
+    git_menu.rs        the Git menu: fixed items on the selected node, from branches.rs's
+                       offers
+    file_drop.rs       a folder dropped on the window opens
+    updates.rs         the update check as the settings say, *Download*, and the dialog telling
+                       of each new release once
     privacy.rs         the first-run prompt, and the usage statistics and crash reports as
                        the user's choices say, told of input and repositories opened;
                        Settings › Privacy shows them

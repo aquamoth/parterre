@@ -10,9 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use eframe::egui::text::{LayoutJob, TextFormat, TextWrapping};
-use eframe::egui::{
-    self, FontId, Id, Key, RichText, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
-};
+use eframe::egui::{self, FontId, Id, RichText, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 use parterre_core::blame::BlameSpec;
 use parterre_core::compare::{Comparison, WorkingTree};
 use parterre_core::conflicts::Resolve;
@@ -25,6 +23,7 @@ use parterre_core::{Oid, Repo};
 use super::file_table::{DiffQueue, FileTable, Lister, Listing, RowPick, file_folder};
 use super::log_window::{Colors, badge, badges, colors};
 use super::{Opener, ParterreApp};
+use crate::keys;
 use crate::settings::CompareWindowSettings;
 use crate::text_size;
 use crate::theme::Palette;
@@ -165,9 +164,11 @@ impl CompareWindow {
         format!("{name} – Compare")
     }
 
-    /// Esc closes, while no text field has the keyboard.
+    /// Esc (⌘W on macOS) closes, while no text field has the keyboard.
     fn handle_keys(&mut self, ui: &Ui) {
-        if !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(Key::Escape)) {
+        if !ui.ctx().egui_wants_keyboard_input()
+            && ui.input_mut(|i| keys::close_window().consume(i))
+        {
             self.view = None;
         }
     }
@@ -261,7 +262,9 @@ impl CompareWindow {
                         format!("from {}", base.short(abbrev))
                     }
                     Some(None) => "No common ancestor".to_owned(),
-                    _ if comparison.reads_working_tree() => "F5 lists the files again".to_owned(),
+                    _ if comparison.reads_working_tree() => {
+                        format!("{} lists the files again", keys::reload_label())
+                    }
                     _ => String::new(),
                 };
                 ui.label(RichText::new(note).size(12.0).color(weak));
@@ -461,6 +464,7 @@ impl ParterreApp {
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
         }
         ctx.show_viewport_immediate(id, builder, |ui, class| {
+            super::commands::window_begin(ui);
             let embedded = class == egui::ViewportClass::EmbeddedWindow;
             if !embedded {
                 if self.compare.title_theme != self.window_theme {
@@ -470,12 +474,12 @@ impl ParterreApp {
                             .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
                     }
                 }
-                // F5 reloads, Ctrl+F5 fetches, as in the main window.
-                let (close, size, (reload, fetch)) = ui.input(|i| {
+                // Reload and fetch, as in the main window.
+                let (close, size, (reload, fetch)) = ui.input_mut(|i| {
                     (
                         i.viewport().close_requested(),
                         i.viewport().inner_rect.map(|r| r.size()),
-                        super::f5_pressed(i),
+                        crate::keys::reload_and_fetch(i),
                     )
                 });
                 if let Some(size) = size

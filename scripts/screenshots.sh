@@ -57,12 +57,14 @@ shot main-fit full "" --fit
 shot main-drag full $'drag node:feature/search 250,60\nhover canvas\nwait 1.5'
 shot search full $'key Ctrl+F\ntype "login"'
 
-shot menu popup "click toolbar:menu"
-for sub in "Recent folders" Export Show Filter Zoom Drag "Newest commits"; do
-    name=$(tr 'A-Z ' 'a-z-' <<<"$sub")
-    shot "menu-$name" popup $'click toolbar:menu\nhover "'"$sub"'"'
+# The menu bar, each menu and submenu, a node selected for the Git menu.
+for menu in File Edit View Git Layout Help; do
+    name=$(tr 'A-Z' 'a-z' <<<"$menu")
+    shot "menu-$name" popup $'click node:feature/dark-mode\nclick "'"$menu"'"'
 done
-shot menu-update popup "click toolbar:menu" --newer-release 9.9.9
+shot menu-view-show popup $'click "View"\nhover "Show"'
+shot menu-update popup 'click "Help"' --newer-release 9.9.9
+shot new-release window "open new-release" --newer-release 9.9.9
 for popover in filter zoom drag; do
     shot "popover-$popover" popup "click toolbar:$popover"
 done
@@ -108,7 +110,7 @@ shot force-push window $'open push:feature/reports\nwait-for "Force push"'
 shot delete-remote-branch window $'open delete-remote-branch:origin/feature/search\nwait 0.5'
 git -C "$repo" worktree add -q "$work/demo-dark-mode" feature/dark-mode
 SHOT_REPO=$work/demo-dark-mode shot merge-into window \
-    $'right-click node:main\nclick "Merge feature/dark-mode into main…"\nwait 0.5'
+    $'click node:main\nclick "Git"\nclick "Merge feature/dark-mode into main…"\nwait 0.5'
 # Several worktrees at once, one of them with a commit nothing else reaches; last, as it adds
 # a node to the graph.
 git -C "$repo" worktree add -q --detach "$work/demo-idea" v0.3.0

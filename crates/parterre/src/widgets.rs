@@ -31,7 +31,12 @@ pub struct Tones {
 }
 
 pub fn tones(ui: &Ui) -> Tones {
-    if ui.visuals().dark_mode {
+    tones_of(ui.visuals().dark_mode)
+}
+
+/// [`tones`] of the dark or the light theme.
+pub fn tones_of(dark: bool) -> Tones {
+    if dark {
         Tones {
             on_bg: Color32::from_rgb(0x21, 0x3a, 0x57),
             on_fg: Color32::from_rgb(0x8e, 0xc2, 0xff),
@@ -326,19 +331,6 @@ pub fn popover_button(ui: &mut Ui, id: Id, glyph: Option<Glyph>, on: bool) -> Re
     response
 }
 
-/// The ☰ menu's [`popover_button`], its icon bold and blue while `marked`: a newer release is
-/// out (#258).
-pub fn menu_button(ui: &mut Ui, id: Id, marked: bool) -> Response {
-    if !marked {
-        return popover_button(ui, id, Some(glyphs::MENU), false);
-    }
-    let (rect, response) = popover_button_area(ui, id, Vec2::splat(BUTTON), false);
-    let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
-    let accent = tones(ui).accent;
-    paint_glyph_weighted(ui.painter(), icon, glyphs::MENU, accent, 1.8);
-    response
-}
-
 /// The room and background of a [`popover_button`].
 fn popover_button_area(ui: &mut Ui, id: Id, size: Vec2, on: bool) -> (Rect, Response) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
@@ -509,7 +501,7 @@ pub struct Find<'a> {
     /// While there is a query: how many places it was found at, e.g. "3 of 12".
     pub count: &'a str,
     /// The shortcuts the tooltips of the previous, next and clear buttons name.
-    pub keys: [&'a str; 3],
+    pub keys: &'a [String; 3],
     /// Take the focus in this frame; `select` also selects the query, so typing replaces it.
     pub focus: bool,
     pub select: bool,
@@ -527,7 +519,7 @@ pub struct Found {
     pub cleared: bool,
 }
 
-/// A find field for `query`: a magnifier, the query (a hint and "Ctrl+F" while empty, if there
+/// A find field for `query`: a magnifier, the query (a hint and Ctrl+F or ⌘F while empty, if there
 /// is room), and while there is one, the count and buttons for the previous and next place and
 /// for clearing. Enter keeps the focus. A paste leaves out the line break it ends with.
 pub fn find_field(ui: &mut Ui, find: &Find, query: &mut String) -> Found {
@@ -620,11 +612,16 @@ pub fn find_field(ui: &mut Ui, find: &Find, query: &mut String) -> Found {
                         .corner_radius(4)
                         .inner_margin(egui::Margin::symmetric(4, 0))
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Ctrl+F").small().weak())
+                            ui.label(
+                                egui::RichText::new(crate::keys::FIND.label())
+                                    .small()
+                                    .weak(),
+                            )
                         });
                     return;
                 }
                 let [previous, next, clear] = find.keys;
+                let (previous, next, clear) = (previous.as_str(), next.as_str(), clear.as_str());
                 if tip(mini_button(ui, glyphs::CLOSE), "Clear", clear).clicked() {
                     found.cleared = true;
                 }

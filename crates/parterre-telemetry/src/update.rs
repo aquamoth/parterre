@@ -186,6 +186,11 @@ impl Update {
     /// Release `tag` (`v0.6.0`, or `0.6.0`) for `channel` on `target`, the Rust target triple
     /// the release files are named after. `None` on Snap and Flatpak, whose stores update
     /// parterre, and for a tag that isn't a version.
+    /// The release's page on GitHub, with its release notes.
+    pub fn notes(&self) -> String {
+        format!("{REPOSITORY}/releases/tag/v{}", self.version)
+    }
+
     pub fn of(tag: &str, channel: Channel, target: &str) -> Option<Update> {
         let version = Version::parse(tag)?.to_string();
         let arch = target.split('-').next().unwrap_or(target);
@@ -397,6 +402,15 @@ mod tests {
         let update = Update::of("0.6.0", Channel::Cargo, "x86_64-unknown-linux-gnu").unwrap();
         assert_eq!(update.version, "0.6.0");
         assert_eq!(update.download, Download::Copy(CARGO_INSTALL));
+    }
+
+    #[test]
+    fn the_notes_are_on_the_releases_page() {
+        let update = Update::of("v0.8.0", Channel::Dmg, "aarch64-apple-darwin").unwrap();
+        assert_eq!(
+            update.notes(),
+            "https://github.com/aquamoth/parterre/releases/tag/v0.8.0"
+        );
     }
 
     #[test]
