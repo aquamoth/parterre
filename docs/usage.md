@@ -68,7 +68,7 @@ look around.
 | `Ctrl+C` (`⌘C` on macOS) | Copy the selected commit's hash |
 | Click a pull request's number | Open the pull request on GitHub |
 | The *Git* menu | On the selected node: show log; compare with HEAD, the working tree or the upstream (with two nodes, with each other); go to, add or delete a worktree; switch to it, set an upstream, create, reset to or delete a branch; merge, cherry-pick or rebase; fetch, pull or push |
-| Right-click a node | Mark it for comparison, or compare it with the marked commit; open its pull requests or its worktree's folder; copy its ref names or folder; select its subtree; return it to the layout |
+| Right-click a node | Show log; compare; create, switch to or delete a branch; rebase, merge, cherry-pick or reset; add, go to or delete a worktree; open its pull requests or its worktree's folder; copy its hash, ref names or folder; select its subtree; return it to the layout |
 | `Esc` | Clear the selection |
 | `F5`, `Ctrl+R` (`⌘R` on macOS) | Reload the repository (it also reloads by itself when branches, tags or HEAD change), in every window that reloads |
 | `Ctrl+F5` (`⇧⌘F` on macOS) | Fetch every remote, from any window |
@@ -112,9 +112,9 @@ and it opens as wide as you left it last time.
 with a folder, first on its commit, in the graph and in the log, in cyan: the branches they
 have checked out, even where hidden, and detached ones with the folder's name in italics. The
 open worktree's branch stays red, as HEAD. A worktree whose folder is gone gets a crossed-out
-folder and a greyer fill. From the *Git* menu, on the selected node:
+folder and a greyer fill. From a node's menu (or the *Git* menu, on the selected node):
 
-- *Add worktree at X…* makes a new worktree at the commit, on a new branch that can track a
+- *Add worktree here…* makes a new worktree at the commit, on a new branch that can track a
   remote one, in a folder next to the repository's (`<repo>.worktrees/` unless you pick
   another). Tick *Go to new worktree* to make it the open one.
 - *Go to worktree* makes another worktree the open one. The layout, the view, moved nodes and
@@ -125,8 +125,8 @@ folder and a greyer fill. From the *Git* menu, on the selected node:
   too; the question then counts the commits only those branches had.
 - *Open* › *File system* / *Terminal* opens its folder; *Copy* copies the folder's path.
 
-**Branches:** *Create branch at X…* (optionally switching to it), *Switch to* a branch or a
-commit (detached), and *Delete*. With several nodes selected that all have local
+**Branches:** *Create branch here…* (optionally switching to it), *Switch to* a branch or a
+commit (detached), and *Delete branch*. With several nodes selected that all have local
 branches, *Delete N local branches* deletes them all. It asks first only when that loses commits,
 and then it lists each branch's.
 
@@ -194,7 +194,7 @@ log's branch labels ↑3 ↓2, and *Compare → Upstream* compares the two. On b
 *Show log* opens a window listing a node's history, or the commits between two selected nodes,
 like TortoiseGit's log: a graph column, the selected commit's message and the files it changed,
 which you can sort and filter. The arrow keys move through the commits, `Ctrl+F` (`⌘F` on
-macOS) finds, `F5` or `Ctrl+R` (`⌘R`) reloads and `Esc` (`⌘W`) closes it. Right-click a row for the actions the *Git* menu has for a node, and to
+macOS) finds, `F5` or `Ctrl+R` (`⌘R`) reloads and `Esc` (`⌘W`) closes it. Right-click a row for the same actions as on a node, and to
 revert the commit or copy its subject.
 
 Four layouts arrange its panes: stacked as in TortoiseGit, side by side, details and files
@@ -227,11 +227,11 @@ what changed instead.
 ## Comparing commits
 
 Comparing two commits lists the files they differ in, in a window with the same table;
-double-click one for its diff. The *Git* menu has *Compare with HEAD*, *Compare with working tree* (your
-uncommitted changes, staged or not; `F5` lists them again), *Compare with* the upstream, or
-with two nodes selected *Compare X with Y*. To compare commits far apart, *Mark for comparison*
-one (right-click its node, or a row in the log) and pick *Compare with marked* on the other,
-from any log. A
+double-click one for its diff. Right-click a node for *Compare* › *HEAD*, *Working tree* (your
+uncommitted changes, staged or not; `F5` lists them again), *Upstream*, or with two nodes
+selected *Selected revisions* (the *Git* menu has them too). To compare commits far apart,
+*Mark for comparison* one (from the node menu or a row in the log) and pick *Compare with
+marked* on the other, from any log. A
 range log's *Compare files* compares its two ends. Where the two histories forked, the window's
 *Since common ancestor* shows only what the right-hand side changed since then, as a pull request
 does (the working tree forks where HEAD does). *Swap sides* turns a comparison of two commits

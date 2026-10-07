@@ -86,10 +86,8 @@ pub enum Request {
     },
 }
 
-/// What the graph's node menu offered before the Git menu took it over (#339): the branch,
-/// remote and worktree sections for `commit`, in the selection `group`. The tests check the
-/// offers through it.
-#[cfg(test)]
+/// The node menu's branch, remote and worktree sections for `commit`, in the selection
+/// `group`.
 pub fn node_menu(
     ui: &mut Ui,
     repo: &Repo,
@@ -495,7 +493,7 @@ pub(super) fn rebase_offer(
 
 /// *Rebase main onto X* for each branch on the node and, last, the commit itself, when it
 /// would really rebase; greyed out while the open worktree is stuck. The log's rows have it
-/// too, through [`row_node_menu`]; the graph's Git menu takes the same offers.
+/// too, through [`node_menu`]; the graph's Git menu takes the same offers.
 fn rebase_targets(
     ui: &mut Ui,
     repo: &Repo,
@@ -551,7 +549,7 @@ pub(super) fn merge_offer(
 
 /// *Merge X into main…* for each branch on the node and, last, the commit itself, when there's
 /// something to merge; greyed out while the open worktree is stuck. The log's rows have it
-/// too, through [`row_node_menu`]; the graph's Git menu takes the same offers.
+/// too, through [`node_menu`]; the graph's Git menu takes the same offers.
 fn merge_targets(
     ui: &mut Ui,
     repo: &Repo,

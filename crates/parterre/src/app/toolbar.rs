@@ -16,11 +16,6 @@ use crate::menu;
 use crate::usage::{self, Menu};
 use crate::widgets::{self, tip, tip_explained};
 
-/// `text` in the menus' case on this platform (Title Case on macOS).
-fn case(text: &str) -> String {
-    super::menu_bar::case(keys::Platform::CURRENT, text)
-}
-
 const SHOW: [(Simplification, Glyph, &str); 3] = [
     (
         Simplification::Decorated,
@@ -278,7 +273,7 @@ impl ParterreApp {
             self.zoom_field(ui);
             if tip(
                 widgets::icon_button(ui, glyphs::MINUS, false),
-                &case("Zoom out"),
+                "Zoom out",
                 &keys::ZOOM_OUT.label(),
             )
             .clicked()
@@ -287,21 +282,20 @@ impl ParterreApp {
             }
             if tip(
                 widgets::icon_button(ui, glyphs::PLUS, false),
-                &case("Zoom in"),
+                "Zoom in",
                 &keys::ZOOM_IN.label(),
             )
             .clicked()
             {
                 self.zoom_by(1.0 / 0.8);
             }
-            // As the View menu names them.
-            let fit = widgets::text_button(ui, &case("Zoom to fit"));
-            if tip(fit, "", &keys::ZOOM_TO_FIT.label()).clicked() {
+            let fit = widgets::text_button(ui, "Fit");
+            if tip(fit, "Fit the whole graph", &keys::ZOOM_TO_FIT.label()).clicked() {
                 usage::action(usage::Action::Fit);
                 self.fit();
             }
-            let actual = widgets::text_button(ui, &case("Actual size"));
-            if tip(actual, "", &keys::ACTUAL_SIZE.label()).clicked() {
+            let reset = widgets::text_button(ui, "Reset");
+            if tip(reset, "Zoom to 100%", &keys::ACTUAL_SIZE.label()).clicked() {
                 self.zoom_by(1.0 / self.view.zoom);
             }
         });
