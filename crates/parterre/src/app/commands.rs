@@ -296,6 +296,19 @@ impl ParterreApp {
         }
     }
 
+    /// The keyboard in the menu bar of Windows and Linux (Alt+letter, F10, arrows), before the
+    /// window's own keys: what it takes, they don't see. macOS's menu bar is the system's.
+    pub(super) fn menu_bar_keys(&mut self, ctx: &egui::Context) {
+        if Platform::CURRENT == Platform::Mac {
+            return;
+        }
+        let state = self.menu_state(ctx);
+        let menus = menu_bar::build(&state);
+        if let Some(command) = menu_bar::bar::keys(ctx, &menus) {
+            self.run_command(ctx, command);
+        }
+    }
+
     /// The menu bar of Windows and Linux, above the toolbar; on macOS, the system's, brought up
     /// to date. Carries out what was chosen in it.
     pub(super) fn menu_bar(&mut self, ui: &mut egui::Ui) {

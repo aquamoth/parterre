@@ -2981,6 +2981,17 @@ fn shortcut_rows() -> Vec<(String, &'static str)> {
         (keys::fetch().label(), "Fetch every remote, in every window"),
         (either(keys::OPEN, keys::CLOSE), "Open / close a folder"),
         (keys::SETTINGS.label(), "Settings"),
+        match keys::Platform::CURRENT {
+            keys::Platform::Mac => (
+                "⌃F2, ⇧⌘/".into(),
+                "The menu bar from the keyboard; Help's search finds any command by name",
+            ),
+            _ => (
+                "Alt+letter, F10, Alt".into(),
+                "The menu bar: Alt with a menu's underlined letter opens it, a letter in it \
+                 chooses; F10 or Alt alone reaches the bar, the arrow keys move",
+            ),
+        },
         (
             keys::close_window().label(),
             "Close the log, compare, diff, blame or settings window",
@@ -3325,6 +3336,7 @@ impl eframe::App for ParterreApp {
         self.update_check(&ctx);
         self.ensure_scene(&ctx);
         self.view_before = self.view;
+        self.menu_bar_keys(&ctx);
         self.handle_keys(&ctx);
 
         self.menu_bar(ui);

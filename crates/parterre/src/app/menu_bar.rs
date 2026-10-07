@@ -371,6 +371,49 @@ pub fn case_with(platform: Platform, template: &str, names: &[&str]) -> String {
     out
 }
 
+/// The access keys of a menu's entries on Windows and Linux (Alt+F for File, then O for Open):
+/// for each label, the index of its underlined character, unique in the menu ignoring case.
+/// Chosen as KDE chooses them for menus that name none: the first letters of words first, in
+/// order, then any other letter or digit of what is still without one. `None` for an entry
+/// that isn't chosen (separators, headings) and for a label with no free letter left.
+pub fn access_keys(labels: &[Option<&str>]) -> Vec<Option<usize>> {
+    let mut taken = std::collections::HashSet::new();
+    let mut keys: Vec<Option<usize>> = vec![None; labels.len()];
+    let candidates = |label: &str, initials: bool| -> Vec<(usize, char)> {
+        let mut previous = ' ';
+        let mut found = Vec::new();
+        for (i, c) in label.chars().enumerate() {
+            let starts_word = !previous.is_alphanumeric();
+            if c.is_alphanumeric() && (starts_word || !initials) {
+                found.push((i, c));
+            }
+            previous = c;
+        }
+        found
+    };
+    for initials in [true, false] {
+        for (key, label) in keys.iter_mut().zip(labels) {
+            let Some(label) = label else { continue };
+            if key.is_some() {
+                continue;
+            }
+            for (i, c) in candidates(label, initials) {
+                if taken.insert(c.to_lowercase().collect::<String>()) {
+                    *key = Some(i);
+                    break;
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// The letter of `label`'s access key `key`, as typed: lower case.
+pub fn access_letter(label: &str, key: Option<usize>) -> Option<String> {
+    let c = label.chars().nth(key?)?;
+    Some(c.to_lowercase().collect())
+}
+
 /// The menus of the bar, as `state` has them.
 pub fn build(state: &State) -> Vec<Menu> {
     let p = state.platform;
@@ -911,6 +954,50 @@ mod tests {
             "Rebase main onto {}"
         );
         assert_eq!(case(Platform::Windows, "Open recent"), "Open recent");
+    }
+
+    #[test]
+    fn access_keys_are_first_letters_then_any_free_one() {
+        let titles = ["File", "Edit", "View", "Git", "Layout", "Help"].map(Some);
+        let keys = access_keys(&titles);
+        assert_eq!(keys, vec![Some(0); 6], "every title its first letter");
+        let file = [
+            Some("Open folder…"),
+            Some("Open recent"),
+            None,
+            Some("Close folder"),
+            None,
+            Some("Export as SVG…"),
+            Some("Export as PNG…"),
+            Some("Settings…"),
+            Some("Quit"),
+        ];
+        let keys = access_keys(&file);
+        let letters: Vec<Option<String>> = file
+            .iter()
+            .zip(&keys)
+            .map(|(l, &k)| l.and_then(|l| access_letter(l, k)))
+            .collect();
+        let s = |c: &str| Some(c.to_owned());
+        assert_eq!(
+            letters,
+            [
+                s("o"),
+                s("r"),
+                None,
+                s("c"),
+                None,
+                s("e"),
+                s("a"),
+                s("s"),
+                s("q")
+            ]
+        );
+        // Nothing free: none.
+        assert_eq!(
+            access_keys(&[Some("ab"), Some("ba"), Some("b")]),
+            [Some(0), Some(0), None]
+        );
     }
 
     #[test]

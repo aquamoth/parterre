@@ -75,6 +75,7 @@ look around.
 | `Ctrl+O` / `Ctrl+W` (`⌘O` / `⌘W` on macOS) | Open / close a folder |
 | `Ctrl+,` (`⌘,` on macOS) | Settings |
 | `Esc` (`⌘W` on macOS) | Close the log, compare, diff, blame or settings window |
+| `Alt`+letter, `F10` or `Alt` alone (`⌃F2`, `⇧⌘/` on macOS) | The menu bar from the keyboard: `Alt` with a menu's underlined letter opens it and a letter in it chooses an item; the arrow keys move, `Enter` chooses, `Esc` closes. On macOS, `⌃F2` reaches the menu bar and `⇧⌘/` searches every menu for a command by name |
 
 When you drag a node, edges at moved nodes are routed afresh through the gaps between nodes, so
 they lose bends they no longer need and go around nodes that are now in the way. With
