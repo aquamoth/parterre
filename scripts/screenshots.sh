@@ -63,6 +63,7 @@ for sub in "Recent folders" Export Show Filter Zoom Drag "Newest commits"; do
     shot "menu-$name" popup $'click toolbar:menu\nhover "'"$sub"'"'
 done
 shot menu-update popup "click toolbar:menu" --newer-release 9.9.9
+shot new-release window "open new-release" --newer-release 9.9.9
 for popover in filter zoom drag; do
     shot "popover-$popover" popup "click toolbar:$popover"
 done

@@ -18,8 +18,10 @@ IP address, as with any request; its
 [privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement)
 covers the request.
 
-When a newer release is out, the ☰ menu icon turns bold blue and *Download 0.6.0* (the new
-version) appears at the bottom of the menu.
+When a newer release is out, a dialog says so the first time parterre hears of it, once per
+version: *parterre 0.8.0 is out*, a link to its release notes, and *Download*. Until you
+update, *Download 0.8.0* opens the *Help* menu on Windows and Linux, whose title turns blue,
+and sits under *About parterre* on macOS, where parterre's Dock icon gets a badge.
 
 On by default. *Check for updates* in *Settings → Privacy* turns it off; then nothing is asked.
 Snap and Flatpak never check, because their stores update parterre, and neither does a build

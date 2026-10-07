@@ -369,6 +369,10 @@ pub struct ParterreApp {
     pull_requests_error: Option<parterre_forge::ForgeError>,
     /// Asks GitHub whether a newer release is out, while `settings.check_for_updates` is on.
     update_check: Option<parterre_telemetry::UpdateCheck>,
+    /// The newest release the new-release dialog has told of (#345).
+    release_told: Option<String>,
+    /// The new-release dialog, while it is open.
+    release_dialog: Option<parterre_telemetry::Update>,
     /// What is sent to PostHog, and the first-run prompt (#261).
     telemetry: privacy::Telemetry,
     system_theme: SystemTheme,
@@ -527,6 +531,11 @@ impl ParterreApp {
             pull_requests_setting,
             pull_requests_error: None,
             update_check: None,
+            release_told: cc
+                .storage
+                .filter(|_| persist)
+                .and_then(|s| eframe::get_value(s, updates::TOLD_KEY)),
+            release_dialog: None,
             telemetry,
             system_theme: SystemTheme::watch(&cc.egui_ctx),
             window_theme: None,
@@ -1117,6 +1126,9 @@ impl ParterreApp {
         match what {
             "menu" | "filter" | "zoom" | "drag" => egui::Popup::open_id(ctx, popup_id(what)),
             "about" => self.show_about = true,
+            "new-release" => {
+                self.release_dialog = Some(self.newer_release().ok_or("no --newer-release")?);
+            }
             "shortcuts" => self.show_shortcuts = true,
             "legend" => self.show_legend = true,
             "first-run" => self.open_first_run_prompt(),
@@ -3315,6 +3327,7 @@ impl eframe::App for ParterreApp {
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         self.about_window(&ctx);
+        self.release_dialog(&ctx);
         self.file_drop(&ctx);
         // Over everything else.
         self.first_run_prompt(&ctx, frame);
@@ -3378,6 +3391,7 @@ impl eframe::App for ParterreApp {
             eframe::set_value(storage, MOVES_KEY, &self.moves);
             eframe::set_value(storage, RECENT_KEY, &self.recent);
             eframe::set_value(storage, PRIVACY_KEY, &self.telemetry.privacy);
+            eframe::set_value(storage, updates::TOLD_KEY, &self.release_told);
         }
     }
 

@@ -71,6 +71,8 @@ names! {
         PullRequestsError => "pull_requests_error",
         ImportSettings => "import_settings",
         ResetSettings => "reset_settings",
+        /// The dialog telling of a newer release, once per version.
+        NewRelease => "new_release",
     }
 }
 

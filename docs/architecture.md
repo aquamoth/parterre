@@ -100,7 +100,8 @@ crates/parterre        the binary (eframe/egui)
   version.rs           release/dev version strings (runs in build.rs; see docs/releasing.md)
   app.rs               canvas interaction, search, status bar, windows, opening folders
     toolbar.rs         the toolbar, its popovers and the ☰ menu
-    updates.rs         the update check as the settings say, and *Download* in the ☰ menu
+    updates.rs         the update check as the settings say, *Download*, and the dialog telling
+                       of each new release once
     privacy.rs         the first-run prompt, and the usage statistics and crash reports as
                        the user's choices say, told of input and repositories opened;
                        Settings › Privacy shows them

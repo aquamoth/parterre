@@ -137,6 +137,7 @@ takes a branch, a tag or a hash prefix. A name that doesn't exist fails the run.
 | `settings`, `settings:PAGE` | The settings, at `appearance`, `branchcolours`, `graph`, `filters`, `dragging`, `privacy`, `advanced` or `manage` |
 | `export-settings:FILE`, `import-settings:FILE` | The settings' Manage page, as if FILE had been picked to export to (written at once) or import from (the dialog asking what to import) |
 | `about`, `shortcuts`, `legend` | About parterre, Keyboard and mouse, the legend |
+| `new-release` | The dialog telling of a newer release, with `--newer-release` |
 | `first-run` | The first-run prompt about usage statistics and crash reports, as at the first start |
 | `log:REF`, `log:FIRST..SECOND` | The log of a commit, or of a range (as if the nodes were selected in that order) |
 | `compare:FIRST..SECOND` | The compare window; `SECOND` may be `WORKING_TREE` |
@@ -204,7 +205,7 @@ runs start from the defaults otherwise.
 | `--log-layout a\|b\|c\|d` | The log window's layout: `stacked`, `side-by-side`, `details-below`, `files-right` |
 | `--diff-form side\|unified`, `--diff-words`, `--diff-whitespace`, `--diff-unfolded` | The diff window's settings |
 | `--no-syntax-colour` | Plain text in the diff and blame windows, as their toolbar button gives |
-| `--newer-release VERSION` | A newer release out, e.g. `0.7.0`: the bold blue ☰ icon and *Download 0.7.0* in the menu |
+| `--newer-release VERSION` | A newer release out, e.g. `0.7.0`: the blue *Help* menu and *Download 0.7.0* in it (on macOS in the parterre menu, and a badge on the Dock icon). The dialog telling of it shows only when opened (`open new-release`) |
 
 Scripted runs never ask GitHub for newer releases: `--newer-release` is the only answer they
 get. *Download* does what it does for the build being run, which for one without a channel
