@@ -19,7 +19,8 @@ serde.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
 
-# Finding Git for Windows when git.exe isn't on PATH (see src/git/program.rs).
+# Finding Git for Windows when git.exe isn't on PATH (see src/git/program.rs), and a merge
+# tool by App Paths (src/merge_tool.rs).
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
 

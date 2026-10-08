@@ -10,7 +10,7 @@ use eframe::egui::{self, Align, Layout, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::{Action, Catalog, command_text};
 use parterre_core::git::Git;
 use parterre_core::remote::{
-    self, Diverged, Live, Pull, Push, PushState, Reconcile, RemoteBranchTip, SetUpstream,
+    self, Diverged, Live, Pull, PushState, Reconcile, RemoteBranchTip, SetUpstream,
 };
 use parterre_core::{Oid, Repo};
 use parterre_forge::github::{self, Proposed};
@@ -61,12 +61,9 @@ pub(super) fn section(
         .map(|b| {
             let targets = remote::push_targets(repo, catalog, &b.name)
                 .into_iter()
-                .map(|(name, state)| {
-                    let push = Request::Run(Action::Push(Box::new(Push {
-                        branch: b.name.clone(),
-                        tip: b.tip,
-                        remote: name.clone(),
-                    })));
+                .map(|(push, state)| {
+                    let name = push.target();
+                    let push = Request::Run(Action::Push(Box::new(push)));
                     match state {
                         PushState::Force => (format!("{name}…"), push, None),
                         PushState::UpToDate => (name, push, Some("Up to date".to_owned())),
@@ -538,6 +535,30 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_pushes_to_an_upstream_of_another_name() {
+        let (_origin, work) = cloned();
+        let p = work.path();
+        git(p, &["switch", "-q", "-c", "feature"]);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "Feature"]);
+        git(p, &["push", "-q", "-u", "origin", "feature"]);
+        git(p, &["branch", "--set-upstream-to=origin/main"]);
+        let (texts, asked) = {
+            let (repo, catalog) = load(p);
+            let oid = repo.commit(repo.resolve("feature").unwrap()).oid;
+            let click = Some("Push feature to origin/main");
+            menu(|ui| super::section(ui, &repo, oid, &catalog, false), click)
+        };
+        assert!(
+            !texts.iter().any(|t| t == "Push feature to origin"),
+            "{texts:?}"
+        );
+        let Some(Request::Run(Action::Push(push))) = asked else {
+            panic!("a push: {asked:?} in {texts:?}")
+        };
+        assert_eq!((push.remote.as_str(), push.to.as_str()), ("origin", "main"));
+    }
+
+    #[test]
     fn a_push_that_needs_a_force_says_so_with_an_ellipsis() {
         let (origin, work) = cloned();
         let p = work.path();
@@ -614,6 +635,7 @@ mod tests {
             branch: "feature".into(),
             tip: h.rev("feature"),
             remote: "origin".into(),
+            to: "feature".into(),
         };
         h.ask(
             Request::Run(Action::Push(Box::new(push))),

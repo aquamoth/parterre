@@ -81,12 +81,50 @@ impl Diverged {
     }
 }
 
-/// Pushes local branch `branch`, at `tip`, to its own name on `remote`.
+/// Pushes local branch `branch`, at `tip`, to branch `to` on `remote`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Push {
     pub branch: String,
     pub tip: Oid,
     pub remote: String,
+    pub to: String,
+}
+
+impl Push {
+    /// Pushing `branch` to `remote` as `git push` does: to its upstream on the upstream's
+    /// remote, to its own name on any other.
+    pub fn new(branch: &LocalBranch, remote: &str) -> Push {
+        let to = branch
+            .upstream_remote
+            .as_ref()
+            .filter(|(r, _)| r == remote)
+            .map_or(&branch.name, |(_, b)| b);
+        Push {
+            branch: branch.name.clone(),
+            tip: branch.tip,
+            remote: remote.to_owned(),
+            to: to.to_owned(),
+        }
+    }
+
+    /// Where it goes: `origin`, or `origin/main` for a branch of another name.
+    pub fn target(&self) -> String {
+        if self.to == self.branch {
+            self.remote.clone()
+        } else {
+            self.remote_branch()
+        }
+    }
+
+    /// The branch it goes to, as its remote-tracking branch is called: `origin/main`.
+    pub fn remote_branch(&self) -> String {
+        format!("{}/{}", self.remote, self.to)
+    }
+
+    /// That remote-tracking branch in full: `refs/remotes/origin/main`.
+    fn tracking(&self) -> String {
+        format!("refs/remotes/{}", self.remote_branch())
+    }
 }
 
 /// `git branch --set-upstream-to`.
@@ -144,9 +182,11 @@ pub(crate) fn pull_command(how: Option<Reconcile>) -> Vec<String> {
     args
 }
 
-/// `git push`, with `-u` only when the branch has no upstream at all, so an upstream of
-/// another name (or one not pushed yet) is left as it is.
-pub(crate) fn push_command(catalog: &Catalog, push: &Push, force: bool) -> Vec<String> {
+/// `git push`, with `-u` only when the branch has no upstream at all, so an upstream not pushed
+/// yet is left as it is. `force` is the remote's tip it replaces: a lease on the branch's own
+/// name takes `--force-if-includes`, but git checks that against the reflog of the local branch
+/// named like the remote's, so a push to another name leases that tip instead.
+pub(crate) fn push_command(catalog: &Catalog, push: &Push, force: Option<Oid>) -> Vec<String> {
     let mut args = words(&["push", "--progress"]);
     let has_upstream = catalog
         .locals
@@ -155,11 +195,26 @@ pub(crate) fn push_command(catalog: &Catalog, push: &Push, force: bool) -> Vec<S
     if !has_upstream {
         args.push("-u".into());
     }
-    if force {
-        args.push(format!("--force-with-lease=refs/heads/{}", push.branch));
-        args.push("--force-if-includes".into());
+    match force {
+        Some(_) if push.to == push.branch => {
+            args.push(format!("--force-with-lease=refs/heads/{}", push.to));
+            args.push("--force-if-includes".into());
+        }
+        Some(theirs) => {
+            args.push(format!(
+                "--force-with-lease=refs/heads/{}:{}",
+                push.to,
+                theirs.to_hex()
+            ));
+        }
+        None => {}
     }
-    args.extend([push.remote.clone(), push.branch.clone()]);
+    args.push(push.remote.clone());
+    if push.to == push.branch {
+        args.push(push.branch.clone());
+    } else {
+        args.push(format!("{}:{}", push.branch, push.to));
+    }
     args
 }
 
@@ -189,16 +244,19 @@ pub(crate) fn delete_remote_command(b: &RemoteBranchTip) -> Vec<String> {
     ]
 }
 
-/// The remotes, by name, with what pushing local branch `branch` to each would do, by the
-/// commits in `repo`. Empty if `repo` has no such branch.
-pub fn push_targets(repo: &Repo, catalog: &Catalog, branch: &str) -> Vec<(String, PushState)> {
+/// Pushing local branch `branch` to each remote, by name, with what each would do by the
+/// commits in `repo`. Empty if there is no such branch.
+pub fn push_targets(repo: &Repo, catalog: &Catalog, branch: &str) -> Vec<(Push, PushState)> {
     let tip = |full: &str| {
         repo.refs
             .iter()
             .find(|r| r.full_name == full)
             .map(|r| r.target)
     };
-    let Some(local) = tip(&format!("refs/heads/{branch}")) else {
+    let (Some(local), Some(branch)) = (
+        tip(&format!("refs/heads/{branch}")),
+        catalog.locals.iter().find(|b| b.name == branch),
+    ) else {
         return Vec::new();
     };
     let mut remotes = catalog.remote_names.clone();
@@ -206,13 +264,14 @@ pub fn push_targets(repo: &Repo, catalog: &Catalog, branch: &str) -> Vec<(String
     remotes
         .into_iter()
         .map(|remote| {
-            let state = match tip(&format!("refs/remotes/{remote}/{branch}")) {
+            let push = Push::new(branch, &remote);
+            let state = match tip(&push.tracking()) {
                 None => PushState::New,
                 Some(theirs) if repo.reaches(theirs, local) => PushState::UpToDate,
                 Some(theirs) if repo.reaches(local, theirs) => PushState::Ahead,
                 Some(_) => PushState::Force,
             };
-            (remote, state)
+            (push, state)
         })
         .collect()
 }
@@ -323,10 +382,10 @@ pub(crate) fn pull(
     Ok(None)
 }
 
-/// Pushes the branch to its own name on the remote. One that would replace the remote's
-/// commits asks first ([`Warning`]: a confirmation when the branch has a copy of each, else a
-/// warning with the commits lost), then forces with a lease. A push the remote rejects is
-/// followed by a fetch, to say whether the remote has commits the branch lacks.
+/// Pushes the branch to the remote. One that would replace the remote's commits asks first
+/// ([`Warning`]: a confirmation when the branch has a copy of each, else a warning with the
+/// commits lost), then forces with a lease. A push the remote rejects is followed by a fetch,
+/// to say whether the remote has commits the branch lacks.
 pub(crate) fn push(
     catalog: &Catalog,
     action: &crate::branches::Action,
@@ -353,21 +412,21 @@ pub(crate) fn push(
         )));
     }
     let git = Git::new(&catalog.root);
-    let tracking = format!("refs/remotes/{}/{branch}", push.remote);
+    let tracking = push.tracking();
+    let theirs_name = push.remote_branch();
     let theirs = remote_tip(&git, &tracking)?;
     if let Some(theirs) = theirs
         && is_ancestor(&git, push.tip, theirs)?
     {
         return Err(Error::Invalid(format!(
-            "{}/{branch} has every commit of {branch}: there's nothing to push.",
-            push.remote
+            "{theirs_name} has every commit of {branch}: there's nothing to push."
         )));
     }
     let force = match theirs {
-        Some(theirs) => !is_ancestor(&git, theirs, push.tip)?,
-        None => false,
+        Some(theirs) if !is_ancestor(&git, theirs, push.tip)? => Some(theirs),
+        _ => None,
     };
-    if force {
+    if force.is_some() {
         let (lost, replaced) = lost_and_replaced(&git, branch, &tracking)?;
         let approved =
             approval.is_some_and(|w| w.action == *action && w.head == theirs && w.commits == lost);
@@ -380,10 +439,20 @@ pub(crate) fn push(
                 deletions: Vec::new(),
                 repo: Some(repo),
                 changed: false,
-                commands: vec![push_command(catalog, push, true)],
+                commands: vec![push_command(catalog, push, force)],
                 head: theirs,
             }));
         }
+    }
+    // What `--force-if-includes` would refuse, for a push to another name.
+    if let Some(theirs) = force
+        && push.to != push.branch
+        && !ever_had(&git, branch, theirs)?
+    {
+        return Err(Error::Failed(format!(
+            "{theirs_name} has commits {branch} never had, so parterre won't force push over \
+             them. Take them into {branch} first."
+        )));
     }
     if run_live(
         &git,
@@ -404,16 +473,17 @@ pub(crate) fn push(
     )? {
         return Err(Error::Failed(format!("{pushed}\n\n{NO_PROMPT}")));
     }
-    let remote = &push.remote;
     match remote_tip(&git, &tracking)? {
         // The lease held, so it was `--force-if-includes`: the remote's commits were fetched,
         // but never on the branch.
-        now if force && now == theirs => Err(Error::Failed(format!(
-            "{remote}/{branch} has commits {branch} never had, so git won't force push over \
-             them. Take them into {branch} first.\n\n{pushed}"
-        ))),
+        now if force.is_some() && push.to == push.branch && now == theirs => {
+            Err(Error::Failed(format!(
+                "{theirs_name} has commits {branch} never had, so git won't force push over \
+                 them. Take them into {branch} first.\n\n{pushed}"
+            )))
+        }
         Some(now) if !is_ancestor(&git, now, push.tip)? => Err(Error::Failed(format!(
-            "{remote}/{branch} has commits you don't have."
+            "{theirs_name} has commits you don't have."
         ))),
         _ => Err(Error::Failed(pushed)),
     }
@@ -641,6 +711,20 @@ fn remote_tip(git: &Git, full: &str) -> Result<Option<Oid>, Error> {
             &format!("{full}^{{commit}}"),
         ])?
         .and_then(|s| Oid::from_hex(&s)))
+}
+
+/// Whether local branch `branch` has `commit`, or had it at any point its reflog recalls.
+fn ever_had(git: &Git, branch: &str, commit: Oid) -> Result<bool, Error> {
+    let full = format!("refs/heads/{branch}");
+    let reflog = git.run(&["rev-list", "--walk-reflogs", &full])?;
+    let mut input = format!("{}\n", commit.to_hex());
+    for oid in reflog.lines() {
+        input.push_str(&format!("^{oid}\n"));
+    }
+    Ok(git
+        .run_with_input(&["rev-list", "-n", "1", "--stdin"], input)?
+        .trim()
+        .is_empty())
 }
 
 fn is_ancestor(git: &Git, ancestor: Oid, of: Oid) -> Result<bool, Error> {

@@ -117,3 +117,17 @@ fn opening_a_file_runs_git_mergetool_and_git_stages_the_result() {
     wait_resolved(&r, "list.txt");
     assert_eq!(read_text(&r.path().join("list.txt")), "one\nTWO (topic)\n");
 }
+
+/// `git mergetool --tool-help` starts git over a hundred times, for a minute on Windows
+/// (#355): detecting reads the config once and looks for the programs itself.
+#[test]
+fn detecting_does_not_ask_git_tool_by_tool() {
+    let r = TestRepo::new();
+    let start = Instant::now();
+    detect(&r);
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        start.elapsed()
+    );
+}

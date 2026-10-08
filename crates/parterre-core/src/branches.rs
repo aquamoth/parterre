@@ -15,6 +15,8 @@ pub struct LocalBranch {
     pub tip: Oid,
     /// Logical remote/branch name, including an upstream that has not been fetched.
     pub upstream: Option<String>,
+    /// That upstream's remote, and its branch there: `origin` and `topic`.
+    pub upstream_remote: Option<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -306,14 +308,15 @@ impl Catalog {
             let name = r.full_name.as_str();
             let tip = r.commit;
             if let Some(name) = name.strip_prefix("refs/heads/") {
-                let upstream = r.upstream_remote.as_ref().map(|(remote, branch)| {
+                let upstream_remote = r.upstream_remote.as_ref().map(|(remote, branch)| {
                     let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
-                    format!("{remote}/{branch}")
+                    (remote.clone(), branch.to_owned())
                 });
                 locals.push(LocalBranch {
                     name: name.to_owned(),
                     tip,
-                    upstream,
+                    upstream: upstream_remote.as_ref().map(|(r, b)| format!("{r}/{b}")),
+                    upstream_remote,
                 });
             } else if let Some(short) = name.strip_prefix("refs/remotes/") {
                 if !short.ends_with("/HEAD") {
@@ -882,7 +885,7 @@ impl Action {
             Self::Resolve(r) => r.label(),
             Self::Fetch => "Fetch".into(),
             Self::Pull(p) => format!("Pull {}", p.branch),
-            Self::Push(p) => format!("Push {} to {}", p.branch, p.remote),
+            Self::Push(p) => format!("Push {} to {}", p.branch, p.target()),
             Self::SetUpstream(s) => format!("Set upstream of {} to {}", s.branch, s.upstream),
             Self::DeleteRemoteBranches(branches) => match branches.as_slice() {
                 [one] => format!("Delete remote branch {}", one.name()),
@@ -1174,7 +1177,7 @@ impl Branches {
             Action::Resolve(r) => Ok(r.conflict.commands(r.answer)),
             Action::Fetch => Ok(vec![crate::remote::fetch_command()]),
             Action::Pull(p) => Ok(vec![crate::remote::pull_command(p.how)]),
-            Action::Push(p) => Ok(vec![crate::remote::push_command(catalog, p, false)]),
+            Action::Push(p) => Ok(vec![crate::remote::push_command(catalog, p, None)]),
             Action::SetUpstream(s) => Ok(vec![crate::remote::set_upstream_command(s)]),
             Action::DeleteRemoteBranches(branches) => Ok(branches
                 .iter()

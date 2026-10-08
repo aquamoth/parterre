@@ -2656,13 +2656,14 @@ impl Tool {
                 }
             }
             Action::Push(push) if confirmation => (
-                format!("Force push {} to {}?", push.branch, push.remote),
+                format!("Force push {} to {}?", push.branch, push.target()),
                 "Force push",
             ),
             Action::Push(push) => (
                 format!(
                     "Force push {} to {} and lose {commits}?",
-                    push.branch, push.remote
+                    push.branch,
+                    push.target()
                 ),
                 "Force push anyway",
             ),
@@ -2741,8 +2742,9 @@ impl Tool {
                 }
                 let unreachable = match force_push {
                     Some(push) => format!(
-                        "These commits on {}/{} are not on {}.",
-                        push.remote, push.branch, push.branch
+                        "These commits on {} are not on {}.",
+                        push.remote_branch(),
+                        push.branch
                     ),
                     None => "These commits are not reachable from any surviving branch, tag or \
                              worktree."

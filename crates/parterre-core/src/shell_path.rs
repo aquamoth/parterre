@@ -44,6 +44,11 @@ pub fn apply(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// The `PATH` that programs parterre starts get: the shell's, or else parterre's own.
+pub fn path() -> Option<OsString> {
+    shell_path().cloned().or_else(|| std::env::var_os("PATH"))
+}
+
 #[cfg(target_os = "macos")]
 fn shell_path() -> Option<&'static OsString> {
     static PATH: OnceLock<Option<OsString>> = OnceLock::new();
