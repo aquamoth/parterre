@@ -215,7 +215,19 @@ impl Automation {
                 Target::Node(name) => {
                     let scene = scene?;
                     let n = named_node(scene, name)?;
-                    let at = view.to_screen(canvas, scene.node_center(n));
+                    // PROTOTYPE (#323): at REF's own label, for the menu the label decides.
+                    let rect = scene.node_rect(n);
+                    let at = scene.visuals[n]
+                        .rows
+                        .iter()
+                        .position(|r| r.label == *name)
+                        .map_or(scene.node_center(n), |i| {
+                            egui::pos2(
+                                rect.center().x,
+                                rect.min.y + scene.row_height * (i as f32 + 0.5),
+                            )
+                        });
+                    let at = view.to_screen(canvas, at);
                     canvas.contains(at).then_some(at)
                 }
                 Target::Canvas => scene.map(|scene| emptiest_spot(scene, view, canvas)),

@@ -442,6 +442,28 @@ fn title(ui: &mut Ui, m: &Menu, lit: bool, key: Option<usize>) -> egui::Response
     response
 }
 
+/// PROTOTYPE (#323): `list` drawn in any popup, such as the graph's right-click menu, without
+/// the bar's keyboard; the command of the item clicked.
+pub fn plain(ui: &mut Ui, list: &[Entry]) -> Option<Command> {
+    PLAIN.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut chosen = None;
+    let keyboard = Keyboard {
+        path: &[],
+        underline: false,
+        steering: false,
+    };
+    entries(ui, list, &keyboard, &mut chosen);
+    PLAIN.store(false, std::sync::atomic::Ordering::Relaxed);
+    chosen
+}
+
+/// PROTOTYPE (#323): lined up with the node menu's plain buttons, without a mark column.
+static PLAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn plain_now() -> bool {
+    PLAIN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A menu's entries; sets `chosen` to the command of the item clicked.
 fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Option<Command>) {
     let keys = keys_of(entries);
@@ -464,7 +486,11 @@ fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Opt
                         if highlighted {
                             lit(ui);
                         }
-                        menu::item(ui, label, &shortcut, item.mark)
+                        if plain_now() {
+                            ui.add(egui::Button::new(label).shortcut_text(shortcut))
+                        } else {
+                            menu::item(ui, label, &shortcut, item.mark)
+                        }
                     })
                     .inner;
                 let response = match &item.tip {
@@ -496,10 +522,17 @@ fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Opt
                     if highlighted {
                         lit(ui);
                     }
-                    menu::submenu(ui, label, open, |ui| {
-                        ui.set_min_width(menu::MIN_WIDTH);
-                        self::entries(ui, &submenu.entries, &deeper, chosen);
-                    });
+                    if plain_now() {
+                        menu::plain_submenu(ui, &submenu.label, |ui| {
+                            ui.set_min_width(menu::MIN_WIDTH);
+                            self::entries(ui, &submenu.entries, &deeper, chosen);
+                        });
+                    } else {
+                        menu::submenu(ui, label, open, |ui| {
+                            ui.set_min_width(menu::MIN_WIDTH);
+                            self::entries(ui, &submenu.entries, &deeper, chosen);
+                        });
+                    }
                 });
                 if let Some(why) = &submenu.why {
                     shown.response.on_disabled_hover_text(why);
@@ -521,7 +554,12 @@ fn lit(ui: &mut Ui) {
 fn heading(ui: &mut Ui, text: &str) {
     let padding = ui.spacing().button_padding;
     ui.horizontal(|ui| {
-        ui.add_space(padding.x + menu::MARK + ui.spacing().icon_spacing);
+        let mark = if plain_now() {
+            0.0
+        } else {
+            menu::MARK + ui.spacing().icon_spacing
+        };
+        ui.add_space(padding.x + mark);
         ui.label(RichText::new(text).small().weak());
     });
     ui.add_space(2.0);
