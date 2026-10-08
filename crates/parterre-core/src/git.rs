@@ -237,6 +237,30 @@ impl Config {
         names
     }
 
+    /// The subsections whose `<section>.<subsection>.<name>` is set to something, in git's
+    /// order, each once: `mergetool.<tool>.cmd` names the user's tools.
+    pub fn subsections(&self, section: &str, name: &str) -> Vec<String> {
+        let (section, name) = (section.to_ascii_lowercase(), name.to_ascii_lowercase());
+        let mut found: Vec<String> = Vec::new();
+        for (key, _) in &self.entries {
+            let sub = key
+                .strip_prefix(section.as_str())
+                .and_then(|rest| rest.strip_prefix('.'))
+                .and_then(|rest| rest.strip_suffix(name.as_str()))
+                .and_then(|rest| rest.strip_suffix('.'));
+            if let Some(sub) = sub
+                && !found.iter().any(|f| f == sub)
+                && !self
+                    .get(&format!("{section}.{sub}.{name}"))
+                    .unwrap_or("")
+                    .is_empty()
+            {
+                found.push(sub.to_owned());
+            }
+        }
+        found
+    }
+
     fn last(&self, key: &str) -> Option<Option<&str>> {
         let key = canonical_key(key);
         self.entries
@@ -263,7 +287,7 @@ fn canonical_key(key: &str) -> String {
 
 /// `git config -z --list`'s output: a NUL after each setting, its key and value separated by
 /// the first newline, and no newline for a key set without a value.
-fn parse_config(out: &[u8]) -> Config {
+pub(crate) fn parse_config(out: &[u8]) -> Config {
     let entries = out
         .split(|&b| b == 0)
         .filter(|entry| !entry.is_empty())
@@ -1507,6 +1531,17 @@ mod tests {
         // Every `remote.<name>.<setting>` names a remote; `remote.pushDefault` doesn't.
         assert_eq!(config.remotes(), ["a.b", "origin"]);
         assert_eq!(parse_config(b""), Config::default());
+    }
+
+    #[test]
+    fn subsections_that_set_a_name_are_listed_once() {
+        let config = parse_config(
+            b"mergetool.mine.cmd\ntrue\0mergetool.My Tool.cmd\nx\0mergetool.mine.cmd\nfalse\0\
+              mergetool.cleared.cmd\nx\0mergetool.cleared.cmd\n\0mergetool.bare.cmd\0\
+              mergetool.meld.path\n/m\0mergetool.keepbackup\nfalse\0",
+        );
+        assert_eq!(config.subsections("mergetool", "cmd"), ["mine", "My Tool"]);
+        assert_eq!(config.subsections("mergeTool", "path"), ["meld"]);
     }
 
     #[test]
