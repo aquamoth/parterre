@@ -791,6 +791,28 @@ fn pull_is_offered_on_the_open_worktrees_branch_with_an_upstream_only() {
 }
 
 #[test]
+fn pull_is_offered_on_the_current_branchs_upstream_too() {
+    let mut s = setup();
+    s.other.write("theirs", b"theirs\n");
+    s.other.commit_all("theirs");
+    s.other.git(&["push", "-q", "origin", "main"]);
+    s.work.git(&["fetch", "-q", "origin"]);
+    s.work.write("mine", b"mine\n");
+    s.work.commit_all("mine");
+    // Another branch's upstream isn't the current branch's to pull.
+    s.work.git(&["branch", "feature", "HEAD~1"]);
+    s.work.git(&["push", "-q", "-u", "origin", "feature"]);
+    let catalog = Catalog::load(s.work.path()).unwrap();
+    let upstream = rev(&s.work, "origin/main");
+    assert_ne!(Some(upstream), catalog.head);
+    assert_eq!(
+        remote::pull_offered(&catalog, upstream).map(|b| b.name.as_str()),
+        Some("main")
+    );
+    assert!(remote::pull_offered(&catalog, rev(&s.work, "origin/feature")).is_none());
+}
+
+#[test]
 fn setting_an_upstream() {
     let s = setup();
     s.work.git(&["branch", "feature"]);

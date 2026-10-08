@@ -276,16 +276,22 @@ pub fn push_targets(repo: &Repo, catalog: &Catalog, branch: &str) -> Vec<(Push, 
         .collect()
 }
 
-/// The open worktree's branch, when it is at `commit` and has an upstream: what *Pull* pulls.
+/// The open worktree's branch, when it has an upstream and `commit` is where it or that
+/// upstream is: what *Pull* pulls (#356).
 pub fn pull_offered(catalog: &Catalog, commit: Oid) -> Option<&LocalBranch> {
-    if !catalog.has_working_tree || catalog.head != Some(commit) {
+    if !catalog.has_working_tree {
         return None;
     }
     let current = catalog.current.as_deref()?;
-    catalog
-        .locals
-        .iter()
-        .find(|b| b.name == current && b.upstream.is_some())
+    let branch = catalog.locals.iter().find(|b| b.name == current)?;
+    let upstream = branch.upstream.as_deref()?;
+    let at_upstream = || {
+        catalog
+            .remotes
+            .iter()
+            .any(|r| r.name == upstream && r.tip == commit)
+    };
+    (catalog.head == Some(commit) || at_upstream()).then_some(branch)
 }
 
 /// `git fetch --all --prune`.
