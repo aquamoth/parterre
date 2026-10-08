@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 
-use eframe::egui::{self, Color32, RichText, Ui, ViewportId};
+use eframe::egui::{self, RichText, Ui, ViewportId};
 use parterre_core::branches::{Action, command_text};
 use parterre_core::clone::{self, Cloning};
 use parterre_forge::ForgeError;
@@ -307,29 +307,18 @@ impl CloneDialog {
 
     fn folder_fields(&mut self, ui: &mut Ui) {
         ui.label(RichText::new("Parent folder").strong());
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let browse = ui.ctx().fonts_mut(|f| {
-                f.layout_no_wrap("Browse…".into(), egui::FontId::default(), Color32::WHITE)
-                    .size()
-                    .x
-            }) + 24.0;
-            let width = ui.available_width() - browse - 4.0;
-            widgets::text_field(ui, &mut self.parent, "Folder", width);
-            if ui
-                .add_enabled(self.browse.is_none(), egui::Button::new("Browse…"))
-                .clicked()
+        let browsing = self.browse.is_some();
+        let (_, browse) = widgets::folder_field(ui, &mut self.parent, "Folder", browsing);
+        if browse {
+            let mut dialog = rfd::AsyncFileDialog::new().set_title("Parent folder");
+            if let Some(dir) = Path::new(self.parent.trim())
+                .ancestors()
+                .find(|a| a.is_dir())
             {
-                let mut dialog = rfd::AsyncFileDialog::new().set_title("Parent folder");
-                if let Some(dir) = Path::new(self.parent.trim())
-                    .ancestors()
-                    .find(|a| a.is_dir())
-                {
-                    dialog = dialog.set_directory(dir);
-                }
-                self.browse = Some(Pending::start((), dialog.pick_folder(), ui.ctx()));
+                dialog = dialog.set_directory(dir);
             }
-        });
+            self.browse = Some(Pending::start((), dialog.pick_folder(), ui.ctx()));
+        }
         ui.add_space(6.0);
         ui.label(RichText::new("Folder name").strong());
         ui.horizontal(|ui| {

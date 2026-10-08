@@ -1336,37 +1336,26 @@ impl Form {
         let catalog = self.catalog.clone();
         let Some(wt) = &mut self.worktree else { return };
         ui.label(RichText::new("Worktree root").strong());
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let browse = ui.ctx().fonts_mut(|f| {
-                f.layout_no_wrap("Browse…".into(), egui::FontId::default(), Color32::WHITE)
-                    .size()
-                    .x
-            }) + 24.0;
-            let width = ui.available_width() - browse - 4.0;
-            if widgets::text_field(ui, &mut wt.root, "Folder", width).changed() {
-                wt.root = with_separator(std::mem::take(&mut wt.root));
-                if !wt.name_edited {
-                    wt.name = worktree_folder::free_name(Path::new(&wt.root), &base, &registered);
-                }
+        let browsing = wt.browse.is_some();
+        let (field, browse) = widgets::folder_field(ui, &mut wt.root, "Folder", browsing);
+        if field.changed() {
+            wt.root = with_separator(std::mem::take(&mut wt.root));
+            if !wt.name_edited {
+                wt.name = worktree_folder::free_name(Path::new(&wt.root), &base, &registered);
             }
-            if ui
-                .add_enabled(wt.browse.is_none(), egui::Button::new("Browse…"))
-                .clicked()
-                && wt.browse.is_none()
-            {
-                let mut dialog = rfd::AsyncFileDialog::new().set_title("Worktree root");
-                let start = Path::new(&wt.root);
-                if let Some(dir) = start.ancestors().find(|a| a.is_dir()) {
-                    dialog = dialog.set_directory(dir);
-                }
-                wt.browse = Some(crate::file_dialog::Pending::start(
-                    (),
-                    dialog.pick_folder(),
-                    ui.ctx(),
-                ));
+        }
+        if browse {
+            let mut dialog = rfd::AsyncFileDialog::new().set_title("Worktree root");
+            let start = Path::new(&wt.root);
+            if let Some(dir) = start.ancestors().find(|a| a.is_dir()) {
+                dialog = dialog.set_directory(dir);
             }
-        });
+            wt.browse = Some(crate::file_dialog::Pending::start(
+                (),
+                dialog.pick_folder(),
+                ui.ctx(),
+            ));
+        }
         // A root inside a working tree, where git would see the worktree as untracked.
         if let Some(folder) = &folder {
             if wt.inside.as_ref().is_none_or(|(f, _)| f != folder) {
