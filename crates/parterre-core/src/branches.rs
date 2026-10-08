@@ -185,6 +185,12 @@ impl Worktree {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.path.display().to_string())
     }
+
+    /// What menus call it, as the graph labels it: its branch, or its folder's name when
+    /// detached.
+    pub fn label(&self) -> String {
+        self.branch.clone().unwrap_or_else(|| self.name())
+    }
 }
 
 /// A fresh catalogue for menus and creation forms. Refresh after repository changes; execution

@@ -69,7 +69,7 @@ for popover in filter zoom drag; do
     shot "popover-$popover" popup "click toolbar:$popover"
 done
 shot context-node popup "right-click node:main"
-for sub in Compare Open Copy; do
+for sub in Actions; do
     name=$(tr 'A-Z ' 'a-z-' <<<"$sub")
     shot "context-node-$name" popup $'right-click node:main\nhover "'"$sub"'"'
 done

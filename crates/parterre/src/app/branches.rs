@@ -1,6 +1,7 @@
-//! The local-branch and worktree tools. Graph nodes and log rows share the same menu and
-//! controller. Slow Git queries and all mutations run on workers; forms retain their selected
-//! commit. Its dialogs are modeless windows, opened over the window they were asked from.
+//! The local-branch and worktree tools: the log rows' menu, what the Git menu offers, and the
+//! controller they share. Slow Git queries and all mutations run on workers; forms retain their
+//! selected commit. Its dialogs are modeless windows, opened over the window they were asked
+//! from.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
@@ -86,20 +87,6 @@ pub enum Request {
     },
 }
 
-/// The node menu's branch, remote and worktree sections for `commit`, in the selection
-/// `group`.
-pub fn node_menu(
-    ui: &mut Ui,
-    repo: &Repo,
-    commit: Oid,
-    group: &[Oid],
-    catalog: Option<&Catalog>,
-    busy: bool,
-    worktrees: bool,
-) -> Option<Request> {
-    menu_for(ui, repo, commit, group, None, catalog, busy, worktrees)
-}
-
 /// The menu of a row of the log: its branches, remotes and worktrees, as the graph's Git menu
 /// has them (`git_menu`), where *Cherry-pick* takes the `selection`, as listed, rather than
 /// everything the branch lacks.
@@ -112,33 +99,10 @@ pub fn row_node_menu(
     busy: bool,
     worktrees: bool,
 ) -> Option<Request> {
-    menu_for(
-        ui,
-        repo,
-        commit,
-        selection,
-        Some(selection),
-        catalog,
-        busy,
-        worktrees,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn menu_for(
-    ui: &mut Ui,
-    repo: &Repo,
-    commit: Oid,
-    group: &[Oid],
-    selection: Option<&[Oid]>,
-    catalog: Option<&Catalog>,
-    busy: bool,
-    worktrees: bool,
-) -> Option<Request> {
-    let branch = branch_section(ui, repo, commit, group, selection, catalog, busy);
+    let branch = branch_section(ui, repo, commit, selection, catalog, busy);
     let remote = catalog.and_then(|c| super::remote::section(ui, repo, commit, c, busy));
     let worktree = worktrees
-        .then(|| worktree_section(ui, commit, group, catalog, busy))
+        .then(|| worktree_section(ui, commit, selection, catalog, busy))
         .flatten();
     branch.or(remote).or(worktree)
 }
@@ -155,8 +119,7 @@ fn branch_section(
     ui: &mut Ui,
     repo: &Repo,
     commit: Oid,
-    group: &[Oid],
-    selection: Option<&[Oid]>,
+    selection: &[Oid],
     catalog: Option<&Catalog>,
     busy: bool,
 ) -> Option<Request> {
@@ -192,29 +155,22 @@ fn branch_section(
     deletions.items(
         ui,
         commit,
-        group,
+        selection,
         |c| deletable_locals(repo, catalog, c),
         busy,
         &mut request,
     );
-    remote_deletions(ui, repo, commit, group, catalog, busy, &mut request);
+    remote_deletions(ui, repo, commit, selection, catalog, busy, &mut request);
     rebase_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
     merge_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
     merge_into_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
-    let picked = match selection {
-        Some(selection) => cherry_pick_selection(ui, repo, selection, catalog, busy),
-        None => cherry_pick_lacking(ui, repo, commit, &refs, catalog, busy),
-    };
-    if let Some(pick) = picked {
+    if let Some(pick) = cherry_pick_selection(ui, repo, selection, catalog, busy) {
         request = Some(pick);
     }
     if let Some(reset) = reset_item(ui, commit, Some(catalog), busy) {
         request = Some(reset);
     }
-    // A log row's: commits are acted on one by one there.
-    if selection.is_some()
-        && let Some(revert) = revert_item(ui, repo, commit, catalog, busy)
-    {
+    if let Some(revert) = revert_item(ui, repo, commit, catalog, busy) {
         request = Some(revert);
     }
     request
@@ -655,22 +611,6 @@ pub(super) fn cherry_pick_offer(
     Some((name, branch, request))
 }
 
-/// *Cherry-pick feature onto main…*: every commit of the node main lacks, named after a branch
-/// on the node (a local one first), or its short hash; greyed out while the open worktree is
-/// stuck.
-fn cherry_pick_lacking(
-    ui: &mut Ui,
-    repo: &Repo,
-    commit: Oid,
-    refs: &[&parterre_core::GitRef],
-    catalog: &Catalog,
-    busy: bool,
-) -> Option<Request> {
-    let (name, branch, request) = cherry_pick_offer(repo, commit, refs, catalog)?;
-    let label = format!("Cherry-pick {name} onto {branch}…");
-    cherry_pick_item(ui, label, request, catalog, busy)
-}
-
 /// *Cherry-pick 3 commits onto main…*: the log's selection, as listed; greyed out while the
 /// open worktree is stuck.
 fn cherry_pick_selection(
@@ -761,12 +701,12 @@ fn worktree_section(
         let blocked = all.iter().find_map(|w| {
             let reason = w.locked.as_ref()?;
             Some(if reason.is_empty() {
-                format!("{} is locked", w.name())
+                format!("{} is locked", w.label())
             } else {
-                format!("{} is locked: {reason}", w.name())
+                format!("{} is locked: {reason}", w.label())
             })
         });
-        let names: Vec<String> = all.iter().map(|w| w.name()).collect();
+        let names: Vec<String> = all.iter().map(|w| w.label()).collect();
         let delete = Request::Run(Action::DeleteWorktrees {
             paths: all.iter().map(|w| w.path.clone()).collect(),
             branches: false,
@@ -787,12 +727,12 @@ pub(super) fn go_to_targets(catalog: &Catalog, commit: Oid) -> Vec<Target> {
         .iter()
         .filter(|w| !w.open && w.head == Some(commit))
         .collect();
-    others.sort_by_key(|w| w.name());
+    others.sort_by_key(|w| w.label());
     others
         .iter()
         .map(|w| {
             (
-                w.name(),
+                w.label(),
                 Request::GoTo(w.path.clone()),
                 w.missing.then(|| "Its folder is gone".to_owned()),
             )
@@ -810,7 +750,7 @@ pub(super) fn deletable_worktrees(
         .iter()
         .filter(|w| !w.open && !w.main && w.head == Some(commit))
         .collect();
-    found.sort_by_key(|w| w.name());
+    found.sort_by_key(|w| w.label());
     found
 }
 
@@ -826,7 +766,7 @@ pub(super) fn worktree_deletions(catalog: &Catalog, commit: Oid) -> Vec<Target> 
         .into_iter()
         .map(|w| {
             (
-                w.name(),
+                w.label(),
                 Request::Run(Action::DeleteWorktrees {
                     paths: vec![w.path.clone()],
                     branches: false,
@@ -3176,7 +3116,7 @@ mod tests {
         let c = rev(&others.path().join("c"), "HEAD");
         let item = |commit, group: &[Oid], click| {
             menu(
-                |ui| super::node_menu(ui, &repo, commit, group, Some(&catalog), false, true),
+                |ui| super::row_node_menu(ui, &repo, commit, group, Some(&catalog), false, true),
                 click,
             )
         };
@@ -3213,7 +3153,7 @@ mod tests {
         let (repo, catalog) = load(dir.path());
         let (base, tip) = (rev(dir.path(), "HEAD~1"), rev(dir.path(), "HEAD"));
         let (texts, asked) = menu(
-            |ui| super::node_menu(ui, &repo, tip, &[tip, base], Some(&catalog), false, true),
+            |ui| super::row_node_menu(ui, &repo, tip, &[tip, base], Some(&catalog), false, true),
             Some("Delete 2 worktrees"),
         );
         assert!(texts.iter().any(|t| t == "Delete 2 worktrees"), "{texts:?}");
@@ -3396,7 +3336,7 @@ mod tests {
         let (base, three, tip) = (rev(p, "one"), rev(p, "three"), rev(p, "main"));
         let item = |commit, group: &[Oid], click| {
             menu(
-                |ui| super::node_menu(ui, &repo, commit, group, Some(&catalog), false, false),
+                |ui| super::row_node_menu(ui, &repo, commit, group, Some(&catalog), false, false),
                 click,
             )
         };

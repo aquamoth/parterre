@@ -68,7 +68,7 @@ look around.
 | `Ctrl+C` (`⌘C` on macOS) | Copy the selected commit's hash |
 | Click a pull request's number | Open the pull request on GitHub |
 | The *Git* menu | On the selected node: show log; compare with HEAD, the working tree or the upstream (with two nodes, with each other); go to, add or delete a worktree; switch to it, set an upstream, create, reset to or delete a branch; merge, cherry-pick or rebase; fetch, pull or push |
-| Right-click a node | Show log; compare; create, switch to or delete a branch; rebase, merge, cherry-pick or reset; add, go to or delete a worktree; open its pull requests or its worktree's folder; copy its hash, ref names or folder; select its subtree; return it to the layout |
+| Right-click a node | What the *Git* menu offers for it, under the same headings, without what doesn't apply (pull only on the current branch), and *Mark for comparison*; *Actions* › copy its hash, ref names or folder, open its pull requests or its worktree's folder; select its subtree, return it to the layout, centre the view on it. With several nodes, what acts on them all |
 | `Esc` | Clear the selection |
 | `F5`, `Ctrl+R` (`⌘R` on macOS) | Reload the repository (it also reloads by itself when branches, tags or HEAD change), in every window that reloads |
 | `Ctrl+F5` (`⇧⌘F` on macOS) | Fetch every remote, from any window |
@@ -115,7 +115,7 @@ have checked out, even where hidden, and detached ones with the folder's name in
 open worktree's branch stays red, as HEAD. A worktree whose folder is gone gets a crossed-out
 folder and a greyer fill. From a node's menu (or the *Git* menu, on the selected node):
 
-- *Add worktree here…* makes a new worktree at the commit, on a new branch that can track a
+- *Add worktree at main…* (*here…* in the log) makes a new worktree at the commit, on a new branch that can track a
   remote one, in a folder next to the repository's (`<repo>.worktrees/` unless you pick
   another). Tick *Go to new worktree* to make it the open one.
 - *Go to worktree* makes another worktree the open one. The layout, the view, moved nodes and
@@ -124,10 +124,11 @@ folder and a greyer fill. From a node's menu (or the *Git* menu, on the selected
   that all have worktrees, *Delete N worktrees* deletes them all after one question, which
   lists what each would lose. Tick *Also delete local branch* there to delete their branches
   too; the question then counts the commits only those branches had.
-- *Open* › *File system* / *Terminal* opens its folder; *Copy* copies the folder's path.
+- *Actions* › *Open in file manager* / *Open in terminal* opens its folder; *Copy folder path*
+  copies its path.
 
-**Branches:** *Create branch here…* (optionally switching to it), *Switch to* a branch or a
-commit (detached), and *Delete branch*. With several nodes selected that all have local
+**Branches:** *Create branch at main…* (*here…* in the log; optionally switching to it), *Switch
+to* a branch or a commit (detached), and *Delete* it. With several nodes selected that all have local
 branches, *Delete N local branches* deletes them all. It asks first only when that loses commits,
 and then it lists each branch's.
 
@@ -139,7 +140,7 @@ and then it lists each branch's.
 | *Merge main into feature/x…* | Merges it into another local branch the way a pull request does: fast-forward, merge commit, rebase and fast-forward, or semi-linear merge. |
 | *Rebase main onto* › … | Rebases it onto a branch or commit. Pick, squash or drop each commit first. |
 | *Cherry-pick feature/x onto main…* | Picks the commits of another branch that it lacks; drop the ones you don't want. `-x` is remembered. |
-| *Reset main to here…* | `git reset` with the mode you choose (soft, mixed, keep, hard); the dialog lists the files each mode leaves changed, and what would be lost. |
+| *Reset main to feature/x…* | `git reset` with the mode you choose (soft, mixed, keep, hard); the dialog lists the files each mode leaves changed, and what would be lost. |
 | *Revert in main…* (log) | Reverts a commit, with the message git words for it. |
 
 Merges, rebases, cherry-picks and reverts offer to stash uncommitted changes first, and to put
@@ -187,7 +188,7 @@ less than a tenth of your hourly API allowance is left, it waits for the next ho
 Hover or select a branch (or its upstream) and the commits between the two are coloured: green
 ahead, blue behind, red lost to a force push, grey dashed replaced by a rebase. A rebased
 branch has a dashed edge to its upstream. The status bar shows `branch 3|2` (ahead|behind), the
-log's branch labels ↑3 ↓2, and *Compare → Upstream* compares the two. On by default
+log's branch labels ↑3 ↓2, and *Compare with origin/x* compares the two. On by default
 (*Settings → Advanced*).
 
 ## The log
@@ -228,9 +229,9 @@ what changed instead.
 ## Comparing commits
 
 Comparing two commits lists the files they differ in, in a window with the same table;
-double-click one for its diff. Right-click a node for *Compare* › *HEAD*, *Working tree* (your
-uncommitted changes, staged or not; `F5` lists them again), *Upstream*, or with two nodes
-selected *Selected revisions* (the *Git* menu has them too). To compare commits far apart,
+double-click one for its diff. Right-click a node for *Compare with HEAD*, *Compare with working
+tree* (your uncommitted changes, staged or not; `F5` lists them again), *Compare with* its
+upstream, or with two nodes selected *Compare a with b* (the *Git* menu has them too). To compare commits far apart,
 *Mark for comparison* one (from the node menu or a row in the log) and pick *Compare with
 marked* on the other, from any log. A
 range log's *Compare files* compares its two ends. Where the two histories forked, the window's

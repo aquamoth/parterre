@@ -482,7 +482,7 @@ mod tests {
         let node = |click: Option<&str>| {
             let (repo, catalog) = (&repo, &catalog);
             menu(
-                move |ui| branches::node_menu(ui, repo, up, &[up], Some(catalog), false, false),
+                move |ui| branches::row_node_menu(ui, repo, up, &[up], Some(catalog), false, false),
                 click,
             )
         };
@@ -534,7 +534,15 @@ mod tests {
             let (repo, catalog, commit) = (&repo, &catalog, rev(p, at));
             menu(
                 move |ui| {
-                    branches::node_menu(ui, repo, commit, &[commit], Some(catalog), false, false)
+                    branches::row_node_menu(
+                        ui,
+                        repo,
+                        commit,
+                        &[commit],
+                        Some(catalog),
+                        false,
+                        false,
+                    )
                 },
                 click,
             )
@@ -642,7 +650,15 @@ mod tests {
             let (repo, catalog, commit) = (&repo, &catalog, rev(p, at));
             menu(
                 move |ui| {
-                    branches::node_menu(ui, repo, commit, &[commit], Some(catalog), false, false)
+                    branches::row_node_menu(
+                        ui,
+                        repo,
+                        commit,
+                        &[commit],
+                        Some(catalog),
+                        false,
+                        false,
+                    )
                 },
                 click,
             )
@@ -668,7 +684,7 @@ mod tests {
         let (repo, catalog) = load(p);
         let (texts, _) = menu(
             |ui| {
-                branches::node_menu(
+                branches::row_node_menu(
                     ui,
                     &repo,
                     rev(p, "main"),
@@ -703,7 +719,7 @@ mod tests {
         let item = "Merge feature into main…";
         let (texts, asked) = menu(
             |ui| {
-                branches::node_menu(
+                branches::row_node_menu(
                     ui,
                     &repo,
                     rev(p, "main"),

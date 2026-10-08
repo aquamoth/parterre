@@ -70,6 +70,13 @@ pub enum Command {
     Direction(Direction),
     KeyboardAndMouse,
     Legend,
+    // The graph's right-click menus' own (`node_menu`).
+    CopyText(String),
+    OpenPullRequest(String),
+    OpenIn(super::Opener, PathBuf),
+    SelectSubtree(Vec<usize>),
+    ReturnToLayout(Vec<usize>),
+    CentreOn(usize),
 }
 
 /// What View › Show turns on and off.

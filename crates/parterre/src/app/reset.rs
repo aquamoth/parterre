@@ -632,7 +632,7 @@ mod tests {
         let mut texts = Vec::new();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let base = rev("HEAD~1");
-            super::super::branches::node_menu(
+            super::super::branches::row_node_menu(
                 ui,
                 &repo,
                 base,

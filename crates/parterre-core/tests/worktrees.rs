@@ -93,6 +93,18 @@ fn worktrees_are_listed_with_their_heads() {
 }
 
 #[test]
+fn menus_call_a_worktree_by_its_branch_and_a_detached_one_by_its_folder() {
+    let (r, _others) = with_worktrees();
+    let repo = load_repo(r.path()).expect("load");
+    let labels: Vec<String> = repo.worktrees.iter().map(|w| w.label()).collect();
+    assert_eq!(labels, ["main", "wt-detached", "gone", "topic"]);
+    let catalog = parterre_core::branches::Catalog::load(r.path()).expect("catalogue");
+    let mut labels: Vec<String> = catalog.worktrees.iter().map(|w| w.label()).collect();
+    labels.sort();
+    assert_eq!(labels, ["gone", "main", "topic", "wt-detached"]);
+}
+
+#[test]
 fn a_locked_worktree_whose_folder_is_gone_is_missing() {
     let (r, others) = with_worktrees();
     let path = others
