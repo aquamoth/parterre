@@ -701,12 +701,12 @@ fn worktree_section(
         let blocked = all.iter().find_map(|w| {
             let reason = w.locked.as_ref()?;
             Some(if reason.is_empty() {
-                format!("{} is locked", w.name())
+                format!("{} is locked", w.label())
             } else {
-                format!("{} is locked: {reason}", w.name())
+                format!("{} is locked: {reason}", w.label())
             })
         });
-        let names: Vec<String> = all.iter().map(|w| w.name()).collect();
+        let names: Vec<String> = all.iter().map(|w| w.label()).collect();
         let delete = Request::Run(Action::DeleteWorktrees {
             paths: all.iter().map(|w| w.path.clone()).collect(),
             branches: false,
@@ -727,12 +727,12 @@ pub(super) fn go_to_targets(catalog: &Catalog, commit: Oid) -> Vec<Target> {
         .iter()
         .filter(|w| !w.open && w.head == Some(commit))
         .collect();
-    others.sort_by_key(|w| w.name());
+    others.sort_by_key(|w| w.label());
     others
         .iter()
         .map(|w| {
             (
-                w.name(),
+                w.label(),
                 Request::GoTo(w.path.clone()),
                 w.missing.then(|| "Its folder is gone".to_owned()),
             )
@@ -750,7 +750,7 @@ pub(super) fn deletable_worktrees(
         .iter()
         .filter(|w| !w.open && !w.main && w.head == Some(commit))
         .collect();
-    found.sort_by_key(|w| w.name());
+    found.sort_by_key(|w| w.label());
     found
 }
 
@@ -766,7 +766,7 @@ pub(super) fn worktree_deletions(catalog: &Catalog, commit: Oid) -> Vec<Target> 
         .into_iter()
         .map(|w| {
             (
-                w.name(),
+                w.label(),
                 Request::Run(Action::DeleteWorktrees {
                     paths: vec![w.path.clone()],
                     branches: false,

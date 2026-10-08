@@ -112,6 +112,15 @@ impl Worktree {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.path.display().to_string())
     }
+
+    /// What menus call it, as the graph labels it: its branch (`topic`), or its folder's name
+    /// when detached.
+    pub fn label(&self) -> String {
+        match &self.branch {
+            Some(b) => b.strip_prefix("refs/heads/").unwrap_or(b).to_owned(),
+            None => self.name(),
+        }
+    }
 }
 
 /// A label on a commit (see [`Repo::labels`]).

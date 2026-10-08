@@ -178,7 +178,7 @@ impl ParterreApp {
                         several
                             .iter()
                             .map(|w| {
-                                Item::new(w.name(), command(w))
+                                Item::new(w.label(), command(w))
                                     .tip(w.path.display().to_string())
                                     .into()
                             })
@@ -326,7 +326,7 @@ fn group_deletions(
         .then(|| {
             let paths = worktrees.iter().flatten().map(|w| w.path.clone()).collect();
             all(
-                names(&worktrees, |w| w.name()),
+                names(&worktrees, |w| w.label()),
                 "worktrees",
                 Action::DeleteWorktrees {
                     paths,
