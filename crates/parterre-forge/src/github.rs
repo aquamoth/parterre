@@ -26,6 +26,9 @@ use super::{ForgeError, PullRequest, PullRequests, Remote};
 use parterre_core::git::Git;
 use parterre_core::oid::Oid;
 
+mod repositories;
+pub use repositories::{Listed, Protocol, Repositories, repositories, repositories_canned};
+
 /// GitHub's GraphQL endpoint. Tokens are only ever sent here.
 #[cfg_attr(not(feature = "github"), allow(dead_code))]
 const GRAPHQL: &str = "https://api.github.com/graphql";
@@ -607,12 +610,28 @@ impl fmt::Debug for Token {
 /// within a few seconds.
 #[cfg_attr(not(feature = "github"), allow(dead_code))]
 fn gh_token() -> Result<Token, ForgeError> {
+    let out = gh(&["auth", "token", "--hostname", "github.com"])?;
+    let token = out.trim();
+    // Tokens are letters, digits and underscores; anything else is not one.
+    let plausible = !token.is_empty()
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    plausible
+        .then(|| Token(token.to_owned()))
+        .ok_or(ForgeError::NotSignedIn)
+}
+
+/// What `gh` prints for `args`: [`ForgeError::NoGh`] if it isn't installed,
+/// [`ForgeError::NotSignedIn`] if it fails or doesn't answer within a few seconds.
+#[cfg_attr(not(feature = "github"), allow(dead_code))]
+fn gh(args: &[&str]) -> Result<String, ForgeError> {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     let mut cmd = Command::new("gh");
     parterre_core::shell_path::apply(&mut cmd)
-        .args(["auth", "token", "--hostname", "github.com"])
+        .args(args)
         .env("GH_PROMPT_DISABLED", "1")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
@@ -646,15 +665,7 @@ fn gh_token() -> Result<Token, ForgeError> {
     if let Some(mut stdout) = child.stdout.take() {
         let _ = std::io::Read::read_to_string(&mut stdout, &mut out);
     }
-    let token = out.trim();
-    // Tokens are letters, digits and underscores; anything else is not one.
-    let plausible = !token.is_empty()
-        && token
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
-    plausible
-        .then(|| Token(token.to_owned()))
-        .ok_or(ForgeError::NotSignedIn)
+    Ok(out)
 }
 
 /// Runs `calls` against the API, signed in with `gh`'s token; without one, or while the

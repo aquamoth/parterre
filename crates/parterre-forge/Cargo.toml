@@ -1,6 +1,6 @@
 [package]
 name = "parterre-forge"
-description = "Internal to parterre: open pull requests from GitHub, shown on their head commits. No stability promises."
+description = "Internal to parterre: open pull requests from GitHub, shown on their head commits, and the user's repositories to clone. No stability promises."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,8 +12,8 @@ homepage.workspace = true
 readme = "README.md"
 
 [features]
-# Open pull requests from GitHub's API (`github`): the HTTPS client. Without it, loading them
-# fails.
+# Open pull requests and the user's repositories from GitHub's API (`github`): the HTTPS client.
+# Without it, loading them fails.
 github = ["dep:ureq"]
 
 [dependencies]
