@@ -70,6 +70,8 @@ pub enum Command {
     Direction(Direction),
     KeyboardAndMouse,
     Legend,
+    /// PROTOTYPE (#323): the right-click menu's own items.
+    Proto(super::prototype_context_menu::Action),
 }
 
 /// What View › Show turns on and off.

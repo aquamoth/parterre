@@ -1,51 +1,55 @@
-//! PROTOTYPE (#323) – throwaway, never for main. Layouts of the graph's right-click menu,
-//! switched with the floating bar at the bottom of the window (or `[` and `]`), or chosen at
-//! start with `PARTERRE_PROTO_MENU=a|b|c|today`:
+//! PROTOTYPE (#323) – throwaway, never for main. The graph's right-click menu as the Git menu
+//! with what doesn't apply left out (variant A, chosen in round one), switched with the
+//! floating bar at the bottom of the window (or `[` and `]`), or chosen at start with
+//! `PARTERRE_PROTO_MENU=a1|a2|today`:
 //!
-//! - A: the Git menu's sections in its order, headed, with only what applies;
-//! - B: short and always the same shape: the Git menu's sections as submenus;
-//! - C: the label right-clicked decides (#144's variant C), *Advanced ›* at the bottom;
+//! - A1: Open in › and Copy › under an *Actions* heading;
+//! - A2: one *Actions ›* submenu with all their choices;
+//! - A+C: A1, narrowed to the branch whose label was right-clicked (#144's variant C); the
+//!   node's body or a tag gets A1 as it is. *Set upstream…* and deleting `origin/X` go under
+//!   *Advanced ›* after the Git sections;
 //! - Today: the menu as on main.
 //!
-//! Every variant is cut from the menu bar's Git menu (`git_menu`), so its items open their real
-//! dialogs. With several nodes selected, A–C offer only what acts on the whole selection.
+//! The Git menu's own sections, in its order and with its headings, then Actions, then
+//! Layout. Two departures from the Git menu: Fetch is the canvas's, and Pull is offered on the
+//! current branch's node only.
+
+use std::path::PathBuf;
 
 use eframe::egui::{self, Align2, Color32, Key, RichText, vec2};
 use parterre_core::RefKind;
 
-use super::ParterreApp;
-use super::branches::loading_reason;
-use super::compare_window::CompareRequest;
 use super::menu_bar::{Command, Entry, Item, Submenu};
+use super::{Opener, ParterreApp};
 use crate::keys;
-use crate::scene::{Row, RowKind};
+use crate::scene::RowKind;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Variant {
-    A,
-    B,
-    C,
+    A1,
+    A2,
+    AC,
     Today,
 }
 
 impl Variant {
-    const ALL: [Variant; 4] = [Variant::A, Variant::B, Variant::C, Variant::Today];
+    const ALL: [Variant; 4] = [Variant::A1, Variant::A2, Variant::AC, Variant::Today];
 
     pub fn from_env() -> Variant {
         let v = std::env::var("PARTERRE_PROTO_MENU").unwrap_or_default();
         match v.to_lowercase().as_str() {
-            "b" => Variant::B,
-            "c" => Variant::C,
+            "a2" => Variant::A2,
+            "ac" => Variant::AC,
             "today" => Variant::Today,
-            _ => Variant::A,
+            _ => Variant::A1,
         }
     }
 
     fn name(self) -> &'static str {
         match self {
-            Variant::A => "A – Mirror the Git menu",
-            Variant::B => "B – Short, same shape",
-            Variant::C => "C – The label decides",
+            Variant::A1 => "A1 – Actions section",
+            Variant::A2 => "A2 – Actions submenu",
+            Variant::AC => "A+C – The label narrows A1",
             Variant::Today => "Today – as on main",
         }
     }
@@ -54,6 +58,17 @@ impl Variant {
         let i = Variant::ALL.iter().position(|&v| v == self).unwrap_or(0) as isize;
         Variant::ALL[(i + by).rem_euclid(Variant::ALL.len() as isize) as usize]
     }
+}
+
+/// What the menu's own items do, beyond the menu bar's commands.
+#[derive(Clone, Debug)]
+pub enum Action {
+    OpenPullRequest(String),
+    Open(Opener, PathBuf),
+    Copy(String),
+    SelectSubtree(Vec<usize>),
+    ReturnToLayout(Vec<usize>),
+    Centre(usize),
 }
 
 /// The floating switcher at the bottom centre.
@@ -74,12 +89,6 @@ pub fn bar(ctx: &egui::Context, variant: &mut Variant) {
                 .fill(Color32::from_rgb(30, 30, 30))
                 .corner_radius(18.0)
                 .inner_margin(vec2(10.0, 6.0))
-                .shadow(egui::Shadow {
-                    offset: [0, 2],
-                    blur: 10,
-                    spread: 0,
-                    color: Color32::from_black_alpha(80),
-                })
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let arrow = |t: &str| {
@@ -104,337 +113,391 @@ pub fn bar(ctx: &egui::Context, variant: &mut Variant) {
         });
 }
 
-/// A, B or C's menu for a node, or the canvas when `node` is `None`.
-pub struct ProtoMenu {
-    pub variant: Variant,
-    pub entries: Vec<Entry>,
+fn act(label: impl Into<String>, action: Action) -> Item {
+    Item::new(label, Command::Proto(action))
 }
 
 impl ParterreApp {
-    pub(super) fn proto_menu(&self, variant: Variant, node: Option<usize>) -> ProtoMenu {
-        let entries = match node {
+    /// The menu for `node`, or the canvas's when `None`.
+    pub(super) fn proto_menu(&self, variant: Variant, node: Option<usize>) -> Vec<Entry> {
+        match node {
             None => self.proto_canvas(),
-            Some(_) if self.selection.len() > 1 => self.proto_several(),
-            Some(node) => match variant {
-                Variant::A => self.proto_a(node),
-                Variant::B => self.proto_b(node),
-                _ => self.proto_c(node),
-            },
-        };
-        ProtoMenu { variant, entries }
+            Some(node) => self.proto_node(variant, node),
+        }
+    }
+
+    pub(super) fn proto_run(&mut self, ctx: &egui::Context, action: Action) {
+        match action {
+            Action::OpenPullRequest(url) => {
+                if let Err(e) = crate::browser::open(&url) {
+                    self.status = Some((e, true));
+                }
+            }
+            Action::Open(opener, dir) => self.open_in(opener, &dir),
+            Action::Copy(text) => ctx.copy_text(text),
+            Action::SelectSubtree(roots) => self.select_subtree(&roots),
+            Action::ReturnToLayout(nodes) => self.return_to_layout(&nodes),
+            Action::Centre(node) => self.center_on(node),
+        }
     }
 
     fn proto_canvas(&self) -> Vec<Entry> {
-        vec![
+        let displaced = self
+            .scene
+            .as_ref()
+            .is_some_and(|s| (0..s.node_count()).any(|n| s.net.is_displaced(n)));
+        let mut out = vec![
             Item::new("Zoom to fit", Command::ZoomToFit)
                 .key(keys::ZOOM_TO_FIT)
                 .into(),
             Item::new("Go to HEAD", Command::GoToHead)
                 .key(keys::GO_TO_HEAD)
                 .into(),
-            Entry::Separator,
-            Item::new("Fetch", Command::Fetch)
-                .key(keys::fetch())
-                .blocked(self.branches.fetch_blocked())
-                .into(),
-            Entry::Separator,
-            Item::new("Return all nodes to layout", Command::ReturnAllToLayout).into(),
-        ]
+        ];
+        if self.branches.fetch_blocked().is_none() {
+            out.push(Entry::Separator);
+            out.push(Item::new("Fetch", Command::Fetch).key(keys::fetch()).into());
+        }
+        if displaced {
+            out.push(Entry::Separator);
+            out.push(Item::new("Return all nodes to layout", Command::ReturnAllToLayout).into());
+        }
+        out
     }
 
-    /// The Git menu's sections, without their headings: History, Worktree, Branch, Integrate
-    /// and Remote, with Fetch left to the canvas and Pull to the current branch's node.
-    fn sections(&self, node: usize) -> Vec<(String, Vec<Entry>)> {
-        let has_current = self.scene.as_ref().is_some_and(|s| {
-            s.graph.nodes[node].refs.iter().any(|&r| {
-                let r = &s.repo.refs[r];
-                r.kind == RefKind::LocalBranch && r.is_head
-            })
+    fn proto_node(&self, variant: Variant, node: usize) -> Vec<Entry> {
+        let Some(scene) = &self.scene else {
+            return Vec::new();
+        };
+        let has_current = scene.graph.nodes[node].refs.iter().any(|&r| {
+            let r = &scene.repo.refs[r];
+            r.kind == RefKind::LocalBranch && r.is_head
         });
-        let mut out: Vec<(String, Vec<Entry>)> = Vec::new();
+        // The Git menu's sections.
+        let mut sections: Vec<(String, Vec<Entry>)> = Vec::new();
         for e in self.git_menu() {
             match e {
-                Entry::Heading(h) => out.push((h, Vec::new())),
+                Entry::Heading(h) => sections.push((h, Vec::new())),
                 Entry::Separator => {}
                 Entry::Item(i) if matches!(i.command, Command::Fetch) => {}
                 Entry::Item(i) if i.label.starts_with("Pull ") && !has_current => {}
                 e => {
-                    if let Some(last) = out.last_mut() {
+                    if let Some(last) = sections.last_mut() {
                         last.1.push(e)
                     }
                 }
             }
         }
-        out
-    }
-
-    fn marks(&self, node: usize) -> Vec<Entry> {
-        let Some(scene) = &self.scene else {
-            return Vec::new();
-        };
-        let oid = scene.repo.commit(scene.graph.nodes[node].commit).oid;
-        let is_marked = self.marked.as_ref().is_some_and(|(m, _)| *m == oid);
-        let mark = if is_marked {
-            Item::new(
-                "Clear the mark",
-                Command::Compare(CompareRequest::Mark(None)),
-            )
-        } else {
-            Item::new(
-                "Mark for comparison",
-                Command::Compare(CompareRequest::Mark(Some(oid))),
-            )
-        };
-        let with = match self.marked.as_ref().filter(|(m, _)| *m != oid) {
-            Some((m, name)) => Item::new(
-                format!("Compare with marked ({name})"),
-                Command::Compare(CompareRequest::Compare(*m, oid)),
-            ),
-            None => {
-                Item::new("Compare with marked", Command::ShowLog).blocked(Some(if is_marked {
-                    "This is the marked commit"
-                } else {
-                    "Mark a commit for comparison first"
-                }))
-            }
-        };
-        vec![mark.into(), with.into()]
-    }
-
-    /// Several nodes: only what acts on all of them.
-    fn proto_several(&self) -> Vec<Entry> {
-        let mut out = Vec::new();
-        for e in self.git_menu() {
-            if let Entry::Item(i) = &e {
-                let all = i.label.starts_with("Show log")
-                    || (i.label.starts_with("Compare ") && i.label.contains(" with "))
-                    || (i.label.starts_with("Delete ") && i.label.ends_with(" branches"));
-                if all && i.enabled {
-                    out.push(e);
-                }
-            }
+        if variant == Variant::AC {
+            self.narrow(node, &mut sections);
         }
-        out
-    }
-
-    fn proto_a(&self, node: usize) -> Vec<Entry> {
-        let mut out = Vec::new();
-        for (i, (heading, items)) in self.sections(node).into_iter().enumerate() {
-            let mut items: Vec<Entry> = items.into_iter().filter(applies).collect();
-            if i == 0 {
-                items.extend(self.marks(node).into_iter().filter(applies));
+        let actions = self.actions(node);
+        match variant {
+            Variant::A2 => {
+                let flat = actions.into_iter().flat_map(flatten).collect();
+                sections.push((String::new(), vec![Submenu::new("Actions", flat).into()]));
             }
+            _ => sections.push(("Actions".to_owned(), actions)),
+        }
+        sections.push(("Layout".to_owned(), self.layout(node)));
+        let mut out = Vec::new();
+        for (heading, items) in sections {
+            let items: Vec<Entry> = items.into_iter().filter_map(applying).collect();
             if items.is_empty() {
                 continue;
             }
             if !out.is_empty() {
                 out.push(Entry::Separator);
             }
-            out.push(Entry::Heading(heading));
+            if !heading.is_empty() {
+                out.push(Entry::Heading(heading));
+            }
             out.extend(items);
         }
         out
     }
 
-    /// Show log and the Compare submenu, as B and C start.
-    fn proto_history(&self, node: usize, history: Vec<Entry>) -> Vec<Entry> {
-        let mut history = history.into_iter();
-        let mut out: Vec<Entry> = history.next().into_iter().collect();
-        let mut compare: Vec<Entry> = history.collect();
-        compare.push(Entry::Separator);
-        compare.extend(self.marks(node));
-        out.push(Submenu::new("Compare", compare).into());
-        out
-    }
-
-    fn proto_b(&self, node: usize) -> Vec<Entry> {
-        let mut s = self.sections(node).into_iter().map(|(_, items)| items);
-        let (history, worktree, branch, integrate, remote) = (
-            s.next().unwrap_or_default(),
-            s.next().unwrap_or_default(),
-            s.next().unwrap_or_default(),
-            s.next().unwrap_or_default(),
-            s.next().unwrap_or_default(),
-        );
-        let mut out = self.proto_history(node, history);
-        out.push(Entry::Separator);
-        // Branch: Switch to, Set upstream, Create branch, Reset, Delete.
-        let mut branch = branch.into_iter();
-        let switch = branch.next();
-        let upstream = branch.next();
-        let create = branch.next();
-        out.extend(switch);
-        out.extend(create);
-        out.push(Entry::Separator);
-        let rest: Vec<Entry> = upstream.into_iter().chain(branch).collect();
-        out.push(sub("Branch", rest));
-        out.push(sub("Integrate", integrate));
-        out.push(sub("Remote", remote));
-        out.push(sub("Worktree", worktree));
-        out
-    }
-
-    fn proto_c(&self, node: usize) -> Vec<Entry> {
-        let Some(scene) = &self.scene else {
-            return Vec::new();
+    /// A+C: Branch, Integrate and Remote narrowed to the branch whose label was right-clicked;
+    /// Set upstream and deleting remote-tracking branches moved to Advanced ›.
+    fn narrow(&self, node: usize, sections: &mut Vec<(String, Vec<Entry>)>) {
+        let Some(scene) = &self.scene else { return };
+        let is_remote = |name: &str| {
+            scene
+                .repo
+                .refs
+                .iter()
+                .any(|r| r.kind == RefKind::RemoteBranch && r.name == name)
         };
-        let mut s = self.sections(node).into_iter().map(|(_, items)| items);
-        let (history, worktrees, branch, integrate, remote) = (
-            s.next().unwrap_or_default(),
-            s.next().unwrap_or_default(),
-            s.next().unwrap_or_default(),
-            s.next().unwrap_or_default(),
-            s.next().unwrap_or_default(),
-        );
-        let mut out = self.proto_history(node, history);
-        out.push(Entry::Separator);
-        // The node's body: what starts from the commit.
-        let body = |worktree: &[Entry], branch: &[Entry]| -> Vec<Entry> {
-            let mut out = Vec::new();
-            if let Some(Entry::Item(i)) = branch.get(2) {
-                out.push(relabel(i.clone(), "Create branch here…"));
-            }
-            if let Some(Entry::Item(i)) = worktree.get(1) {
-                out.push(relabel(i.clone(), "Add worktree here…"));
-            }
-            out.extend(branch.get(3).cloned().filter(applies));
-            out
+        let advanced = |i: &Item| {
+            i.label.starts_with("Set upstream")
+                || i.label
+                    .strip_prefix("Delete ")
+                    .is_some_and(|n| is_remote(n.trim_end_matches('…')))
         };
-        let worktree_name = |c: crate::scene::Checkout| {
-            let w = &scene.repo.worktrees[c.index];
-            (!w.open).then(|| w.name())
-        };
-        let flat = |entries: &[Entry]| -> Vec<Item> {
-            entries.iter().cloned().flat_map(flatten).collect()
-        };
-        let row = self.proto_row.clone();
-        let section: Vec<Entry> = match row.as_ref().map(|r| (r, &r.kind)) {
+        // The branch right-clicked, and whether it's the current one.
+        let label = match self.proto_row.as_ref().map(|r| (&r.label, &r.kind)) {
             Some((
-                Row { label, .. },
+                label,
                 RowKind::Ref {
                     kind: kind @ (RefKind::LocalBranch | RefKind::RemoteBranch),
                     head,
-                    worktree,
+                    ..
                 },
-            )) => {
-                let local = *kind == RefKind::LocalBranch;
-                let current = local && *head;
-                // Branch, Integrate and Remote, without Create branch and Reset (the body's).
-                let mut items: Vec<Item> = flat(&branch)
-                    .into_iter()
-                    .chain(flat(&integrate))
-                    .chain(flat(&remote))
-                    .filter(|i| {
-                        !i.label.starts_with("Create branch") && !i.label.starts_with("Reset ")
-                    })
-                    .collect();
-                // The remote-tracking branches of a local one on this node, to delete.
-                let remotes: Vec<String> = if local {
-                    scene.graph.nodes[node]
-                        .refs
-                        .iter()
-                        .map(|&r| &scene.repo.refs[r])
-                        .filter(|r| {
-                            r.kind == RefKind::RemoteBranch
-                                && r.name.ends_with(&format!("/{label}"))
-                        })
-                        .map(|r| r.name.clone())
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                let advanced_item = |i: &Item| {
-                    i.label.starts_with("Set upstream")
-                        || (i.label.starts_with("Delete ")
-                            && (!local || remotes.iter().any(|r| mentions(&i.label, r))))
-                };
-                // #144: greyed only for what could apply but doesn't now; hidden otherwise.
-                items.retain(|i| {
-                    i.enabled || i.why.as_deref() == Some("Up to date") || busy(&i.why)
-                });
-                items.retain(|i| {
-                    mentions(&i.label, label)
-                        || (advanced_item(i) && remotes.iter().any(|r| mentions(&i.label, r)))
-                });
-                if current {
-                    items.retain(|i| {
-                        i.label.starts_with("Push")
-                            || i.label.starts_with("Pull")
-                            || advanced_item(i)
-                    });
-                }
-                let (advanced, mut main): (Vec<Item>, Vec<Item>) =
-                    items.into_iter().partition(|i| advanced_item(i));
-                // A branch another worktree has: its worktree's items too.
-                if let Some(name) = worktree.and_then(worktree_name) {
-                    main.extend(
-                        flat(&worktrees)
-                            .into_iter()
-                            .filter(|i| mentions(&i.label, &name)),
-                    );
-                }
-                let mut out: Vec<Entry> = main.into_iter().map(Entry::Item).collect();
-                if !advanced.is_empty() {
-                    out.push(Entry::Separator);
-                    out.push(
-                        Submenu::new("Advanced", advanced.into_iter().map(Entry::Item).collect())
-                            .into(),
-                    );
-                }
-                out
-            }
-            Some((_, RowKind::Worktree(c)))
-            | Some((
-                _,
-                RowKind::Ref {
-                    worktree: Some(c), ..
-                },
-            )) if worktree_name(*c).is_some() => {
-                let name = worktree_name(*c).unwrap_or_default();
-                flat(&worktrees)
-                    .into_iter()
-                    .filter(|i| mentions(&i.label, &name))
-                    .map(Entry::Item)
-                    .collect()
-            }
-            _ => body(&worktrees, &branch),
+            )) => Some((label.clone(), *kind == RefKind::LocalBranch && *head)),
+            _ => None,
         };
-        out.extend(section);
+        let x = super::git_menu::node_name(scene, node);
+        let mut moved: Vec<Entry> = Vec::new();
+        for (index, (_, items)) in sections.iter_mut().enumerate() {
+            // Branch, Integrate, Remote.
+            if !(2..=4).contains(&index) {
+                continue;
+            }
+            let all = std::mem::take(items);
+            let Some((l, _current)) = &label else {
+                // The body: as A1, but Advanced's items moved there.
+                for e in all {
+                    match e {
+                        Entry::Item(i) if advanced(&i) => moved.push(i.into()),
+                        Entry::Submenu(s) => {
+                            let (adv, rest): (Vec<Entry>, Vec<Entry>) =
+                                s.entries.iter().cloned().partition(|c| match c {
+                                    Entry::Item(i) => advanced(&Item {
+                                        label: spell(&s.label, &i.label),
+                                        ..i.clone()
+                                    }),
+                                    _ => false,
+                                });
+                            for c in adv {
+                                if let Entry::Item(mut i) = c {
+                                    i.label = spell(&s.label, &i.label);
+                                    moved.push(i.into());
+                                }
+                            }
+                            if !rest.is_empty() {
+                                items.push(Submenu { entries: rest, ..s }.into());
+                            }
+                        }
+                        e => items.push(e),
+                    }
+                }
+                continue;
+            };
+            // The label's remote-tracking branches on this node, to delete under Advanced.
+            let remotes: Vec<String> = scene.graph.nodes[node]
+                .refs
+                .iter()
+                .map(|&r| &scene.repo.refs[r])
+                .filter(|r| r.kind == RefKind::RemoteBranch && r.name.ends_with(&format!("/{l}")))
+                .map(|r| r.name.clone())
+                .collect();
+            for mut i in all.into_iter().flat_map(flatten_named) {
+                let commit_level =
+                    i.label.starts_with("Create branch") || i.label.starts_with("Reset ");
+                if commit_level {
+                    // Named after the label right-clicked rather than the node's first branch.
+                    i.label = i
+                        .label
+                        .split(' ')
+                        .map(|w| match w.strip_suffix('…') {
+                            Some(w) if w == x => format!("{l}…"),
+                            _ if w == x => l.clone(),
+                            _ => w.to_owned(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    items.push(i.into());
+                } else if mentions(&i.label, l) {
+                    if advanced(&i) {
+                        moved.push(i.into());
+                    } else {
+                        items.push(i.into());
+                    }
+                } else if advanced(&i) && remotes.iter().any(|r| mentions(&i.label, r)) {
+                    moved.push(i.into());
+                }
+            }
+        }
+        if !moved.is_empty() {
+            sections.push((String::new(), vec![Submenu::new("Advanced", moved).into()]));
+        }
+    }
+
+    /// Open in › and Copy ›, for the node right-clicked.
+    fn actions(&self, node: usize) -> Vec<Entry> {
+        let Some(scene) = &self.scene else {
+            return Vec::new();
+        };
+        let n = &scene.graph.nodes[node];
+        let worktrees_shown = self.settings.graph.show_worktrees;
+        let open_worktree = scene.repo.worktrees.iter().find(|w| w.open);
+        let worktrees: Vec<&parterre_core::Worktree> = if worktrees_shown {
+            scene
+                .worktrees_on(node)
+                .into_iter()
+                .map(|k| &scene.repo.worktrees[k])
+                .filter(|w| !w.missing)
+                .collect()
+        } else {
+            open_worktree.filter(|_| n.is_head).into_iter().collect()
+        };
+        let pull_requests_shown = self.settings.graph.show_pull_requests
+            && self.pull_requests.origin().is_some()
+            && !self.pull_requests.needs_sign_in()
+            && self.pull_requests.list().is_some();
+        // One worktree: the item. Several: a submenu naming them.
+        let per_worktree =
+            |label: &str, each: &dyn Fn(&parterre_core::Worktree) -> Action| -> Option<Entry> {
+                match worktrees.as_slice() {
+                    [] => None,
+                    [w] => Some(act(label, each(w)).tip(w.path.display().to_string()).into()),
+                    several => Some(
+                        Submenu::new(
+                            label,
+                            several
+                                .iter()
+                                .map(|w| act(w.name(), each(w)).into())
+                                .collect(),
+                        )
+                        .into(),
+                    ),
+                }
+            };
+        let mut open: Vec<Entry> = Vec::new();
+        if pull_requests_shown {
+            let item = |label: String, i: usize| -> Entry {
+                let pr = &scene.pull_requests[i];
+                act(label, Action::OpenPullRequest(pr.url.clone()))
+                    .tip(pr.title.clone())
+                    .into()
+            };
+            match n.pull_requests.as_slice() {
+                [] => {}
+                &[i] => open.push(item(
+                    format!("Pull request #{}", scene.pull_requests[i].number),
+                    i,
+                )),
+                several => open.push(
+                    Submenu::new(
+                        "Pull request",
+                        several
+                            .iter()
+                            .map(|&i| item(format!("#{}", scene.pull_requests[i].number), i))
+                            .collect(),
+                    )
+                    .into(),
+                ),
+            }
+        }
+        open.extend(per_worktree("File manager", &|w| {
+            Action::Open(Opener::FileManager, w.path.clone())
+        }));
+        open.extend(per_worktree("Terminal", &|w| {
+            Action::Open(Opener::Terminal, w.path.clone())
+        }));
+        let commit = scene.repo.commit(n.commit);
+        let mut copy: Vec<Entry> = vec![
+            act("Commit hash", Action::Copy(commit.oid.to_hex()))
+                .key(keys::COPY)
+                .into(),
+        ];
+        if !n.refs.is_empty() {
+            let names: Vec<&str> = n
+                .refs
+                .iter()
+                .map(|&r| scene.repo.refs[r].full_name.as_str())
+                .collect();
+            copy.push(act("Ref names", Action::Copy(names.join("\n"))).into());
+        }
+        copy.extend(per_worktree("Folder path", &|w| {
+            Action::Copy(w.path.display().to_string())
+        }));
+        let mut out = Vec::new();
+        if !open.is_empty() {
+            out.push(Submenu::new("Open in", open).into());
+        }
+        out.push(Submenu::new("Copy", copy).into());
+        out
+    }
+
+    fn layout(&self, node: usize) -> Vec<Entry> {
+        let Some(scene) = &self.scene else {
+            return Vec::new();
+        };
+        let group = if self.selection.contains(node) {
+            self.selection.nodes.clone()
+        } else {
+            vec![node]
+        };
+        let displaced: Vec<usize> = group
+            .iter()
+            .copied()
+            .filter(|&n| scene.net.is_displaced(n))
+            .collect();
+        let back = if group.len() > 1 {
+            "Return selection to layout"
+        } else {
+            "Return node to layout"
+        };
+        let mut out: Vec<Entry> = vec![
+            act("Select subtree", Action::SelectSubtree(group))
+                .tip("Select everything that grows out of this (first-parent descendants)")
+                .into(),
+        ];
+        if !displaced.is_empty() {
+            out.push(act(back, Action::ReturnToLayout(displaced)).into());
+        }
+        out.push(act("Centre view here", Action::Centre(node)).into());
         out
     }
 }
 
-fn busy(why: &Option<String>) -> bool {
-    why.as_deref()
-        .is_some_and(|w| w == loading_reason(true) || w == loading_reason(false))
-}
-
-/// What the menu shows in A: what can be done, and what only a running git operation holds up.
-fn applies(e: &Entry) -> bool {
+/// `e` without what doesn't apply: a greyed item is left out, a submenu keeps what applies
+/// and goes when nothing does.
+fn applying(e: Entry) -> Option<Entry> {
     match e {
-        Entry::Item(i) => i.enabled || busy(&i.why),
-        Entry::Submenu(s) => s.enabled || busy(&s.why),
-        _ => true,
+        Entry::Item(i) if !i.enabled => None,
+        Entry::Submenu(s) if !s.enabled => None,
+        Entry::Submenu(mut s) => {
+            s.entries = s.entries.into_iter().filter_map(applying).collect();
+            (!s.entries.is_empty()).then_some(Entry::Submenu(s))
+        }
+        e => Some(e),
     }
 }
 
-/// A submenu of `items`, greyed when none of them can be done.
-fn sub(label: &str, items: Vec<Entry>) -> Entry {
-    let mut s = Submenu::new(label, items);
-    if !s.entries.iter().any(|e| match e {
-        Entry::Item(i) => i.enabled,
-        Entry::Submenu(s) => s.enabled,
-        _ => false,
-    }) {
-        s.enabled = false;
-        s.why = Some("Nothing to do here".to_owned());
-    }
-    s.into()
-}
-
-fn relabel(mut item: Item, label: &str) -> Entry {
-    item.label = label.to_owned();
-    item.into()
+/// A2: Open in › File manager is *Open in file manager*, Copy › Commit hash *Copy commit hash*.
+fn flatten(e: Entry) -> Vec<Entry> {
+    let Entry::Submenu(s) = e else {
+        return vec![e];
+    };
+    let verb = s.label;
+    let name = |label: &str| {
+        let mut chars = label.chars();
+        let lower: String = match chars.next() {
+            Some(f) => f.to_lowercase().chain(chars).collect(),
+            None => String::new(),
+        };
+        if verb == "Open in" && label.starts_with("Pull request") {
+            format!("Open {lower}")
+        } else {
+            format!("{verb} {lower}")
+        }
+    };
+    s.entries
+        .into_iter()
+        .map(|c| match c {
+            Entry::Item(mut i) => {
+                i.label = name(&i.label);
+                Entry::Item(i)
+            }
+            Entry::Submenu(mut sub) => {
+                sub.label = name(&sub.label);
+                Entry::Submenu(sub)
+            }
+            c => c,
+        })
+        .collect()
 }
 
 /// `label` names `name` as a word of its own.
@@ -445,7 +508,7 @@ fn mentions(label: &str, name: &str) -> bool {
 }
 
 /// An item, or a submenu's items named in full: *Merge into main › x* is *Merge x into main…*.
-fn flatten(e: Entry) -> Vec<Item> {
+fn flatten_named(e: Entry) -> Vec<Item> {
     match e {
         Entry::Item(i) => vec![i],
         Entry::Submenu(s) => s

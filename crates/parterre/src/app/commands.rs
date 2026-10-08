@@ -227,6 +227,7 @@ impl ParterreApp {
                 self.show_log(&nodes);
             }
             Command::Compare(request) => self.compare_request(request),
+            Command::Proto(action) => self.proto_run(ctx, action),
             Command::Git(request) => self.branches.request(ctx, request, ViewportId::ROOT),
             Command::Fetch => self.fetch(ctx, ViewportId::ROOT),
             Command::RememberMoves => self.set_remember_moves(!self.settings.remember_moves),

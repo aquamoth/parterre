@@ -2288,9 +2288,6 @@ impl ParterreApp {
             prototype_context_menu::Variant::Today => None,
             v => Some(self.proto_menu(v, context_node)),
         };
-        let proto_a = proto
-            .as_ref()
-            .is_some_and(|p| p.variant == prototype_context_menu::Variant::A);
         let Some(scene) = &self.scene else { return };
         // A node's menu acts on the selection it belongs to.
         let group: Vec<usize> = match context_node {
@@ -2315,7 +2312,7 @@ impl ParterreApp {
                     let Some(node) = context_node else {
                         usage::menu(ui.ctx(), usage::Menu::Canvas);
                         if let Some(p) = &proto {
-                            if let Some(c) = menu_bar::bar::plain(ui, &p.entries) {
+                            if let Some(c) = menu_bar::bar::plain(ui, p) {
                                 action = Some(MenuAction::Proto(c));
                             }
                             return;
@@ -2338,131 +2335,123 @@ impl ParterreApp {
                     let oid_of = |n: usize| scene.repo.commit(scene.graph.nodes[n].commit).oid;
                     let oid = oid_of(node);
                     if let Some(p) = &proto {
-                        if let Some(c) = menu_bar::bar::plain(ui, &p.entries) {
+                        if let Some(c) = menu_bar::bar::plain(ui, p) {
                             action = Some(MenuAction::Proto(c));
                         }
-                    } else {
-                        // Greyed out rather than left out, so the menu keeps its shape.
-                        let show_log = ui
-                            .add_enabled(
-                                group.len() <= 2,
-                                item("Show log", &keys::SHOW_LOG.label()),
-                            )
-                            .on_disabled_hover_text("Select one or two nodes");
-                        if show_log.clicked() {
-                            action = Some(MenuAction::ShowLog(group.clone()));
+                        return;
+                    }
+                    // Greyed out rather than left out, so the menu keeps its shape.
+                    let show_log = ui
+                        .add_enabled(group.len() <= 2, item("Show log", &keys::SHOW_LOG.label()))
+                        .on_disabled_hover_text("Select one or two nodes");
+                    if show_log.clicked() {
+                        action = Some(MenuAction::ShowLog(group.clone()));
+                        ui.close();
+                    }
+                    menu::plain_submenu(ui, "Compare", |ui| {
+                        // Two nodes: with each other, in selection order; one: with HEAD.
+                        let head = scene.repo.head_commit().map(|c| scene.repo.commit(c).oid);
+                        let (label, pair) = match *group.as_slice() {
+                            [a, b] => ("Selected revisions", Some((oid_of(a), oid_of(b)))),
+                            [_] => ("HEAD", head.filter(|&h| h != oid).map(|h| (oid, h))),
+                            _ => ("Selected revisions", None),
+                        };
+                        let why = if group.len() > 2 {
+                            "Select one or two nodes"
+                        } else {
+                            "This is HEAD"
+                        };
+                        let compare = ui
+                            .add_enabled(pair.is_some(), egui::Button::new(label))
+                            .on_disabled_hover_text(why);
+                        if compare.clicked()
+                            && let Some((a, b)) = pair
+                        {
+                            action = Some(MenuAction::Compare(CompareRequest::Compare(a, b)));
                             ui.close();
                         }
-                        menu::plain_submenu(ui, "Compare", |ui| {
-                            // Two nodes: with each other, in selection order; one: with HEAD.
-                            let head = scene.repo.head_commit().map(|c| scene.repo.commit(c).oid);
-                            let (label, pair) = match *group.as_slice() {
-                                [a, b] => ("Selected revisions", Some((oid_of(a), oid_of(b)))),
-                                [_] => ("HEAD", head.filter(|&h| h != oid).map(|h| (oid, h))),
-                                _ => ("Selected revisions", None),
-                            };
-                            let why = if group.len() > 2 {
-                                "Select one or two nodes"
-                            } else {
-                                "This is HEAD"
-                            };
-                            let compare = ui
-                                .add_enabled(pair.is_some(), egui::Button::new(label))
-                                .on_disabled_hover_text(why);
-                            if compare.clicked()
-                                && let Some((a, b)) = pair
-                            {
-                                action = Some(MenuAction::Compare(CompareRequest::Compare(a, b)));
-                                ui.close();
-                            }
-                            let working_tree = scene.repo.has_working_tree;
-                            let why = if !working_tree {
-                                "A bare repository has no working tree"
-                            } else {
-                                "Select one node"
-                            };
-                            let with_working_tree = ui
-                                .add_enabled(
-                                    group.len() == 1 && working_tree,
-                                    egui::Button::new("Working tree"),
-                                )
-                                .on_disabled_hover_text(why);
-                            if with_working_tree.clicked() {
-                                action =
-                                    Some(MenuAction::Compare(CompareRequest::WorkingTree(oid)));
-                                ui.close();
-                            }
-                            // Each branch on the node against its upstream, from the upstream.
-                            let upstreams = match *group.as_slice() {
-                                [_] if upstreams_shown => {
-                                    crate::upstreams::compare_items(scene, node)
-                                }
-                                _ => Vec::new(),
-                            };
-                            for (u, pair) in upstreams {
-                                let label = format!("Upstream ({})", u.short_name());
-                                let item = ui
-                                    .add_enabled(pair.is_ok(), egui::Button::new(label))
-                                    .on_disabled_hover_text(pair.err().unwrap_or_default());
-                                if item.clicked()
-                                    && let Ok((up, branch)) = pair
-                                {
-                                    action = Some(MenuAction::Compare(CompareRequest::Compare(
-                                        up, branch,
-                                    )));
-                                    ui.close();
-                                }
-                            }
-                            menu::separator(ui);
-                            let is_marked = marked.as_ref().is_some_and(|(m, _)| *m == oid);
-                            let (text, mark) = if is_marked {
-                                ("Clear the mark", None)
-                            } else {
-                                ("Mark for comparison", Some(oid))
-                            };
-                            let mark_item = ui
-                                .add_enabled(group.len() == 1, egui::Button::new(text))
-                                .on_disabled_hover_text("Select one node");
-                            if mark_item.clicked() {
-                                action = Some(MenuAction::Compare(CompareRequest::Mark(mark)));
-                                ui.close();
-                            }
-                            let other = marked
-                                .as_ref()
-                                .filter(|(m, _)| *m != oid && group.len() == 1);
-                            let label = other
-                                .map_or("Compare with marked".to_owned(), |(_, name)| {
-                                    format!("Compare with marked ({name})")
-                                });
-                            let why = if group.len() > 1 {
-                                "Select one node"
-                            } else if is_marked {
-                                "This is the marked commit"
-                            } else {
-                                "Mark a commit for comparison first"
-                            };
-                            let with_marked = ui
-                                .add_enabled(other.is_some(), egui::Button::new(label))
-                                .on_disabled_hover_text(why);
-                            if with_marked.clicked()
-                                && let Some(&(m, _)) = other
-                            {
-                                action = Some(MenuAction::Compare(CompareRequest::Compare(m, oid)));
-                                ui.close();
-                            }
-                        });
-                        let group_oids: Vec<Oid> = group.iter().map(|&n| oid_of(n)).collect();
-                        if let Some(request) = branches::node_menu(
-                            ui,
-                            &scene.repo,
-                            oid,
-                            &group_oids,
-                            self.branches.catalog.as_deref(),
-                            self.branches.busy(),
-                            worktrees_shown,
-                        ) {
-                            action = Some(MenuAction::Branch(request));
+                        let working_tree = scene.repo.has_working_tree;
+                        let why = if !working_tree {
+                            "A bare repository has no working tree"
+                        } else {
+                            "Select one node"
+                        };
+                        let with_working_tree = ui
+                            .add_enabled(
+                                group.len() == 1 && working_tree,
+                                egui::Button::new("Working tree"),
+                            )
+                            .on_disabled_hover_text(why);
+                        if with_working_tree.clicked() {
+                            action = Some(MenuAction::Compare(CompareRequest::WorkingTree(oid)));
+                            ui.close();
                         }
+                        // Each branch on the node against its upstream, from the upstream.
+                        let upstreams = match *group.as_slice() {
+                            [_] if upstreams_shown => crate::upstreams::compare_items(scene, node),
+                            _ => Vec::new(),
+                        };
+                        for (u, pair) in upstreams {
+                            let label = format!("Upstream ({})", u.short_name());
+                            let item = ui
+                                .add_enabled(pair.is_ok(), egui::Button::new(label))
+                                .on_disabled_hover_text(pair.err().unwrap_or_default());
+                            if item.clicked()
+                                && let Ok((up, branch)) = pair
+                            {
+                                action =
+                                    Some(MenuAction::Compare(CompareRequest::Compare(up, branch)));
+                                ui.close();
+                            }
+                        }
+                        menu::separator(ui);
+                        let is_marked = marked.as_ref().is_some_and(|(m, _)| *m == oid);
+                        let (text, mark) = if is_marked {
+                            ("Clear the mark", None)
+                        } else {
+                            ("Mark for comparison", Some(oid))
+                        };
+                        let mark_item = ui
+                            .add_enabled(group.len() == 1, egui::Button::new(text))
+                            .on_disabled_hover_text("Select one node");
+                        if mark_item.clicked() {
+                            action = Some(MenuAction::Compare(CompareRequest::Mark(mark)));
+                            ui.close();
+                        }
+                        let other = marked
+                            .as_ref()
+                            .filter(|(m, _)| *m != oid && group.len() == 1);
+                        let label = other.map_or("Compare with marked".to_owned(), |(_, name)| {
+                            format!("Compare with marked ({name})")
+                        });
+                        let why = if group.len() > 1 {
+                            "Select one node"
+                        } else if is_marked {
+                            "This is the marked commit"
+                        } else {
+                            "Mark a commit for comparison first"
+                        };
+                        let with_marked = ui
+                            .add_enabled(other.is_some(), egui::Button::new(label))
+                            .on_disabled_hover_text(why);
+                        if with_marked.clicked()
+                            && let Some(&(m, _)) = other
+                        {
+                            action = Some(MenuAction::Compare(CompareRequest::Compare(m, oid)));
+                            ui.close();
+                        }
+                    });
+                    let group_oids: Vec<Oid> = group.iter().map(|&n| oid_of(n)).collect();
+                    if let Some(request) = branches::node_menu(
+                        ui,
+                        &scene.repo,
+                        oid,
+                        &group_oids,
+                        self.branches.catalog.as_deref(),
+                        self.branches.busy(),
+                        worktrees_shown,
+                    ) {
+                        action = Some(MenuAction::Branch(request));
                     }
                     // The worktrees shown on the node, the open one at HEAD among them. Hidden,
                     // the open one is still at HEAD.
@@ -2479,16 +2468,11 @@ impl ParterreApp {
                     let folders_shown = worktrees_shown || open_worktree.is_some();
                     menu::separator(ui);
                     // Greyed out rather than left out, so the menu keeps its shape.
-                    let open_label = if proto.is_some() { "Open in" } else { "Open" };
                     if !(pull_requests_shown || folders_shown) {
-                        if !proto_a {
-                            ui.add_enabled(false, egui::Button::new(open_label))
-                                .on_disabled_hover_text(
-                                    "Show pull requests or worktrees to open them",
-                                );
-                        }
+                        ui.add_enabled(false, egui::Button::new("Open"))
+                            .on_disabled_hover_text("Show pull requests or worktrees to open them");
                     } else {
-                        menu::plain_submenu(ui, open_label, |ui| {
+                        menu::plain_submenu(ui, "Open", |ui| {
                             if pull_requests_shown {
                                 let mut open_item = |ui: &mut Ui, label: &str, i: usize| {
                                     let pr = &scene.pull_requests[i];
@@ -2604,13 +2588,6 @@ impl ParterreApp {
                         }
                     });
                     menu::separator(ui);
-                    if proto_a {
-                        ui.horizontal(|ui| {
-                            ui.add_space(ui.spacing().button_padding.x);
-                            ui.label(egui::RichText::new("Layout").small().weak());
-                        });
-                        ui.add_space(2.0);
-                    }
                     if ui
                         .button("Select subtree")
                         .on_hover_text(
@@ -2632,10 +2609,9 @@ impl ParterreApp {
                         "Return node to layout"
                     };
                     // Greyed out rather than left out, so the menu keeps its shape.
-                    if !(proto_a && displaced.is_empty())
-                        && ui
-                            .add_enabled(!displaced.is_empty(), egui::Button::new(label))
-                            .clicked()
+                    if ui
+                        .add_enabled(!displaced.is_empty(), egui::Button::new(label))
+                        .clicked()
                     {
                         action = Some(MenuAction::ReturnToLayout(displaced));
                         ui.close();

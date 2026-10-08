@@ -147,16 +147,41 @@ impl ParterreApp {
             catalog,
             busy: self.branches.busy(),
         };
+        // PROTOTYPE (#323): with several nodes, only what acts on all of them, as History has it.
+        let one = |entries: Vec<Entry>| -> Vec<Entry> {
+            if group.len() < 2 {
+                return entries;
+            }
+            entries
+                .into_iter()
+                .map(|e| match e {
+                    Entry::Item(i)
+                        if matches!(i.command, Command::Fetch)
+                            || i.label.starts_with(&case(p, "Pull "))
+                            || i.label.ends_with(&case(p, " local branches")) =>
+                    {
+                        Entry::Item(i)
+                    }
+                    Entry::Item(i) => i.blocked(Some("Select one node")).into(),
+                    Entry::Submenu(mut s) => {
+                        s.enabled = false;
+                        s.why = Some("Select one node".to_owned());
+                        s.into()
+                    }
+                    e => e,
+                })
+                .collect()
+        };
         let mut entries = Vec::new();
         entries.extend(self.history(&c, &group));
         entries.push(Entry::Separator);
-        entries.extend(worktree_section(&c, commit));
+        entries.extend(one(worktree_section(&c, commit)));
         entries.push(Entry::Separator);
-        entries.extend(branch_section(&c, self, commit, &group));
+        entries.extend(one(branch_section(&c, self, commit, &group)));
         entries.push(Entry::Separator);
-        entries.extend(integrate_section(&c, self, commit));
+        entries.extend(one(integrate_section(&c, self, commit)));
         entries.push(Entry::Separator);
-        entries.extend(self.remote_section(&c, commit));
+        entries.extend(one(self.remote_section(&c, commit)));
         entries
     }
 
@@ -257,7 +282,56 @@ impl ParterreApp {
             .into(),
         };
         entries.push(entry);
+        entries.extend(self.marks(p, group));
         entries
+    }
+
+    /// PROTOTYPE (#323): Mark for comparison and Compare with marked, as the node's menu had
+    /// them.
+    fn marks(&self, p: Platform, group: &[usize]) -> Vec<Entry> {
+        let oid = match (&self.scene, group) {
+            (Some(scene), &[n]) => Some(scene.repo.commit(scene.graph.nodes[n].commit).oid),
+            _ => None,
+        };
+        let why = if group.is_empty() {
+            "Select a node"
+        } else {
+            "Select one node"
+        };
+        let Some(oid) = oid else {
+            return vec![
+                grey(case(p, "Mark for comparison"), why),
+                grey(case(p, "Compare with marked"), why),
+            ];
+        };
+        let is_marked = self.marked.as_ref().is_some_and(|(m, _)| *m == oid);
+        let mark = if is_marked {
+            Item::new(
+                case(p, "Clear the mark"),
+                Command::Compare(CompareRequest::Mark(None)),
+            )
+        } else {
+            Item::new(
+                case(p, "Mark for comparison"),
+                Command::Compare(CompareRequest::Mark(Some(oid))),
+            )
+        };
+        let with = match self.marked.as_ref().filter(|(m, _)| *m != oid) {
+            Some((m, name)) => Item::new(
+                case_with(p, "Compare with marked ({})", &[name]),
+                Command::Compare(CompareRequest::Compare(*m, oid)),
+            )
+            .into(),
+            None => grey(
+                case(p, "Compare with marked"),
+                if is_marked {
+                    "This is the marked commit"
+                } else {
+                    "Mark a commit for comparison first"
+                },
+            ),
+        };
+        vec![mark.into(), with]
     }
 
     /// Fetch, pull the current branch, push the node's branches.
@@ -490,7 +564,7 @@ fn delete_entry(c: &Ctx, app: &ParterreApp, commit: Oid, group: &[usize]) -> Ent
         if each.iter().all(|found| !found.is_empty()) {
             let all: Vec<BranchTip> = each.into_iter().flatten().collect();
             let names: Vec<String> = all.iter().map(|b| b.name.clone()).collect();
-            let label = case_with(p, "Delete {} branches", &[&all.len().to_string()]);
+            let label = case_with(p, "Delete {} local branches", &[&all.len().to_string()]);
             return Item::new(
                 label,
                 Command::Git(Request::Run(Action::DeleteBranches(all))),
@@ -618,7 +692,7 @@ fn integrate_section(c: &Ctx, app: &ParterreApp, commit: Option<Oid>) -> Vec<Ent
 
 /// A node's name in labels: its first branch, a local one first, else its first ref, else its
 /// short hash.
-fn node_name(scene: &crate::scene::Scene, node: usize) -> String {
+pub(super) fn node_name(scene: &crate::scene::Scene, node: usize) -> String {
     let n = &scene.graph.nodes[node];
     let repo = &scene.repo;
     n.refs
