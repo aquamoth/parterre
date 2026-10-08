@@ -378,7 +378,8 @@ pub(crate) fn push(
                 commits: lost,
                 replaced,
                 deletions: Vec::new(),
-                repo,
+                repo: Some(repo),
+                changed: false,
                 commands: vec![push_command(catalog, push, true)],
                 head: theirs,
             }));
@@ -489,7 +490,8 @@ pub(crate) fn delete_remote_branches(
             commits,
             replaced: Vec::new(),
             deletions,
-            repo: Arc::new(git.load()?),
+            repo: Some(Arc::new(git.load()?)),
+            changed: false,
             commands: branches.iter().map(delete_remote_command).collect(),
             head: None,
         }));

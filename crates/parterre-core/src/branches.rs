@@ -976,7 +976,12 @@ pub struct Warning {
     /// Each branch or worktree the action deletes, in its order, with what it loses. Empty for
     /// a switch.
     pub deletions: Vec<Deletion>,
-    pub repo: Arc<Repo>,
+    /// The graph to show the commits in, loaded with them. None when the graph on screen has
+    /// them: a worktree's are reachable from its HEAD, which the graph loads (#354).
+    pub repo: Option<Arc<Repo>>,
+    /// Something ran before it asked, such as the worktrees git didn't refuse: the repository
+    /// is not what it was. Set by [`Branches::execute`].
+    pub changed: bool,
     pub commands: Vec<Vec<String>>,
     /// The HEAD the warning was about, or, for a force push, the remote branch's tip.
     pub(crate) head: Option<Oid>,
@@ -1197,7 +1202,10 @@ impl Branches {
         }
         let requested = action.clone();
         match self.execute_inner(action, approval, cancel, &mut report) {
-            Ok(Some(warning)) => Outcome::Warning(warning),
+            Ok(Some(mut warning)) => {
+                warning.changed = !report.steps.is_empty();
+                Outcome::Warning(warning)
+            }
             Ok(None) => Outcome::Done(report),
             Err(error) => {
                 let error = if let Action::Create(c) = &requested
@@ -1250,10 +1258,6 @@ impl Branches {
         cancel: &CancelTree,
         report: &mut Report,
     ) -> Result<Option<Warning>, Error> {
-        // Before the catalogue: deleting worktrees loads it alongside the graph.
-        if let Action::DeleteWorktrees { paths, branches } = &action {
-            return self.delete_worktrees(paths, *branches, approval, cancel, report);
-        }
         let git = Git::new(&self.path);
         let catalog = Catalog::load(&self.path)?;
         if let Action::DeleteBranches(branches) = &action {
@@ -1264,6 +1268,9 @@ impl Branches {
                     })
             };
             return self.delete_branches(&catalog, branches, &approved, cancel, report);
+        }
+        if let Action::DeleteWorktrees { paths, branches } = &action {
+            return self.delete_worktrees(&catalog, paths, *branches, approval, cancel, report);
         }
         if let Action::Reset(reset) = &action {
             crate::reset::execute(&catalog, reset, cancel, report)?;
@@ -1429,7 +1436,8 @@ impl Branches {
                     replaced: Vec::new(),
                     deletions: Vec::new(),
                     head: catalog.head,
-                    repo,
+                    repo: Some(repo),
+                    changed: false,
                     commands: commands.clone(),
                 }));
             }
@@ -1528,6 +1536,7 @@ impl Branches {
     /// was approved.
     fn delete_worktrees(
         &self,
+        catalog: &Catalog,
         paths: &[PathBuf],
         branches: bool,
         approval: Option<&Warning>,
@@ -1539,14 +1548,6 @@ impl Branches {
             branches,
         };
         let git = Git::new(&self.path);
-        // Before approval, the graph the warning shows lost commits in loads alongside what's
-        // lost rather than after it: on a large repository it is most of the wait (#354). It
-        // isn't waited for when the worktrees can't be deleted.
-        let graph = approval.is_none().then(|| {
-            let git = git.clone();
-            std::thread::spawn(move || git.load())
-        });
-        let catalog = &Catalog::load(&self.path)?;
         let wts = find_worktrees(catalog, paths)?;
         let deletions = worktree_losses(&git, catalog, &wts)?;
         let commits = worktree_commits(&deletions, branches);
@@ -1554,15 +1555,12 @@ impl Branches {
             w.action == *action && w.commits == commits && same_losses(&w.deletions, &deletions)
         });
         let Some(approved) = approved else {
-            let repo = match graph {
-                Some(graph) => graph.join().expect("graph load")?,
-                None => git.load()?,
-            };
             return Ok(Some(Warning {
                 action: action.clone(),
                 replaced: Vec::new(),
                 head: catalog.head,
-                repo: Arc::new(repo),
+                repo: None,
+                changed: false,
                 commands: worktree_commands(&deletions, branches),
                 deletions,
                 commits,
@@ -1636,7 +1634,8 @@ impl Branches {
             action: Action::DeleteWorktrees { paths, branches },
             replaced: Vec::new(),
             head: after.head,
-            repo: Arc::new(git.load()?),
+            repo: None,
+            changed: false,
             commands: worktree_commands(&deletions, branches),
             commits: worktree_commits(&deletions, branches),
             deletions,
@@ -1664,7 +1663,8 @@ fn branch_warning(
         commits,
         replaced: Vec::new(),
         deletions,
-        repo,
+        repo: Some(repo),
+        changed: false,
         commands: vec![force],
         head,
     }))

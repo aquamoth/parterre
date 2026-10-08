@@ -1916,11 +1916,16 @@ impl Tool {
         });
         if let Some(result) = completed {
             let job = self.job.take().unwrap();
-            self.reload = Some(job.path.clone());
+            // A question asked before anything ran leaves the repository as it was: nothing
+            // to load again while it's asked (#354).
+            let unchanged = matches!(&result, Outcome::Warning(w) if !w.changed);
+            if !unchanged {
+                self.reload = Some(job.path.clone());
+            }
             let here = self.repo.as_ref().is_some_and(|r| r.path == job.path);
             // What was loaded meanwhile is from before it ended: look at the worktree again
             // at once, for whether it's stuck. The refs follow with the graph's reload.
-            if let Some(repo) = self.repo.clone().filter(|_| here) {
+            if let Some(repo) = self.repo.clone().filter(|_| here && !unchanged) {
                 self.unlooked = true;
                 self.look_at_once = true;
                 self.load_catalog(ctx, &repo);
@@ -2840,8 +2845,10 @@ impl Tool {
             let focus = loss.fresh && (remote || !confirmation);
             dialogs::actions(ui, button, !busy && allowed, !confirmation, focus)
         });
-        if let Some(commits) = show_log {
-            self.log_request = Some((warning.repo.clone(), commits, true));
+        if let Some(commits) = show_log
+            && let Some(repo) = warning.repo.clone().or_else(|| self.repo.clone())
+        {
+            self.log_request = Some((repo, commits, true));
         }
         if deletes_branches != loss.warning.deletes_branches() {
             loss.warning.set_deletes_branches(deletes_branches);
@@ -3262,6 +3269,10 @@ mod tests {
         let path = listed(dir.path(), others.path(), "b");
         let mut h = Harness::new(dir);
         h.ask(worktree_deletion(path.clone()), "Delete worktree b?");
+        assert!(
+            h.tool.reload.is_none(),
+            "asking changes nothing to load again"
+        );
         // Unticked, the branch keeps its commit: a confirmation.
         assert!(h.shows("Delete") && !h.shows("Delete anyway"));
         h.click("Also delete local branch b");
@@ -3271,8 +3282,10 @@ mod tests {
                 && h.shows("Delete anyway")
         });
         h.click("Show in log");
-        let (_, commits, _) = h.tool.log_request.take().expect("the log is asked for");
+        let (repo, commits, _) = h.tool.log_request.take().expect("the log is asked for");
         assert_eq!(commits, [only]);
+        // In the graph on screen.
+        assert!(repo.lookup(&only).is_some());
         // Unticked again, it's the confirmation again.
         h.click("Also delete local branch b");
         h.until("back to the confirmation", |h| {
