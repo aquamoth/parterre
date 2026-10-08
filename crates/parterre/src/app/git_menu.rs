@@ -325,15 +325,10 @@ impl ParterreApp {
                 .flat_map(|b| {
                     parterre_core::remote::push_targets(repo, catalog, &b.name)
                         .into_iter()
-                        .map(|(remote, state)| {
+                        .map(|(push, state)| {
                             use parterre_core::remote::PushState;
-                            let push =
-                                Request::Run(Action::Push(Box::new(parterre_core::remote::Push {
-                                    branch: b.name.clone(),
-                                    tip: b.tip,
-                                    remote: remote.clone(),
-                                })));
-                            let name = format!("{} to {remote}", b.name);
+                            let name = format!("{} to {}", b.name, push.target());
+                            let push = Request::Run(Action::Push(Box::new(push)));
                             match state {
                                 PushState::Force => (format!("{name}…"), push, None),
                                 PushState::UpToDate => (name, push, Some("Up to date".to_owned())),

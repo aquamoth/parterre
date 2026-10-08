@@ -123,12 +123,21 @@ fn pull(r: &TestRepo, how: Option<Reconcile>) -> Action {
     }))
 }
 
+/// Pushing `branch` to its own name on `origin`.
 fn push(r: &TestRepo, branch: &str) -> Action {
     Action::Push(Box::new(Push {
         branch: branch.into(),
         tip: rev(r, branch),
         remote: "origin".into(),
+        to: branch.into(),
     }))
+}
+
+/// Pushing `branch` to `origin`, as the menus offer it: to its upstream there.
+fn push_offered(r: &TestRepo, branch: &str) -> Action {
+    let catalog = Catalog::load(r.path()).unwrap();
+    let b = catalog.locals.iter().find(|b| b.name == branch).unwrap();
+    Action::Push(Box::new(Push::new(b, "origin")))
 }
 
 /// Whether git's config, as parterre's git reads it (the system's and the user's included),
@@ -417,19 +426,57 @@ fn the_first_push_of_a_branch_with_no_upstream_sets_it() {
 }
 
 #[test]
-fn pushing_leaves_an_upstream_of_another_name_alone() {
+fn pushing_goes_to_an_upstream_of_another_name() {
     let mut s = setup();
     s.work
         .git(&["checkout", "-q", "-b", "feature", "--track", "origin/main"]);
     s.work.commit("feature");
-    let report = done(execute(&s.work, push(&s.work, "feature"), None));
-    assert_eq!(commands(&report), ["git push --progress origin feature"]);
+    let report = done(execute(&s.work, push_offered(&s.work, "feature"), None));
     assert_eq!(
-        on_origin(&s, "feature"),
+        commands(&report),
+        ["git push --progress origin feature:main"]
+    );
+    assert_eq!(
+        on_origin(&s, "main"),
         Some(rev(&s.work, "feature").to_hex())
     );
-    assert_eq!(on_origin(&s, "main"), Some(rev(&s.work, "main").to_hex()));
+    assert_eq!(on_origin(&s, "feature"), None);
     assert_eq!(upstream(&s.work, "feature").as_deref(), Some("origin/main"));
+}
+
+#[test]
+fn a_new_upstream_is_what_push_compares_with() {
+    let mut s = setup();
+    let url = s.origin.path().to_str().unwrap().to_owned();
+    s.work.git(&["remote", "add", "backup", &url]);
+    s.work.git(&["fetch", "-q", "backup"]);
+    s.work.branch("feature");
+    s.work.commit("feature");
+    s.work.git(&["push", "-q", "-u", "origin", "feature"]);
+    let targets = |r: &TestRepo| {
+        let repo = r.load();
+        let catalog = Catalog::load(r.path()).unwrap();
+        remote::push_targets(&repo, &catalog, "feature")
+            .into_iter()
+            .map(|(push, state)| (push.target(), state))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        targets(&s.work),
+        [
+            ("backup".to_owned(), PushState::New),
+            ("origin".to_owned(), PushState::UpToDate)
+        ]
+    );
+    s.work
+        .git(&["branch", "--set-upstream-to=origin/main", "feature"]);
+    assert_eq!(
+        targets(&s.work),
+        [
+            ("backup".to_owned(), PushState::New),
+            ("origin/main".to_owned(), PushState::Ahead)
+        ]
+    );
 }
 
 #[test]
@@ -610,6 +657,74 @@ fn a_force_push_with_no_upstream_sets_it_too() {
 }
 
 #[test]
+fn the_upstream_is_found_on_its_own_remote_when_another_name_contains_it() {
+    let s = setup();
+    let url = s.origin.path().to_str().unwrap().to_owned();
+    // Newer git refuses to add `a/b` beside `a`, but configs may have both.
+    for remote in ["a", "a/b"] {
+        let fetch = format!("+refs/heads/*:refs/remotes/{remote}/*");
+        s.work
+            .git(&["config", &format!("remote.{remote}.url"), &url]);
+        s.work
+            .git(&["config", &format!("remote.{remote}.fetch"), &fetch]);
+    }
+    s.work.git(&["config", "branch.main.remote", "a"]);
+    s.work
+        .git(&["config", "branch.main.merge", "refs/heads/b/c"]);
+    let repo = s.work.load();
+    let catalog = Catalog::load(s.work.path()).unwrap();
+    let targets: Vec<_> = remote::push_targets(&repo, &catalog, "main")
+        .into_iter()
+        .map(|(push, _)| push.target())
+        .collect();
+    assert_eq!(targets, ["a/b/c", "a/b", "origin"]);
+}
+
+#[test]
+fn a_force_push_to_an_upstream_of_another_name_leases_that_branch() {
+    let s = rebased_feature();
+    s.work.git(&["branch", "-m", "feature", "topic"]);
+    let theirs = rev(&s.work, "origin/feature").to_hex();
+    let w = warning(execute(&s.work, push_offered(&s.work, "topic"), None));
+    assert!(w.is_confirmation(), "{w:?}");
+    assert_eq!(w.replaced.len(), 2);
+    let report = done(execute(&s.work, w.action.clone(), Some(&w)));
+    // Git checks `--force-if-includes` against a local `feature`, so the lease names the tip.
+    assert_eq!(
+        commands(&report),
+        [format!(
+            "git push --progress --force-with-lease=refs/heads/feature:{theirs} origin topic:feature"
+        )]
+    );
+    assert_eq!(
+        on_origin(&s, "feature"),
+        Some(rev(&s.work, "topic").to_hex())
+    );
+    assert_eq!(on_origin(&s, "topic"), None);
+}
+
+#[test]
+fn a_force_push_to_an_upstream_of_another_name_wont_lose_commits_the_branch_never_had() {
+    let mut s = setup();
+    let theirs = push_from_other(&mut s, "theirs", "theirs\n");
+    s.work.git(&["fetch", "-q", "origin"]);
+    s.work.branch("topic");
+    s.work
+        .git(&["branch", "--set-upstream-to=origin/main", "topic"]);
+    s.work.commit("mine");
+    let w = warning(execute(&s.work, push_offered(&s.work, "topic"), None));
+    assert_eq!(w.commits, vec![oid(&theirs)]);
+    let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
+    assert_eq!(
+        error,
+        "origin/main has commits topic never had, so parterre won't force push over them. \
+         Take them into topic first."
+    );
+    assert!(report.steps.is_empty());
+    assert_eq!(on_origin(&s, "main"), Some(theirs));
+}
+
+#[test]
 fn a_moved_branch_is_not_pushed() {
     let mut s = setup();
     let stale = push(&s.work, "main");
@@ -629,6 +744,9 @@ fn each_remote_says_whether_a_push_would_send_anything() {
         let repo = r.load();
         let catalog = Catalog::load(r.path()).unwrap();
         remote::push_targets(&repo, &catalog, branch)
+            .into_iter()
+            .map(|(push, state)| (push.remote, state))
+            .collect::<Vec<_>>()
     };
     let both = |state| vec![("backup".to_owned(), state), ("origin".to_owned(), state)];
     assert_eq!(states(&s.work, "main"), both(PushState::UpToDate));
