@@ -1,11 +1,12 @@
 //! The Git menu (#339, #344): fixed items acting on the selected node, named after their
 //! targets, and greyed out, not left out, where they don't apply. In each section what only
 //! looks comes first, then what changes, then what destroys. A target that has several (Switch
-//! to with two branches on the node) is a submenu. What it offers is what the node's menu
-//! offered (`branches`), from the same functions.
+//! to with two branches on the node) is a submenu. With several nodes selected, what acts on
+//! one is greyed out, and deleting what they all have is one item. The graph's right-click
+//! menu is this one, without what doesn't apply (`node_menu`).
 
-use parterre_core::branches::{Action, BranchTip, Catalog};
-use parterre_core::{Oid, RefKind};
+use parterre_core::branches::{Action, Catalog};
+use parterre_core::{Oid, RefKind, Repo};
 
 use super::ParterreApp;
 use super::branches::{self, Request, Target, loading_reason};
@@ -147,16 +148,36 @@ impl ParterreApp {
             catalog,
             busy: self.branches.busy(),
         };
+        let mut worktree = worktree_section(&c, commit);
+        let mut branch = branch_section(&c, self, commit);
+        let mut integrate = integrate_section(&c, self, commit);
+        let mut remote = self.remote_section(&c, commit);
+        if group.len() > 1 {
+            // Several nodes: what acts on one is greyed out, and deleting what every node has
+            // is one item, in place of the section's Delete (its last).
+            for section in [&mut worktree, &mut branch, &mut integrate, &mut remote] {
+                one_node(p, section);
+            }
+            if let (Some(scene), Some(catalog)) = (scene, catalog) {
+                let oids: Vec<Oid> = group
+                    .iter()
+                    .map(|&n| scene.repo.commit(scene.graph.nodes[n].commit).oid)
+                    .collect();
+                let (worktrees, branches) = group_deletions(&scene.repo, catalog, &oids, c.busy);
+                for (section, all) in [(&mut worktree, worktrees), (&mut branch, branches)] {
+                    if !all.is_empty() {
+                        section.pop();
+                        section.extend(all);
+                    }
+                }
+            }
+        }
         let mut entries = Vec::new();
         entries.extend(self.history(&c, &group));
-        entries.push(Entry::Separator);
-        entries.extend(worktree_section(&c, commit));
-        entries.push(Entry::Separator);
-        entries.extend(branch_section(&c, self, commit, &group));
-        entries.push(Entry::Separator);
-        entries.extend(integrate_section(&c, self, commit));
-        entries.push(Entry::Separator);
-        entries.extend(self.remote_section(&c, commit));
+        for section in [worktree, branch, integrate, remote] {
+            entries.push(Entry::Separator);
+            entries.extend(section);
+        }
         entries
     }
 
@@ -377,7 +398,7 @@ fn worktree_section(c: &Ctx, commit: Option<Oid>) -> Vec<Entry> {
     entries
 }
 
-fn branch_section(c: &Ctx, app: &ParterreApp, commit: Option<Oid>, group: &[usize]) -> Vec<Entry> {
+fn branch_section(c: &Ctx, app: &ParterreApp, commit: Option<Oid>) -> Vec<Entry> {
     let p = c.p;
     let mut entries = vec![Entry::Heading(case(p, "Branch"))];
     let (Some(catalog), Some(commit), Some(repo)) = (c.catalog, commit, &app.repo) else {
@@ -466,40 +487,20 @@ fn branch_section(c: &Ctx, app: &ParterreApp, commit: Option<Oid>, group: &[usiz
         (None, Err(why)) => grey(c.label("Reset {current} to {x}…", "Reset {current}…"), &why),
     };
     entries.push(reset);
-    entries.push(delete_entry(c, app, commit, group));
+    entries.push(delete_entry(c, app, commit));
     entries
 }
 
 /// *Delete*: the node's local and remote-tracking branches, one item for one (*Delete
-/// feature/x*), a submenu (Local x, Remote origin/x) for several. With several nodes selected
-/// that all have local branches, one item deletes them all.
-fn delete_entry(c: &Ctx, app: &ParterreApp, commit: Oid, group: &[usize]) -> Entry {
+/// feature/x*), a submenu (Local x, Remote origin/x) for several.
+fn delete_entry(c: &Ctx, app: &ParterreApp, commit: Oid) -> Entry {
     let p = c.p;
-    let (Some(catalog), Some(repo), Some(scene)) = (c.catalog, &app.repo, &app.scene) else {
+    let (Some(catalog), Some(repo)) = (c.catalog, &app.repo) else {
         return grey(
             c.label("Delete {x}", "Delete"),
             c.blocked().unwrap_or("Select a node"),
         );
     };
-    let oid = |n: usize| scene.repo.commit(scene.graph.nodes[n].commit).oid;
-    if group.len() > 1 {
-        let each: Vec<Vec<BranchTip>> = group
-            .iter()
-            .map(|&n| branches::deletable_locals(repo, catalog, oid(n)))
-            .collect();
-        if each.iter().all(|found| !found.is_empty()) {
-            let all: Vec<BranchTip> = each.into_iter().flatten().collect();
-            let names: Vec<String> = all.iter().map(|b| b.name.clone()).collect();
-            let label = case_with(p, "Delete {} branches", &[&all.len().to_string()]);
-            return Item::new(
-                label,
-                Command::Git(Request::Run(Action::DeleteBranches(all))),
-            )
-            .tip(names.join(", "))
-            .blocked(c.blocked())
-            .into();
-        }
-    }
     let mut found: Vec<Target> = branches::deletable_locals(repo, catalog, commit)
         .into_iter()
         .map(|b| {
@@ -616,6 +617,107 @@ fn integrate_section(c: &Ctx, app: &ParterreApp, commit: Option<Oid>) -> Vec<Ent
     entries
 }
 
+/// For a selection of several nodes: greys what acts on one. Fetch, and Pull of the current
+/// branch, don't, and stay.
+fn one_node(p: Platform, section: &mut [Entry]) {
+    let why = || Some("Select one node".to_owned());
+    for entry in section {
+        match entry {
+            Entry::Item(i)
+                if matches!(i.command, Command::Fetch)
+                    || i.label.starts_with(&case(p, "Pull ")) => {}
+            Entry::Item(i) => {
+                i.enabled = false;
+                i.why = why();
+            }
+            Entry::Submenu(s) => {
+                s.enabled = false;
+                s.why = why();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What every one of the commits `oids` has to delete, as one item each: worktrees, then local
+/// and remote-tracking branches.
+fn group_deletions(
+    repo: &Repo,
+    catalog: &Catalog,
+    oids: &[Oid],
+    busy: bool,
+) -> (Vec<Entry>, Vec<Entry>) {
+    let p = Platform::CURRENT;
+    let blocked = busy.then(|| loading_reason(true));
+    // One item for them all when every node has some.
+    let all = |each: Vec<Vec<String>>, many: &str, action: Action| -> Option<Entry> {
+        if each.iter().any(Vec::is_empty) {
+            return None;
+        }
+        let names: Vec<String> = each.into_iter().flatten().collect();
+        let label = case_with(
+            p,
+            &format!("Delete {{}} {many}"),
+            &[&names.len().to_string()],
+        );
+        Some(
+            Item::new(label, Command::Git(Request::Run(action)))
+                .tip(names.join(", "))
+                .blocked(blocked)
+                .into(),
+        )
+    };
+    let worktrees: Vec<Vec<&parterre_core::branches::Worktree>> = oids
+        .iter()
+        .map(|&o| branches::deletable_worktrees(catalog, o))
+        .collect();
+    let unlocked = worktrees.iter().flatten().all(|w| w.locked.is_none());
+    let worktree = unlocked
+        .then(|| {
+            let paths = worktrees.iter().flatten().map(|w| w.path.clone()).collect();
+            all(
+                names(&worktrees, |w| w.label()),
+                "worktrees",
+                Action::DeleteWorktrees {
+                    paths,
+                    branches: false,
+                },
+            )
+        })
+        .flatten();
+    let locals: Vec<_> = oids
+        .iter()
+        .map(|&o| branches::deletable_locals(repo, catalog, o))
+        .collect();
+    let remotes: Vec<_> = oids
+        .iter()
+        .map(|&o| branches::deletable_remotes(repo, catalog, o))
+        .collect();
+    let branch = [
+        all(
+            names(&locals, |b| b.name.clone()),
+            "local branches",
+            Action::DeleteBranches(locals.iter().flatten().cloned().collect()),
+        ),
+        all(
+            names(&remotes, |b| b.name()),
+            "remote branches",
+            Action::DeleteRemoteBranches(remotes.iter().flatten().cloned().collect()),
+        ),
+    ];
+    (
+        worktree.into_iter().collect(),
+        branch.into_iter().flatten().collect(),
+    )
+}
+
+/// The names of what each node has, all in one list per node.
+fn names<T>(each: &[Vec<T>], name: impl Fn(&T) -> String) -> Vec<Vec<String>> {
+    each.iter()
+        .map(|found| found.iter().map(&name).collect())
+        .collect()
+}
+
 /// A node's name in labels: its first branch, a local one first, else its first ref, else its
 /// short hash.
 fn node_name(scene: &crate::scene::Scene, node: usize) -> String {
@@ -636,8 +738,56 @@ fn node_name(scene: &crate::scene::Scene, node: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ctx, fill};
+    use super::{Command, Ctx, Entry, Item, case, fill, group_deletions, one_node};
+    use crate::app::tool_harness::{git, init, load};
     use crate::keys::Platform;
+    use parterre_core::Oid;
+
+    fn label(entry: &Entry) -> String {
+        match entry {
+            Entry::Item(i) => i.label.clone(),
+            Entry::Submenu(s) => s.label.clone(),
+            _ => String::new(),
+        }
+    }
+
+    #[test]
+    fn several_nodes_offer_to_delete_what_they_all_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        init(p);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(p, &["branch", "a"]);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "next"]);
+        git(p, &["branch", "b"]);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "tip"]);
+        git(
+            p,
+            &["remote", "add", "origin", "https://example.com/demo.git"],
+        );
+        git(p, &["update-ref", "refs/remotes/origin/a", "a"]);
+        git(p, &["update-ref", "refs/remotes/origin/b", "b"]);
+        let (repo, catalog) = load(p);
+        let oid = |name: &str| repo.commit(repo.resolve(name).unwrap()).oid;
+        let labels = |oids: &[Oid]| {
+            let (worktrees, branches) = group_deletions(&repo, &catalog, oids, false);
+            worktrees
+                .iter()
+                .chain(&branches)
+                .map(label)
+                .collect::<Vec<_>>()
+        };
+        let p = Platform::CURRENT;
+        assert_eq!(
+            labels(&[oid("a"), oid("b")]),
+            [
+                case(p, "Delete 2 local branches"),
+                case(p, "Delete 2 remote branches")
+            ]
+        );
+        // The current branch can't go, and its commit has no remote-tracking branch.
+        assert!(labels(&[oid("a"), oid("HEAD")]).is_empty());
+    }
 
     fn ctx(p: Platform, x: Option<&str>) -> Ctx<'static> {
         Ctx {
@@ -647,6 +797,26 @@ mod tests {
             catalog: None,
             busy: false,
         }
+    }
+
+    #[test]
+    fn several_nodes_grey_what_acts_on_one_but_fetch_and_pull() {
+        let p = Platform::CURRENT;
+        let mut section: Vec<Entry> = vec![
+            Entry::Heading(case(p, "Remote")),
+            Item::new(case(p, "Fetch"), Command::Fetch).into(),
+            Item::new(case(p, "Pull main"), Command::ShowLog).into(),
+            Item::new(case(p, "Push x to origin"), Command::ShowLog).into(),
+        ];
+        one_node(p, &mut section);
+        let enabled: Vec<bool> = section
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Item(i) => Some(i.enabled),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(enabled, [true, true, false]);
     }
 
     #[test]
