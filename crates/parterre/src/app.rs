@@ -14,6 +14,8 @@ use std::sync::Arc;
 use parterre_core::recent::Recent;
 use parterre_core::{Oid, Repo};
 
+// PROTOTYPE — throwaway About dialogs.
+mod about_prototype;
 mod auto_reload;
 mod blame_window;
 mod branches;
@@ -2709,6 +2711,11 @@ impl ParterreApp {
     /// parterre to keep showing them.
     fn about_window(&mut self, ctx: &egui::Context) {
         if !self.show_about {
+            return;
+        }
+        // PROTOTYPE — throwaway.
+        if std::env::var_os("PARTERRE_ABOUT_CURRENT").is_none() {
+            self.show_about = about_prototype::show(ctx);
             return;
         }
         // Paths chosen by build.rs.
