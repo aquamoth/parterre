@@ -18,8 +18,8 @@ use parterre_forge::github::{self, Proposed};
 use super::branches::{Request, Target, capitalized, loading_reason, target_menu_named};
 use crate::{dialogs, menu, widgets};
 
-/// *Pull* on the open worktree's branch, *Push* and *Set upstream…* for the local branches at
-/// `commit`, after a separator; nothing without a remote.
+/// *Pull* on the open worktree's branch or its upstream, *Push* and *Set upstream…* for the
+/// local branches at `commit`, after a separator; nothing without a remote.
 pub(super) fn section(
     ui: &mut Ui,
     repo: &Repo,
@@ -28,12 +28,13 @@ pub(super) fn section(
     busy: bool,
 ) -> Option<Request> {
     let locals: Vec<_> = catalog.locals.iter().filter(|b| b.tip == commit).collect();
-    if locals.is_empty() || catalog.remote_names.is_empty() {
+    let pull = remote::pull_offered(catalog, commit).zip(catalog.head);
+    if (locals.is_empty() && pull.is_none()) || catalog.remote_names.is_empty() {
         return None;
     }
     let mut request = None;
     menu::separator(ui);
-    if let Some(branch) = remote::pull_offered(catalog, commit) {
+    if let Some((branch, head)) = pull {
         let stuck = catalog.stuck().map(|s| s.reason());
         let upstream = branch.upstream.clone().unwrap_or_default();
         let response = ui
@@ -49,11 +50,14 @@ pub(super) fn section(
         if response.clicked() {
             request = Some(Request::Run(Action::Pull(Box::new(Pull {
                 branch: branch.name.clone(),
-                head: commit,
+                head,
                 how: None,
             }))));
             ui.close();
         }
+    }
+    if locals.is_empty() {
+        return request;
     }
     // Each branch's remotes: one asking for a force push ends in "…", for its question.
     let pushes: Vec<(String, Vec<Target>)> = locals
@@ -514,6 +518,28 @@ mod tests {
         assert_eq!(
             (push.branch.as_str(), push.remote.as_str()),
             ("main", "origin")
+        );
+    }
+
+    #[test]
+    fn the_upstreams_row_pulls_the_open_worktrees_branch() {
+        let (origin, work) = cloned();
+        let p = work.path();
+        let theirs = pushed_elsewhere(origin.path(), "theirs");
+        git(p, &["fetch", "-q", "origin"]);
+        let (repo, catalog) = load(p);
+        let up = repo.commit(repo.resolve(&theirs).unwrap()).oid;
+        let (texts, asked) = menu(
+            |ui| super::section(ui, &repo, up, &catalog, false),
+            Some("Pull main"),
+        );
+        assert!(!texts.iter().any(|t| t.starts_with("Push")), "{texts:?}");
+        let Some(Request::Run(Action::Pull(pull))) = asked else {
+            panic!("a pull: {asked:?} in {texts:?}")
+        };
+        assert_eq!(
+            (pull.branch.as_str(), Some(pull.head)),
+            ("main", catalog.head)
         );
     }
 

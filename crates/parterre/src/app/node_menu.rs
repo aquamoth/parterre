@@ -1,8 +1,9 @@
 //! The graph's right-click menus (#323). A node's is the Git menu (`git_menu`) with what
 //! doesn't apply left out: its sections, headings and order, then *Actions ›* and *Layout*.
 //! Two departures: Fetch isn't the node's, so it stays in the menu bar, and Pull is offered on
-//! the current branch's node only. Items held up by a running git operation stay, greyed out.
-//! With several nodes selected, only what acts on all of them is offered.
+//! the current branch's node and its upstream's only (#356). Items held up by a running git
+//! operation stay, greyed out. With several nodes selected, only what acts on all of them is
+//! offered.
 
 use parterre_core::RefKind;
 use parterre_core::Worktree;
@@ -47,17 +48,23 @@ impl ParterreApp {
         } else {
             vec![node]
         };
-        let has_current = scene.graph.nodes[node].refs.iter().any(|&r| {
+        // Pull is the current branch's, on its node and its upstream's.
+        let oid = scene.repo.commit(scene.graph.nodes[node].commit).oid;
+        let pull_here = scene.graph.nodes[node].refs.iter().any(|&r| {
             let r = &scene.repo.refs[r];
             r.kind == RefKind::LocalBranch && r.is_head
-        });
+        }) || self
+            .branches
+            .catalog
+            .as_deref()
+            .is_some_and(|c| parterre_core::remote::pull_offered(c, oid).is_some());
         let mut sections: Vec<(String, Vec<Entry>)> = Vec::new();
         for entry in self.git_menu() {
             match entry {
                 Entry::Heading(heading) => sections.push((heading, Vec::new())),
                 Entry::Separator => {}
                 Entry::Item(i) if matches!(i.command, Command::Fetch) => {}
-                Entry::Item(i) if is_pull(&i) && (!has_current || group.len() > 1) => {}
+                Entry::Item(i) if is_pull(&i) && (!pull_here || group.len() > 1) => {}
                 entry => {
                     if let Some((_, items)) = sections.last_mut() {
                         items.push(entry);
