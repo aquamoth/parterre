@@ -1,14 +1,19 @@
-//! Opening a web page in the default browser, by running the platform's opener with the URL as
-//! its argument (no shell). eframe's `links` feature would do it through the `webbrowser` crate,
-//! which brings a dozen crates for URL parsing; see the research on GitHub pull requests (§14).
+//! Opening a web page in the default browser, or a file in its app, by running the platform's
+//! opener with the URL as its argument (no shell). eframe's `links` feature would do it through
+//! the `webbrowser` crate, which brings a dozen crates for URL parsing; see the research on
+//! GitHub pull requests (§14).
 
+use std::ffi::OsStr;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// The only pages parterre opens.
 const ALLOWED: &str = "https://github.com/";
+/// And parterre's contact address (#351), in the mail app.
+const MAIL: &str = crate::about::MAIL;
 
-/// Opens `url` in the default browser. Only github.com pages are opened; anything else is an
-/// error, as is an opener that can't be started.
+/// Opens `url` in the default browser. Only github.com pages and [`MAIL`] are opened; anything
+/// else is an error, as is an opener that can't be started.
 pub fn open(url: &str) -> Result<(), String> {
     if !is_allowed(url) {
         return Err(format!(
@@ -16,6 +21,12 @@ pub fn open(url: &str) -> Result<(), String> {
         ));
     }
     spawn(opener(url)).map_err(|e| format!("could not open {url}: {e}"))
+}
+
+/// Opens the file at `path` in the app the system opens its kind with, such as the browser for
+/// an HTML file.
+pub fn open_file(path: &Path) -> Result<(), String> {
+    spawn(opener(path)).map_err(|e| format!("could not open {}: {e}", path.display()))
 }
 
 /// Starts `cmd` with no input or output, and doesn't wait for it: an opener may run as long as
@@ -33,21 +44,22 @@ pub fn spawn(mut cmd: Command) -> std::io::Result<()> {
 /// A github.com page, with nothing in it that an opener or a browser could take for more
 /// than a URL.
 fn is_allowed(url: &str) -> bool {
-    url.starts_with(ALLOWED)
-        && url
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-._~/:?#=&%".contains(&b))
+    url == MAIL
+        || url.starts_with(ALLOWED)
+            && url
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._~/:?#=&%".contains(&b))
 }
 
 #[cfg(target_os = "macos")]
-fn opener(url: &str) -> Command {
+fn opener(url: impl AsRef<OsStr>) -> Command {
     let mut cmd = Command::new("open");
     cmd.arg(url);
     cmd
 }
 
 #[cfg(windows)]
-fn opener(url: &str) -> Command {
+fn opener(url: impl AsRef<OsStr>) -> Command {
     use std::os::windows::process::CommandExt;
     // Explorer hands a URL to the default browser. Not `cmd /c start`, which would read `&`
     // and `^` in it as commands.
@@ -59,7 +71,7 @@ fn opener(url: &str) -> Command {
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn opener(url: &str) -> Command {
+fn opener(url: impl AsRef<OsStr>) -> Command {
     let mut cmd = Command::new("xdg-open");
     cmd.arg(url);
     cmd
@@ -70,16 +82,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_plain_github_pages_are_opened() {
+    fn only_plain_github_pages_and_the_contact_address_are_opened() {
         assert!(is_allowed("https://github.com/aquamoth/parterre/pull/12"));
         assert!(is_allowed(
             "https://github.com/my-org/some.repo_name/pull/3"
         ));
+        assert!(is_allowed(MAIL));
         for url in [
             "http://github.com/aquamoth/parterre/pull/12",
             "https://github.com.evil.example/x",
             "https://gist.github.com/x",
             "file:///etc/passwd",
+            "mailto:someone@example.com",
+            "mailto:parterre@trustfall.se?subject=x",
             "https://github.com/a/b/pull/1 --new-window",
             "https://github.com/a/b/pull/1\"",
             "https://github.com/a/b/pull/1;rm",

@@ -101,7 +101,7 @@ const NO_POSTHOG_TIP: &str = "Not in this build: it sends nothing.";
 const INSTALL_ID_TIP: &str = "Sent with the usage statistics, never with a crash report. Quote \
     it to have its data deleted.";
 /// The "What parterre sends" page (#260).
-const WHAT_PARTERRE_SENDS: &str = "https://github.com/aquamoth/parterre/blob/main/docs/privacy.md";
+const WHAT_PARTERRE_SENDS: &str = crate::about::PRIVACY;
 const PAGE: f32 = 440.0;
 
 impl ParterreApp {

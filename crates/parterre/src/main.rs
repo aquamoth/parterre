@@ -3,6 +3,7 @@
 // Release builds on Windows are GUI-subsystem apps (no console window); see `console`.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod about;
 mod app;
 mod automation;
 mod browser;

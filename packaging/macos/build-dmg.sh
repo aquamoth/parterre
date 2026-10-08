@@ -53,8 +53,8 @@ if [ -z "$minimum" ]; then
     echo "found no minimum macOS version in $bin" >&2
     exit 1
 fi
-# NOTICE's, without the email address, as on the Windows executable.
-copyright=$(grep -m1 '^Copyright' NOTICE | sed 's/ *<.*//')
+# NOTICE's, without the email address, as on the Windows executable, and with Apple's ©.
+copyright=$(grep -m1 '^Copyright' NOTICE | sed -e 's/ *<.*//' -e 's/(C)/©/')
 
 stage=$dir/packaging/dmg
 app=$stage/parterre.app
