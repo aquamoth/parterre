@@ -20,6 +20,7 @@ use parterre_core::{Oid, RefKind, Repo};
 use parterre_util::CancelTree;
 
 use super::cherry_pick::CherryPickDialog;
+use super::clone::CloneDialog;
 use super::merge::MergeDialog;
 use super::rebase::{RebaseDialog, stuck_color};
 use super::remote::{PullDialog, PullRequestCheck, SetUpstreamDialog};
@@ -1602,6 +1603,8 @@ struct Job {
     rx: mpsc::Receiver<Outcome>,
     /// The worktree to go to once it's done.
     go_to: Option<PathBuf>,
+    /// A clone's folder, to open once it's done.
+    open: Option<PathBuf>,
     /// A revert's: where the branch was, for the log to follow it to the new commit.
     reverting: Option<Oid>,
     /// A fetch's, pull's or push's: git's output as it comes.
@@ -1662,6 +1665,7 @@ fn operation(action: &Action) -> usage::Action {
         Action::Push(_) => usage::Action::Push,
         Action::SetUpstream(_) => usage::Action::SetUpstream,
         Action::DeleteRemoteBranches(_) => usage::Action::DeleteRemoteBranch,
+        Action::Clone(_) => usage::Action::Clone,
     }
 }
 
@@ -1754,6 +1758,12 @@ pub struct Tool {
     pub reload: Option<PathBuf>,
     /// A worktree to make the open one.
     pub go_to: Option<PathBuf>,
+    /// *Clone repository…*, while it's open.
+    clone: Option<CloneDialog>,
+    /// The parent folder the last clone went in, remembered across runs.
+    pub clone_parent: Option<PathBuf>,
+    /// A repository just cloned, for the app to open.
+    pub open: Option<PathBuf>,
     /// When the stuck banner shows.
     banner: BannerTimer,
     /// The next look at the worktree shows the banner at once: it follows an operation of
@@ -1767,6 +1777,10 @@ pub struct Tool {
     pub conflicts_changed: bool,
     /// `--pull-requests-from`'s list, asked instead of GitHub before deleting remote branches.
     canned_pull_requests: Option<Arc<str>>,
+    /// `--github-repositories-from`'s list, shown instead of GitHub's for cloning.
+    pub canned_repositories: Option<Arc<str>>,
+    /// *Clone repository…* starts with a URL on the clipboard: not in scripted runs or tests.
+    pub read_clipboard: bool,
 }
 
 impl Tool {
@@ -1983,6 +1997,7 @@ impl Tool {
                 ),
                 Outcome::Done(report) => {
                     self.go_to = job.go_to;
+                    self.open = job.open;
                     match report.attention.clone() {
                         Some(a) => {
                             self.notice(ctx, job.path, a.title, report, Some(a.message));
@@ -2327,6 +2342,7 @@ impl Tool {
             cancel,
             rx,
             go_to: None,
+            open: None,
             reverting,
             live,
         });
@@ -2404,9 +2420,44 @@ impl Tool {
         self.restore_dialog(ctx);
         self.pull_dialog(ctx);
         self.set_upstream_dialog(ctx);
+        self.clone_dialog(ctx);
         self.loss_dialog(ctx);
         self.network_window(ctx);
         self.notifications(ctx);
+    }
+
+    /// Opens *Clone repository…* over `opener`, or brings it forward if it's open.
+    pub fn clone_repository(&mut self, ctx: &egui::Context, opener: ViewportId) {
+        match &mut self.clone {
+            Some(dialog) => dialog.raise(),
+            None => {
+                self.clone = Some(CloneDialog::new(
+                    ctx,
+                    self.clone_parent.as_deref(),
+                    self.canned_repositories.clone(),
+                    self.read_clipboard,
+                    opener,
+                ));
+            }
+        }
+    }
+
+    fn clone_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.clone.take() else {
+            return;
+        };
+        match dialog.show(ctx, self.busy()) {
+            dialogs::Answer::Primary => {
+                let cloning = dialog.cloning();
+                self.clone_parent = Some(cloning.parent.clone());
+                self.run(ctx, cloning.path(), dialog.action(), None, dialog.opener);
+                if let Some(job) = &mut self.job {
+                    job.open = Some(cloning.path());
+                }
+            }
+            dialogs::Answer::Cancel => {}
+            dialogs::Answer::Open => self.clone = Some(dialog),
+        }
     }
 
     /// Whether a fetch can start now, or why not.

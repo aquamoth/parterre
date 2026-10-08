@@ -34,6 +34,9 @@ pub struct Automation {
     pub zoom: Option<f32>,
     /// Pull requests to show instead of GitHub's (`--pull-requests-from`), as JSON.
     pub pull_requests: Option<String>,
+    /// The GitHub repositories to clone from instead of GitHub's (`--github-repositories-from`),
+    /// as JSON.
+    pub github_repositories: Option<String>,
     /// The newer release to offer instead of asking GitHub (`--newer-release`).
     pub newer_release: Option<parterre_telemetry::Update>,
     /// Something is still loading (a diff, a blame or its history): the script waits.

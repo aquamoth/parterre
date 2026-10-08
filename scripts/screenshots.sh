@@ -102,6 +102,16 @@ shot merge window $'open merge:feature/dark-mode\nwait 0.5'
 shot cherry-pick window $'open cherry-pick:feature/dark-mode\nwait 0.5'
 shot revert window $'open revert:v0.3.0\nwait 0.5'
 shot set-upstream window $'open set-upstream:feature/reports\nwait 0.5'
+cat >"$work/repositories.json" <<'JSON'
+[
+  {"name": "mira/checkout", "description": "The shop's checkout", "private": true},
+  {"name": "mira/parterre", "description": "Revision graph viewer"},
+  {"name": "acme/design-system", "fork": true},
+  {"name": "acme/payments", "private": true},
+  {"name": "acme/legacy-api", "archived": true}
+]
+JSON
+shot clone window $'open clone\nwait 0.5' --github-repositories-from "$work/repositories.json"
 # Pushed, then reworded: pushing it again replaces the commit on origin.
 git -C "$repo" push -q origin feature/reports
 git -C "$repo" switch -q feature/reports

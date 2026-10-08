@@ -45,6 +45,8 @@ fn file_corrupt(file: &std::path::Path) -> bool {
 pub const MOVES_KEY: &str = "parterre-moves";
 /// Storage key for the recently opened repositories, newest first.
 pub const RECENT_KEY: &str = "parterre-recent-repositories";
+/// Storage key for the parent folder the last clone went in.
+pub const CLONE_PARENT_KEY: &str = "parterre-clone-parent";
 pub type RememberedMoves =
     std::collections::HashMap<String, std::collections::HashMap<String, (f32, f32, bool)>>;
 

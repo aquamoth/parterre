@@ -39,6 +39,13 @@ it) on the window from a file manager (on Windows, macOS and X11; not yet on Way
 drop a folder on parterre's Dock icon, choose parterre in Finder's *Open With*, or pick
 *Revision Graph* in the *Services* (or *Quick Actions*) of a folder's menu in Finder.
 
+*File › Clone repository…*, also on the start screen, clones a repository from any URL git
+takes (GitHub, Azure DevOps or any other host) into a new folder, and opens it. With the
+GitHub CLI signed in (`gh auth login`), the same field also searches your GitHub repositories
+and lists them for picking; their URLs are HTTPS or SSH as `gh config get git_protocol` says.
+Credentials come from git's credential helpers, as for fetching. A clone that fails or is
+cancelled leaves no folder behind.
+
 ## The graph
 
 parterre shows the commits that have a branch, a tag or a worktree on them, and leaves out the

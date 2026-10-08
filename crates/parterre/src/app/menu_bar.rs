@@ -32,6 +32,7 @@ pub enum Command {
     InstallCommandLineTool,
     Quit,
     OpenFolder,
+    CloneRepository,
     OpenRecent(PathBuf),
     ClearRecent,
     /// Close Folder, or with another window in front (macOS), Close Window.
@@ -603,6 +604,7 @@ fn file_menu(state: &State) -> Vec<Entry> {
         item(p, "Open folder…", Command::OpenFolder)
             .key(keys::OPEN)
             .into(),
+        item(p, "Clone repository…", Command::CloneRepository).into(),
         open_recent.into(),
         Entry::Separator,
         close.key(keys::CLOSE).into(),
@@ -1079,7 +1081,7 @@ mod tests {
     #[test]
     fn open_recent_tells_same_names_apart() {
         let mac = build(&state(Platform::Mac));
-        let Entry::Submenu(recent) = &find(&mac, Kind::File).entries[1] else {
+        let Entry::Submenu(recent) = &find(&mac, Kind::File).entries[2] else {
             panic!("no Open Recent");
         };
         assert_eq!(
@@ -1087,7 +1089,9 @@ mod tests {
             ["app — a", "app — b", "|", "Clear Menu"]
         );
         let linux = build(&state(Platform::Linux));
-        let Entry::Submenu(recent) = &find(&linux, Kind::File).entries[1] else {
+        let file = &find(&linux, Kind::File).entries;
+        assert_eq!(labels(file)[..2], ["Open folder…", "Clone repository…"]);
+        let Entry::Submenu(recent) = &file[2] else {
             panic!("no Open recent");
         };
         assert_eq!(recent.label, "Open recent");

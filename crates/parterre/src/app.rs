@@ -19,6 +19,7 @@ mod auto_reload;
 mod blame_window;
 mod branches;
 mod cherry_pick;
+mod clone;
 mod column_borders;
 mod commands;
 mod commit_table;
@@ -59,8 +60,8 @@ use crate::render::{self, Marks};
 use crate::reveal::Reveal;
 use crate::scene::{FONT_SIZE, Scene, to_point};
 use crate::settings::{
-    MOVES_KEY, PRIVACY_KEY, Privacy, RECENT_KEY, RememberedMoves, RepoSettings, Settings,
-    load_moves,
+    CLONE_PARENT_KEY, MOVES_KEY, PRIVACY_KEY, Privacy, RECENT_KEY, RememberedMoves, RepoSettings,
+    Settings, load_moves,
 };
 use crate::settings_file::{self, Stored};
 use crate::system_theme::SystemTheme;
@@ -502,9 +503,18 @@ impl ParterreApp {
             selection: Selection::default(),
             selected_edge: None,
             preview: None,
-            branches: branches::Tool::with_canned_pull_requests(
-                automation.pull_requests.as_deref(),
-            ),
+            branches: {
+                let mut tool =
+                    branches::Tool::with_canned_pull_requests(automation.pull_requests.as_deref());
+                tool.canned_repositories = automation.github_repositories.as_deref().map(Arc::from);
+                tool.read_clipboard = persist;
+                tool.clone_parent = cc
+                    .storage
+                    .filter(|_| persist)
+                    .and_then(|s| eframe::get_value(s, CLONE_PARENT_KEY))
+                    .flatten();
+                tool
+            },
             context_node: None,
             pending_select: Vec::new(),
             drag: None,
@@ -1153,6 +1163,7 @@ impl ParterreApp {
             "legend" => self.show_legend = true,
             "first-run" => self.open_first_run_prompt(),
             "settings" => self.open_settings(self.settings_page),
+            "clone" => self.branches.clone_repository(ctx, egui::ViewportId::ROOT),
             "fetch" | "pull" => {
                 let repo = self.repo.clone().ok_or("no repository is open")?;
                 return self.open_branch_dialog(ctx, &repo, what, "");
@@ -1845,16 +1856,30 @@ impl ParterreApp {
                     .color(ui.visuals().weak_text_color()),
             );
             ui.add_space(16.0);
-            if ui
-                .add(egui::Button::new("Open folder…").min_size(vec2(140.0, 30.0)))
-                .on_hover_text(format!(
-                    "Any folder inside the repository ({})",
-                    keys::OPEN.label()
-                ))
-                .clicked()
-            {
-                self.pick_folder = true;
-            }
+            let button = vec2(140.0, 30.0);
+            let width = 2.0 * button.x + ui.spacing().item_spacing.x;
+            ui.allocate_ui(vec2(width, button.y), |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new("Open folder…").min_size(button))
+                        .on_hover_text(format!(
+                            "Any folder inside the repository ({})",
+                            keys::OPEN.label()
+                        ))
+                        .clicked()
+                    {
+                        self.pick_folder = true;
+                    }
+                    if ui
+                        .add(egui::Button::new("Clone repository…").min_size(button))
+                        .on_hover_text("From GitHub, Azure DevOps or any URL git takes")
+                        .clicked()
+                    {
+                        self.branches
+                            .clone_repository(ui.ctx(), egui::ViewportId::ROOT);
+                    }
+                });
+            });
             if let Some((msg, true)) = &self.status {
                 ui.add_space(10.0);
                 ui.colored_label(Color32::RED, msg);
@@ -2967,6 +2992,9 @@ impl eframe::App for ParterreApp {
         if let Some(path) = self.branches.go_to.take() {
             self.go_to_worktree(&path);
         }
+        if let Some(path) = self.branches.open.take() {
+            self.open_folder(&path);
+        }
         if let Some(what) = self.automation.open.take() {
             match self.open_named(&ctx, &what) {
                 Ok(true) => {}
@@ -3091,6 +3119,7 @@ impl eframe::App for ParterreApp {
             );
             eframe::set_value(storage, MOVES_KEY, &self.moves);
             eframe::set_value(storage, RECENT_KEY, &self.recent);
+            eframe::set_value(storage, CLONE_PARENT_KEY, &self.branches.clone_parent);
             eframe::set_value(storage, PRIVACY_KEY, &self.telemetry.privacy);
             eframe::set_value(storage, updates::TOLD_KEY, &self.release_told);
         }
