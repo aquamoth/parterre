@@ -660,8 +660,13 @@ fn a_force_push_with_no_upstream_sets_it_too() {
 fn the_upstream_is_found_on_its_own_remote_when_another_name_contains_it() {
     let s = setup();
     let url = s.origin.path().to_str().unwrap().to_owned();
+    // Newer git refuses to add `a/b` beside `a`, but configs may have both.
     for remote in ["a", "a/b"] {
-        s.work.git(&["remote", "add", remote, &url]);
+        let fetch = format!("+refs/heads/*:refs/remotes/{remote}/*");
+        s.work
+            .git(&["config", &format!("remote.{remote}.url"), &url]);
+        s.work
+            .git(&["config", &format!("remote.{remote}.fetch"), &fetch]);
     }
     s.work.git(&["config", "branch.main.remote", "a"]);
     s.work
