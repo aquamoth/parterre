@@ -156,6 +156,10 @@ _Avoid_: switching to a worktree, opening a worktree
 Removing a worktree from git and deleting its folder and everything in it.
 _Avoid_: removing a worktree, closing a worktree
 
+**Cloning a repository**:
+Copying a repository from a URL into a new folder with `git clone`, then opening it.
+_Avoid_: checking out, downloading, importing
+
 ### The log
 
 **Log window**:

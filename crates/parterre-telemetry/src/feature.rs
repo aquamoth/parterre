@@ -73,6 +73,7 @@ names! {
         ResetSettings => "reset_settings",
         /// The dialog telling of a newer release, once per version.
         NewRelease => "new_release",
+        Clone => "clone",
     }
 }
 
@@ -129,6 +130,7 @@ names! {
         Push => "push",
         SetUpstream => "set_upstream",
         DeleteRemoteBranch => "delete_remote_branch",
+        Clone => "clone",
         OpenRepository => "open_repository",
         CloseRepository => "close_repository",
         Reload => "reload",

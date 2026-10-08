@@ -492,6 +492,38 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
         .inner
 }
 
+/// A folder's [`text_field`] with a *Browse…* [`text_button`] after it, as wide as the row, the
+/// button greyed while `browsing`. The field's response, and whether *Browse…* was clicked.
+pub fn folder_field(
+    ui: &mut Ui,
+    text: &mut String,
+    hint: &str,
+    browsing: bool,
+) -> (Response, bool) {
+    const BROWSE: &str = "Browse…";
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let button = ui
+            .painter()
+            .layout_no_wrap(
+                BROWSE.to_owned(),
+                egui::TextStyle::Button.resolve(ui.style()),
+                Color32::WHITE,
+            )
+            .size()
+            .x
+            + 24.0;
+        // The field's frame line adds a point on each side.
+        let field = text_field(ui, text, hint, ui.available_width() - button - 4.0 - 2.0);
+        let browse = ui
+            .add_enabled_ui(!browsing, |ui| text_button(ui, BROWSE))
+            .inner
+            .clicked();
+        (field, browse && !browsing)
+    })
+    .inner
+}
+
 /// A find field, as in the main toolbar and the blame windows' toolbars.
 pub struct Find<'a> {
     pub id: Id,

@@ -4,7 +4,7 @@ Standalone TortoiseGit-style revision graph viewer. Rust workspace, egui/eframe 
 
 - `crates/parterre-core` must stay free of GUI dependencies; put anything testable there.
 - `crates/parterre` is the app; keep rendering and interaction there.
-- `crates/parterre-forge` (pull requests, `github` feature), `crates/parterre-highlight`
+- `crates/parterre-forge` (pull requests and repositories to clone, `github` feature), `crates/parterre-highlight`
   (tree-sitter, `syntax` feature) and `crates/parterre-telemetry` (update check and PostHog,
   `send` feature) wrap external stacks: their dependencies live in those manifests only, so an
   engine is swapped by replacing the crate. `crates/parterre-util` holds

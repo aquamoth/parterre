@@ -769,7 +769,7 @@ fn last_output(report: &Report) -> String {
 }
 
 /// A network command's failure, in git's words, and what parterre can't do about it.
-fn network_failure(report: &Report) -> Error {
+pub(crate) fn network_failure(report: &Report) -> Error {
     Error::Failed(format!("{}\n\n{NO_PROMPT}", last_output(report)))
 }
 
@@ -877,7 +877,7 @@ fn network_command(git: &Git, args: &[String]) -> std::process::Command {
 
 /// Runs a git command as [`crate::branches::run`] does, streaming its output to `live` as it
 /// comes.
-fn run_live(
+pub(crate) fn run_live(
     git: &Git,
     args: Vec<String>,
     cancel: &CancelTree,

@@ -849,6 +849,8 @@ pub enum Action {
     SetUpstream(Box<crate::remote::SetUpstream>),
     /// Deletes branches on their remotes, each still at the tip it was offered at.
     DeleteRemoteBranches(Vec<crate::remote::RemoteBranchTip>),
+    /// Clones a repository into a new folder: no repository need be open.
+    Clone(Box<crate::clone::Cloning>),
 }
 
 impl Action {
@@ -891,15 +893,20 @@ impl Action {
                 [one] => format!("Delete remote branch {}", one.name()),
                 branches => format!("Delete {} remote branches", branches.len()),
             },
+            Self::Clone(c) => format!("Clone {}", c.name),
         }
     }
 
-    /// Fetching, pulling and pushing: they reach a remote, so their output is shown as it
-    /// comes, and they can be cancelled.
+    /// Fetching, pulling, pushing and cloning: they reach a remote, so their output is shown
+    /// as it comes, and they can be cancelled.
     pub fn is_network(&self) -> bool {
         matches!(
             self,
-            Self::Fetch | Self::Pull(_) | Self::Push(_) | Self::DeleteRemoteBranches(_)
+            Self::Fetch
+                | Self::Pull(_)
+                | Self::Push(_)
+                | Self::DeleteRemoteBranches(_)
+                | Self::Clone(_)
         )
     }
 }
@@ -1183,6 +1190,7 @@ impl Branches {
                 .iter()
                 .map(crate::remote::delete_remote_command)
                 .collect()),
+            Action::Clone(c) => Ok(vec![crate::clone::command(c)]),
         }
     }
 
@@ -1193,6 +1201,13 @@ impl Branches {
         cancel: &CancelTree,
     ) -> Outcome {
         let mut report = Report::default();
+        // Into a folder of its own: nothing here is a repository yet.
+        if let Action::Clone(cloning) = &action {
+            return match crate::clone::execute(cloning, cancel, &mut report, self.live.as_ref()) {
+                Ok(()) => Outcome::Done(report),
+                Err(error) => Outcome::Failed { error, report },
+            };
+        }
         if let Action::Pull(pull) = &action {
             let pulled = Catalog::load(&self.path).and_then(|catalog| {
                 crate::remote::pull(&catalog, pull, cancel, &mut report, self.live.as_ref())
@@ -1384,7 +1399,8 @@ impl Branches {
             | Action::Pull(_)
             | Action::Push(_)
             | Action::SetUpstream(_)
-            | Action::DeleteRemoteBranches(_) => {
+            | Action::DeleteRemoteBranches(_)
+            | Action::Clone(_) => {
                 unreachable!("handled above")
             }
             Action::Switch(name) => {

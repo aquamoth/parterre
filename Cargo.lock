@@ -2691,6 +2691,7 @@ name = "parterre"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "clap",
  "eframe",
  "embed-resource",

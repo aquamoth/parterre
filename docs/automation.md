@@ -140,6 +140,7 @@ takes a branch, a tag or a hash prefix. A name that doesn't exist fails the run.
 | `filter`, `zoom`, `drag` | A toolbar popover |
 | `settings`, `settings:PAGE` | The settings, at `appearance`, `branchcolours`, `graph`, `filters`, `dragging`, `privacy`, `advanced` or `manage` |
 | `export-settings:FILE`, `import-settings:FILE` | The settings' Manage page, as if FILE had been picked to export to (written at once) or import from (the dialog asking what to import) |
+| `clone` | *Clone repository…*, with no repository open too |
 | `about`, `shortcuts`, `legend` | About parterre (on macOS, the system's own panel, which screenshots don't show), Keyboard and mouse, the legend |
 | `new-release` | The dialog telling of a newer release, with `--newer-release` |
 | `first-run` | The first-run prompt about usage statistics and crash reports, as at the first start |
@@ -206,6 +207,7 @@ runs start from the defaults otherwise.
 | `--current-branch`, `--filter`, `--hide`, `--branch-color` | Which branches show, and their colours |
 | `--no-remotes`, `--no-tags`, `--pull-requests`, `--worktrees` | Which refs show |
 | `--pull-requests-from FILE` | Pull requests from a file instead of GitHub, see [below](#pull-requests-without-github) |
+| `--github-repositories-from FILE` | The GitHub repositories *Clone repository…* lists, from a file instead of GitHub, see [below](#repositories-to-clone-without-github) |
 | `--drag-mode adapt\|free\|subtree` | What moves with a dragged node |
 | `--log-layout a\|b\|c\|d` | The log window's layout: `stacked`, `side-by-side`, `details-below`, `files-right` |
 | `--diff-form side\|unified`, `--diff-words`, `--diff-whitespace`, `--diff-unfolded` | The diff window's settings |
@@ -236,6 +238,21 @@ pull requests on. FILE is a JSON array:
 `origin/<head>` is at. `origin` must still point at GitHub (`git remote set-url origin
 https://github.com/owner/name.git` after fetching will do); that is where clicking a pull
 request goes. A mistake in the file, or a `head` that `origin` has no branch for, fails the run.
+
+## Repositories to clone without GitHub
+
+`--github-repositories-from FILE` lists the repositories in FILE in *Clone repository…*
+instead of asking GitHub, with HTTPS URLs. FILE is a JSON array, most recently pushed first:
+
+```json
+[
+  {"name": "mira/checkout", "description": "The shop's checkout", "private": true},
+  {"name": "acme/design-system", "fork": true},
+  {"name": "acme/legacy-api", "archived": true}
+]
+```
+
+`name` is `owner/name`; the rest may be left out. A mistake in the file fails the run.
 
 ## Running without a display
 

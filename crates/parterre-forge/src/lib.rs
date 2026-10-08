@@ -1,5 +1,6 @@
 //! Open pull requests of the forge repository a repository's `origin` points at: GitHub, for
 //! now. Not in TortoiseGit. Research and decisions: `docs/research/github-forks-and-pull-requests.md`.
+//! Also the signed-in user's GitHub repositories, to clone one ([`github::repositories`]).
 //!
 //! Nothing here fetches commits. A pull request is shown only where its head is a commit the
 //! repository has already, as a label on that commit ([`PullRequests::heads`]).

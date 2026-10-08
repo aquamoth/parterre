@@ -7,6 +7,7 @@ pub mod blame;
 pub mod branches;
 pub mod changed_files;
 pub mod cherry_pick;
+pub mod clone;
 pub mod columns;
 pub mod compare;
 pub mod conflicts;

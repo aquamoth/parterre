@@ -21,7 +21,8 @@ path = "src/main.rs"
 default = ["github", "send", "syntax"]
 # Syntax colour in the diff and blame windows (#209).
 syntax = ["parterre-highlight/syntax"]
-# Open pull requests from GitHub, shown on their head commits.
+# Open pull requests from GitHub, shown on their head commits, and the user's repositories to
+# clone.
 github = ["parterre-forge/github"]
 # The update check (#258), and whatever else parterre asks or sends over the network: off, it
 # makes no requests of its own. The switch for packagers (docs/building.md#features).
@@ -47,6 +48,11 @@ serde_json.workspace = true
 # the app (GNOME), draw an Adwaita-style one with the window title, instead of a plain grey bar.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
+
+# eframe's clipboard crate, to start *Clone repository…* with a URL copied (src/app/clone.rs).
+# macOS reads its pasteboard itself (src/macos.rs).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+arboard = { version = "3.6", default-features = false }
 
 # eframe's, to read the window handle it hands out (src/reveal.rs).
 [target.'cfg(windows)'.dependencies]

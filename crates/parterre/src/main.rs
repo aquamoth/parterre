@@ -126,6 +126,12 @@ struct Cli {
     #[arg(long, value_name = "FILE", hide = true)]
     pull_requests_from: Option<PathBuf>,
 
+    /// List the GitHub repositories in FILE to clone from instead of asking GitHub, for
+    /// screenshots and demos: a JSON array of {"name", "description", "private", "fork",
+    /// "archived"}, name being owner/name (see docs/automation.md).
+    #[arg(long, value_name = "FILE", hide = true)]
+    github_repositories_from: Option<PathBuf>,
+
     /// Offer VERSION as a newer release instead of asking GitHub: the menu's update marker and
     /// its Download entry, for screenshots and tests (see docs/automation.md).
     #[arg(long, value_name = "VERSION", hide = true)]
@@ -336,6 +342,22 @@ fn main() -> ExitCode {
         },
         None => None,
     };
+    let canned_repositories = match &cli.github_repositories_from {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(json) => match parterre_forge::github::repositories_canned(&json) {
+                Ok(_) => Some(json),
+                Err(e) => {
+                    eprintln!("parterre: {}: {e}", path.display());
+                    return ExitCode::FAILURE;
+                }
+            },
+            Err(e) => {
+                eprintln!("parterre: could not read {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
     if let Some(version) = &cli.newer_release
         && parterre_telemetry::Version::parse(version).is_none()
     {
@@ -424,6 +446,7 @@ fn main() -> ExitCode {
     automation.fit = cli.fit;
     automation.zoom = cli.zoom;
     automation.pull_requests = canned_pull_requests;
+    automation.github_repositories = canned_repositories;
     automation.newer_release = cli
         .newer_release
         .as_deref()
