@@ -20,7 +20,7 @@ const SHOW: [(Simplification, Glyph, &str); 3] = [
     (
         Simplification::Decorated,
         glyphs::LABELLED,
-        "Only commits with a branch or tag, and the merges joining them (TortoiseGit's default)",
+        "Only commits with a branch or tag, and the merges joining them",
     ),
     // "Branchings and merges" is in the menu only.
     (

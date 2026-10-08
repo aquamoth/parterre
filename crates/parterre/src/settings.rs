@@ -210,7 +210,7 @@ impl Look {
 
     pub fn label(self) -> &'static str {
         match self {
-            Look::Classic => "Classic (TortoiseGit)",
+            Look::Classic => "Classic",
             Look::Modern => "Modern",
         }
     }

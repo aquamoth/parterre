@@ -81,8 +81,8 @@ const STATUS_TIP: &str = "The bar at the bottom: the selected commit or edge, an
     nodes and commits are shown.";
 const DIRECTION_TIP: &str = "The side of the graph the newest commits are on.";
 const STASH_TIP: &str = "Show the stash, as a label on the commit it was made on.";
-const LAYER_GAP_TIP: &str = "Space between rows of commits (TortoiseGit: 30).";
-const NODE_GAP_TIP: &str = "Space between neighbouring commits in a row (TortoiseGit: 25).";
+const LAYER_GAP_TIP: &str = "Space between rows of commits (default 30).";
+const NODE_GAP_TIP: &str = "Space between neighbouring commits in a row (default 25).";
 const EDGE_GAP_TIP: &str = "Room for each edge that passes between the commits of a row.";
 const LOG_LAYOUT_TIP: &str = "How the log window arranges its commits, details and changed \
     files. Also in the log window's header.";
@@ -250,7 +250,7 @@ impl ParterreApp {
                     rows.row(
                         "Style",
                         "Modern: curved edges bundled into trunks, and wide rows split so siblings \
-                     stack. Classic: as TortoiseGit draws it.",
+                     stack. Classic: straight, separate edges, and rows as wide as they need to be.",
                         |ui| {
                             let current = Look::of(s);
                             egui::ComboBox::from_id_salt("look")
@@ -265,7 +265,7 @@ impl ParterreApp {
                                 });
                         },
                     );
-                    rows.row("Edges", "Straight is how TortoiseGit draws them.", |ui| {
+                    rows.row("Edges", "", |ui| {
                         text_segmented(
                             ui,
                             &mut s.edge_style,
@@ -349,8 +349,7 @@ impl ParterreApp {
                 let tags = s.graph.show_tags;
                 rows.row(
                     "Tags make nodes",
-                    "When off, a tag alone does not make a commit a node (TortoiseGit's \
-                     \"Show all tags\").",
+                    "When off, a tag alone does not make a commit a node.",
                     |ui| {
                         ui.add_enabled_ui(tags, |ui| {
                             widgets::switch(ui, &mut s.graph.tags_make_nodes)
@@ -437,8 +436,8 @@ impl ParterreApp {
                     );
                     rows.slider(
                         "Extra for slanted edges",
-                        "Widen gaps that long sideways edges cross, so edges stay steep \
-                         (TortoiseGit does this, up to 300).",
+                        "Widen gaps that long sideways edges cross, so edges stay steep (up to \
+                         300).",
                         &mut l.gap_per_span,
                         0.0..=0.5,
                     );
@@ -446,14 +445,13 @@ impl ParterreApp {
                     rows.slider("Between edges", EDGE_GAP_TIP, &mut l.edge_gap, 2.0..=40.0);
                     rows.slider(
                         "Maximum row width",
-                        "Rows wider than this are split so siblings stack up. 0 = never \
-                         (TortoiseGit).",
+                        "Rows wider than this are split so siblings stack up. 0 = never.",
                         &mut l.max_layer_width,
                         0.0..=10000.0,
                     );
                 });
                 ui.add_space(8.0);
-                if widgets::text_button(ui, "TortoiseGit spacing").clicked() {
+                if widgets::text_button(ui, "Default spacing").clicked() {
                     *l = LayoutOptions {
                         direction: l.direction,
                         ranking: l.ranking,
@@ -749,7 +747,7 @@ fn filters(ui: &mut Ui, s: &mut Settings) {
     group(ui, |rows| {
         rows.switch(
             "Current branch only",
-            "Only HEAD's history (TortoiseGit's \"Current branch\").",
+            "Only HEAD's history.",
             &mut g.current_branch_only,
         );
         rows.switch(
