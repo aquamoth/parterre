@@ -1250,6 +1250,10 @@ impl Branches {
         cancel: &CancelTree,
         report: &mut Report,
     ) -> Result<Option<Warning>, Error> {
+        // Before the catalogue: deleting worktrees loads it alongside the graph.
+        if let Action::DeleteWorktrees { paths, branches } = &action {
+            return self.delete_worktrees(paths, *branches, approval, cancel, report);
+        }
         let git = Git::new(&self.path);
         let catalog = Catalog::load(&self.path)?;
         if let Action::DeleteBranches(branches) = &action {
@@ -1260,9 +1264,6 @@ impl Branches {
                     })
             };
             return self.delete_branches(&catalog, branches, &approved, cancel, report);
-        }
-        if let Action::DeleteWorktrees { paths, branches } = &action {
-            return self.delete_worktrees(&catalog, paths, *branches, approval, cancel, report);
         }
         if let Action::Reset(reset) = &action {
             crate::reset::execute(&catalog, reset, cancel, report)?;
@@ -1527,7 +1528,6 @@ impl Branches {
     /// was approved.
     fn delete_worktrees(
         &self,
-        catalog: &Catalog,
         paths: &[PathBuf],
         branches: bool,
         approval: Option<&Warning>,
@@ -1539,6 +1539,14 @@ impl Branches {
             branches,
         };
         let git = Git::new(&self.path);
+        // Before approval, the graph the warning shows lost commits in loads alongside what's
+        // lost rather than after it: on a large repository it is most of the wait (#354). It
+        // isn't waited for when the worktrees can't be deleted.
+        let graph = approval.is_none().then(|| {
+            let git = git.clone();
+            std::thread::spawn(move || git.load())
+        });
+        let catalog = &Catalog::load(&self.path)?;
         let wts = find_worktrees(catalog, paths)?;
         let deletions = worktree_losses(&git, catalog, &wts)?;
         let commits = worktree_commits(&deletions, branches);
@@ -1546,11 +1554,15 @@ impl Branches {
             w.action == *action && w.commits == commits && same_losses(&w.deletions, &deletions)
         });
         let Some(approved) = approved else {
+            let repo = match graph {
+                Some(graph) => graph.join().expect("graph load")?,
+                None => git.load()?,
+            };
             return Ok(Some(Warning {
                 action: action.clone(),
                 replaced: Vec::new(),
                 head: catalog.head,
-                repo: Arc::new(git.load()?),
+                repo: Arc::new(repo),
                 commands: worktree_commands(&deletions, branches),
                 deletions,
                 commits,
@@ -1787,37 +1799,56 @@ fn worktree_losses(
         .flatten()
         .map(|b| format!("refs/heads/{}", b.name))
         .collect();
-    wts.iter()
-        .zip(branches)
-        .map(|(wt, branch)| {
-            let files = if wt.missing {
-                Vec::new()
-            } else {
-                changed_files(&wt.path)?
-            };
-            let commits = match (&wt.branch, wt.head) {
-                (None, Some(head)) => lost_commits(git, catalog, head, &[], &leaving, None)?,
-                _ => Vec::new(),
-            };
-            let branch = match branch {
-                Some(b) => Some(WorktreeBranch {
-                    commits: lost_commits(git, catalog, b.tip, &excluded, &leaving, None)?,
-                    name: b.name,
-                    tip: b.tip,
-                }),
-                None => None,
-            };
-            Ok(Deletion {
-                name: wt.name(),
-                path: Some(wt.path.clone()),
-                commits,
-                files,
-                refusal: None,
-                branch,
-                head: wt.head,
+    let (leaving, excluded) = (&leaving, &excluded);
+    // Every worktree's status and commits at once: each is a git start, which on Windows is
+    // most of what it costs (#309, #354).
+    std::thread::scope(|s| {
+        let pending: Vec<_> = wts
+            .iter()
+            .zip(branches)
+            .map(|(&wt, branch)| {
+                let files = s.spawn(move || {
+                    if wt.missing {
+                        Ok(Vec::new())
+                    } else {
+                        changed_files(&wt.path)
+                    }
+                });
+                let commits = s.spawn(move || -> Result<_, Error> {
+                    let commits = match (&wt.branch, wt.head) {
+                        (None, Some(head)) => lost_commits(git, catalog, head, &[], leaving, None)?,
+                        _ => Vec::new(),
+                    };
+                    let branch = match branch {
+                        Some(b) => Some(WorktreeBranch {
+                            commits: lost_commits(git, catalog, b.tip, excluded, leaving, None)?,
+                            name: b.name,
+                            tip: b.tip,
+                        }),
+                        None => None,
+                    };
+                    Ok((commits, branch))
+                });
+                (wt, files, commits)
             })
-        })
-        .collect()
+            .collect();
+        pending
+            .into_iter()
+            .map(|(wt, files, commits)| {
+                let files = files.join().expect("status")?;
+                let (commits, branch) = commits.join().expect("lost commits")?;
+                Ok(Deletion {
+                    name: wt.name(),
+                    path: Some(wt.path.clone()),
+                    commits,
+                    files,
+                    refusal: None,
+                    branch,
+                    head: wt.head,
+                })
+            })
+            .collect()
+    })
 }
 
 /// The local branch a worktree has checked out, with its tip. A branch being rebased there
