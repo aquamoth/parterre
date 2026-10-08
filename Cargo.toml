@@ -16,7 +16,7 @@ version = "0.0.0"
 edition = "2024"
 # egui/eframe 0.36 need 1.95.
 rust-version = "1.95"
-authors = ["Mattias Åslund <mattias@trustfall.se>"]
+authors = ["Trustfall AB <parterre@trustfall.se>"]
 license = "GPL-3.0-only"
 # Only to crates.io, which packaging/about.toml relies on to leave our own crates out of the
 # third-party notices.

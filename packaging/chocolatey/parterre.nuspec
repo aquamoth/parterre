@@ -10,7 +10,7 @@
     <title>parterre (git revision graph)</title>
     <!-- The Chocolatey account that maintains the package. -->
     <owners>aquamoth</owners>
-    <authors>Mattias Åslund</authors>
+    <authors>Trustfall AB</authors>
     <projectUrl>https://github.com/aquamoth/parterre</projectUrl>
     <packageSourceUrl>https://github.com/aquamoth/parterre/tree/main/packaging/chocolatey</packageSourceUrl>
     <projectSourceUrl>https://github.com/aquamoth/parterre/tree/__TAG__</projectSourceUrl>
@@ -19,7 +19,7 @@
     <iconUrl>https://cdn.jsdelivr.net/gh/aquamoth/parterre@__TAG__/packaging/icon/parterre-128.png</iconUrl>
     <licenseUrl>https://github.com/aquamoth/parterre/blob/__TAG__/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <copyright>Copyright (C) 2026 Mattias Åslund</copyright>
+    <copyright>Copyright (C) 2026 Trustfall AB</copyright>
     <tags>parterre git revision-graph tortoisegit gui foss cross-platform</tags>
     <summary>A standalone, TortoiseGit-style revision graph viewer for git repositories.</summary>
     <description><![CDATA[parterre draws the branches and tags of a git repository as a compact revision graph, in the style of TortoiseGit's Revision Graph, and lets you rearrange it by hand. From the graph you can browse the log, compare commits, and view file diffs and blame.

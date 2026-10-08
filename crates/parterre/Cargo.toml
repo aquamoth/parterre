@@ -112,8 +112,8 @@ workspace = true
 # which neither tool can see: EGL or GLX, Wayland, X11 and xkbcommon.
 [package.metadata.deb]
 name = "parterre"
-maintainer = "Mattias Åslund <mattias@trustfall.se>"
-copyright = "2026 Mattias Åslund"
+maintainer = "Trustfall AB <parterre@trustfall.se>"
+copyright = "2026 Trustfall AB"
 license-file = ["../../LICENSE", "0"]
 extended-description = """\
 A fast, native git viewer inspired by TortoiseGit's Revision Graph: a compact, tree-like picture \

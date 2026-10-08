@@ -26,7 +26,7 @@ pub fn script(resources: &Resources) -> String {
     let [major, minor, patch] = resources.numeric_version;
     let numeric = format!("{major},{minor},{patch},0");
     let strings = [
-        // The publisher (see `docs/distribution.md`); the copyright stays with the author.
+        // The publisher and copyright holder (see `docs/distribution.md`).
         ("CompanyName", "Trustfall AB"),
         // Also the name Task Manager lists the process under.
         ("FileDescription", "parterre"),
@@ -111,9 +111,8 @@ mod tests {
 
     #[test]
     fn copyright_comes_from_the_notice_without_the_email() {
-        let notice =
-            "parterre, a viewer\nCopyright (C) 2026 Mattias Åslund <m@example.com>\n\nMore";
-        assert_eq!(copyright(notice), "Copyright (C) 2026 Mattias Åslund");
+        let notice = "parterre, a viewer\nCopyright (C) 2026 Trustfall AB <m@example.com>\n\nMore";
+        assert_eq!(copyright(notice), "Copyright (C) 2026 Trustfall AB");
         assert_eq!(copyright("no such line"), "");
     }
 
@@ -121,7 +120,7 @@ mod tests {
     fn wide_strings_are_ascii_with_escapes() {
         assert_eq!(wide_string("plain"), r#"L"plain""#);
         assert_eq!(wide_string(r#"a "b" c\d"#), r#"L"a ""b"" c\\d""#);
-        assert_eq!(wide_string("Åslund ©"), r#"L"\x00C5slund \x00A9""#);
+        assert_eq!(wide_string("Enköping ©"), r#"L"Enk\x00F6ping \x00A9""#);
         // Outside the BMP: a surrogate pair.
         assert_eq!(wide_string("🌳"), r#"L"\xD83C\xDF33""#);
     }
@@ -133,7 +132,7 @@ mod tests {
             numeric_version: [0, 4, 1],
             version: "0.4.1 (a1b2c3d)",
             description: "A viewer.",
-            notice: "Copyright (C) 2026 Mattias Åslund <m@example.com>",
+            notice: "Copyright (C) 2026 Trustfall AB <m@example.com>",
         });
         assert!(rc.starts_with("1 ICON \"C:/src/parterre.ico\"\n"));
         assert!(rc.contains("FILEVERSION 0,4,1,0\n"));
@@ -141,9 +140,7 @@ mod tests {
         assert!(rc.contains(r#"VALUE "ProductName", L"parterre""#));
         assert!(rc.contains(r#"VALUE "ProductVersion", L"0.4.1 (a1b2c3d)""#));
         assert!(rc.contains(r#"VALUE "CompanyName", L"Trustfall AB""#));
-        assert!(
-            rc.contains(r#"VALUE "LegalCopyright", L"Copyright (C) 2026 Mattias \x00C5slund""#)
-        );
+        assert!(rc.contains(r#"VALUE "LegalCopyright", L"Copyright (C) 2026 Trustfall AB""#));
         assert!(rc.contains(r#"VALUE "Translation", 0x409, 1200"#));
         assert!(rc.is_ascii());
     }

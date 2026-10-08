@@ -43,7 +43,7 @@ approval (#20). Not planned for now:
 
 ## Identity
 
-- **Publisher: Trustfall AB.** Copyright stays with Mattias Åslund.
+- **Publisher and copyright holder: Trustfall AB**, contact parterre@trustfall.se.
 - **App ID `se.trustfall.parterre`** for the Linux desktop entry, AppStream metadata and
   Wayland app ID, and later Flathub. Flathub verifies a domain ID through a token on
   `https://trustfall.se/.well-known/`, and changing an ID after publishing is costly.
