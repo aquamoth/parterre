@@ -227,6 +227,21 @@ impl ParterreApp {
                 self.show_log(&nodes);
             }
             Command::Compare(request) => self.compare_request(request),
+            Command::CopyText(text) => {
+                usage::action(usage::Action::Copy);
+                ctx.copy_text(text);
+            }
+            Command::OpenPullRequest(url) => self.open_pull_request(&url),
+            Command::OpenIn(opener, dir) => self.open_in(opener, &dir),
+            Command::SelectSubtree(roots) => {
+                usage::action(usage::Action::SelectSubtree);
+                self.select_subtree(&roots);
+            }
+            Command::ReturnToLayout(nodes) => {
+                usage::action(usage::Action::ReturnToLayout);
+                self.return_to_layout(&nodes);
+            }
+            Command::CentreOn(node) => self.center_on(node),
             Command::Git(request) => self.branches.request(ctx, request, ViewportId::ROOT),
             Command::Fetch => self.fetch(ctx, ViewportId::ROOT),
             Command::RememberMoves => self.set_remember_moves(!self.settings.remember_moves),

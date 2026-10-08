@@ -162,7 +162,7 @@ takes a branch, a tag or a hash prefix. A name that doesn't exist fails the run.
 Everything else is done as a person would do it:
 
 - select a node with `click node:REF`;
-- mark one for comparison through its context menu: `right-click node:REF`, `hover "Compare"`,
+- mark one for comparison through its context menu: `right-click node:REF`,
   `click "Mark for comparison"`;
 - use the Git menu on a node: `click node:REF`, `click "Git"`, `click "Create branch at REF…"`;
 - drag a node with `drag node:REF DX,DY`, then `wait 1.5` for the physics.

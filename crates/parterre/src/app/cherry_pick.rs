@@ -410,22 +410,16 @@ mod tests {
         let dir = repository();
         let p = dir.path();
         let (repo, catalog) = load(p);
-        let node = |at: &str, click: Option<&str>| {
-            let (repo, catalog, commit) = (&repo, &catalog, rev(p, at));
-            menu(
-                move |ui| {
-                    branches::node_menu(ui, repo, commit, &[commit], Some(catalog), false, false)
-                },
-                click,
-            )
+        // As the Git menu, and so the graph's, offers it.
+        let offer = |at: &str| {
+            let commit = rev(p, at);
+            let refs = branches::refs_at(&repo, commit, &catalog);
+            branches::cherry_pick_offer(&repo, commit, &refs, &catalog)
         };
-        let (texts, asked) = node("up", Some("Cherry-pick up onto main…"));
-        assert!(
-            texts.contains(&"Cherry-pick up onto main…".to_owned()),
-            "{texts:?}"
-        );
+        let (name, branch, asked) = offer("up").expect("offered");
+        assert_eq!((name.as_str(), branch.as_str()), ("up", "main"));
         match asked {
-            Some(Request::CherryPick { picks, name }) => {
+            Request::CherryPick { picks, name } => {
                 assert_eq!(picks, Picks::Lacking(rev(p, "up")));
                 assert_eq!(name.as_deref(), Some("up"));
             }
@@ -433,14 +427,9 @@ mod tests {
         }
         // A commit with no branch: its short hash.
         let short = rev(p, "up~1").short(repo.abbrev_len.max(7));
-        let item = format!("Cherry-pick {short} onto main…");
-        assert!(node("up~1", None).0.contains(&item));
+        assert_eq!(offer("up~1").expect("offered").0, short);
         // On main already: nothing to pick.
-        let texts = node("main~1", None).0;
-        assert!(
-            !texts.iter().any(|t| t.starts_with("Cherry-pick")),
-            "{texts:?}"
-        );
+        assert!(offer("main~1").is_none());
     }
 
     #[test]
@@ -631,14 +620,15 @@ mod tests {
 
         let (repo, catalog) = load(p);
         let up = rev(p, "up");
+        let item = format!(
+            "Cherry-pick {} onto main…",
+            up.short(repo.abbrev_len.max(7))
+        );
         let (texts, asked) = menu(
-            |ui| branches::node_menu(ui, &repo, up, &[up], Some(&catalog), false, false),
-            Some("Cherry-pick up onto main…"),
+            |ui| branches::row_node_menu(ui, &repo, up, &[up], Some(&catalog), false, false),
+            Some(&item),
         );
-        assert!(
-            texts.contains(&"Cherry-pick up onto main…".to_owned()),
-            "{texts:?}"
-        );
+        assert!(texts.contains(&item), "{texts:?}");
         assert!(asked.is_none(), "greyed out");
     }
 }

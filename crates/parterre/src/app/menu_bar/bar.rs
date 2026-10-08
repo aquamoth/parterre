@@ -359,6 +359,7 @@ pub fn show(ui: &mut Ui, menus: &[Menu]) -> Option<Command> {
                             path,
                             underline,
                             steering: nav.active,
+                            plain: false,
                         };
                         entries(ui, &m.entries, &keyboard, &mut chosen);
                     });
@@ -374,6 +375,21 @@ struct Keyboard<'a> {
     underline: bool,
     /// The keyboard moves in the menus: its submenus are open, and only those.
     steering: bool,
+    /// A right-click menu: no column for check marks, so the items line up with plain buttons.
+    plain: bool,
+}
+
+/// `list` as a right-click menu, in a popup already open; the command of the item clicked.
+pub fn context(ui: &mut Ui, list: &[Entry]) -> Option<Command> {
+    let mut chosen = None;
+    let keyboard = Keyboard {
+        path: &[],
+        underline: false,
+        steering: false,
+        plain: true,
+    };
+    entries(ui, list, &keyboard, &mut chosen);
+    chosen
 }
 
 /// `text` with its access key `key` underlined, in `color` (the widget's own if `None`).
@@ -464,7 +480,11 @@ fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Opt
                         if highlighted {
                             lit(ui);
                         }
-                        menu::item(ui, label, &shortcut, item.mark)
+                        if keyboard.plain {
+                            ui.add(egui::Button::new(label).shortcut_text(shortcut))
+                        } else {
+                            menu::item(ui, label, &shortcut, item.mark)
+                        }
                     })
                     .inner;
                 let response = match &item.tip {
@@ -481,7 +501,7 @@ fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Opt
                 }
             }
             Entry::Separator => menu::separator(ui),
-            Entry::Heading(text) => heading(ui, text),
+            Entry::Heading(text) => heading(ui, text, keyboard.plain),
             Entry::Submenu(submenu) => {
                 // Open while the keyboard is in it; closed when the keyboard moves elsewhere.
                 let inside = highlighted && keyboard.path.len() > 1;
@@ -490,16 +510,22 @@ fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Opt
                     path: if inside { &keyboard.path[1..] } else { &[] },
                     underline: keyboard.underline,
                     steering: keyboard.steering,
+                    plain: keyboard.plain,
                 };
                 let label = underlined(ui, &submenu.label, key, None, false);
                 let shown = ui.add_enabled_ui(submenu.enabled, |ui| {
                     if highlighted {
                         lit(ui);
                     }
-                    menu::submenu(ui, label, open, |ui| {
+                    let content = |ui: &mut Ui| {
                         ui.set_min_width(menu::MIN_WIDTH);
                         self::entries(ui, &submenu.entries, &deeper, chosen);
-                    });
+                    };
+                    if keyboard.plain {
+                        menu::plain_submenu(ui, &submenu.label, content);
+                    } else {
+                        menu::submenu(ui, label, open, content);
+                    }
                 });
                 if let Some(why) = &submenu.why {
                     shown.response.on_disabled_hover_text(why);
@@ -518,10 +544,15 @@ fn lit(ui: &mut Ui) {
 }
 
 /// A small title over a group of items, lined up with their labels.
-fn heading(ui: &mut Ui, text: &str) {
+fn heading(ui: &mut Ui, text: &str, plain: bool) {
     let padding = ui.spacing().button_padding;
     ui.horizontal(|ui| {
-        ui.add_space(padding.x + menu::MARK + ui.spacing().icon_spacing);
+        let mark = if plain {
+            0.0
+        } else {
+            menu::MARK + ui.spacing().icon_spacing
+        };
+        ui.add_space(padding.x + mark);
         ui.label(RichText::new(text).small().weak());
     });
     ui.add_space(2.0);

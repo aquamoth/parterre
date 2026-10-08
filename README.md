@@ -170,8 +170,8 @@ parterre ~/src/other --worktrees   # another one, with its worktrees shown
 | Do | To |
 |---|---|
 | Double-click a node, or `L` | Show its log |
-| Right-click a node | Compare, branch, merge, rebase, worktrees, open, copy |
-| The *Git* menu | The same on the selected node, and fetch, pull and push |
+| Right-click a node | What the *Git* menu offers for it, and copy, open, layout |
+| The *Git* menu | The same on the selected node, and fetch |
 | Drag a node; `1` `2` `3` | Move it; the graph gives way / only the selection / the whole subtree |
 | `F`, `H` | Zoom to fit the whole graph, go to HEAD |
 | `Ctrl+F` (`⌘F` on macOS) | Find branches, tags, hashes, subjects or authors |

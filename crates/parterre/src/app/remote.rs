@@ -709,7 +709,7 @@ mod tests {
         let item = |group: &[parterre_core::Oid], click| {
             menu(
                 |ui| {
-                    super::super::branches::node_menu(
+                    super::super::branches::row_node_menu(
                         ui,
                         &repo,
                         tip,

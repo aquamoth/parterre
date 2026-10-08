@@ -305,24 +305,12 @@ mod tests {
         );
     }
 
-    fn row_menu(dir: &Path, at: &str, log: bool) -> Vec<String> {
+    fn row_menu(dir: &Path, at: &str) -> Vec<String> {
         let (repo, catalog) = load(dir);
         let commit = rev(dir, at);
         menu(
             |ui| {
-                if log {
-                    branches::row_node_menu(
-                        ui,
-                        &repo,
-                        commit,
-                        &[commit],
-                        Some(&catalog),
-                        false,
-                        false,
-                    )
-                } else {
-                    branches::node_menu(ui, &repo, commit, &[commit], Some(&catalog), false, false)
-                }
+                branches::row_node_menu(ui, &repo, commit, &[commit], Some(&catalog), false, false)
             },
             None,
         )
@@ -334,22 +322,18 @@ mod tests {
         let dir = repository();
         let p = dir.path();
         let item = "Revert in main…".to_owned();
-        assert!(row_menu(p, "main~1", true).contains(&item));
-        assert!(row_menu(p, "main", true).contains(&item));
-        assert!(
-            !row_menu(p, "main~1", false).contains(&item),
-            "not the graph"
-        );
+        assert!(row_menu(p, "main~1").contains(&item));
+        assert!(row_menu(p, "main").contains(&item));
         git(p, &["switch", "-q", "side"]);
         commit(p, "side", "side\n", "side");
         assert!(
-            row_menu(p, "main~1", true)
+            row_menu(p, "main~1")
                 .iter()
                 .all(|t| !t.starts_with("Revert"))
         );
         let detached = "Revert in HEAD…".to_owned();
         git(p, &["switch", "-q", "--detach", "main"]);
-        assert!(row_menu(p, "main~1", true).contains(&detached));
+        assert!(row_menu(p, "main~1").contains(&detached));
     }
 
     #[test]
@@ -515,7 +499,7 @@ mod tests {
             "{texts:?}"
         );
         // Greyed out until it's finished with git.
-        let menu_texts = row_menu(h.path(), "main~1", true);
+        let menu_texts = row_menu(h.path(), "main~1");
         assert!(
             menu_texts.contains(&"Revert in main…".to_owned()),
             "{menu_texts:?}"
