@@ -17,7 +17,8 @@ const NOTICE: &str = include_str!(env!("PARTERRE_NOTICE"));
 const LICENSE: &str = include_str!(env!("PARTERRE_LICENSE"));
 
 const TAGLINE: &str = "A TortoiseGit-style revision graph viewer";
-const COPYRIGHT: &str = "© 2026 Mattias Åslund";
+const COPYRIGHT: &str = "© 2026 Trustfall AB";
+const CONTACT: &str = "parterre@trustfall.se";
 const WEBSITE: &str = "https://github.com/aquamoth/parterre";
 const ISSUES: &str = "https://github.com/aquamoth/parterre/issues";
 const PRIVACY: &str = "https://github.com/aquamoth/parterre/blob/main/docs/privacy.md";
@@ -202,7 +203,16 @@ fn centred(ui: &mut Ui, s: &mut State, icon: &TextureHandle) -> Answer {
     }
     ui.vertical_centered(|ui| {
         ui.add_space(8.0);
-        image(ui, icon, 96.0);
+        let rect = ui.add(egui::Image::new((icon.id(), vec2(96.0, 96.0)))).rect;
+        // The tile's own corners (114.5 of 512); a faint rim keeps it off a dark background.
+        if ui.visuals().dark_mode {
+            ui.painter().rect_stroke(
+                rect,
+                CornerRadius::same((96.0 * 114.5 / 512.0) as u8),
+                Stroke::new(1.0, Color32::from_white_alpha(46)),
+                egui::StrokeKind::Inside,
+            );
+        }
         ui.add_space(6.0);
         ui.label(RichText::new("parterre").strong().size(22.0));
         ui.label(RichText::new(TAGLINE).weak());
@@ -226,11 +236,14 @@ fn centred(ui: &mut Ui, s: &mut State, icon: &TextureHandle) -> Answer {
             ("Website", "", "↗"),
             ("Report a bug", "", "↗"),
             ("Privacy", "", "↗"),
+            ("Contact", CONTACT, "↗"),
         ],
     ) {
         Some(0) => drop(crate::browser::open(WEBSITE)),
         Some(1) => drop(crate::browser::open(ISSUES)),
-        Some(_) => drop(crate::browser::open(PRIVACY)),
+        Some(2) => drop(crate::browser::open(PRIVACY)),
+        // PROTOTYPE: copies; the real one opens mailto: (browser.rs allows github.com only).
+        Some(_) => ui.ctx().copy_text(CONTACT.to_owned()),
         None => {}
     }
     ui.add_space(10.0);
