@@ -140,7 +140,7 @@ takes a branch, a tag or a hash prefix. A name that doesn't exist fails the run.
 | `filter`, `zoom`, `drag` | A toolbar popover |
 | `settings`, `settings:PAGE` | The settings, at `appearance`, `branchcolours`, `graph`, `filters`, `dragging`, `privacy`, `advanced` or `manage` |
 | `export-settings:FILE`, `import-settings:FILE` | The settings' Manage page, as if FILE had been picked to export to (written at once) or import from (the dialog asking what to import) |
-| `about`, `shortcuts`, `legend` | About parterre, Keyboard and mouse, the legend |
+| `about`, `shortcuts`, `legend` | About parterre (on macOS, the system's own panel, which screenshots don't show), Keyboard and mouse, the legend |
 | `new-release` | The dialog telling of a newer release, with `--newer-release` |
 | `first-run` | The first-run prompt about usage statistics and crash reports, as at the first start |
 | `log:REF`, `log:FIRST..SECOND` | The log of a commit, or of a range (as if the nodes were selected in that order) |

@@ -3,6 +3,7 @@
 // Release builds on Windows are GUI-subsystem apps (no console window); see `console`.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod about;
 mod app;
 mod automation;
 mod browser;
@@ -60,7 +61,7 @@ const VERSION: &str = env!("PARTERRE_VERSION");
 
 /// Show the revision graph of a git repository: how its branches and tags relate.
 #[derive(Debug, Parser)]
-#[command(version = VERSION, about)]
+#[command(version = VERSION)]
 struct Cli {
     /// Repository to show (any directory inside it). Without one, the repository of the current
     /// directory, or none: the window then asks for one.
@@ -74,11 +75,11 @@ struct Cli {
     #[arg(long, value_enum)]
     direction: Option<Dir>,
 
-    /// Overall look: "modern" (curved, bundled edges) or "classic" (as TortoiseGit).
+    /// Overall look: "modern" (curved, bundled edges) or "classic" (straight, separate edges).
     #[arg(long, value_enum)]
     look: Option<LookArg>,
 
-    /// Maximum row width before siblings stack up (0 = unlimited, as TortoiseGit).
+    /// Maximum row width before siblings stack up (0 = unlimited).
     #[arg(long)]
     max_row_width: Option<f32>,
 
@@ -255,11 +256,11 @@ enum LogLayoutArg {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Mode {
-    /// Commits with refs, and merges joining them (TortoiseGit default).
+    /// Commits with refs, and merges joining them (the default).
     Labelled,
     /// Also where labelled commits' histories fork apart.
     Forks,
-    /// Also every fork point and merge (TortoiseGit "Show branchings and merges").
+    /// Also every fork point and merge.
     Branches,
     /// Every commit.
     All,

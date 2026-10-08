@@ -1,7 +1,7 @@
 //! What parterre does with macOS itself, through AppKit: folders opened from Finder (dropped on
 //! the Dock icon, *Open With*, #336, and the *Revision Graph* service, #337), the clipboard for
-//! the menu bar's Paste, *Install Command Line Tool…* (#341), and the input method's indicator
-//! (#342). The menu bar is `app::menu_bar::macos`.
+//! the menu bar's Paste, *Install Command Line Tool…* (#341), the input method's indicator
+//! (#342), and the About panel (#351). The menu bar is `app::menu_bar::macos`.
 
 // AppKit's API is Objective-C, called through objc2: every call is `unsafe` to Rust.
 #![allow(unsafe_code)]
@@ -12,15 +12,17 @@ use std::sync::Mutex;
 
 use eframe::egui;
 use objc2::rc::Retained;
-use objc2::runtime::NSObject;
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::runtime::{AnyObject, NSObject};
+use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationWillFinishLaunchingNotification, NSPasteboard,
-    NSPasteboardTypeFileURL, NSPasteboardTypeString,
+    NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionCredits, NSAboutPanelOptionVersion,
+    NSApplication, NSApplicationWillFinishLaunchingNotification,
+    NSAttributedStringAppKitDocumentFormats, NSPasteboard, NSPasteboardTypeFileURL,
+    NSPasteboardTypeString,
 };
 use objc2_foundation::{
-    NSAppleEventDescriptor, NSAppleEventManager, NSNotification, NSNotificationCenter,
-    NSObjectProtocol, NSString, NSURL,
+    NSAppleEventDescriptor, NSAppleEventManager, NSAttributedString, NSData, NSDictionary,
+    NSNotification, NSNotificationCenter, NSObjectProtocol, NSString, NSURL,
 };
 
 /// Folders Finder asked parterre to open, not taken yet.
@@ -288,4 +290,51 @@ end run"#;
             Err(format!("Could not make {LINK}: {}", message.trim()))
         }
     }
+}
+
+/// *About parterre*: macOS's own About panel (#351). AppKit takes the name, the icon and the
+/// copyright from the app bundle (Info.plist's `NSHumanReadableCopyright`, which
+/// `packaging/macos/build-dmg.sh` fills in from NOTICE); parterre gives the version and the
+/// credits under it.
+pub fn about_panel() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let (version, commit) = crate::about::version_and_commit(crate::VERSION);
+    let notices = crate::about::third_party_notices()
+        .and_then(NSURL::from_file_path)
+        .and_then(|url| url.absoluteString())
+        .map(|url| url.to_string());
+    let html = crate::about::credits_html(notices.as_deref());
+    let data = NSData::with_bytes(html.as_bytes());
+    // SAFETY: HTML in UTF-8 (its meta tag says so), and no document attributes asked for.
+    let credits = unsafe {
+        NSAttributedString::initWithHTML_documentAttributes(
+            NSAttributedString::alloc(),
+            &data,
+            None,
+        )
+    };
+    let mut keys = Vec::new();
+    let mut values: Vec<Retained<AnyObject>> = Vec::new();
+    // SAFETY: AppKit's constants.
+    unsafe {
+        keys.push(NSAboutPanelOptionApplicationVersion);
+        values.push(Retained::into_super(Retained::into_super(
+            NSString::from_str(version),
+        )));
+        // Without one, the panel shows CFBundleVersion, which is the version again.
+        keys.push(NSAboutPanelOptionVersion);
+        values.push(Retained::into_super(Retained::into_super(
+            NSString::from_str(commit),
+        )));
+        if let Some(credits) = credits {
+            keys.push(NSAboutPanelOptionCredits);
+            values.push(Retained::into_super(Retained::into_super(credits)));
+        }
+    }
+    let options = NSDictionary::from_retained_objects(&keys, &values);
+    let app = NSApplication::sharedApplication(mtm);
+    // SAFETY: the keys are AppKit's, each with the type it documents.
+    unsafe { app.orderFrontStandardAboutPanelWithOptions(&options) };
 }

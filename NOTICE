@@ -1,5 +1,5 @@
-parterre, a TortoiseGit-style revision graph viewer
-Copyright (C) 2026 Mattias Åslund <mattias@trustfall.se>
+parterre, a revision graph viewer
+Copyright (C) 2026 Trustfall AB <parterre@trustfall.se>
 
 This program is free software: you can redistribute it and/or modify it under
 the terms of version 3 of the GNU General Public License as published by the

@@ -86,6 +86,7 @@ open import-settings:$work/settings.json"
 shot shortcuts window "open shortcuts"
 shot legend window "open legend"
 shot about window "open about"
+shot about-legal window $'open about\nclick "Legal"\nwait 0.3'
 
 shot log window $'open log:v0.1.0..feature/reports\nwait-for "Describe reports"'
 shot compare window $'open compare:v0.3.0..feature/reports\nwait-for "README"'

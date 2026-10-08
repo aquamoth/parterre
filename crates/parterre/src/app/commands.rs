@@ -156,7 +156,7 @@ impl ParterreApp {
         }
         let text = ctx.egui_wants_keyboard_input();
         match command {
-            Command::About => self.show_about = true,
+            Command::About => self.about.open(ctx),
             Command::Download => {
                 if let Some(update) = self.newer_release() {
                     self.download(ctx, &update.download);

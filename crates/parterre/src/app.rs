@@ -14,6 +14,7 @@ use std::sync::Arc;
 use parterre_core::recent::Recent;
 use parterre_core::{Oid, Repo};
 
+mod about;
 mod auto_reload;
 mod blame_window;
 mod branches;
@@ -321,7 +322,7 @@ pub struct ParterreApp {
     show_legend: bool,
     show_settings: bool,
     settings_page: SettingsPage,
-    show_about: bool,
+    about: about::About,
     /// Show the save dialog for exporting in this format at the end of this frame.
     export: Option<Format>,
     /// The folder exported to last, where the save dialog starts next time.
@@ -516,7 +517,7 @@ impl ParterreApp {
             show_legend: false,
             show_settings: false,
             settings_page: SettingsPage::default(),
-            show_about: false,
+            about: about::About::default(),
             export: None,
             export_dir: None,
             settings_file: None,
@@ -1143,7 +1144,7 @@ impl ParterreApp {
     fn open_named(&mut self, ctx: &egui::Context, what: &str) -> Result<bool, String> {
         match what {
             "filter" | "zoom" | "drag" => egui::Popup::open_id(ctx, popup_id(what)),
-            "about" => self.show_about = true,
+            "about" => self.about.open(ctx),
             "new-release" => {
                 self.release_dialog = Some(self.newer_release().ok_or("no --newer-release")?);
             }
@@ -2704,38 +2705,6 @@ impl ParterreApp {
             self.show_shortcuts = false;
         }
     }
-
-    /// The "Appropriate Legal Notices" of GPL-3.0 section 5(d). NOTICE requires works based on
-    /// parterre to keep showing them.
-    fn about_window(&mut self, ctx: &egui::Context) {
-        if !self.show_about {
-            return;
-        }
-        // Paths chosen by build.rs.
-        const NOTICE: &str = include_str!(env!("PARTERRE_NOTICE"));
-        const LICENSE: &str = include_str!(env!("PARTERRE_LICENSE"));
-        // Both texts are wrapped at 80 columns already: as wide as that, and the scroll bar.
-        let font = egui::TextStyle::Monospace.resolve(&ctx.global_style());
-        let column = ctx.fonts_mut(|f| f.glyph_width(&font, '0'));
-        let shown = crate::dialogs::Dialog::new("about", "About parterre")
-            .screen(crate::usage::Screen::About)
-            .width((81.0 * column + 16.0).ceil())
-            .resizable()
-            .show(ctx, |ui| {
-                ui.heading(format!("parterre {}", crate::VERSION));
-                crate::dialogs::fields(ui, |ui| {
-                    ui.add(egui::Label::new(RichText::new(NOTICE).monospace()).extend());
-                    ui.collapsing("GNU General Public License, version 3", |ui| {
-                        ui.add(egui::Label::new(RichText::new(LICENSE).monospace()).extend());
-                    });
-                });
-                ui.separator();
-                crate::dialogs::actions(ui, "", false, false, false)
-            });
-        if shown.inner == crate::dialogs::Answer::Cancel || shown.should_close() {
-            self.show_about = false;
-        }
-    }
 }
 
 /// The legend's rows: what each colour and mark in the graph stands for. Sets `open_colours`
@@ -3378,7 +3347,9 @@ impl eframe::App for ParterreApp {
         self.file_requests(&ctx);
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
-        self.about_window(&ctx);
+        if let Some(error) = self.about.show(&ctx) {
+            self.status = Some((error, true));
+        }
         self.release_dialog(&ctx);
         self.file_drop(&ctx);
         // Over everything else.

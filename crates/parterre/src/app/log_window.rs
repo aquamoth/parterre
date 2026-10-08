@@ -1497,8 +1497,7 @@ fn walk_tools(ui: &mut Ui, options: &mut LogOptions) {
             r,
             "Topological order",
             "",
-            "Each branch's commits together, parents after their children. TortoiseGit's \
-             default.",
+            "Each branch's commits together, parents after their children.",
         ),
         LogOrder::Date => widgets::tip_explained(
             r,
