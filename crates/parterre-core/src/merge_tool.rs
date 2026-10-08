@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use crate::git::{Git, GitError};
+use crate::git::{Config, Git, GitError};
 
 /// Tools that run in a terminal, which parterre has none of.
 fn is_terminal(name: &str) -> bool {
@@ -56,25 +56,53 @@ impl Detected {
     }
 }
 
-/// Asks git (`--tool-help` takes about 0.3 s: call off the UI thread).
+/// Reads git's config in one call and looks for the tools' programs as git would, where
+/// `git mergetool --tool-help` starts git over a hundred times, which takes a minute on
+/// Windows (#355).
 pub fn detect(git: &Git) -> Result<Detected, GitError> {
-    let get = |key: &str| -> Result<Option<String>, GitError> {
-        Ok(git
-            .query(&["config", "--get", key])?
-            .filter(|v| !v.is_empty()))
+    let lookup = Lookup {
+        path: crate::shell_path::path()
+            .map(|path| std::env::split_paths(&path).collect())
+            .unwrap_or_default(),
+        program_files: program_files(),
+        is_file: Path::is_file,
     };
-    let tool = get("merge.tool")?;
-    let gui = get("merge.guitool")?;
-    let help = git.run(&["mergetool", "--tool-help"])?;
-    let available = parse_tool_help(&help);
+    Ok(decide(&git.config()?, &lookup, app_paths))
+}
+
+/// What `config` says and `lookup` finds; `app_paths` finds a tool by Windows' App Paths.
+fn decide(
+    config: &Config,
+    lookup: &Lookup<impl Fn(&Path) -> bool>,
+    app_paths: impl Fn(&str) -> Option<PathBuf>,
+) -> Detected {
+    let mut user = config.subsections("mergetool", "cmd");
+    user.sort();
+    let available = |name: &str| {
+        if user.iter().any(|u| u == name) {
+            return true;
+        }
+        let Some(tool) = BUILT_IN.iter().find(|t| t.names.contains(&name)) else {
+            return false;
+        };
+        // git runs the program `mergetool.<name>.path` names, if set, and no other.
+        match config
+            .get(&format!("mergetool.{name}.path"))
+            .filter(|p| !p.is_empty())
+        {
+            Some(path) => lookup.finds(path),
+            None => lookup.finds_built_in(tool),
+        }
+    };
     let found = |name: &str| {
         app_paths(name).map(|path| Tool {
             name: name.to_owned(),
             path: Some(path),
         })
     };
+    let get = |key: &str| config.get(key).filter(|v| !v.is_empty()).map(str::to_owned);
     // git's `--gui` order: `merge.guitool`, then `merge.tool`.
-    let named = gui.or(tool);
+    let named = get("merge.guitool").or_else(|| get("merge.tool"));
     let mut installed: Vec<Tool> = Vec::new();
     let configured = match &named {
         None => Configured::None,
@@ -82,7 +110,7 @@ pub fn detect(git: &Git) -> Result<Detected, GitError> {
             why: format!("{name} runs in a terminal"),
             terminal: true,
         },
-        Some(name) if available.iter().any(|t| t == name) => Configured::Usable(name.clone()),
+        Some(name) if available(name) => Configured::Usable(name.clone()),
         Some(name) => {
             if let Some(tool) = found(name) {
                 installed.push(tool);
@@ -93,9 +121,14 @@ pub fn detect(git: &Git) -> Result<Detected, GitError> {
             }
         }
     };
-    for name in available.into_iter().filter(|n| !is_terminal(n)) {
-        if !installed.iter().any(|t| t.name == name) {
-            installed.push(Tool { name, path: None });
+    // In `--tool-help`'s order: git's own, then the user's, by name.
+    let names = BUILT_IN.iter().flat_map(|t| t.names.iter().copied());
+    for name in names.chain(user.iter().map(String::as_str)) {
+        if !is_terminal(name) && available(name) && !installed.iter().any(|t| t.name == name) {
+            installed.push(Tool {
+                name: name.to_owned(),
+                path: None,
+            });
         }
     }
     for (name, _) in APP_PATHS {
@@ -105,43 +138,124 @@ pub fn detect(git: &Git) -> Result<Detected, GitError> {
             installed.push(tool);
         }
     }
-    Ok(Detected {
+    Detected {
         configured,
         installed,
-    })
+    }
 }
 
-/// The tools `git mergetool --tool-help` says are available: the built-ins it found and the
-/// user's own `mergetool.<name>.cmd`, indented under "may be set to one of the following:"
-/// (a blank line before `user-defined:`). 2.34 prints a name per line, 2.37 a description
-/// after it; user-defined ones come out as `<name>.cmd <command>`.
-pub fn parse_tool_help(help: &str) -> Vec<String> {
-    let mut tools = Vec::new();
-    let mut lines = help.lines();
-    if !lines.any(|l| l.contains("may be set to one of the following")) {
-        return tools;
+/// A GUI tool git has a script for in `mergetools/`: the names it goes by, and the programs
+/// the script runs, the first one found on `PATH`. Terminal tools, and `kompare`, which
+/// can't merge, aren't here.
+struct BuiltIn {
+    names: &'static [&'static str],
+    programs: &'static [&'static str],
+    /// On Windows, git looks for the programs in `<Program Files>\<folder>` too.
+    program_files: Option<&'static str>,
+}
+
+/// A tool that git finds on `PATH` only.
+const fn built_in(names: &'static [&'static str], programs: &'static [&'static str]) -> BuiltIn {
+    BuiltIn {
+        names,
+        programs,
+        program_files: None,
     }
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
+}
+
+/// git's GUI tools, by name, as of git 2.53.
+const BUILT_IN: &[BuiltIn] = &[
+    built_in(&["araxis"], &["compare"]),
+    built_in(&["bc", "bc3", "bc4"], &["bcomp", "bcompare"]),
+    built_in(&["codecompare"], &["CodeMerge"]),
+    built_in(&["deltawalker"], &["DeltaWalker"]),
+    built_in(&["diffmerge"], &["diffmerge"]),
+    built_in(&["diffuse"], &["diffuse"]),
+    built_in(&["ecmerge"], &["ecmerge"]),
+    BuiltIn {
+        program_files: Some("ExamDiff Pro"),
+        ..built_in(&["examdiff"], &["ExamDiff.com"])
+    },
+    built_in(&["guiffy"], &["guiffy"]),
+    built_in(
+        &["gvimdiff", "gvimdiff1", "gvimdiff2", "gvimdiff3"],
+        &["gvim"],
+    ),
+    BuiltIn {
+        program_files: Some("Kdiff3"),
+        ..built_in(&["kdiff3"], &["kdiff3"])
+    },
+    built_in(&["meld"], &["meld"]),
+    built_in(&["opendiff"], &["opendiff"]),
+    built_in(&["p4merge"], &["p4merge"]),
+    built_in(&["smerge"], &["smerge"]),
+    built_in(&["tkdiff"], &["tkdiff"]),
+    built_in(&["tortoisemerge"], &["tortoisegitmerge", "tortoisemerge"]),
+    built_in(&["vscode"], &["code"]),
+    BuiltIn {
+        program_files: Some("WinMerge"),
+        ..built_in(&["winmerge"], &["WinMergeU.exe"])
+    },
+    built_in(&["xxdiff"], &["xxdiff"]),
+];
+
+/// Where git's `sh` finds programs: in the folders of `PATH`, and for some tools on Windows,
+/// in the Program Files folders.
+struct Lookup<F> {
+    path: Vec<PathBuf>,
+    program_files: Vec<PathBuf>,
+    is_file: F,
+}
+
+impl<F: Fn(&Path) -> bool> Lookup<F> {
+    /// `program` as `sh` finds it: a path as it is, a name in a folder of `PATH`.
+    fn finds(&self, program: &str) -> bool {
+        let program = Path::new(program);
+        if program.components().count() > 1 {
+            return self.is_program(program);
         }
-        if !line.starts_with('\t') {
-            // "The following tools are valid, but not currently available:"
-            break;
-        }
-        if line.trim_end().ends_with(':') {
-            // `user-defined:`
-            continue;
-        }
-        let Some(word) = line.split_whitespace().next() else {
-            continue;
-        };
-        let name = word.strip_suffix(".cmd").unwrap_or(word);
-        if !tools.iter().any(|t| t == name) {
-            tools.push(name.to_owned());
-        }
+        self.path
+            .iter()
+            .any(|dir| self.is_program(&dir.join(program)))
     }
-    tools
+
+    /// Any of `tool`'s programs on `PATH`, or in its Program Files folder.
+    fn finds_built_in(&self, tool: &BuiltIn) -> bool {
+        tool.programs.iter().any(|p| self.finds(p))
+            || tool.program_files.is_some_and(|folder| {
+                self.program_files.iter().any(|dir| {
+                    tool.programs
+                        .iter()
+                        .any(|p| self.is_program(&dir.join(folder).join(p)))
+                })
+            })
+    }
+
+    /// `path`, or on Windows `path.exe`, which `sh` runs for it there.
+    fn is_program(&self, path: &Path) -> bool {
+        (self.is_file)(path) || (cfg!(windows) && (self.is_file)(&with_exe(path)))
+    }
+}
+
+/// `path` with `.exe` added, as Windows names a program.
+fn with_exe(path: &Path) -> PathBuf {
+    let mut path = path.as_os_str().to_owned();
+    path.push(".exe");
+    PathBuf::from(path)
+}
+
+/// The Program Files folders, as git's `mergetool_find_win32_cmd` takes them from the
+/// environment; none outside Windows.
+fn program_files() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 /// git's built-ins that a per-user install hides from git's own lookup, by App Paths entry.
@@ -155,33 +269,26 @@ fn app_paths(name: &str) -> Option<PathBuf> {
 
 #[cfg(windows)]
 fn app_paths_entry(exe: &str) -> Option<PathBuf> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    ["HKCU", "HKLM"].iter().find_map(|hive| {
-        let key = format!(r"{hive}\Software\Microsoft\Windows\CurrentVersion\App Paths\{exe}");
-        let out = std::process::Command::new("reg")
-            .args(["query", &key, "/ve"])
-            .stdin(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .ok()?;
-        let path = parse_reg_default(&String::from_utf8_lossy(&out.stdout))?;
-        path.is_file().then_some(path)
-    })
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE]
+        .into_iter()
+        .find_map(|hive| {
+            let key = RegKey::predef(hive)
+                .open_subkey(format!(
+                    r"Software\Microsoft\Windows\CurrentVersion\App Paths\{exe}"
+                ))
+                .ok()?;
+            // The key's default value.
+            let value: String = key.get_value("").ok()?;
+            let path = PathBuf::from(value.trim().trim_matches('"'));
+            path.is_file().then_some(path)
+        })
 }
 
 #[cfg(not(windows))]
 fn app_paths_entry(_exe: &str) -> Option<PathBuf> {
     None
-}
-
-/// The default value in `reg query <key> /ve` output: `    (Default)    REG_SZ    C:\…`.
-pub fn parse_reg_default(out: &str) -> Option<PathBuf> {
-    out.lines().find_map(|line| {
-        let (_, value) = line.split_once("REG_SZ")?;
-        let value = value.trim().trim_matches('"');
-        (!value.is_empty()).then(|| PathBuf::from(value))
-    })
 }
 
 /// The `git config --global` commands that remember `tool` for good: `merge.guitool` when a
@@ -261,43 +368,158 @@ pub fn open(root: &Path, tool: &Tool, path: &str) -> Result<(), GitError> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn tool_help_of_git_2_34_lists_names_only() {
-        let help = "'git mergetool --tool=<tool>' may be set to one of the following:\n\
-                    \t\tkdiff3\n\t\tmeld\n\t\tvimdiff\n\n\tuser-defined:\n\t\tmine.cmd true\n\n\
-                    The following tools are valid, but not currently available:\n\t\tbc\n";
-        assert_eq!(parse_tool_help(help), ["kdiff3", "meld", "vimdiff", "mine"]);
+    use std::collections::HashSet;
+
+    use crate::git::parse_config;
+
+    /// `decide` with `settings` (`key=value` each) and only `files` there, `bin` on `PATH`
+    /// and `pf` the Program Files folder; App Paths names `C:/W/WinMergeU.exe`
+    /// for WinMerge, if it is among `files`.
+    fn decide_with(settings: &[&str], files: &[&str]) -> Detected {
+        let config: Vec<u8> = settings
+            .iter()
+            .flat_map(|s| format!("{}\0", s.replacen('=', "\n", 1)).into_bytes())
+            .collect();
+        let files: HashSet<PathBuf> = files.iter().map(PathBuf::from).collect();
+        let lookup = Lookup {
+            path: vec![PathBuf::from("bin")],
+            program_files: vec![PathBuf::from("pf")],
+            is_file: |p: &Path| files.contains(p),
+        };
+        decide(&parse_config(&config), &lookup, |name| {
+            (name == "winmerge" && files.contains(Path::new("C:/W/WinMergeU.exe")))
+                .then(|| PathBuf::from("C:/W/WinMergeU.exe"))
+        })
     }
 
-    /// As git 2.43 printed it.
-    #[test]
-    fn tool_help_lists_descriptions_and_user_defined_tools() {
-        let help = "'git mergetool --tool=<tool>' may be set to one of the following:\n\
-                    \t\tmeld             Use Meld (requires a graphical session) with optional `auto merge`\n\
-                    \n\
-                    \tuser-defined:\n\
-                    \t\tfake.cmd /tmp/fake.sh \"$BASE\" \"$LOCAL\"\n\
-                    \n\
-                    The following tools are valid, but not currently available:\n\
-                    \t\tbc               Use Beyond Compare (requires a graphical session)\n\
-                    \n\
-                    Some of the tools listed above only work in a windowed\n";
-        assert_eq!(parse_tool_help(help), ["meld", "fake"]);
-    }
-
-    #[test]
-    fn tool_help_with_only_user_defined_tools() {
-        let help = "'git mergetool --tool=<tool>' may be set to one of the following:\n\
-                    \tuser-defined:\n\t\tmine.cmd true\n\n\
-                    The following tools are valid, but not currently available:\n\t\tbc\n";
-        assert_eq!(parse_tool_help(help), ["mine"]);
+    fn names(d: &Detected) -> Vec<&str> {
+        d.installed.iter().map(|t| t.name.as_str()).collect()
     }
 
     #[test]
-    fn tool_help_without_tools_lists_none() {
-        let help = "No suitable tool for 'git mergetool --tool=<tool>' found.\n\n\
-                    The following tools are valid, but not currently available:\n\t\tbc\n";
-        assert!(parse_tool_help(help).is_empty());
+    fn git_s_tools_are_installed_by_their_programs_on_path() {
+        let meld = Path::new("bin").join("meld");
+        let code = Path::new("bin").join("code");
+        let d = decide_with(
+            &["merge.tool=meld"],
+            &[meld.to_str().unwrap(), code.to_str().unwrap()],
+        );
+        assert_eq!(d.configured, Configured::Usable("meld".into()));
+        assert_eq!(names(&d), ["meld", "vscode"]);
+        // Every name a tool goes by, as `--tool-help` lists them.
+        let bcompare = Path::new("bin").join("bcompare");
+        let d = decide_with(&["merge.tool=bc4"], &[bcompare.to_str().unwrap()]);
+        assert_eq!(d.configured, Configured::Usable("bc4".into()));
+        assert_eq!(names(&d), ["bc", "bc3", "bc4"]);
+    }
+
+    #[test]
+    fn some_are_found_in_program_files_too() {
+        let kdiff3 = Path::new("pf").join("Kdiff3").join("kdiff3");
+        let d = decide_with(&["merge.tool=kdiff3"], &[kdiff3.to_str().unwrap()]);
+        assert_eq!(d.configured, Configured::Usable("kdiff3".into()));
+        // meld isn't looked for there.
+        let meld = Path::new("pf").join("Meld").join("meld");
+        assert!(
+            decide_with(&[], &[meld.to_str().unwrap()])
+                .installed
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_configured_path_is_the_one_program_looked_for() {
+        let mine = Path::new("opt").join("meld");
+        let mine = mine.to_str().unwrap();
+        let usable = decide_with(
+            &["merge.tool=meld", &format!("mergetool.meld.path={mine}")],
+            &[mine],
+        );
+        assert_eq!(usable.configured, Configured::Usable("meld".into()));
+        let on_path = Path::new("bin").join("meld");
+        let missing = decide_with(
+            &["merge.tool=meld", "mergetool.meld.path=/nowhere/meld"],
+            &[on_path.to_str().unwrap()],
+        );
+        assert_eq!(
+            missing.configured,
+            Configured::Unusable {
+                why: "meld is not available".into(),
+                terminal: false
+            }
+        );
+    }
+
+    #[test]
+    fn the_user_s_tools_follow_git_s_by_name_and_terminal_ones_are_left_out() {
+        let tkdiff = Path::new("bin").join("tkdiff");
+        let gvim = Path::new("bin").join("gvim");
+        let d = decide_with(
+            &[
+                "merge.tool=vimdiff",
+                "mergetool.zed.cmd=zed",
+                "mergetool.alpha.cmd=a",
+                "mergetool.vimdiff3.cmd=v",
+            ],
+            &[tkdiff.to_str().unwrap(), gvim.to_str().unwrap()],
+        );
+        assert_eq!(
+            d.configured,
+            Configured::Unusable {
+                why: "vimdiff runs in a terminal".into(),
+                terminal: true
+            }
+        );
+        assert_eq!(
+            names(&d),
+            [
+                "gvimdiff",
+                "gvimdiff1",
+                "gvimdiff2",
+                "gvimdiff3",
+                "tkdiff",
+                "alpha",
+                "zed"
+            ]
+        );
+    }
+
+    #[test]
+    fn app_paths_offers_a_tool_git_does_not_find() {
+        let d = decide_with(&["merge.tool=winmerge"], &["C:/W/WinMergeU.exe"]);
+        assert_eq!(
+            d.configured,
+            Configured::Unusable {
+                why: "winmerge is not available".into(),
+                terminal: false
+            }
+        );
+        assert_eq!(
+            d.installed,
+            [Tool {
+                name: "winmerge".into(),
+                path: Some(PathBuf::from("C:/W/WinMergeU.exe"))
+            }]
+        );
+        // Found by git, it needs no path.
+        let found = Path::new("pf").join("WinMerge").join("WinMergeU.exe");
+        let d = decide_with(&[], &[found.to_str().unwrap()]);
+        assert_eq!(d.configured, Configured::None);
+        assert_eq!(
+            d.installed,
+            [Tool {
+                name: "winmerge".into(),
+                path: None
+            }]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_program_is_found_by_its_exe() {
+        let meld = Path::new("bin").join("meld.exe");
+        let d = decide_with(&["merge.guitool=meld"], &[meld.to_str().unwrap()]);
+        assert_eq!(d.configured, Configured::Usable("meld".into()));
     }
 
     #[test]
@@ -306,18 +528,6 @@ mod tests {
             assert!(is_terminal(t), "{t}");
         }
         assert!(!is_terminal("meld"));
-    }
-
-    #[test]
-    fn reg_query_gives_the_default_value() {
-        let out = "\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\WinMergeU.exe\r\n    (Default)    REG_SZ    C:\\Users\\a\\AppData\\Local\\Programs\\WinMerge\\WinMergeU.exe\r\n\r\n";
-        assert_eq!(
-            parse_reg_default(out),
-            Some(PathBuf::from(
-                r"C:\Users\a\AppData\Local\Programs\WinMerge\WinMergeU.exe"
-            ))
-        );
-        assert_eq!(parse_reg_default("ERROR: not found"), None);
     }
 
     #[test]
