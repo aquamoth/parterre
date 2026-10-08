@@ -1308,21 +1308,21 @@ impl ParterreApp {
             }
             "push" => {
                 let (branch, remote) = match name.split_once(':') {
-                    Some((branch, remote)) => (branch, Some(remote.to_owned())),
-                    None => (name, catalog.remote_names.iter().min().cloned()),
+                    Some((branch, remote)) => (branch, Some(remote)),
+                    None => (name, None),
                 };
-                let tip = catalog
+                let local = catalog
                     .locals
                     .iter()
                     .find(|b| b.name == branch)
-                    .ok_or_else(|| format!("no local branch named {branch}"))?
-                    .tip;
+                    .ok_or_else(|| format!("no local branch named {branch}"))?;
+                // As `git push`: the upstream's remote, else the first.
+                let remote = remote
+                    .or(local.upstream_remote.as_ref().map(|(r, _)| r.as_str()))
+                    .or(catalog.remote_names.iter().min().map(String::as_str))
+                    .ok_or("the repository has no remote")?;
                 branches::Request::Run(parterre_core::branches::Action::Push(Box::new(
-                    parterre_core::remote::Push {
-                        branch: branch.to_owned(),
-                        tip,
-                        remote: remote.ok_or("the repository has no remote")?,
-                    },
+                    parterre_core::remote::Push::new(local, remote),
                 )))
             }
             "delete-remote-branch" => {
