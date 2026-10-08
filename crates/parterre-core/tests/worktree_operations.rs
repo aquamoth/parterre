@@ -476,6 +476,7 @@ fn a_worktree_that_loses_nothing_is_confirmed_then_deleted_keeping_its_branch() 
     let confirm = warning(execute(&r, action.clone(), None));
     assert!(confirm.is_confirmation());
     assert!(path.exists(), "asking deletes nothing");
+    assert!(!confirm.changed);
     assert_eq!(confirm.commands[0][..2], ["worktree", "remove"]);
     assert!(!confirm.commands[0].contains(&"--force".to_owned()));
     done(execute(&r, action, Some(&confirm)));
@@ -533,6 +534,8 @@ fn a_detached_head_with_commits_nothing_else_reaches_is_a_warning() {
     let action = deletion(&r, "detached");
     let w = warning(execute(&r, action.clone(), None));
     assert_eq!(w.commits, [only]);
+    // Shown in the graph on screen, which loads every worktree's HEAD: none is loaded (#354).
+    assert!(w.repo.is_none());
     assert!(w.deletions[0].files.is_empty());
     // Git itself would delete a clean detached worktree without a word: nothing to force.
     assert!(!w.commands[0].contains(&"--force".to_owned()));
@@ -795,6 +798,7 @@ fn the_worktrees_git_refuses_are_asked_about_again_and_the_rest_deleted() {
     match execute(&r, action, Some(&fresh)) {
         Outcome::Warning(again) => {
             assert!(!plain.exists(), "the one git agreed to went");
+            assert!(again.changed);
             assert_eq!(again.action, deletion(&r, "w"));
             assert_eq!(again.deletions.len(), 1);
             assert!(again.deletions[0].refusal.is_some());

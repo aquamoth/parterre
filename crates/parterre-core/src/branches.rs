@@ -979,7 +979,12 @@ pub struct Warning {
     /// Each branch or worktree the action deletes, in its order, with what it loses. Empty for
     /// a switch.
     pub deletions: Vec<Deletion>,
-    pub repo: Arc<Repo>,
+    /// The graph to show the commits in, loaded with them. None when the graph on screen has
+    /// them: a worktree's are reachable from its HEAD, which the graph loads (#354).
+    pub repo: Option<Arc<Repo>>,
+    /// Something ran before it asked, such as the worktrees git didn't refuse: the repository
+    /// is not what it was. Set by [`Branches::execute`].
+    pub changed: bool,
     pub commands: Vec<Vec<String>>,
     /// The HEAD the warning was about, or, for a force push, the remote branch's tip.
     pub(crate) head: Option<Oid>,
@@ -1200,7 +1205,10 @@ impl Branches {
         }
         let requested = action.clone();
         match self.execute_inner(action, approval, cancel, &mut report) {
-            Ok(Some(warning)) => Outcome::Warning(warning),
+            Ok(Some(mut warning)) => {
+                warning.changed = !report.steps.is_empty();
+                Outcome::Warning(warning)
+            }
             Ok(None) => Outcome::Done(report),
             Err(error) => {
                 let error = if let Action::Create(c) = &requested
@@ -1431,7 +1439,8 @@ impl Branches {
                     replaced: Vec::new(),
                     deletions: Vec::new(),
                     head: catalog.head,
-                    repo,
+                    repo: Some(repo),
+                    changed: false,
                     commands: commands.clone(),
                 }));
             }
@@ -1553,7 +1562,8 @@ impl Branches {
                 action: action.clone(),
                 replaced: Vec::new(),
                 head: catalog.head,
-                repo: Arc::new(git.load()?),
+                repo: None,
+                changed: false,
                 commands: worktree_commands(&deletions, branches),
                 deletions,
                 commits,
@@ -1627,7 +1637,8 @@ impl Branches {
             action: Action::DeleteWorktrees { paths, branches },
             replaced: Vec::new(),
             head: after.head,
-            repo: Arc::new(git.load()?),
+            repo: None,
+            changed: false,
             commands: worktree_commands(&deletions, branches),
             commits: worktree_commits(&deletions, branches),
             deletions,
@@ -1655,7 +1666,8 @@ fn branch_warning(
         commits,
         replaced: Vec::new(),
         deletions,
-        repo,
+        repo: Some(repo),
+        changed: false,
         commands: vec![force],
         head,
     }))
@@ -1790,37 +1802,56 @@ fn worktree_losses(
         .flatten()
         .map(|b| format!("refs/heads/{}", b.name))
         .collect();
-    wts.iter()
-        .zip(branches)
-        .map(|(wt, branch)| {
-            let files = if wt.missing {
-                Vec::new()
-            } else {
-                changed_files(&wt.path)?
-            };
-            let commits = match (&wt.branch, wt.head) {
-                (None, Some(head)) => lost_commits(git, catalog, head, &[], &leaving, None)?,
-                _ => Vec::new(),
-            };
-            let branch = match branch {
-                Some(b) => Some(WorktreeBranch {
-                    commits: lost_commits(git, catalog, b.tip, &excluded, &leaving, None)?,
-                    name: b.name,
-                    tip: b.tip,
-                }),
-                None => None,
-            };
-            Ok(Deletion {
-                name: wt.name(),
-                path: Some(wt.path.clone()),
-                commits,
-                files,
-                refusal: None,
-                branch,
-                head: wt.head,
+    let (leaving, excluded) = (&leaving, &excluded);
+    // Every worktree's status and commits at once: each is a git start, which on Windows is
+    // most of what it costs (#309, #354).
+    std::thread::scope(|s| {
+        let pending: Vec<_> = wts
+            .iter()
+            .zip(branches)
+            .map(|(&wt, branch)| {
+                let files = s.spawn(move || {
+                    if wt.missing {
+                        Ok(Vec::new())
+                    } else {
+                        changed_files(&wt.path)
+                    }
+                });
+                let commits = s.spawn(move || -> Result<_, Error> {
+                    let commits = match (&wt.branch, wt.head) {
+                        (None, Some(head)) => lost_commits(git, catalog, head, &[], leaving, None)?,
+                        _ => Vec::new(),
+                    };
+                    let branch = match branch {
+                        Some(b) => Some(WorktreeBranch {
+                            commits: lost_commits(git, catalog, b.tip, excluded, leaving, None)?,
+                            name: b.name,
+                            tip: b.tip,
+                        }),
+                        None => None,
+                    };
+                    Ok((commits, branch))
+                });
+                (wt, files, commits)
             })
-        })
-        .collect()
+            .collect();
+        pending
+            .into_iter()
+            .map(|(wt, files, commits)| {
+                let files = files.join().expect("status")?;
+                let (commits, branch) = commits.join().expect("lost commits")?;
+                Ok(Deletion {
+                    name: wt.name(),
+                    path: Some(wt.path.clone()),
+                    commits,
+                    files,
+                    refusal: None,
+                    branch,
+                    head: wt.head,
+                })
+            })
+            .collect()
+    })
 }
 
 /// The local branch a worktree has checked out, with its tip. A branch being rebased there

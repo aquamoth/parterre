@@ -584,7 +584,7 @@ fn warning_contains_exact_endangered_ids_and_approval_deletes_only_that_branch()
     assert_eq!(r.git(&["branch", "--show-current"]), "main");
     assert_eq!(Catalog::load(r.path()).unwrap().locals.len(), 1);
     // The warning's snapshot survives removal of the last ref for Show in log.
-    assert!(w.repo.lookup(&tip).is_some());
+    assert!(w.repo.as_ref().unwrap().lookup(&tip).is_some());
 }
 
 #[test]
