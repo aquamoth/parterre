@@ -16,7 +16,7 @@ use crate::widgets;
 const NOTICE: &str = include_str!(env!("PARTERRE_NOTICE"));
 const LICENSE: &str = include_str!(env!("PARTERRE_LICENSE"));
 
-const TAGLINE: &str = "A TortoiseGit-style revision graph viewer";
+const TAGLINE: &str = "A revision graph viewer";
 const COPYRIGHT: &str = "© 2026 Trustfall AB";
 const CONTACT: &str = "parterre@trustfall.se";
 const WEBSITE: &str = "https://github.com/aquamoth/parterre";
@@ -313,7 +313,7 @@ fn banner(ui: &mut Ui, s: &mut State, icon: &TextureHandle) -> Answer {
         .show(ui, |ui| match s.tab {
             Tab::About => {
                 ui.label(
-                    "Shows a git repository's history as TortoiseGit's revision graph does: \
+                    "Shows a git repository's history as a revision graph: \
                      branches, tags and merges, without the commits in between.",
                 );
                 ui.add_space(10.0);
