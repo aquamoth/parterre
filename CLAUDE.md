@@ -11,7 +11,7 @@ Standalone TortoiseGit-style revision graph viewer. Rust workspace, egui/eframe 
   the std-only cancellation handles the others share; keep it that small (#214).
 - Behavioural reference for what TortoiseGit does: `docs/research/tortoisegit-revision-graph.md`.
 - Screenshots live in `docs/images/<major>.<minor>/`; published packages link to them, so never
-  move or delete one (`docs/releasing.md`).
+  move or delete one. `scripts/readme-images.sh` takes a new set (`docs/images/README.md`).
 - Work is tracked in GitHub issues (`gh issue`), not in files: open questions and decisions
   for the human to review are labelled `question`, planned work `enhancement`, and defects
   `bug`. Refer to them by number (#68).

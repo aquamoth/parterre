@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Takes the README's images, of the storefront demo (scripts/readme-demo-repo.py), into a
-# folder: scripts/readme-images.sh [OUT] (default /tmp/parterre-readme). Copy them into
-# docs/images/<major>.<minor>/ for a release (docs/releasing.md#screenshots).
+# folder: scripts/readme-images.sh [OUT] (default /tmp/parterre-readme). They go in a new
+# docs/images/<major>.<minor>/, never over an old one: docs/images/README.md says why.
 #
-# Light, at 2x, and the main window in dark too. Uses target/debug/parterre, or $PARTERRE, under
+# Light and dark, at 2x. Uses target/debug/parterre, or $PARTERRE, under
 # xvfb-run as scripts/screenshots.sh does. Needs Python with Pillow, to crop.
 set -euo pipefail
 out=$(realpath -m "${1:-/tmp/parterre-readme}")
@@ -48,39 +48,35 @@ f, *box = sys.argv[1:]; Image.open(f).crop(tuple(map(int, box))).save(f, optimiz
 }
 
 "$root/scripts/readme-demo-repo.py" "$work" >/dev/null
-for theme in light dark; do
-    shot hero $theme full $'hover "146"\nwait 1' --fit
-done
-shot worktrees light full $'right-click node:feature/dark-mode\nhover "Actions"\nwait 0.5' --fit
-shot git-menu light full $'click node:fix/cart-rounding\nclick "Git"\nwait 0.5' --fit
-# A larger main window, so that a margin is left all round the windows' crops.
-WSIZE=1500x1100 shot log light window \
-    $'open log:fix/cart-rounding\nwait-for "Cart: total in cents"\nclick "Cart: total in cents"\nwait 0.5'
 # `open diff:` names a commit by a branch, a tag or a hash: "Cart: total in cents".
 cents=$(git -C "$work/storefront" rev-parse --short fix/cart-rounding~1)
-WSIZE=1500x1100 shot diff light window \
-    $'open diff:'"$cents"$':src/cart.rs\nwait-for "total"\nwait 0.5' --diff-unfolded
-WSIZE=1500x1100 shot blame light window \
-    $'open blame:fix/cart-rounding:src/cart.rs:30\nwait 0.5\nhover 1490,1000\nwait 1'
+for theme in light dark; do
+    shot hero $theme full $'hover "146"\nwait 1' --fit
+    shot worktrees $theme full $'right-click node:feature/dark-mode\nhover "Actions"\nwait 0.5' --fit
+    shot git-menu $theme full $'click node:fix/cart-rounding\nclick "Git"\nwait 0.5' --fit
+    # A larger main window, so that a margin is left all round the windows' crops.
+    WSIZE=1500x1100 shot log $theme window \
+        $'open log:fix/cart-rounding\nwait-for "Cart: total in cents"\nclick "Cart: total in cents"\nwait 0.5'
+    WSIZE=1500x1100 shot diff $theme window \
+        $'open diff:'"$cents"$':src/cart.rs\nwait-for "total"\nwait 0.5' --diff-unfolded
+    WSIZE=1500x1100 shot blame $theme window \
+        $'open blame:fix/cart-rounding:src/cart.rs:30\nwait 0.5\nhover 1490,1000\nwait 1'
+done
 # The 16-point margin (32 px) that a window's crop keeps.
-for f in "$out"/{log,diff,blame}-light.png; do
+for f in "$out"/{log,diff,blame}-*.png; do
     [[ -f $f ]] || continue
     read -r w h < <(python3 -c 'import sys; from PIL import Image; print(*Image.open(sys.argv[1]).size)' "$f")
     crop "$f" 32 32 $((w - 32)) $((h - 32))
 done
 
 "$root/scripts/readme-demo-repo.py" "$work" --rebasing >/dev/null
-shot rebase light full $'click node:fix/cart-rounding\nhover canvas\nwait 0.5' --fit
-crop "$out/rebase-light.png" 0 250 2560 870
+for theme in light dark; do
+    shot rebase $theme full $'click node:fix/cart-rounding\nhover canvas\nwait 0.5' --fit
+    crop "$out/rebase-$theme.png" 0 250 2560 870
+done
 
 # Dragging, at 1x: the graph gives way, a subtree moves as one, and the layout comes back.
-"$root/scripts/readme-demo-repo.py" "$work" >/dev/null
-data=$(mktemp -d)
-if ! XDG_DATA_HOME=$data XDG_CONFIG_HOME=$data WINIT_X11_SCALE_FACTOR=1 \
-    "$bin" "$work/storefront" --window-size 1000x620 --worktrees \
-    --pull-requests-from "$work/prs.json" --theme light --fit --record "$out/drag-light.gif" \
-    --script - 2> >(grep -v '^saved recording\|^frame interval\|^graph:' >&2) <<'STEPS'; then
-wait 0.5
+drag_steps='wait 0.5
 drag node:experiment/wasm -330,60
 hover canvas
 wait 1.5
@@ -94,10 +90,20 @@ wait 1.5
 click "Layout"
 click "Return all nodes to layout"
 wait 2
-STEPS
-    failed+=(drag-light)
-fi
-rm -rf "$data"
+'
+for theme in light dark; do
+    "$root/scripts/readme-demo-repo.py" "$work" >/dev/null
+    data=$(mktemp -d)
+    if ! printf '%s' "$drag_steps" |
+        XDG_DATA_HOME=$data XDG_CONFIG_HOME=$data WINIT_X11_SCALE_FACTOR=1 \
+            "$bin" "$work/storefront" --window-size 1000x620 --worktrees \
+            --pull-requests-from "$work/prs.json" --theme $theme --fit \
+            --record "$out/drag-$theme.gif" --script - \
+            2> >(grep -v '^saved recording\|^frame interval\|^graph:' >&2); then
+        failed+=("drag-$theme")
+    fi
+    rm -rf "$data"
+done
 
 echo "images in $out"
 if ((${#failed[@]})); then

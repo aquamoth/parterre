@@ -183,9 +183,9 @@ The README, the crates.io README and the AppStream metadata
 their folder, so never move or delete one: take new screenshots into a new folder, and point
 the three at it.
 
-`scripts/readme-images.sh OUT` takes them all, of the same demo repository
-(`scripts/readme-demo-repo.py`), in about 30 seconds: light, at 2x, the main window in dark
-too, and the GIF of dragging. Run again on the same commit, it makes the same files.
+`scripts/readme-images.sh OUT` takes them all, light and dark, of the same demo repository.
+[docs/images/README.md](images/README.md) says why each version gets a folder of its own, and
+how to make one.
 
 ## Version strings
 
