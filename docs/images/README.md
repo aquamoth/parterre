@@ -32,9 +32,12 @@ leaves each release with the pictures of what it shipped.
    red id-clash warnings, which only debug builds show. If the UI has changed so that a step no
    longer finds its target, the run says which, and the script is the place to fix it.
 2. Copy them into a new folder named for the version they show, `docs/images/<major>.<minor>/`,
-   with the platform and theme icons (`platform-*.svg`, `theme-*.svg`) of the last folder.
+   with the platform badges (`platform-*.svg`) of the last folder.
 3. Point all three at it: `README.md`, `crates/parterre/README.md` and the metainfo.
    `grep -rn 'docs/images/' --include='*.md' --include='*.xml' .` finds every link.
 
-The README shows each picture through `<picture>`, so GitHub picks the reader's theme; the icons
-under the first one open each theme's version.
+The README shows each picture twice, as `…-light.png#gh-light-mode-only` and
+`…-dark.png#gh-dark-mode-only`, and GitHub hides the one that doesn't match the theme chosen in
+the reader's GitHub settings. `<picture>` would follow the system's theme instead, which shows
+dark pictures on a light page when the two differ. A README can't switch themes itself: GitHub
+runs no script and takes no style in it.
