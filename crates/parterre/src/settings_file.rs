@@ -7,6 +7,12 @@
 //! - `version`: [`VERSION`], the format's. It goes up when a setting changes its meaning, and
 //!   reading converts what an older version wrote. Settings added or removed leave it alone:
 //!   missing ones get their defaults, unknown ones are left out.
+//!
+//!   An older parterre saving the stored document keeps a newer version's number, and writes
+//!   back the settings it couldn't read; those it could, it writes as it understood them (#369).
+//!   So a setting whose meaning changes gets a new name, or a value the older version can't
+//!   read, rather than being converted from what it was: under the newer number, it isn't
+//!   converted again.
 //! - `parterre`: the version of parterre that wrote it, for people reading it.
 //! - `settings`: parterre's own settings (exported without what belongs to the computer:
 //!   window sizes and dividers).
@@ -81,6 +87,11 @@ impl Stored {
             .map(|(key, repo)| (key.clone(), to_value(repo)))
             .collect();
         let mut now = header();
+        // What a newer version wrote is written back in its form, so the number stays its.
+        let version = self.file.get("version").and_then(Value::as_u64);
+        if let Some(newer) = version.filter(|&v| v > VERSION) {
+            now["version"] = newer.into();
+        }
         now["settings"] = to_value(settings);
         now["repositories"] = Value::Object(repositories);
         lenient::write_back(now, &self.file, &self.skipped).to_string()
@@ -274,6 +285,9 @@ mod tests {
         assert_eq!(out["settings"]["sounds"], true);
         assert_eq!(out["repositories"]["/src/app"]["hide_tags"], "v*");
         assert_eq!(out["repositories"]["/src/app"]["ref_filter"], "main");
+        // Under its own version, or the newer one would convert it again (#369).
+        assert_eq!(out["version"], 2);
+        assert_eq!(out["parterre"], crate::VERSION);
     }
 
     #[test]
