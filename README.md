@@ -1,5 +1,9 @@
 # parterre
 
+[![Windows](docs/images/1.0/platform-windows.svg)](#install)
+[![Linux](docs/images/1.0/platform-linux.svg)](#install)
+[![macOS](docs/images/1.0/platform-macos.svg)](#install)
+
 [![Latest release](https://img.shields.io/github/v/release/aquamoth/parterre?include_prereleases&sort=semver)](https://github.com/aquamoth/parterre/releases)
 [![crates.io](https://img.shields.io/crates/v/parterre)](https://crates.io/crates/parterre)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue)](LICENSE)
@@ -7,14 +11,11 @@
 **Every branch, worktree and pull request of a git repository in one picture, and the git
 operations to act on them.**
 
-parterre is a fast, native revision graph for Linux, Windows and macOS, inspired by
-TortoiseGit's *Revision Graph*. It leaves out the commits in between and shows how your branches,
-tags, remotes, worktrees and open pull requests relate.
+parterre is a fast, native revision graph for Windows, Linux and macOS (Apple silicon and
+Intel), inspired by TortoiseGit's *Revision Graph*. It leaves out the commits in between and
+shows how your branches, tags, remotes, worktrees and open pull requests relate.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/hero-dark.png">
-  <img alt="parterre showing a repository with local and remote branches, tags, three worktrees and four open pull requests; the pointer rests on pull request #146, whose tooltip names its title, author and branches" src="docs/images/0.6/hero-light.png">
-</picture>
+<img alt="parterre showing a repository with local and remote branches, tags, three worktrees and four open pull requests, under its menu bar and toolbar; the pointer rests on pull request #146, whose tooltip names its title, author and branches" src="docs/images/1.0/hero-light.png">
 
 A parterre is a formal garden laid out in patterns, made to be seen from the upper floors of
 the house. This one gives you that view of a repository: every branch at once, from above.
@@ -29,7 +30,8 @@ in cyan. A detached worktree, such as one for reviewing a pull request, is named
   stay, since it is the same history.
 - **Add** a worktree at any commit, on a new branch that can track a remote one, and
   **delete** one you are done with.
-- **Open** a worktree's folder in your file manager or a terminal, straight from the graph.
+- **Open** a worktree's folder in your file manager or a terminal, straight from the graph
+  (*Actions* in its menu).
 - **Merge, rebase, cherry-pick, reset and revert** the open worktree's branch from the graph
   and the log. Each dialog shows what will change and the git command it runs, and can stash
   your uncommitted changes first and put them back after. A rebase lets you pick, squash or
@@ -38,10 +40,7 @@ in cyan. A detached worktree, such as one for reviewing a pull request, is named
 - A worktree stopped in a rebase, merge or cherry-pick shows it in the graph, and a banner
   says what is stopped there and which files conflict.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/worktrees-dark.png">
-  <img alt="The context menu of a branch checked out in another worktree: create, switch, rebase, merge, cherry-pick and reset; add, go to and delete worktrees; open the worktree in the file system or a terminal" src="docs/images/0.6/worktrees-light.png">
-</picture>
+<img alt="The menu of a node checked out in the worktree review-139: history, worktree, branch, integrate and layout commands, and Actions open, with copy, open pull request #139, open in file manager and open in terminal" src="docs/images/1.0/worktrees-light.png">
 
 Turn worktrees on with the folder button in the toolbar.
 
@@ -69,6 +68,8 @@ A branch that was rebased since it was pushed gets a **dashed arrow to its upstr
 worktree in the middle of a rebase gets an **orange zigzag** from where it has got to back to
 the branch being rebased.
 
+<img alt="fix/cart-rounding, rebased onto main but not pushed, is selected: a dashed arrow runs to origin/fix/cart-rounding, its new commits are green and the replaced ones grey dashed. On the right, an orange zigzag joins the worktree storefront-checkout, stopped part-way through a rebase, to feature/checkout-redesign" src="docs/images/1.0/rebase-light.png">
+
 **Fetch** every remote from the toolbar or with `Ctrl+F5` (`⇧⌘F` on macOS), **pull** the open worktree's branch,
 and **push** any local branch from its node. A push that would replace the remote's commits
 asks first, and says whether the branch has a copy of each; it forces only with a lease
@@ -76,10 +77,7 @@ asks first, and says whether the branch has a copy of each; it forces only with 
 credential helper or ssh-agent. **Delete** a remote branch from its node: parterre asks
 first, lists any commits only it has, and won't delete a branch with an open pull request.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/rebase-dark.png">
-  <img alt="fix/cart-rounding, rebased onto main but not pushed, is selected: a dashed arrow runs to origin/fix/cart-rounding, its new commits are green and the replaced ones grey dashed. On the left, an orange zigzag joins feature/checkout-redesign to its worktree, which is stopped part-way through a rebase" src="docs/images/0.6/rebase-light.png">
-</picture>
+<img alt="The Git menu of the menu bar, for the selected fix/cart-rounding, 5 ahead and 2 behind its upstream: history, worktree, branch and integrate commands, then fetch, pull main and push fix/cart-rounding to origin" src="docs/images/1.0/git-menu-light.png">
 
 ## Arrange it your way
 
@@ -89,10 +87,7 @@ move only the selected nodes, or a whole subtree, undo with `Ctrl+Z` (`⌘Z` on 
 everything back with *Layout › Return all nodes to layout*. Turn on *Remember moved nodes* (*Settings → Dragging*) to keep your
 arrangement for each repository.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/drag-dark.gif">
-  <img alt="Dragging nodes: the graph gives way, a subtree moves as one, and Return all nodes to layout puts everything back" src="docs/images/0.6/drag-light.gif">
-</picture>
+<img alt="Dragging nodes: the graph gives way, a subtree moves as one, and Layout › Return all nodes to layout puts everything back" src="docs/images/1.0/drag-light.gif">
 
 ## History, diffs and blame
 
@@ -104,25 +99,23 @@ two commits, or a commit with your working tree.
 <table>
   <tr>
     <td width="33%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/log-dark.png">
-        <img alt="The log window: a branch's history with a graph column, branch labels with ahead and behind counts, the selected commit's details and changed files" src="docs/images/0.6/log-light.png">
-      </picture>
+      <img alt="The log window: a branch's history with a graph column, branch labels with ahead and behind counts, the selected commit's details and changed files" src="docs/images/1.0/log-light.png">
     </td>
     <td width="33%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/diff-dark.png">
-        <img alt="The diff window, side by side, with the changed words marked" src="docs/images/0.6/diff-light.png">
-      </picture>
+      <img alt="The diff window, side by side, with the changed words marked" src="docs/images/1.0/diff-light.png">
     </td>
     <td width="33%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/images/0.6/blame-dark.png">
-        <img alt="The blame window: each line's commit, author and date, shaded by age, over the file's history" src="docs/images/0.6/blame-light.png">
-      </picture>
+      <img alt="The blame window: each line's commit, author and date, shaded by age, over the file's history" src="docs/images/1.0/blame-light.png">
     </td>
   </tr>
 </table>
+
+## Light or dark
+
+parterre follows your desktop's light or dark mode, or keeps the one you pick in *Settings ›
+Appearance*.
+
+<img alt="The same repository in the dark theme" src="docs/images/1.0/hero-dark.png" width="60%">
 
 ## Install
 
@@ -166,6 +159,10 @@ cd ~/src/my-project
 parterre                           # the repository you are in
 parterre ~/src/other --worktrees   # another one, with its worktrees shown
 ```
+
+In the window, *File › Open folder…* (or a folder dropped on it, except on Wayland) opens another repository, and
+*File › Clone repository…* clones one from any URL, or from your GitHub repositories when the
+GitHub CLI is signed in.
 
 | Do | To |
 |---|---|

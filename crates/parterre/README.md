@@ -5,7 +5,7 @@ operations to act on them. A fast, native revision graph for Linux, Windows and 
 inspired by TortoiseGit's **Revision Graph**: it shows how your branches, tags, remotes,
 worktrees and open GitHub pull requests relate, and lets you rearrange the graph by hand.
 
-![parterre showing a repository with branches, tags, worktrees and pull requests](https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/0.6/hero-light.png)
+![parterre showing a repository with branches, tags, worktrees and pull requests](https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/1.0/hero-light.png)
 
 ```sh
 cargo install --locked parterre    # build from source
