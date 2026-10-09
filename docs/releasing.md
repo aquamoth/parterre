@@ -183,6 +183,10 @@ The README, the crates.io README and the AppStream metadata
 their folder, so never move or delete one: take new screenshots into a new folder, and point
 the three at it.
 
+`scripts/readme-images.sh OUT` takes them all, light and dark, of the same demo repository.
+[docs/images/README.md](images/README.md) says why each version gets a folder of its own, and
+how to make one.
+
 ## Version strings
 
 `parterre --version` and *About parterre* show which build is running:

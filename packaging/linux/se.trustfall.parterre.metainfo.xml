@@ -36,23 +36,23 @@
   <screenshots>
     <screenshot type="default">
       <caption>Branches, tags, worktrees and open pull requests of a repository</caption>
-      <image>https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/0.6/hero-light.png</image>
+      <image>https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/1.0/hero-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Merge, rebase, cherry-pick, reset and worktrees from a branch's menu</caption>
-      <image>https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/0.6/worktrees-light.png</image>
+      <image>https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/1.0/worktrees-light.png</image>
     </screenshot>
     <screenshot>
       <caption>A rebased branch and a rebase in progress, against their upstreams</caption>
-      <image>https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/0.6/rebase-light.png</image>
+      <image>https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/1.0/rebase-light.png</image>
     </screenshot>
     <screenshot>
       <caption>The log of a branch</caption>
-      <image>https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/0.6/log-light.png</image>
+      <image>https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/1.0/log-light.png</image>
     </screenshot>
     <screenshot>
       <caption>A file's diff, with changed words marked</caption>
-      <image>https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/0.6/diff-light.png</image>
+      <image>https://raw.githubusercontent.com/aquamoth/parterre/main/docs/images/1.0/diff-light.png</image>
     </screenshot>
   </screenshots>
   <content_rating type="oars-1.1"/>
