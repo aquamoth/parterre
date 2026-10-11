@@ -161,17 +161,6 @@ impl Repo {
             .enumerate()
             .map(|(i, c)| (c.oid, CommitIx::new(i)))
             .collect();
-        Repo::with_index(path, commits, by_oid, refs, head)
-    }
-
-    /// `by_oid` indexes `commits`.
-    pub(crate) fn with_index(
-        path: PathBuf,
-        commits: Vec<Commit>,
-        by_oid: HashMap<Oid, CommitIx>,
-        refs: Vec<GitRef>,
-        head: Head,
-    ) -> Repo {
         Repo {
             path,
             commits,

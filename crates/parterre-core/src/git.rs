@@ -538,7 +538,7 @@ impl Git {
             let log = if starts.is_empty() {
                 Ok((Vec::new(), HashMap::new()))
             } else {
-                git.run_with_input(
+                git.run_with_input_bytes(
                     &[
                         "log",
                         "--no-color",
@@ -550,6 +550,8 @@ impl Git {
                     ],
                     oid_lines(&starts),
                 )
+                // A copy, git's bigger buffer freed before the parse: see `parse_log`.
+                .map(|out| String::from_utf8_lossy(&out).into_owned())
                 .and_then(|log| parse_log(&log))
             };
             (log, abbrev.join().unwrap_or(DEFAULT_ABBREV_LEN))
@@ -626,7 +628,8 @@ impl Git {
             .iter()
             .find(|(name, _)| name == "refs/remotes/origin/HEAD")
             .map(|(_, target)| target.clone());
-        let mut repo = Repo::with_index(root, commits, by_oid, refs, head);
+        // Indexed anew, after the commits: handed `by_oid` instead, a load is 0.4% slower.
+        let mut repo = Repo::new(root, commits, refs, head);
         repo.abbrev_len = abbrev_len;
         repo.has_working_tree = has_working_tree;
         repo.worktrees = worktrees;
@@ -1247,30 +1250,55 @@ pub(crate) fn log_fields(log: &str, per_record: usize) -> Result<Vec<&str>, usiz
 }
 
 fn parse_log(log: &str) -> Result<(Vec<Commit>, HashMap<Oid, CommitIx>), GitError> {
+    /// A record with its numbers parsed and its text not copied yet.
+    struct Raw<'a> {
+        oid: Oid,
+        parents: &'a str,
+        empty_tree: bool,
+        author_name: &'a str,
+        author_email: &'a str,
+        author_time: i64,
+        author_date: &'a str,
+        commit_time: i64,
+        subject: &'a str,
+    }
+
     let fields = log_fields(log, LOG_FIELDS).map_err(|n| {
         GitError::Parse(format!(
             "log output has {n} fields, not a multiple of {LOG_FIELDS}"
         ))
     })?;
     let (records, _) = fields.as_chunks::<LOG_FIELDS>();
-    let oids = records
-        .iter()
-        .map(|[hash, ..]| {
-            let hash = hash.trim_start_matches('\n');
-            Oid::from_hex(hash).ok_or_else(|| GitError::Parse(format!("bad hash {hash:?}")))
-        })
-        .collect::<Result<Vec<Oid>, GitError>>()?;
-    let by_oid: HashMap<Oid, CommitIx> = oids
+    // Records of their own first, from a copy of git's output (`Git::load`): without both,
+    // glibc hands some 15 MB back to the OS after every load, and faulting it in again makes
+    // the next one 1% slower.
+    let mut raw = Vec::with_capacity(records.len());
+    for &[hash, parents, tree, an, ae, at, ad, ct, subject] in records {
+        let hash = hash.trim_start_matches('\n');
+        raw.push(Raw {
+            oid: Oid::from_hex(hash)
+                .ok_or_else(|| GitError::Parse(format!("bad hash {hash:?}")))?,
+            parents,
+            empty_tree: tree == EMPTY_TREE_SHA1 || tree == EMPTY_TREE_SHA256,
+            author_name: an,
+            author_email: ae,
+            author_time: at.parse().unwrap_or(0),
+            author_date: ad,
+            commit_time: ct.parse().unwrap_or(0),
+            subject,
+        });
+    }
+    let by_oid: HashMap<Oid, CommitIx> = raw
         .iter()
         .enumerate()
-        .map(|(i, &oid)| (oid, CommitIx::new(i)))
+        .map(|(i, r)| (r.oid, CommitIx::new(i)))
         .collect();
-    let commits = records
-        .iter()
-        .zip(oids)
-        .map(|(&[_, parents, tree, an, ae, at, ad, ct, subject], oid)| {
+    let commits = raw
+        .into_iter()
+        .map(|r| {
             let mut truncated = false;
-            let parents = parents
+            let parents = r
+                .parents
                 .split_ascii_whitespace()
                 .filter_map(|p| {
                     let ix = Oid::from_hex(p).and_then(|o| by_oid.get(&o).copied());
@@ -1279,16 +1307,16 @@ fn parse_log(log: &str) -> Result<(Vec<Commit>, HashMap<Oid, CommitIx>), GitErro
                 })
                 .collect();
             Commit {
-                oid,
+                oid: r.oid,
                 parents,
                 truncated,
-                empty_tree: tree == EMPTY_TREE_SHA1 || tree == EMPTY_TREE_SHA256,
-                author_name: an.to_owned(),
-                author_email: ae.to_owned(),
-                author_time: at.parse().unwrap_or(0),
-                author_date: ad.to_owned(),
-                commit_time: ct.parse().unwrap_or(0),
-                subject: subject.to_owned(),
+                empty_tree: r.empty_tree,
+                author_name: r.author_name.to_owned(),
+                author_email: r.author_email.to_owned(),
+                author_time: r.author_time,
+                author_date: r.author_date.to_owned(),
+                commit_time: r.commit_time,
+                subject: r.subject.to_owned(),
             }
         })
         .collect();

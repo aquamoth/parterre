@@ -161,13 +161,13 @@ fn transpose_all(g: &mut LayeredGraph) {
 }
 
 fn neighbour_positions(g: &LayeredGraph, item: usize, neighbours: Neighbours, out: &mut Vec<u32>) {
+    // Matched here: [`Neighbours::of`] isn't inlined, which makes transposing 6% slower.
+    let list = match neighbours {
+        Neighbours::Above => g.up(item),
+        Neighbours::Below => g.down(item),
+    };
     out.clear();
-    out.extend(
-        neighbours
-            .of(g, item)
-            .iter()
-            .map(|&(nb, _)| g.pos[nb as usize]),
-    );
+    out.extend(list.iter().map(|&(nb, _)| g.pos[nb as usize]));
     out.sort_unstable();
 }
 

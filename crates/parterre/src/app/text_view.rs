@@ -12,8 +12,7 @@ use parterre_core::file_diff::{Rev, raw_offset};
 use parterre_core::find::{self, Step};
 
 use super::table_style;
-use crate::keys;
-use crate::widgets;
+use crate::{keys, widgets, worker};
 
 pub(super) const TOOLBAR_HEIGHT: f32 = 44.0;
 pub(super) const HEADER_HEIGHT: f32 = 34.0;
@@ -44,10 +43,11 @@ impl<T> Load<T> {
         matches!(self, Load::Loading(_))
     }
 
-    /// The worker's result, once it has come.
     pub(super) fn received(&self) -> Option<Result<T, String>> {
         match self {
-            Load::Loading(rx) => rx.try_recv().ok(),
+            Load::Loading(rx) => {
+                worker::received(rx, || Err("loading stopped unexpectedly".into()))
+            }
             _ => None,
         }
     }
@@ -630,5 +630,22 @@ pub(super) fn colors(ui: &Ui) -> Colors {
             thumb: Color32::from_black_alpha(45),
             thumb_hover: Color32::from_black_alpha(90),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_worker_gone_without_an_answer_fails_the_load() {
+        let (tx, rx) = mpsc::channel::<Result<(), String>>();
+        let load = Load::Loading(rx);
+        assert_eq!(load.received(), None);
+        drop(tx);
+        assert_eq!(
+            load.received(),
+            Some(Err("loading stopped unexpectedly".into()))
+        );
     }
 }
