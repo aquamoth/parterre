@@ -1,50 +1,53 @@
-//! The menu bar on Windows and Linux: a row of parterre's own above the toolbar, as tall as
-//! the toolbar's rows were (about 29 points; KDE's is 29, GNOME's 32, WinUI's 36), with the
-//! menus in parterre's menu look (`crate::menu`). As in native menu bars, once a menu is open,
-//! pointing at another title opens that one. A menu taller than the window scrolls.
-//!
-//! And as there, the keyboard: Alt+letter opens a menu by its underlined letter, and in a menu
-//! a letter chooses the item it underlines; F10, or Alt pressed and let go alone, gives the bar
-//! the keyboard. The arrow keys move between menus and items, Enter chooses, Esc closes. The
-//! letters are underlined while Alt is held or the bar has the keyboard. Alt with Ctrl is
-//! AltGr on Windows, typing characters: never the bar's.
+//! As in native menu bars, once a menu is open, pointing at another title opens that one. And as
+//! there, the keyboard: Alt+letter opens a menu by its underlined letter, and in a menu a letter
+//! chooses the item it underlines; F10, or Alt pressed and let go alone, gives the bar the
+//! keyboard. The arrow keys move between menus and items, Enter chooses, Esc closes.
 
-use eframe::egui::{self, Color32, Event, Id, Key, Popup, RichText, Ui, WidgetText, vec2};
+use eframe::egui::{self, Color32, Event, Id, Key, Popup, RichText, Ui, WidgetText};
 
 use super::{Command, Entry, Menu, access_keys, access_letter};
 use crate::menu;
 use crate::widgets;
 
-/// The row's height.
-pub const HEIGHT: f32 = 29.0;
+// As tall as the toolbar's rows were. KDE's is 29, GNOME's 32, WinUI's 36.
+#[cfg(not(target_os = "macos"))]
+const BAR_HEIGHT: f32 = 29.0;
 
-/// The id of the popup of the menu titled `title`, for a script to open (`open menu:file`).
+fn title_id(title: &str) -> Id {
+    Id::new(("menu-bar", title.to_lowercase()))
+}
+
 pub fn popup_id(title: &str) -> Id {
-    Id::new(("menu-bar", title.to_lowercase())).with("popup")
+    title_id(title).with("popup")
 }
 
 /// Where the keyboard is in the bar, kept between frames.
 #[derive(Clone, Debug, Default)]
 struct Nav {
-    /// The bar has the keyboard: a title is highlighted, and the letters are underlined.
-    active: bool,
-    /// The title highlighted, or whose menu is open.
-    title: usize,
+    /// A title is highlighted and the letters are underlined.
+    bar_focused: bool,
+    /// The menu highlighted, or open.
+    menu: usize,
     /// While a menu is open: the entry highlighted in it, then in each submenu the keyboard
     /// opened.
     path: Vec<Option<usize>>,
-    /// Alt is held.
-    alt: bool,
+    alt_held: bool,
     /// Alt went down with nothing else since: let go, it gives the bar the keyboard.
     alt_alone: bool,
+}
+
+impl Nav {
+    fn has_keyboard(&self) -> bool {
+        self.bar_focused || !self.path.is_empty()
+    }
 }
 
 fn nav_id() -> Id {
     Id::new("menu-bar-nav")
 }
 
-/// The entries a menu shows at the keyboard's depth: its own, or an open submenu's.
-fn level<'a>(entries: &'a [Entry], path: &[Option<usize>]) -> &'a [Entry] {
+/// The entries of the innermost submenu `path` opened.
+fn entries_at_cursor<'a>(entries: &'a [Entry], path: &[Option<usize>]) -> &'a [Entry] {
     let mut entries = entries;
     for &index in path.iter().take(path.len().saturating_sub(1)) {
         match index.and_then(|i| entries.get(i)) {
@@ -55,7 +58,6 @@ fn level<'a>(entries: &'a [Entry], path: &[Option<usize>]) -> &'a [Entry] {
     entries
 }
 
-/// An entry's label, if it is one the keyboard can choose.
 fn label_of(entry: &Entry) -> Option<&str> {
     match entry {
         Entry::Item(item) => Some(&item.label),
@@ -64,7 +66,6 @@ fn label_of(entry: &Entry) -> Option<&str> {
     }
 }
 
-/// Whether the keyboard can choose `entry`: an item or a submenu, not greyed out.
 fn choosable(entry: &Entry) -> bool {
     match entry {
         Entry::Item(item) => item.enabled,
@@ -73,83 +74,92 @@ fn choosable(entry: &Entry) -> bool {
     }
 }
 
-/// The entries' access keys: the index of each one's underlined character.
-fn keys_of(entries: &[Entry]) -> Vec<Option<usize>> {
+fn access_keys_of(entries: &[Entry]) -> Vec<Option<usize>> {
     let labels: Vec<Option<&str>> = entries.iter().map(label_of).collect();
     access_keys(&labels)
 }
 
-/// The next choosable entry after `from` (or the first), going `forward` or back, round.
-fn step(entries: &[Entry], from: Option<usize>, forward: bool) -> Option<usize> {
+fn title_access_keys(menus: &[Menu]) -> Vec<Option<usize>> {
+    let titles: Vec<Option<&str>> = menus.iter().map(|m| Some(m.title.as_str())).collect();
+    access_keys(&titles)
+}
+
+/// After `from`, or from the start, wrapping round.
+fn next_choosable(entries: &[Entry], from: Option<usize>, forward: bool) -> Option<usize> {
     let n = entries.len();
     (1..=n)
         .map(|k| match (from, forward) {
             (Some(f), true) => (f + k) % n,
-            (Some(f), false) => (f + n * 2 - k) % n,
+            (Some(f), false) => (f + n - k) % n,
             (None, true) => k - 1,
             (None, false) => n - k,
         })
         .find(|&i| choosable(&entries[i]))
 }
 
-/// The letter a key types, for access keys.
-fn letter(key: Key) -> Option<String> {
+fn typed_letter(key: Key) -> Option<String> {
     let name = key.name();
     (name.chars().count() == 1 && name.chars().all(char::is_alphanumeric))
         .then(|| name.to_lowercase())
 }
 
-/// Takes the keyboard's input for the bar this frame, before anything else sees it: what opens
-/// and moves in the menus, and the command chosen, if any. Keys the bar doesn't want are left
-/// for the window.
+/// Call before anything else reads the input: the keys the bar takes are removed from it.
 pub fn keys(ctx: &egui::Context, menus: &[Menu]) -> Option<Command> {
     if menus.is_empty() {
         return None;
     }
     let mut nav: Nav = ctx.data(|d| d.get_temp(nav_id())).unwrap_or_default();
-    let open = menus
+    // Follow a menu opened or closed with the pointer.
+    match menus
         .iter()
-        .position(|m| Popup::is_id_open(ctx, popup_id(&m.title)));
-    // A menu opened or closed with the pointer.
-    match open {
-        Some(i) if i != nav.title || nav.path.is_empty() => {
-            nav.title = i;
+        .position(|m| Popup::is_id_open(ctx, popup_id(&m.title)))
+    {
+        Some(i) if i != nav.menu || nav.path.is_empty() => {
+            nav.menu = i;
             nav.path = vec![None];
         }
         None if !nav.path.is_empty() => nav.path.clear(),
         _ => {}
     }
     let n = menus.len();
-    let title_keys = access_keys(
-        &menus
-            .iter()
-            .map(|m| Some(m.title.as_str()))
-            .collect::<Vec<_>>(),
-    );
-    let title_of = |typed: &str| {
+    let title_keys = title_access_keys(menus);
+    let menu_of_letter = |typed: &str| {
         (0..n).find(|&i| access_letter(&menus[i].title, title_keys[i]).as_deref() == Some(typed))
     };
-    let open_menu = |nav: &mut Nav, title: usize| {
-        nav.title = title;
-        nav.path = vec![step(&menus[title].entries, None, true)];
-        nav.active = true;
-        Popup::open_id(ctx, popup_id(&menus[title].title));
+    let open_menu = |nav: &mut Nav, menu: usize| {
+        nav.menu = menu;
+        nav.path = vec![next_choosable(&menus[menu].entries, None, true)];
+        nav.bar_focused = true;
+        Popup::open_id(ctx, popup_id(&menus[menu].title));
     };
     let close_menu = |nav: &mut Nav| {
-        Popup::close_id(ctx, popup_id(&menus[nav.title].title));
+        Popup::close_id(ctx, popup_id(&menus[nav.menu].title));
         nav.path.clear();
+    };
+    let release_keyboard = |nav: &mut Nav| {
+        if !nav.path.is_empty() {
+            close_menu(nav);
+        }
+        nav.bar_focused = false;
+    };
+    let toggle_keyboard = |nav: &mut Nav| {
+        if nav.has_keyboard() {
+            release_keyboard(nav);
+        } else {
+            nav.bar_focused = true;
+            nav.menu = 0;
+        }
     };
     let mut chosen = None;
     let (events, modifiers) = ctx.input(|i| (i.events.clone(), i.modifiers));
     let mut taken = Vec::new();
-    // Anything else this frame: Alt wasn't alone.
-    let mut other = false;
+    let mut other_input = false;
     for (index, event) in events.iter().enumerate() {
         if matches!(
             event,
             Event::Key { pressed: true, .. } | Event::Text(_) | Event::PointerButton { .. }
         ) {
-            other = true;
+            other_input = true;
         }
         match event {
             Event::Key {
@@ -159,36 +169,26 @@ pub fn keys(ctx: &egui::Context, menus: &[Menu]) -> Option<Command> {
                 ..
             } => {
                 nav.alt_alone = false;
+                // Ctrl+Alt is AltGr on Windows, typing characters.
                 if m.ctrl || m.command || m.mac_cmd {
                     continue;
                 }
-                let has_keyboard = nav.active || !nav.path.is_empty();
                 if *key == Key::F10 && !m.any() {
-                    if has_keyboard {
-                        if !nav.path.is_empty() {
-                            close_menu(&mut nav);
-                        }
-                        nav.active = false;
-                    } else {
-                        nav.active = true;
-                        nav.title = 0;
-                    }
+                    toggle_keyboard(&mut nav);
                     taken.push(index);
                     continue;
                 }
-                if !has_keyboard {
-                    // Alt+letter opens a menu by its letter.
+                if !nav.has_keyboard() {
                     if m.alt
-                        && let Some(title) = letter(*key).as_deref().and_then(title_of)
+                        && let Some(menu) = typed_letter(*key).as_deref().and_then(menu_of_letter)
                     {
-                        open_menu(&mut nav, title);
+                        open_menu(&mut nav, menu);
                         taken.push(index);
                     }
                     continue;
                 }
-                let entries = &menus[nav.title].entries;
                 let depth = nav.path.len();
-                let here = level(entries, &nav.path);
+                let here = entries_at_cursor(&menus[nav.menu].entries, &nav.path);
                 let cursor = nav.path.last().copied().flatten();
                 let under = cursor.and_then(|c| here.get(c));
                 match key {
@@ -196,54 +196,55 @@ pub fn keys(ctx: &egui::Context, menus: &[Menu]) -> Option<Command> {
                         nav.path.pop();
                     }
                     Key::Escape if depth == 1 => close_menu(&mut nav),
-                    Key::Escape => nav.active = false,
+                    Key::Escape => nav.bar_focused = false,
                     Key::ArrowLeft if depth > 1 => {
                         nav.path.pop();
                     }
                     Key::ArrowRight if matches!(under, Some(Entry::Submenu(s)) if s.enabled) => {
                         if let Some(Entry::Submenu(s)) = under {
-                            nav.path.push(step(&s.entries, None, true));
+                            nav.path.push(next_choosable(&s.entries, None, true));
                         }
                     }
                     Key::ArrowLeft | Key::ArrowRight => {
                         let forward = *key == Key::ArrowRight;
-                        let title = (nav.title + if forward { 1 } else { n - 1 }) % n;
+                        let menu = (nav.menu + if forward { 1 } else { n - 1 }) % n;
                         if depth > 0 {
                             close_menu(&mut nav);
-                            open_menu(&mut nav, title);
+                            open_menu(&mut nav, menu);
                         } else {
-                            nav.title = title;
+                            nav.menu = menu;
                         }
                     }
                     Key::ArrowDown | Key::ArrowUp | Key::Enter | Key::Space if depth == 0 => {
-                        let title = nav.title;
-                        open_menu(&mut nav, title);
+                        let menu = nav.menu;
+                        open_menu(&mut nav, menu);
                     }
                     Key::ArrowDown | Key::ArrowUp => {
                         let forward = *key == Key::ArrowDown;
                         if let Some(last) = nav.path.last_mut() {
-                            *last = step(here, cursor, forward);
+                            *last = next_choosable(here, cursor, forward);
                         }
                     }
                     Key::Enter | Key::Space => match under {
                         Some(Entry::Item(item)) if item.enabled => {
                             chosen = Some(item.command.clone());
-                            close_menu(&mut nav);
-                            nav.active = false;
+                            release_keyboard(&mut nav);
                         }
                         Some(Entry::Submenu(s)) if s.enabled => {
-                            nav.path.push(step(&s.entries, None, true));
+                            nav.path.push(next_choosable(&s.entries, None, true));
                         }
                         _ => {}
                     },
                     key => {
-                        let Some(typed) = letter(*key) else { continue };
+                        let Some(typed) = typed_letter(*key) else {
+                            continue;
+                        };
                         if depth == 0 {
-                            if let Some(title) = title_of(&typed) {
-                                open_menu(&mut nav, title);
+                            if let Some(menu) = menu_of_letter(&typed) {
+                                open_menu(&mut nav, menu);
                             }
                         } else {
-                            let keys = keys_of(here);
+                            let keys = access_keys_of(here);
                             let found = (0..here.len()).find(|&i| {
                                 label_of(&here[i])
                                     .and_then(|l| access_letter(l, keys[i]))
@@ -253,14 +254,13 @@ pub fn keys(ctx: &egui::Context, menus: &[Menu]) -> Option<Command> {
                             match found.map(|i| (i, &here[i])) {
                                 Some((_, Entry::Item(item))) if item.enabled => {
                                     chosen = Some(item.command.clone());
-                                    close_menu(&mut nav);
-                                    nav.active = false;
+                                    release_keyboard(&mut nav);
                                 }
                                 Some((i, Entry::Submenu(s))) if s.enabled => {
                                     if let Some(last) = nav.path.last_mut() {
                                         *last = Some(i);
                                     }
-                                    nav.path.push(step(&s.entries, None, true));
+                                    nav.path.push(next_choosable(&s.entries, None, true));
                                 }
                                 _ => {}
                             }
@@ -269,47 +269,37 @@ pub fn keys(ctx: &egui::Context, menus: &[Menu]) -> Option<Command> {
                 }
                 taken.push(index);
             }
-            // What the keys typed is the bar's while it has the keyboard.
             Event::Text(_) => {
                 nav.alt_alone = false;
-                if nav.active || !nav.path.is_empty() {
+                if nav.has_keyboard() {
                     taken.push(index);
                 }
             }
             Event::PointerButton { pressed: true, .. } => {
                 nav.alt_alone = false;
                 if nav.path.is_empty() {
-                    nav.active = false;
+                    nav.bar_focused = false;
                 }
             }
             _ => {}
         }
     }
-    // Alt pressed and let go alone.
-    let alt = modifiers.alt && !modifiers.ctrl && !modifiers.command;
-    if alt && !nav.alt {
-        nav.alt_alone = !other;
-    } else if !alt && nav.alt && nav.alt_alone && !other {
-        if nav.active || !nav.path.is_empty() {
-            if !nav.path.is_empty() {
-                close_menu(&mut nav);
-            }
-            nav.active = false;
-        } else {
-            nav.active = true;
-            nav.title = 0;
-        }
+    let alt_held = modifiers.alt && !modifiers.ctrl && !modifiers.command;
+    if alt_held && !nav.alt_held {
+        nav.alt_alone = !other_input;
+    } else if !alt_held && nav.alt_held && nav.alt_alone && !other_input {
+        toggle_keyboard(&mut nav);
     }
-    if !alt {
+    if !alt_held {
         nav.alt_alone = false;
     }
-    nav.alt = alt;
+    nav.alt_held = alt_held;
     if !taken.is_empty() {
         ctx.input_mut(|i| {
-            let mut k = 0;
+            let mut index = 0;
             i.events.retain(|_| {
-                let keep = !taken.contains(&k);
-                k += 1;
+                let keep = !taken.contains(&index);
+                index += 1;
                 keep
             });
         });
@@ -318,35 +308,28 @@ pub fn keys(ctx: &egui::Context, menus: &[Menu]) -> Option<Command> {
     chosen
 }
 
-/// Draws the bar; returns the command chosen, if any.
+#[cfg(not(target_os = "macos"))]
 pub fn show(ui: &mut Ui, menus: &[Menu]) -> Option<Command> {
     let mut chosen = None;
     let nav: Nav = ui.data(|d| d.get_temp(nav_id())).unwrap_or_default();
-    let underline = nav.active || nav.alt;
-    let open = menus
+    let underline = nav.bar_focused || nav.alt_held;
+    let any_open = menus
         .iter()
         .any(|m| Popup::is_id_open(ui.ctx(), popup_id(&m.title)));
-    let title_keys = access_keys(
-        &menus
-            .iter()
-            .map(|m| Some(m.title.as_str()))
-            .collect::<Vec<_>>(),
-    );
+    let title_keys = title_access_keys(menus);
     ui.horizontal(|ui| {
-        ui.set_height(HEIGHT);
+        ui.set_height(BAR_HEIGHT);
         ui.spacing_mut().item_spacing.x = 0.0;
         for (i, m) in menus.iter().enumerate() {
             let id = popup_id(&m.title);
             let is_open = Popup::is_id_open(ui.ctx(), id);
-            let highlighted = nav.active && nav.path.is_empty() && nav.title == i;
+            let highlighted = nav.bar_focused && nav.path.is_empty() && nav.menu == i;
             let key = underline.then_some(title_keys[i]).flatten();
             let response = title(ui, m, is_open || highlighted, key);
-            // Pointing at another title while one is open opens it instead.
-            if open && !is_open && response.hovered() {
+            if any_open && !is_open && response.hovered() {
                 Popup::open_id(ui.ctx(), id);
             }
-            // The keyboard's place in this menu, while it is the open one.
-            let path: &[Option<usize>] = if nav.title == i { &nav.path } else { &[] };
+            let path: &[Option<usize>] = if nav.menu == i { &nav.path } else { &[] };
             Popup::menu(&response)
                 .id(id)
                 .style(menu::style)
@@ -358,8 +341,8 @@ pub fn show(ui: &mut Ui, menus: &[Menu]) -> Option<Command> {
                         let keyboard = Keyboard {
                             path,
                             underline,
-                            steering: nav.active,
-                            plain: false,
+                            steering: nav.bar_focused,
+                            context_menu: false,
                         };
                         entries(ui, &m.entries, &keyboard, &mut chosen);
                     });
@@ -375,24 +358,23 @@ struct Keyboard<'a> {
     underline: bool,
     /// The keyboard moves in the menus: its submenus are open, and only those.
     steering: bool,
-    /// A right-click menu: no column for check marks, so the items line up with plain buttons.
-    plain: bool,
+    context_menu: bool,
 }
 
-/// `list` as a right-click menu, in a popup already open; the command of the item clicked.
+/// `list` in a popup already open.
 pub fn context(ui: &mut Ui, list: &[Entry]) -> Option<Command> {
     let mut chosen = None;
     let keyboard = Keyboard {
         path: &[],
         underline: false,
         steering: false,
-        plain: true,
+        context_menu: true,
     };
     entries(ui, list, &keyboard, &mut chosen);
     chosen
 }
 
-/// `text` with its access key `key` underlined, in `color` (the widget's own if `None`).
+/// `color` `None` is the widget's own.
 fn underlined(
     ui: &Ui,
     text: &str,
@@ -433,8 +415,8 @@ fn underlined(
     job.into()
 }
 
-/// A menu's title in the bar: framed while it is open, pointed at or highlighted.
-fn title(ui: &mut Ui, m: &Menu, lit: bool, key: Option<usize>) -> egui::Response {
+#[cfg(not(target_os = "macos"))]
+fn title(ui: &mut Ui, m: &Menu, highlighted: bool, key: Option<usize>) -> egui::Response {
     let t = widgets::tones(ui);
     let color = m.accent.then_some(t.on_fg);
     let text = underlined(ui, &m.title, key, color, m.accent);
@@ -444,12 +426,11 @@ fn title(ui: &mut Ui, m: &Menu, lit: bool, key: Option<usize>) -> egui::Response
         f32::INFINITY,
         egui::TextStyle::Button,
     );
-    let size = vec2(galley.size().x + 20.0, HEIGHT - 4.0);
+    let size = egui::vec2(galley.size().x + 20.0, BAR_HEIGHT - 4.0);
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let id = Id::new(("menu-bar", m.title.to_lowercase()));
-    let response = ui.interact(rect, id, egui::Sense::click());
-    if lit || response.hovered() {
-        let fill = if lit { t.press } else { t.hover };
+    let response = ui.interact(rect, title_id(&m.title), egui::Sense::click());
+    if highlighted || response.hovered() {
+        let fill = if highlighted { t.press } else { t.hover };
         ui.painter().rect_filled(rect, 6.0, fill);
     }
     let color = color.unwrap_or(ui.visuals().text_color());
@@ -458,9 +439,8 @@ fn title(ui: &mut Ui, m: &Menu, lit: bool, key: Option<usize>) -> egui::Response
     response
 }
 
-/// A menu's entries; sets `chosen` to the command of the item clicked.
 fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Option<Command>) {
-    let keys = keys_of(entries);
+    let keys = access_keys_of(entries);
     let cursor = keyboard.path.first().copied().flatten();
     for (index, entry) in entries.iter().enumerate() {
         let key = keyboard.underline.then_some(keys[index]).flatten();
@@ -478,9 +458,9 @@ fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Opt
                 let response = ui
                     .add_enabled_ui(item.enabled, |ui| {
                         if highlighted {
-                            lit(ui);
+                            look_hovered(ui);
                         }
-                        if keyboard.plain {
+                        if keyboard.context_menu {
                             ui.add(egui::Button::new(label).shortcut_text(shortcut))
                         } else {
                             menu::item(ui, label, &shortcut, item.mark)
@@ -491,7 +471,7 @@ fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Opt
                     Some(tip) => response.on_hover_text(tip),
                     None => response,
                 };
-                let response = match &item.why {
+                let response = match &item.why_disabled {
                     Some(why) => response.on_disabled_hover_text(why),
                     None => response,
                 };
@@ -501,33 +481,30 @@ fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Opt
                 }
             }
             Entry::Separator => menu::separator(ui),
-            Entry::Heading(text) => heading(ui, text, keyboard.plain),
+            Entry::Heading(text) => heading(ui, text, keyboard.context_menu),
             Entry::Submenu(submenu) => {
-                // Open while the keyboard is in it; closed when the keyboard moves elsewhere.
                 let inside = highlighted && keyboard.path.len() > 1;
                 let open = keyboard.steering.then_some(inside);
                 let deeper = Keyboard {
                     path: if inside { &keyboard.path[1..] } else { &[] },
-                    underline: keyboard.underline,
-                    steering: keyboard.steering,
-                    plain: keyboard.plain,
+                    ..*keyboard
                 };
                 let label = underlined(ui, &submenu.label, key, None, false);
                 let shown = ui.add_enabled_ui(submenu.enabled, |ui| {
                     if highlighted {
-                        lit(ui);
+                        look_hovered(ui);
                     }
                     let content = |ui: &mut Ui| {
                         ui.set_min_width(menu::MIN_WIDTH);
                         self::entries(ui, &submenu.entries, &deeper, chosen);
                     };
-                    if keyboard.plain {
+                    if keyboard.context_menu {
                         menu::plain_submenu(ui, &submenu.label, content);
                     } else {
                         menu::submenu(ui, label, open, content);
                     }
                 });
-                if let Some(why) = &submenu.why {
+                if let Some(why) = &submenu.why_disabled {
                     shown.response.on_disabled_hover_text(why);
                 }
             }
@@ -536,21 +513,20 @@ fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Opt
     }
 }
 
-/// The look of the entry the keyboard is on: as if pointed at.
-fn lit(ui: &mut Ui) {
+fn look_hovered(ui: &mut Ui) {
     let w = &mut ui.visuals_mut().widgets;
     w.inactive.weak_bg_fill = w.hovered.weak_bg_fill;
     w.inactive.corner_radius = w.hovered.corner_radius;
 }
 
-/// A small title over a group of items, lined up with their labels.
-fn heading(ui: &mut Ui, text: &str, plain: bool) {
+/// Lined up with the items' labels.
+fn heading(ui: &mut Ui, text: &str, context_menu: bool) {
     let padding = ui.spacing().button_padding;
     ui.horizontal(|ui| {
-        let mark = if plain {
+        let mark = if context_menu {
             0.0
         } else {
-            menu::MARK + ui.spacing().icon_spacing
+            menu::MARK_WIDTH + ui.spacing().icon_spacing
         };
         ui.add_space(padding.x + mark);
         ui.label(RichText::new(text).small().weak());
@@ -558,7 +534,7 @@ fn heading(ui: &mut Ui, text: &str, plain: bool) {
     ui.add_space(2.0);
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use eframe::egui::{self, Event, Pos2, Rect};
 
@@ -644,7 +620,6 @@ mod tests {
             self.texts.iter().any(|(t, _)| t == text)
         }
 
-        /// `key` pressed with `modifiers`, then two frames for what follows.
         fn key(&mut self, modifiers: egui::Modifiers, key: egui::Key) {
             self.events.push(Event::Key {
                 key,
@@ -725,7 +700,6 @@ mod tests {
         assert!(b.shows("Zoom to fit"));
         assert!(b.shows("Detail"));
         assert!(!b.shows("Open folder…"));
-        // Greyed out: nothing.
         b.click("Go to HEAD");
         assert!(b.chosen.is_none());
     }
@@ -786,7 +760,7 @@ mod tests {
         b.press(Key::Escape);
         assert!(!b.shows("Open folder…"));
         b.press(Key::Escape);
-        // The bar has let go: a letter is no longer its.
+        // A letter is no longer the bar's.
         b.press(Key::F);
         assert!(!b.shows("Open folder…"));
     }

@@ -1,21 +1,16 @@
-//! Scripted runs (`--script`, `--screenshot`): the steps of a workflow script
-//! ([`crate::script`]) fed to the window frame by frame, as a person's input, then exit. And
-//! recording the window (`--record`, [`crate::record`]). See `docs/automation.md`.
-
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Event, Pos2, Rect, vec2};
+use eframe::egui::{self, Event, Modifiers, PointerButton, Pos2, Rect, Vec2, vec2};
 
 use crate::record::{self, Recorder};
 use crate::scene::Scene;
 use crate::script::{self, Crop, Step, Target};
 use crate::view::View;
 
-/// A scripted run went wrong: parterre exits with a failure.
 static FAILED: AtomicBool = AtomicBool::new(false);
 
 pub fn fail() {
@@ -26,43 +21,41 @@ pub fn failed() -> bool {
     FAILED.load(Ordering::Relaxed)
 }
 
+const SCRIPT_FPS: u32 = 60;
+const SETTLE_FRAMES: u32 = 8;
+/// `--zoom` applies once the initial view is set.
+const START_ZOOM_FRAME: u32 = 2;
+const WARM_UP_FRAME_GAPS: usize = 3;
+const TARGET_TIMEOUT: Duration = Duration::from_secs(15);
+const PAUSE_FRAMES: usize = 12;
+/// A moment on the end, for a recording to show it.
+const LINGER_AT_END_FRAMES: usize = 15;
+const MAX_TEXTS_LISTED: usize = 40;
+const CROP_SHADOW_MARGIN: f32 = 16.0;
+
 #[derive(Debug, Default)]
 pub struct Automation {
-    /// Start with the whole graph fitted instead of at HEAD.
-    pub fit: bool,
-    /// Zoom to apply (around the canvas centre) after the initial view is set up.
-    pub zoom: Option<f32>,
-    /// Pull requests to show instead of GitHub's (`--pull-requests-from`), as JSON.
-    pub pull_requests: Option<String>,
-    /// The GitHub repositories to clone from instead of GitHub's (`--github-repositories-from`),
-    /// as JSON.
-    pub github_repositories: Option<String>,
-    /// The newer release to offer instead of asking GitHub (`--newer-release`).
-    pub newer_release: Option<parterre_telemetry::Update>,
-    /// Something is still loading (a diff, a blame or its history): the script waits.
+    pub start_fitted: bool,
+    pub start_zoom: Option<f32>,
+    pub canned_pull_requests: Option<String>,
+    pub canned_github_repositories: Option<String>,
+    pub canned_newer_release: Option<parterre_telemetry::Update>,
     pub waiting: bool,
-    /// The workflow script being run; `--screenshot` is its last step.
     pub script: Option<Runner>,
-    /// Where the window is recorded to.
     pub record: Option<Recorder>,
-    /// What a script step asks to open, for the app to take; put back while it can't yet.
-    pub open: Option<String>,
-    /// The texts on screen in the last frame, and where, for a script to aim at.
+    pub pending_open: Option<String>,
     pub texts: Texts,
-    /// This frame is a screenshot of the script: no pointer, and not recorded.
-    unrecorded: bool,
-    /// When an interactive recording started.
+    next_frame_is_screenshot: bool,
     recording_since: Option<Instant>,
     frame: u32,
     frame_times: Vec<Instant>,
 }
 
-/// A file or folder a script drops on the window.
 #[derive(Debug)]
-struct Dropped(PathBuf);
+struct DroppedPath(PathBuf);
 
-impl egui::DroppedFile for Dropped {
-    fn path(&self) -> &std::path::Path {
+impl egui::DroppedFile for DroppedPath {
+    fn path(&self) -> &Path {
         &self.0
     }
 
@@ -71,58 +64,51 @@ impl egui::DroppedFile for Dropped {
     }
 }
 
-/// Why a screenshot was taken.
 #[derive(Debug)]
 enum Shot {
-    /// A step of the script, cropped to this part of the window.
-    Step(PathBuf, Option<Rect>),
-    /// A frame of the recording, shown from this frame time on.
-    Frame(u64),
+    ScriptStep { path: PathBuf, crop: Option<Rect> },
+    RecordingFrame { frame_time: u64 },
 }
 
 impl Automation {
-    /// A scripted run: no stored settings, viewports embedded, frames on a clock of their own.
-    pub fn is_active(&self) -> bool {
+    pub fn is_scripted(&self) -> bool {
         self.script.is_some()
     }
 
-    /// Feeds the events of the script to the coming frame, and keeps time by frames, so a
-    /// recording plays at the speed it would have had however slowly its frames were
-    /// captured. Called before each frame, after [`Self::drive`] has counted the last.
+    /// Keeps time by frames, so a recording plays at the speed a person would see however
+    /// slowly its frames were captured.
     pub fn inject_input(&mut self, raw: &mut egui::RawInput) {
         let Some(runner) = &mut self.script else {
             return;
         };
-        raw.time = Some(f64::from(self.frame) / 60.0);
-        raw.predicted_dt = 1.0 / 60.0;
+        raw.time = Some(f64::from(self.frame) / f64::from(SCRIPT_FPS));
+        raw.predicted_dt = 1.0 / SCRIPT_FPS as f32;
         raw.events
-            .extend(runner.queue.pop_front().unwrap_or_default());
-        if let Some(path) = &runner.dragged {
+            .extend(runner.coming_frames.pop_front().unwrap_or_default());
+        if let Some(path) = &runner.dragged_file {
             raw.hovered_files = vec![egui::HoveredFile {
                 path: Some(path.clone()),
                 ..Default::default()
             }];
         }
-        if let Some(path) = runner.dropped.take() {
-            raw.dropped_files = vec![Arc::new(Dropped(path))];
+        if let Some(path) = runner.dropped_file.take() {
+            raw.dropped_files = vec![Arc::new(DroppedPath(path))];
         }
     }
 
-    /// Automated runs step the physics at a fixed rate so they are reproducible.
+    /// Scripted runs step the physics at a fixed rate, to be reproducible.
     pub fn fixed_dt(&self) -> Option<f32> {
-        self.is_active().then_some(1.0 / 60.0)
+        self.is_scripted().then_some(1.0 / SCRIPT_FPS as f32)
     }
 
-    /// A step the app carries out (`open`) went wrong: the run stops with a failure.
-    pub fn fail(&mut self, ctx: &egui::Context, message: &str) {
-        let line = self.script.as_mut().map_or(0, Runner::end);
-        eprintln!("parterre: script line {line}: {message}");
-        fail();
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    pub fn fail_step(&mut self, ctx: &egui::Context, message: &str) {
+        let line = self.script.as_mut().map_or(0, |runner| {
+            runner.closing = true;
+            runner.last_line_taken()
+        });
+        stop_with_failure(ctx, &format!("line {line}: {message}"));
     }
 
-    /// Called after each frame. Without a scene (no repository open) a script can still open
-    /// and click the window's other parts.
     pub fn drive(
         &mut self,
         ctx: &egui::Context,
@@ -130,6 +116,23 @@ impl Automation {
         view: &mut View,
         canvas: Rect,
     ) {
+        self.take_shots(ctx);
+        if !self.is_scripted() {
+            self.record_frame(ctx, false);
+            return;
+        }
+        self.frame += 1;
+        self.frame_times.push(Instant::now());
+        ctx.request_repaint();
+        if self.frame == START_ZOOM_FRAME
+            && let Some(zoom) = self.start_zoom
+        {
+            view.zoom_around(canvas, canvas.center(), zoom / view.zoom);
+        }
+        self.run_script(ctx, scene, view, canvas);
+    }
+
+    fn take_shots(&mut self, ctx: &egui::Context) {
         let shots: Vec<_> = ctx.input(|i| {
             i.raw
                 .events
@@ -144,58 +147,46 @@ impl Automation {
         });
         for (image, data) in shots {
             match data.as_deref().and_then(|d| d.downcast_ref::<Shot>()) {
-                Some(Shot::Frame(slot)) => {
+                Some(Shot::RecordingFrame { frame_time }) => {
                     if let Some(record) = &mut self.record {
-                        record.push(&image, *slot);
+                        record.push(&image, *frame_time);
                     }
                 }
-                Some(Shot::Step(path, crop)) => {
-                    let image = match crop {
-                        Some(rect) => image.region(rect, Some(ctx.pixels_per_point())),
-                        None => (*image).clone(),
-                    };
-                    save(&image, path);
+                Some(Shot::ScriptStep { path, crop }) => {
+                    match crop {
+                        Some(rect) => {
+                            let cropped = image.region(rect, Some(ctx.pixels_per_point()));
+                            save_screenshot(&cropped, path);
+                        }
+                        None => save_screenshot(&image, path),
+                    }
                     if let Some(runner) = &mut self.script {
-                        runner.shots -= 1;
+                        runner.pending_screenshots -= 1;
                     }
                 }
                 None => {}
             }
         }
-        if !self.is_active() {
-            self.record_frame(ctx, false);
-            return;
-        }
-        self.frame += 1;
-        self.frame_times.push(Instant::now());
-        ctx.request_repaint();
-        if self.frame == 2
-            && let Some(z) = self.zoom
-        {
-            view.zoom_around(canvas, canvas.center(), z / view.zoom);
-        }
-        self.run_script(ctx, scene, view, canvas);
     }
 
-    /// How fast the frames came, for benchmarks: printed when the run ends.
     fn report_frame_times(&self) {
         let gaps: Vec<f32> = self
             .frame_times
             .windows(2)
-            .skip(3)
+            .skip(WARM_UP_FRAME_GAPS)
             .map(|w| (w[1] - w[0]).as_secs_f32() * 1000.0)
             .collect();
-        if !gaps.is_empty() {
-            let mean = gaps.iter().sum::<f32>() / gaps.len() as f32;
-            let max = gaps.iter().copied().fold(0.0, f32::max);
-            eprintln!(
-                "frame interval: mean {mean:.1} ms, max {max:.1} ms over {} frames",
-                gaps.len()
-            );
+        if gaps.is_empty() {
+            return;
         }
+        let mean = gaps.iter().sum::<f32>() / gaps.len() as f32;
+        let max = gaps.iter().copied().fold(0.0, f32::max);
+        eprintln!(
+            "frame interval: mean {mean:.1} ms, max {max:.1} ms over {} frames",
+            gaps.len()
+        );
     }
 
-    /// Takes the next step of the script, once the window has settled.
     fn run_script(
         &mut self,
         ctx: &egui::Context,
@@ -203,45 +194,46 @@ impl Automation {
         view: &View,
         canvas: Rect,
     ) {
-        const START: u32 = 8;
         let Some(runner) = &mut self.script else {
             return;
         };
-        if self.frame < START || self.waiting || self.open.is_some() {
+        if self.frame < SETTLE_FRAMES || self.waiting || self.pending_open.is_some() {
             self.record_frame(ctx, false);
             return;
         }
-        let texts = self.texts.lock().map(|t| t.clone()).unwrap_or_default();
-        let find = |target: &Target| -> Option<Pos2> {
-            match target {
-                Target::Text(text) => find_text(&texts, text),
-                Target::Node(name) => {
-                    let scene = scene?;
-                    let n = named_node(scene, name)?;
-                    let at = view.to_screen(canvas, scene.node_center(n));
-                    canvas.contains(at).then_some(at)
+        let action = {
+            let texts = self.texts.lock().unwrap_or_else(PoisonError::into_inner);
+            let find = |target: &Target| -> Option<Pos2> {
+                match target {
+                    Target::Text(text) => find_text(&texts, text),
+                    Target::Node(name) => {
+                        let scene = scene?;
+                        let node = named_node(scene, name)?;
+                        let at = view.to_screen(canvas, scene.node_center(node));
+                        canvas.contains(at).then_some(at)
+                    }
+                    Target::Canvas => scene.map(|scene| emptiest_spot(scene, view, canvas)),
+                    Target::Toolbar(name) => ctx
+                        .read_response(crate::app::toolbar_button_id(name))
+                        .map(|r| r.rect.center()),
+                    Target::Point(p) => Some(p.to_pos2()),
                 }
-                Target::Canvas => scene.map(|scene| emptiest_spot(scene, view, canvas)),
-                Target::Toolbar(name) => ctx
-                    .read_response(crate::app::toolbar_button_id(name))
-                    .map(|r| r.rect.center()),
-                Target::Point(p) => Some(p.to_pos2()),
-            }
+            };
+            runner.advance(find, &texts)
         };
-        let mut shot = false;
-        match runner.advance(find, &texts) {
+        let mut screenshot_requested = false;
+        match action {
             Action::Busy => {}
-            Action::Open(what) => self.open = Some(what),
-            Action::Shot(path, crop) => {
+            Action::Open(what) => self.pending_open = Some(what),
+            Action::Screenshot(path, crop) => {
                 let rect = crop_rect(ctx, crop);
                 if crop != Crop::Full && rect.is_none() {
                     eprintln!("{}: no {crop:?} on screen to crop to", path.display());
                 }
-                let shot_of = Shot::Step(path, rect);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
-                    shot_of,
+                    Shot::ScriptStep { path, crop: rect },
                 )));
-                shot = true;
+                screenshot_requested = true;
             }
             Action::Done => {
                 self.report_frame_times();
@@ -250,56 +242,55 @@ impl Automation {
                 }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            Action::Failed(message) => {
-                eprintln!("parterre: script {message}");
-                fail();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+            Action::Failed(message) => stop_with_failure(ctx, &message),
         }
-        self.record_frame(ctx, shot);
+        self.record_frame(ctx, screenshot_requested);
     }
 
-    /// Paints the pointer and asks for the frame of the recording due, if any. A screenshot
-    /// shows the frame after the one asking for it, so a screenshot of the script leaves the
-    /// pointer out of that one, and the recording shows the frame before it a moment longer.
-    fn record_frame(&mut self, ctx: &egui::Context, screenshot: bool) {
-        if self.record.is_none() {
-            return;
-        }
-        if std::mem::take(&mut self.unrecorded) {
-            return;
-        }
-        record::paint_pointer(ctx);
-        if screenshot {
-            self.unrecorded = true;
-            return;
-        }
-        let slot = if self.is_active() {
-            u64::from(self.frame) * u64::from(record::FPS) / 60
-        } else {
-            let since = *self.recording_since.get_or_insert_with(Instant::now);
-            ctx.request_repaint_after(Duration::from_secs_f32(1.0 / record::FPS as f32));
-            (since.elapsed().as_secs_f64() * f64::from(record::FPS)) as u64
-        };
+    /// A screenshot shows the frame after the one asking for it. That frame of a script's
+    /// screenshot goes without the pointer and unrecorded: the one before shows a moment longer.
+    fn record_frame(&mut self, ctx: &egui::Context, screenshot_requested: bool) {
         let Some(record) = &mut self.record else {
             return;
         };
-        if record.requested.is_none_or(|r| slot > r) {
-            record.requested = Some(slot);
+        if std::mem::take(&mut self.next_frame_is_screenshot) {
+            return;
+        }
+        record::paint_pointer(ctx);
+        if screenshot_requested {
+            self.next_frame_is_screenshot = true;
+            return;
+        }
+        let frame_time = if self.script.is_some() {
+            u64::from(self.frame) * u64::from(record::FPS) / u64::from(SCRIPT_FPS)
+        } else {
+            let since = *self.recording_since.get_or_insert_with(Instant::now);
+            ctx.request_repaint_after(Duration::from_secs(1) / record::FPS);
+            (since.elapsed().as_secs_f64() * f64::from(record::FPS)) as u64
+        };
+        if record
+            .last_requested_frame_time
+            .is_none_or(|last| frame_time > last)
+        {
+            record.last_requested_frame_time = Some(frame_time);
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
-                Shot::Frame(slot),
+                Shot::RecordingFrame { frame_time },
             )));
         }
     }
 }
 
-fn save(image: &egui::ColorImage, path: &std::path::Path) {
-    let [w, h] = image.size;
-    let bytes: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+fn stop_with_failure(ctx: &egui::Context, message: &str) {
+    eprintln!("parterre: script {message}");
+    fail();
+    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+}
+
+fn save_screenshot(image: &egui::ColorImage, path: &Path) {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         let _ = std::fs::create_dir_all(dir);
     }
-    match image::RgbaImage::from_raw(w as u32, h as u32, bytes).map(|img| img.save(path)) {
+    match record::to_rgba(image).map(|rgba| rgba.save(path)) {
         Some(Ok(())) => eprintln!("saved screenshot to {}", path.display()),
         Some(Err(e)) => {
             eprintln!("could not save screenshot: {e}");
@@ -309,21 +300,17 @@ fn save(image: &egui::ColorImage, path: &std::path::Path) {
     }
 }
 
-/// The part of the window a screenshot is cropped to: the topmost window, or every open menu
-/// and popover, with room for their shadows.
 fn crop_rect(ctx: &egui::Context, crop: Crop) -> Option<Rect> {
     let rect = ctx.memory(|m| {
         let areas = m.areas();
-        let visible: Vec<_> = m.layer_ids().filter(|l| areas.is_visible(l)).collect();
+        let visible = m.layer_ids().filter(|l| areas.is_visible(l));
         match crop {
             Crop::Full => None,
             Crop::Window => visible
-                .iter()
-                .rev()
-                .find(|l| l.order == egui::Order::Middle && areas.parent_layer(**l).is_none())
+                .filter(|l| l.order == egui::Order::Middle && areas.parent_layer(*l).is_none())
+                .last()
                 .and_then(|l| m.area_rect(l.id)),
             Crop::Popup => visible
-                .iter()
                 .filter(|l| l.order == egui::Order::Foreground)
                 .filter_map(|l| m.area_rect(l.id))
                 // Not empty areas, such as that of notifications when there are none.
@@ -331,10 +318,13 @@ fn crop_rect(ctx: &egui::Context, crop: Crop) -> Option<Rect> {
                 .reduce(Rect::union),
         }
     })?;
-    Some(rect.expand(16.0).intersect(ctx.content_rect()))
+    Some(
+        rect.expand(CROP_SHADOW_MARGIN)
+            .intersect(ctx.content_rect()),
+    )
 }
 
-/// Where `text` is on screen: the topmost exact match, else the topmost containing it.
+/// `texts` are in paint order: the last match is the topmost.
 fn find_text(texts: &[(String, Rect)], text: &str) -> Option<Pos2> {
     texts
         .iter()
@@ -344,10 +334,8 @@ fn find_text(texts: &[(String, Rect)], text: &str) -> Option<Pos2> {
         .map(|(_, r)| r.center())
 }
 
-/// The texts painted in the last frame, and where; kept by [`TextCollector`].
 pub type Texts = Arc<Mutex<Vec<(String, Rect)>>>;
 
-/// Keeps the texts of every frame, for a script to aim at.
 pub struct TextCollector(pub Texts);
 
 impl egui::Plugin for TextCollector {
@@ -384,70 +372,45 @@ fn collect_texts(shape: &egui::Shape, texts: &mut Vec<(String, Rect)>) {
     }
 }
 
-/// What the script asks of the window this frame.
 #[derive(Debug, PartialEq)]
-pub enum Action {
+enum Action {
     Busy,
     Open(String),
-    Shot(PathBuf, Crop),
+    Screenshot(PathBuf, Crop),
     Done,
     Failed(String),
 }
 
-/// How long a step waits for its target to show.
-const TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Runs a workflow script, frame by frame: each step becomes the input of the frames that
-/// follow, moving the pointer there as a person would.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Runner {
     lines: Vec<script::Line>,
-    next: usize,
-    /// The events of the coming frames, one entry a frame.
-    queue: VecDeque<Vec<Event>>,
+    next_line: usize,
+    coming_frames: VecDeque<Vec<Event>>,
     pointer: Option<Pos2>,
-    /// Frames to do nothing.
-    hold: u32,
-    /// Since when the step has been waiting for its target.
-    since: Option<Instant>,
-    /// Screenshots asked for and not saved yet.
-    shots: usize,
-    finished: bool,
-    /// Done or failed: the window is closing.
-    ended: bool,
-    /// A file or folder dragged over the window (`drag-file`).
-    dragged: Option<PathBuf>,
-    /// The one dropped (`drop-file`), for the coming frame.
-    dropped: Option<PathBuf>,
+    idle_frames: usize,
+    waiting_since: Option<Instant>,
+    pending_screenshots: usize,
+    lingering_at_end: bool,
+    closing: bool,
+    dragged_file: Option<PathBuf>,
+    dropped_file: Option<PathBuf>,
 }
 
 impl Runner {
     pub fn new(lines: Vec<script::Line>) -> Runner {
         Runner {
             lines,
-            next: 0,
-            queue: VecDeque::new(),
-            pointer: None,
-            hold: 0,
-            since: None,
-            shots: 0,
-            finished: false,
-            ended: false,
-            dragged: None,
-            dropped: None,
+            ..Runner::default()
         }
     }
 
-    /// Stops the script: the window is closing. The line of the last step taken.
-    fn end(&mut self) -> usize {
-        self.ended = true;
-        self.next
+    fn last_line_taken(&self) -> usize {
+        self.next_line
             .checked_sub(1)
             .and_then(|i| self.lines.get(i))
             .map_or(0, |l| l.number)
     }
 
-    /// Adds a screenshot of the whole window after the last step.
     pub fn push_screenshot(&mut self, path: PathBuf) {
         let number = self.lines.last().map_or(0, |l| l.number) + 1;
         self.lines.push(script::Line {
@@ -456,112 +419,69 @@ impl Runner {
         });
     }
 
-    /// Takes the next step if the last is done. `find` says where a target is on screen.
-    pub fn advance(
+    fn advance(
         &mut self,
         find: impl Fn(&Target) -> Option<Pos2>,
         texts: &[(String, Rect)],
     ) -> Action {
-        if !self.queue.is_empty() || self.shots > 0 || self.ended {
+        if !self.coming_frames.is_empty() || self.pending_screenshots > 0 || self.closing {
             return Action::Busy;
         }
-        if self.hold > 0 {
-            self.hold -= 1;
+        if self.idle_frames > 0 {
+            self.idle_frames -= 1;
             return Action::Busy;
         }
-        let Some(line) = self.lines.get(self.next).cloned() else {
-            // Stay a moment on the end, for a recording to show it.
-            if !self.finished {
-                self.finished = true;
-                self.hold = 15;
+        let Some(line) = self.lines.get(self.next_line).cloned() else {
+            if !self.lingering_at_end {
+                self.lingering_at_end = true;
+                self.idle_frames = LINGER_AT_END_FRAMES;
                 return Action::Busy;
             }
-            self.ended = true;
+            self.closing = true;
             return Action::Done;
         };
-        let target = match &line.step {
-            Step::WaitFor(t)
-            | Step::Click { target: t, .. }
-            | Step::Hover(t)
-            | Step::Drag(t, _) => match find(t) {
-                Some(at) => Some(at),
-                None => return self.missing(&line, t, texts),
-            },
-            _ => None,
+        let at = match &line.step {
+            Step::WaitFor(target)
+            | Step::Click { target, .. }
+            | Step::Hover(target)
+            | Step::Drag { target, .. } => {
+                let Some(at) = find(target) else {
+                    return self.target_missing(line.number, target, texts);
+                };
+                at
+            }
+            _ => Pos2::ZERO,
         };
-        self.since = None;
-        self.next += 1;
-        let empty = |n| std::iter::repeat_n(Vec::new(), n);
+        self.waiting_since = None;
+        self.next_line += 1;
         match line.step {
-            Step::Wait(seconds) => self.hold = (seconds * 60.0).round().max(0.0) as u32,
+            Step::Wait { seconds } => {
+                self.idle_frames = (seconds * SCRIPT_FPS as f32).round().max(0.0) as usize;
+            }
             Step::WaitFor(_) => {}
             Step::Click {
                 button,
                 count,
                 modifiers,
                 ..
-            } => {
-                let at = target.unwrap_or_default();
-                self.glide(at, false);
-                // A moment over it, to show its hover.
-                self.queue.extend(empty(12));
-                if !modifiers.is_none() {
-                    self.queue
-                        .push_back(vec![Event::ModifiersChanged(modifiers)]);
-                }
-                let button = match button {
-                    script::Button::Primary => egui::PointerButton::Primary,
-                    script::Button::Secondary => egui::PointerButton::Secondary,
-                };
-                for _ in 0..count {
-                    for pressed in [true, false] {
-                        self.queue.push_back(vec![Event::PointerButton {
-                            pos: at,
-                            button,
-                            pressed,
-                            modifiers,
-                        }]);
-                    }
-                }
-                if !modifiers.is_none() {
-                    self.queue
-                        .push_back(vec![Event::ModifiersChanged(egui::Modifiers::NONE)]);
-                }
-                self.queue.extend(empty(12));
-            }
+            } => self.click(at, button, count, modifiers),
             Step::Hover(_) => {
-                self.glide(target.unwrap_or_default(), false);
-                self.queue.extend(empty(20));
-            }
-            Step::Drag(_, by) => {
-                let at = target.unwrap_or_default();
                 self.glide(at, false);
-                self.queue.extend(empty(6));
-                let button = |pos, pressed| Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed,
-                    modifiers: egui::Modifiers::NONE,
-                };
-                self.queue.push_back(vec![button(at, true)]);
-                self.queue.extend(empty(4));
-                self.glide(at + by, true);
-                self.queue.extend(empty(4));
-                self.queue.push_back(vec![button(at + by, false)]);
-                self.queue.extend(empty(12));
+                self.pause(20);
             }
+            Step::Drag { by, .. } => self.drag(at, by),
             Step::Scroll(delta) => {
-                self.queue.push_back(vec![Event::MouseWheel {
+                self.coming_frames.push_back(vec![Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
                     delta,
                     phase: egui::TouchPhase::Move,
-                    modifiers: egui::Modifiers::NONE,
+                    modifiers: Modifiers::NONE,
                 }]);
-                self.queue.extend(empty(12));
+                self.pause(PAUSE_FRAMES);
             }
             Step::Key(modifiers, key) => {
                 for pressed in [true, false] {
-                    self.queue.push_back(vec![Event::Key {
+                    self.coming_frames.push_back(vec![Event::Key {
                         key,
                         physical_key: None,
                         pressed,
@@ -569,78 +489,126 @@ impl Runner {
                         modifiers,
                     }]);
                 }
-                self.queue.extend(empty(12));
+                self.pause(PAUSE_FRAMES);
             }
             Step::Type(text) => {
                 // A few characters a second, as typed.
                 for c in text.chars() {
-                    self.queue.push_back(vec![Event::Text(c.to_string())]);
-                    self.queue.extend(empty(3));
+                    self.coming_frames
+                        .push_back(vec![Event::Text(c.to_string())]);
+                    self.pause(3);
                 }
-                self.queue.extend(empty(8));
+                self.pause(8);
             }
             Step::Open(what) => {
-                self.hold = 12;
+                self.idle_frames = PAUSE_FRAMES;
                 return Action::Open(what);
             }
             Step::DragFile(path) => {
-                self.dragged = Some(path);
-                self.queue.extend(empty(20));
+                self.dragged_file = Some(path);
+                self.pause(20);
             }
             Step::DropFile => {
-                self.dropped = self.dragged.take();
-                self.queue.extend(empty(20));
+                self.dropped_file = self.dragged_file.take();
+                self.pause(20);
             }
             Step::Screenshot(path, crop) => {
-                self.shots += 1;
-                return Action::Shot(path, crop);
+                self.pending_screenshots += 1;
+                return Action::Screenshot(path, crop);
             }
         }
         Action::Busy
     }
 
-    /// The target isn't on screen (yet).
-    fn missing(
+    fn click(&mut self, at: Pos2, button: PointerButton, count: u32, modifiers: Modifiers) {
+        self.glide(at, false);
+        // A moment over it, to show its hover.
+        self.pause(PAUSE_FRAMES);
+        if !modifiers.is_none() {
+            self.coming_frames
+                .push_back(vec![Event::ModifiersChanged(modifiers)]);
+        }
+        for _ in 0..count {
+            for pressed in [true, false] {
+                self.coming_frames.push_back(vec![Event::PointerButton {
+                    pos: at,
+                    button,
+                    pressed,
+                    modifiers,
+                }]);
+            }
+        }
+        if !modifiers.is_none() {
+            self.coming_frames
+                .push_back(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+        }
+        self.pause(PAUSE_FRAMES);
+    }
+
+    fn drag(&mut self, from: Pos2, by: Vec2) {
+        let to = from + by;
+        let primary = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        self.glide(from, false);
+        self.pause(6);
+        self.coming_frames.push_back(vec![primary(from, true)]);
+        self.pause(4);
+        self.glide(to, true);
+        self.pause(4);
+        self.coming_frames.push_back(vec![primary(to, false)]);
+        self.pause(PAUSE_FRAMES);
+    }
+
+    fn pause(&mut self, frames: usize) {
+        self.coming_frames
+            .extend(std::iter::repeat_n(Vec::new(), frames));
+    }
+
+    fn target_missing(
         &mut self,
-        line: &script::Line,
+        line_number: usize,
         target: &Target,
         texts: &[(String, Rect)],
     ) -> Action {
-        let since = *self.since.get_or_insert_with(Instant::now);
-        if since.elapsed() < TIMEOUT {
+        let since = *self.waiting_since.get_or_insert_with(Instant::now);
+        if since.elapsed() < TARGET_TIMEOUT {
             return Action::Busy;
         }
-        self.ended = true;
+        self.closing = true;
         let mut shown: Vec<&str> = Vec::new();
-        for (t, _) in texts.iter().rev() {
-            if !shown.contains(&t.as_str()) && shown.len() < 40 {
-                shown.push(t);
+        for (text, _) in texts.iter().rev() {
+            if shown.len() == MAX_TEXTS_LISTED {
+                break;
+            }
+            if !shown.contains(&text.as_str()) {
+                shown.push(text);
             }
         }
         Action::Failed(format!(
-            "line {}: no {target:?} on screen; the topmost texts: {shown:?}",
-            line.number
+            "line {line_number}: no {target:?} on screen; the topmost texts: {shown:?}"
         ))
     }
 
-    /// Moves the pointer to `to` over a few frames, as a hand would.
-    fn glide(&mut self, to: Pos2, held: bool) {
+    fn glide(&mut self, to: Pos2, button_held: bool) {
         let from = self.pointer.unwrap_or(to);
-        let frames = ((from.distance(to) / 25.0) as usize).clamp(if held { 20 } else { 8 }, 40);
+        let min_frames = if button_held { 20 } else { 8 };
+        let frames = ((from.distance(to) / 25.0) as usize).clamp(min_frames, 40);
         for i in 1..=frames {
             let t = i as f32 / frames as f32;
             let eased = t * t * (3.0 - 2.0 * t);
-            self.queue
+            self.coming_frames
                 .push_back(vec![Event::PointerMoved(from.lerp(to, eased))]);
         }
         self.pointer = Some(to);
     }
 }
 
-/// The node of a ref name or hash prefix.
 fn named_node(scene: &Scene, name: &str) -> Option<usize> {
-    (0..scene.node_count()).find(|&i| {
-        let node = &scene.graph.nodes[i];
+    scene.graph.nodes.iter().position(|node| {
         scene
             .repo
             .commit(node.commit)
@@ -651,24 +619,26 @@ fn named_node(scene: &Scene, name: &str) -> Option<usize> {
     })
 }
 
-/// The point of the canvas's upper left quarter (where an opened menu still fits) farthest
-/// from any node.
+/// In the canvas's upper left quarter, where an opened menu still fits.
 fn emptiest_spot(scene: &Scene, view: &View, canvas: Rect) -> Pos2 {
+    const GRID_STEPS: u8 = 16;
     let area = Rect::from_min_size(canvas.min, canvas.size() / 2.0).shrink(20.0);
-    let nearest = |p: Pos2| {
+    let clearance = |p: Pos2| {
         (0..scene.node_count())
             .map(|n| view.to_screen(canvas, scene.node_center(n)).distance_sq(p))
             .fold(f32::INFINITY, f32::min)
     };
-    (0..=16)
-        .flat_map(|i| (0..=16).map(move |j| (i as f32 / 16.0, j as f32 / 16.0)))
-        .map(|(u, v)| area.lerp_inside(vec2(u, v)))
-        .max_by(|&a, &b| nearest(a).total_cmp(&nearest(b)))
-        .unwrap_or(area.center())
+    let fraction = |step: u8| f32::from(step) / f32::from(GRID_STEPS);
+    (0..=GRID_STEPS)
+        .flat_map(|i| (0..=GRID_STEPS).map(move |j| vec2(fraction(i), fraction(j))))
+        .map(|uv| {
+            let spot = area.lerp_inside(uv);
+            (spot, clearance(spot))
+        })
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map_or(area.center(), |(spot, _)| spot)
 }
 
-/// How tidy the graph is, for checking a change to the layout or the physics: printed when the
-/// run ends (see [`parterre_core::physics::Tidiness`]).
 fn report_tidiness(scene: &Scene) {
     let t = scene.net.tidiness();
     eprintln!(
@@ -686,13 +656,14 @@ mod tests {
         Runner::new(script::parse(script).unwrap())
     }
 
-    /// Runs frames until the script asks for something other than more frames, as the window
-    /// would, with `find` as what is on screen; and the events it fed the frames.
-    fn run(runner: &mut Runner, find: impl Fn(&Target) -> Option<Pos2>) -> (Action, Vec<Event>) {
+    fn run_until_action(
+        runner: &mut Runner,
+        find: impl Fn(&Target) -> Option<Pos2>,
+    ) -> (Action, Vec<Event>) {
         let mut events = Vec::new();
         for _ in 0..10_000 {
             let action = runner.advance(&find, &[]);
-            events.extend(runner.queue.pop_front().unwrap_or_default());
+            events.extend(runner.coming_frames.pop_front().unwrap_or_default());
             if action != Action::Busy {
                 return (action, events);
             }
@@ -700,7 +671,7 @@ mod tests {
         panic!("the script never got anywhere");
     }
 
-    fn presses(events: &[Event]) -> Vec<(Pos2, egui::PointerButton, bool)> {
+    fn presses(events: &[Event]) -> Vec<(Pos2, PointerButton, bool)> {
         events
             .iter()
             .filter_map(|e| match e {
@@ -720,14 +691,13 @@ mod tests {
         let mut r = runner("right-click \"Show log\"\nscreenshot a.png popup");
         let at = pos2(300.0, 200.0);
         let find = |t: &Target| (*t == Target::Text("Show log".into())).then_some(at);
-        let (action, events) = run(&mut r, find);
-        assert_eq!(action, Action::Shot("a.png".into(), Crop::Popup));
-        let secondary = egui::PointerButton::Secondary;
+        let (action, events) = run_until_action(&mut r, find);
+        assert_eq!(action, Action::Screenshot("a.png".into(), Crop::Popup));
+        let secondary = PointerButton::Secondary;
         assert_eq!(
             presses(&events),
             [(at, secondary, true), (at, secondary, false)]
         );
-        // The pointer got there before pressing.
         let first_press = events
             .iter()
             .position(|e| matches!(e, Event::PointerButton { .. }))
@@ -740,13 +710,13 @@ mod tests {
         let mut r = runner("screenshot a.png\nkey Escape");
         assert_eq!(
             r.advance(|_| None, &[]),
-            Action::Shot("a.png".into(), Crop::Full)
+            Action::Screenshot("a.png".into(), Crop::Full)
         );
         for _ in 0..5 {
             assert_eq!(r.advance(|_| None, &[]), Action::Busy);
         }
-        r.shots -= 1;
-        let (action, events) = run(&mut r, |_| None);
+        r.pending_screenshots -= 1;
+        let (action, events) = run_until_action(&mut r, |_| None);
         assert_eq!(action, Action::Done);
         assert!(events.iter().any(|e| matches!(
             e,
@@ -762,9 +732,9 @@ mod tests {
     fn drags_with_the_button_held() {
         let mut r = runner("drag node:main 100,0");
         let at = pos2(50.0, 50.0);
-        let (action, events) = run(&mut r, |_| Some(at));
+        let (action, events) = run_until_action(&mut r, |_| Some(at));
         assert_eq!(action, Action::Done);
-        let primary = egui::PointerButton::Primary;
+        let primary = PointerButton::Primary;
         let end = at + vec2(100.0, 0.0);
         assert_eq!(
             presses(&events),
@@ -781,16 +751,16 @@ mod tests {
     #[test]
     fn types_one_character_at_a_time() {
         let mut r = runner("type \"ab\"");
-        let (_, events) = run(&mut r, |_| None);
+        let (_, events) = run_until_action(&mut r, |_| None);
         assert_eq!(events, [Event::Text("a".into()), Event::Text("b".into())]);
     }
 
     #[test]
     fn says_what_is_on_screen_when_a_target_never_shows() {
         let mut r = runner("wait 0.1\nclick \"Merge\"");
-        r.since = Some(Instant::now() - TIMEOUT);
-        r.hold = 0;
-        r.next = 1;
+        r.waiting_since = Some(Instant::now() - TARGET_TIMEOUT);
+        r.idle_frames = 0;
+        r.next_line = 1;
         let texts = [("Rebase".to_owned(), Rect::NOTHING)];
         match r.advance(|_| None, &texts) {
             Action::Failed(message) => {
@@ -802,7 +772,6 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // And stops there.
         assert_eq!(r.advance(|_| None, &texts), Action::Busy);
     }
 

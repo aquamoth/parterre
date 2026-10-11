@@ -1,11 +1,9 @@
-//! In-memory snapshot of a repository's commit graph and refs.
-//!
-//! The snapshot holds every commit reachable from any ref (except notes), so that view options
+//! A snapshot holds every commit reachable from any ref (except notes), so that view options
 //! such as "show remote branches" can be toggled without going back to git.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -14,7 +12,6 @@ use crate::git::Listing;
 use crate::oid::Oid;
 use crate::upstream::Upstream;
 
-/// Index of a commit in [`Repo::commits`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CommitIx(pub u32);
 
@@ -27,90 +24,75 @@ impl CommitIx {
 #[derive(Clone, Debug)]
 pub struct Commit {
     pub oid: Oid,
-    /// Parents present in the snapshot, in git order (first parent first).
+    /// Those in the snapshot, first parent first.
     pub parents: Vec<CommitIx>,
-    /// True if some parent is not in the snapshot (shallow clone boundary).
+    /// Some parent is not in the snapshot: a shallow clone's boundary.
     pub truncated: bool,
-    /// True if the commit's tree is the empty tree (e.g. `git commit --allow-empty` roots or
-    /// svn-imported "create trunk" commits).
+    /// Such as an `--allow-empty` root, or an svn import's "create trunk" commit.
     pub empty_tree: bool,
     pub author_name: String,
     pub author_email: String,
-    /// Author timestamp, seconds since the Unix epoch.
+    /// Unix seconds.
     pub author_time: i64,
-    /// Author date formatted by git in the local time zone, `YYYY-MM-DD HH:MM`.
+    /// In the local time zone, `YYYY-MM-DD HH:MM`.
     pub author_date: String,
-    /// Committer timestamp, seconds since the Unix epoch.
+    /// Unix seconds.
     pub commit_time: i64,
     pub subject: String,
 }
 
-/// What kind of ref a label represents; drives label colour and visibility options.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RefKind {
-    /// `refs/heads/*`
     LocalBranch,
-    /// `refs/remotes/*`
     RemoteBranch,
-    /// `refs/tags/*`
     Tag,
-    /// `refs/stash`
     Stash,
-    /// A detached `HEAD` (only present when HEAD is not on a branch).
+    /// Only while HEAD is not on a branch.
     DetachedHead,
-    /// Anything else, e.g. `refs/pull/*` or tool-specific namespaces.
+    /// Such as `refs/pull/*`.
     Other,
 }
 
 #[derive(Clone, Debug)]
 pub struct GitRef {
-    /// Full name, e.g. `refs/remotes/origin/main`.
+    /// `refs/remotes/origin/main`.
     pub full_name: String,
-    /// Display name, e.g. `origin/main`.
+    /// `origin/main`.
     pub name: String,
     pub kind: RefKind,
-    /// The commit the ref points at (tags are peeled).
+    /// Tags peeled.
     pub target: CommitIx,
-    /// True for annotated tags (tag objects), false for lightweight tags and non-tags.
     pub annotated: bool,
-    /// True if this is the branch `HEAD` points at.
     pub is_head: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Head {
-    /// HEAD points at a branch; the commit is `None` for an unborn branch.
     Branch {
         name: String,
+        /// `None` for an unborn branch.
         target: Option<CommitIx>,
     },
     Detached(CommitIx),
 }
 
-/// One of the repository's worktrees (`git worktree list`). A bare main repository isn't one.
+/// A bare main repository isn't one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worktree {
-    /// Its folder, as git lists it.
     pub path: PathBuf,
-    /// The commit checked out. `None` for an unborn branch.
+    /// `None` for an unborn branch.
     pub head: Option<CommitIx>,
-    /// The branch checked out (`refs/heads/topic`); `None` if HEAD is detached.
+    /// `refs/heads/topic`; `None` if HEAD is detached.
     pub branch: Option<String>,
-    /// Locked against pruning (`git worktree lock`).
     pub locked: bool,
     /// Its folder is gone.
     pub missing: bool,
-    /// The worktree parterre opened.
     pub open: bool,
 }
 
 impl Worktree {
-    /// Its folder's name, e.g. `t3code-42df6b45`.
     pub fn name(&self) -> String {
-        self.path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.path.display().to_string())
+        folder_name(&self.path)
     }
 
     /// What menus call it, as the graph labels it: its branch (`topic`), or its folder's name
@@ -123,7 +105,6 @@ impl Worktree {
     }
 }
 
-/// A label on a commit (see [`Repo::labels`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Label {
     /// An index into [`Repo::refs`], and into [`Repo::worktrees`] the worktree that has it
@@ -136,40 +117,36 @@ pub enum Label {
     Worktree(usize),
 }
 
-/// The order refs on one commit are shown in: a detached HEAD first, then TortoiseGit's order,
-/// by full ref name (heads, remotes, stash, tags).
+/// A detached HEAD first, then TortoiseGit's order, by full ref name (heads, remotes, stash,
+/// tags).
 pub fn cmp_refs_for_display(a: &GitRef, b: &GitRef) -> Ordering {
     (b.kind == RefKind::DetachedHead)
         .cmp(&(a.kind == RefKind::DetachedHead))
         .then_with(|| a.full_name.cmp(&b.full_name))
 }
 
-/// git's abbreviation length for small repositories, used when git cannot tell us.
+/// git's abbreviation length for small repositories.
 pub const DEFAULT_ABBREV_LEN: usize = 7;
 
 #[derive(Clone, Debug)]
 pub struct Repo {
-    /// Working tree root, or the git dir for bare repositories.
+    /// The working tree root, or the git dir for a bare repository.
     pub path: PathBuf,
     pub commits: Vec<Commit>,
     pub refs: Vec<GitRef>,
     pub head: Head,
-    /// How many hex digits git abbreviates hashes to in this repository (`core.abbrev`; by
-    /// default sized to the object count, 7 at minimum). Use with [`Oid::short`].
+    /// For [`Oid::short`]: `core.abbrev`, by default sized to the object count.
     pub abbrev_len: usize,
-    /// False for a bare repository (or one opened inside its `.git` directory): there are no
-    /// files on disk to compare with.
+    /// False for a bare repository, or one opened inside its `.git` folder.
     pub has_working_tree: bool,
-    /// The worktrees, the main one first (empty if git can't list them).
+    /// The main one first; empty if git can't list them.
     pub worktrees: Vec<Worktree>,
-    /// The remote branch `origin/HEAD` points at (`refs/remotes/origin/main`), if any.
+    /// `refs/remotes/origin/main`, as `origin/HEAD` names it.
     pub default_branch: Option<String>,
-    /// The local branches that have an upstream, in ref order.
+    /// In ref order.
     pub upstreams: Vec<Upstream>,
-    /// What git listed of the refs and worktrees, for the branch catalogue (#310).
     pub(crate) listing: Listing,
     by_oid: HashMap<Oid, CommitIx>,
-    /// Every commit's generation, worked out the first time it's needed.
     generations: OnceLock<Vec<u32>>,
 }
 
@@ -180,6 +157,17 @@ impl Repo {
             .enumerate()
             .map(|(i, c)| (c.oid, CommitIx(i as u32)))
             .collect();
+        Repo::with_index(path, commits, by_oid, refs, head)
+    }
+
+    /// `by_oid` indexes `commits`.
+    pub(crate) fn with_index(
+        path: PathBuf,
+        commits: Vec<Commit>,
+        by_oid: HashMap<Oid, CommitIx>,
+        refs: Vec<GitRef>,
+        head: Head,
+    ) -> Repo {
         Repo {
             path,
             commits,
@@ -196,8 +184,8 @@ impl Repo {
         }
     }
 
-    /// Every commit's generation, by [`CommitIx`]: one more than its highest parent's, 1 for a
-    /// root. A commit's ancestors all have lower generations than it, whatever their dates say.
+    /// By [`CommitIx`]: one more than the highest parent's, 1 for a root. A commit's ancestors
+    /// all have lower generations than it, whatever their dates say.
     pub fn generations(&self) -> &[u32] {
         self.generations.get_or_init(|| generations_of(self))
     }
@@ -381,9 +369,8 @@ impl Repo {
         }
     }
 
-    /// True if both snapshots have the same refs pointing at the same commits, the same HEAD,
-    /// the same default branch, the same upstreams and the same worktrees. The commits are then the same too, as a
-    /// snapshot holds exactly what its refs and worktrees reach.
+    /// The same refs at the same commits, HEAD, default branch, upstreams and worktrees. The
+    /// commits are then the same too, as a snapshot holds exactly what those reach.
     pub fn same_refs(&self, other: &Repo) -> bool {
         let refs = |repo: &Repo| -> Vec<(String, Oid, bool)> {
             repo.refs
@@ -427,16 +414,17 @@ impl Repo {
             && upstreams(self) == upstreams(other)
     }
 
-    /// Display name for the repository (directory name).
     pub fn display_name(&self) -> String {
-        self.path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.path.display().to_string())
+        folder_name(&self.path)
     }
 }
 
-/// Every commit's generation (see [`Repo::generations`]).
+fn folder_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 fn generations_of(repo: &Repo) -> Vec<u32> {
     let n = repo.commits.len();
     let mut generation = vec![0u32; n];

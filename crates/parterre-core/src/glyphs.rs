@@ -1,19 +1,14 @@
-//! The icons of the toolbar and menus: outlines in a 24 × 24 box, stroked [`STROKE`] wide, in
-//! the style of Lucide (where the generic ones come from; the graph and drag-mode ones are drawn
-//! here). Paths are SVG path data, so icons can be copied from an SVG editor; [`flatten`] turns
-//! them into polylines for painting.
-//!
-//! Chosen on 2026-09-26 with the toolbar; the prototype is on the branch `prototype/menus`
-//! (`crates/parterre/prototype-menus/index.html`).
+//! The toolbar's and menus' icons: outlines in Lucide's style, many of them Lucide's own. Paths
+//! are SVG path data, so that icons can be copied from an SVG editor.
 
 /// The side of the box the icons are drawn in.
 pub const SIZE: f32 = 24.0;
-/// Line width, in the units of the box.
+/// The line width, in the box's units.
 pub const STROKE: f32 = 1.8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Part {
-    /// SVG path data, stroked.
+    /// SVG path data, always stroked.
     Path(&'static str),
     Circle {
         center: [f32; 2],
@@ -305,8 +300,8 @@ pub const FETCH: Glyph = &[
     Part::Path("M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"),
 ];
 
-/// Every glyph, for tests.
-pub const ALL: [Glyph; 51] = [
+#[cfg(test)]
+const ALL: [Glyph; 53] = [
     MENU,
     SEARCH,
     PLUS,
@@ -358,17 +353,16 @@ pub const ALL: [Glyph; 51] = [
     PALETTE,
     WARNING,
     FETCH,
+    FOLDER,
+    FOLDER_GONE,
 ];
 
-/// One stroke of a flattened path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Polyline {
     pub points: Vec<[f32; 2]>,
-    /// Ends where it started (the path had a `Z`).
     pub closed: bool,
 }
 
-/// Path data that [`flatten`] can't read; the offset is in bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("bad path data at byte {0}")]
 pub struct PathError(pub usize);
@@ -388,16 +382,12 @@ pub fn flatten(d: &str, tolerance: f32) -> Result<Vec<Polyline>, PathError> {
     let mut cmd: Option<u8> = None;
     loop {
         lx.skip();
-        if lx.i >= lx.s.len() {
+        let Some(&next) = lx.s.get(lx.i) else {
             break;
-        }
-        match lx.s[lx.i] {
-            c if c.is_ascii_alphabetic() => {
-                cmd = Some(c);
-                lx.i += 1;
-            }
-            _ if cmd.is_none() => return Err(PathError(lx.i)),
-            _ => {}
+        };
+        if next.is_ascii_alphabetic() {
+            cmd = Some(next);
+            lx.i += 1;
         }
         let c = cmd.ok_or(PathError(lx.i))?;
         let rel = c.is_ascii_lowercase();
@@ -460,13 +450,15 @@ pub fn flatten(d: &str, tolerance: f32) -> Result<Vec<Polyline>, PathError> {
                 pos = end;
             }
             b'A' => {
-                let radii = [lx.number()?, lx.number()?];
-                let rotation = lx.number()?;
-                let large = lx.flag()?;
-                let sweep = lx.flag()?;
-                let end = lx.point(origin)?;
-                arc(pos, radii, rotation, large, sweep, end, tolerance, &mut cur);
-                pos = end;
+                let to = ArcTo {
+                    radii: [lx.number()?, lx.number()?],
+                    rotation_deg: lx.number()?,
+                    large_arc: lx.flag()?,
+                    sweep: lx.flag()?,
+                    end: lx.point(origin)?,
+                };
+                arc(pos, &to, tolerance, &mut cur);
+                pos = to.end;
             }
             b'Z' => {
                 if cur.last() == Some(&start) && cur.len() > 1 {
@@ -562,7 +554,6 @@ impl Lexer<'_> {
     }
 }
 
-/// Number of straight pieces for a curve of about `length`.
 fn pieces(length: f32, tolerance: f32) -> usize {
     ((length / tolerance.max(1e-3)).sqrt().ceil() as usize).clamp(2, 64)
 }
@@ -588,18 +579,23 @@ fn cubic(
     }
 }
 
-/// An elliptical arc, from its SVG endpoint form (SVG 1.1, appendix F.6.5).
-#[allow(clippy::too_many_arguments)]
-fn arc(
-    p0: [f32; 2],
+struct ArcTo {
     radii: [f32; 2],
     rotation_deg: f32,
-    large: bool,
+    large_arc: bool,
     sweep: bool,
-    p1: [f32; 2],
-    tol: f32,
-    out: &mut Vec<[f32; 2]>,
-) {
+    end: [f32; 2],
+}
+
+/// An elliptical arc, from its SVG endpoint form (SVG 1.1, appendix F.6.5).
+fn arc(p0: [f32; 2], to: &ArcTo, tol: f32, out: &mut Vec<[f32; 2]>) {
+    let &ArcTo {
+        radii,
+        rotation_deg,
+        large_arc,
+        sweep,
+        end: p1,
+    } = to;
     let (mut rx, mut ry) = (radii[0].abs(), radii[1].abs());
     if p0 == p1 {
         return;
@@ -619,7 +615,7 @@ fn arc(
     }
     let num = rx * rx * ry * ry - rx * rx * y1 * y1 - ry * ry * x1 * x1;
     let den = rx * rx * y1 * y1 + ry * ry * x1 * x1;
-    let sign = if large == sweep { -1.0 } else { 1.0 };
+    let sign = if large_arc == sweep { -1.0 } else { 1.0 };
     let coef = sign * (num / den).max(0.0).sqrt();
     let (cx1, cy1) = (coef * rx * y1 / ry, -coef * ry * x1 / rx);
     let cx = cos * cx1 - sin * cy1 + (p0[0] + p1[0]) / 2.0;

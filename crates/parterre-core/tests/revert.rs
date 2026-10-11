@@ -1,7 +1,3 @@
-//! Reverting a commit on the open worktree's branch, against real, disposable repositories:
-//! when it's offered, the message (checked against what `git revert` itself writes), merges,
-//! uncommitted changes with and without stashing them, restoring the stash, and every way it
-//! can stop or refuse without losing work.
 mod common;
 
 use common::{TestRepo, read_text};
@@ -40,7 +36,6 @@ fn failed(out: Outcome) -> (String, Report) {
     }
 }
 
-/// The revert `p` would run with git's message.
 fn plain(p: &Preview, stash: bool) -> revert::Revert {
     p.revert(stash, &p.message.clone())
 }
@@ -59,7 +54,6 @@ fn message(r: &TestRepo) -> String {
     r.git(&["log", "-1", "--format=%B"])
 }
 
-/// main: base (file "one") → change (file "two") → later (another file).
 fn history() -> TestRepo {
     let mut r = TestRepo::new();
     r.write("file", b"one\n");
@@ -95,7 +89,7 @@ fn offered_for_commits_head_reaches_only() {
 fn the_message_is_what_git_writes() {
     let r = history();
     let p = preview(&r, "change");
-    assert!(!p.merge && !p.reference);
+    assert!(!p.is_merge && !p.revert_reference);
     r.git(&["revert", "--no-edit", "change"]);
     assert_eq!(p.message.trim_end(), message(&r));
     assert!(
@@ -179,7 +173,7 @@ fn with_revert_reference_the_title_is_the_users() {
     let r = history();
     r.git(&["config", "revert.reference", "true"]);
     let p = preview(&r, "change");
-    assert!(p.reference);
+    assert!(p.revert_reference);
     let short = r.git(&["show", "-s", "--pretty=reference", "change"]);
     assert_eq!(p.message, format!("\n\nThis reverts commit {short}.\n"));
     assert!(p.blocked(false, &p.message).is_some());
@@ -200,14 +194,14 @@ fn a_merge_is_reverted_against_its_first_parent() {
     r.commit_all("main only");
     r.merge("feature", "Merge branch 'feature'");
     let p = preview(&r, "HEAD");
-    assert!(p.merge);
+    assert!(p.is_merge);
     let revert = plain(&p, false);
     assert!(
         revert::command(&revert)
             .windows(2)
             .any(|w| w == ["-m", "1"])
     );
-    // Compare with git's own wording first, in a throwaway branch.
+    // Git's own wording, in a throwaway branch.
     r.git(&["switch", "-q", "-c", "check"]);
     r.git(&["revert", "--no-edit", "-m", "1", "HEAD"]);
     assert_eq!(p.message.trim_end(), message(&r));
@@ -242,7 +236,7 @@ fn local_changes_to_a_file_the_revert_changes_need_a_stash() {
     let p = preview(&r, "change");
     assert_eq!(p.overlap, ["file"]);
     assert_eq!(p.refused(false), ["file"]);
-    let short = &rev(&r, "change").to_hex()[..7];
+    let short = rev(&r, "change").short(7);
     assert_eq!(
         p.refusal(false),
         Some(format!("{short} changes 1 file with local changes"))
@@ -326,7 +320,6 @@ fn restoring_an_entry_gone_since_says_so() {
     assert!(error.contains("gone from the stash list"), "{error}");
 }
 
-/// main, where `file` changed again after `change`: reverting `change` conflicts.
 fn conflicting() -> TestRepo {
     let mut r = history();
     r.write("file", b"three\n");
@@ -347,7 +340,6 @@ fn a_conflict_leaves_the_revert_in_progress() {
     let open = catalog.worktrees.iter().find(|w| w.open).unwrap();
     assert_eq!(open.reverting, Some(rev(&r, "change")));
     assert_eq!(catalog.stashed_for_revert, None);
-    // Nothing more is offered there until it's finished.
     assert!(Preview::load(r.path(), rev(&r, "HEAD")).is_err());
 }
 
@@ -376,7 +368,6 @@ fn a_conflict_after_stashing_names_the_entry_instead_of_restoring() {
     assert_eq!(text(&r, "other"), "mine\n");
 }
 
-/// main, where a later commit undid `change` by hand.
 fn undone() -> TestRepo {
     let mut r = history();
     r.write("file", b"one\n");
@@ -390,7 +381,7 @@ fn nothing_to_revert_leaves_no_operation_in_progress() {
     let head = rev(&r, "HEAD");
     let p = preview(&r, "change");
     let report = done(execute(&r, plain(&p, false)));
-    let short = &rev(&r, "change").to_hex()[..7];
+    let short = rev(&r, "change").short(7);
     assert_eq!(
         report.attention.expect("said so").title,
         format!("Nothing to revert: {short}'s changes are already undone")
@@ -446,7 +437,7 @@ fn a_detached_head_is_reverted_on() {
     let revert = plain(&p, false);
     assert_eq!(
         Action::Revert(Box::new(revert.clone())).label(),
-        format!("Revert {} in HEAD", &rev(&r, "change").to_hex()[..7])
+        format!("Revert {} in HEAD", rev(&r, "change").short(7))
     );
     done(execute(&r, revert));
     assert_eq!(text(&r, "file"), "one\n");

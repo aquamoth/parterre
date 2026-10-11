@@ -1,32 +1,22 @@
-//! The resource script `build.rs` compiles into the Windows executable: the icon, and the version
-//! information Explorer shows under *Properties → Details* (product name, versions, copyright).
-//!
-//! Like `version.rs`, `build.rs` includes this file and the app compiles it only for its tests,
-//! so it must not use anything outside `std`.
+//! The resource script `build.rs` compiles into the Windows executable. Like `version.rs`,
+//! `build.rs` includes this file and the app compiles it only for its tests, so it must not use
+//! anything outside `std`.
 
 use std::fmt::Write as _;
 
-/// What goes into the script.
 #[derive(Debug)]
 pub struct Resources<'a> {
-    /// Path of the `.ico` file.
-    pub icon: &'a str,
-    /// `major.minor.patch`, which Explorer shows as the file version (with a fourth part, 0).
+    pub icon_path: &'a str,
     pub numeric_version: [u16; 3],
-    /// The full version string (`PARTERRE_VERSION`), shown as the product version.
     pub version: &'a str,
-    /// The package description, `CARGO_PKG_DESCRIPTION`.
     pub description: &'a str,
-    /// The copyright line of `NOTICE`.
     pub notice: &'a str,
 }
 
-/// The resource script for `resources`.
 pub fn script(resources: &Resources) -> String {
     let [major, minor, patch] = resources.numeric_version;
     let numeric = format!("{major},{minor},{patch},0");
     let strings = [
-        // The publisher and copyright holder (see `docs/distribution.md`).
         ("CompanyName", "Trustfall AB"),
         // Also the name Task Manager lists the process under.
         ("FileDescription", "parterre"),
@@ -40,7 +30,7 @@ pub fn script(resources: &Resources) -> String {
     ];
 
     // Both resource compilers take forward slashes, which need no escaping.
-    let icon = resources.icon.replace('\\', "/");
+    let icon = resources.icon_path.replace('\\', "/");
     let mut rc = format!(
         "1 ICON \"{icon}\"\n\
          \n\
@@ -74,7 +64,6 @@ pub fn script(resources: &Resources) -> String {
     rc
 }
 
-/// The first line of `notice` that starts with "Copyright", without the email address.
 fn copyright(notice: &str) -> &str {
     let line = notice
         .lines()
@@ -84,9 +73,8 @@ fn copyright(notice: &str) -> &str {
     line.split_once('<').map_or(line, |(name, _)| name).trim()
 }
 
-/// `s` as a wide string literal of a resource script. Anything outside ASCII is escaped as UTF-16
-/// code units, so the script is plain ASCII and needs no code page, which the resource compilers
-/// would otherwise guess differently.
+/// Escapes anything outside ASCII as UTF-16 code units: a plain ASCII script needs no code page,
+/// which the resource compilers would guess differently.
 fn wide_string(s: &str) -> String {
     let mut literal = String::from("L\"");
     for c in s.chars() {
@@ -128,7 +116,7 @@ mod tests {
     #[test]
     fn script_holds_the_icon_and_version_information() {
         let rc = script(&Resources {
-            icon: r"C:\src\parterre.ico",
+            icon_path: r"C:\src\parterre.ico",
             numeric_version: [0, 4, 1],
             version: "0.4.1 (a1b2c3d)",
             description: "A viewer.",

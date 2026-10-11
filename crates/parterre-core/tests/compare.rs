@@ -1,5 +1,3 @@
-//! Comparing two commits: sides, and the files git lists between them.
-
 mod common;
 
 use common::TestRepo;
@@ -14,7 +12,7 @@ fn ix(repo: &Repo, hash: &str) -> CommitIx {
         .expect("commit in snapshot")
 }
 
-fn oid(hash: &str) -> Rev {
+fn rev(hash: &str) -> Rev {
     Rev::Commit(Oid::from_hex(hash).unwrap())
 }
 
@@ -48,12 +46,12 @@ fn an_ancestor_goes_on_the_left_whichever_is_picked_first() {
     let (r, [base, feature, main]) = forked();
     let repo = r.load();
     let c = Comparison::of(&repo, ix(&repo, &feature), ix(&repo, &base), false);
-    assert_eq!((c.old, c.new), (oid(&base), oid(&feature)));
+    assert_eq!((c.old, c.new), (rev(&base), rev(&feature)));
     // Diverged commits keep the order they were picked in.
     let c = Comparison::of(&repo, ix(&repo, &feature), ix(&repo, &main), false);
-    assert_eq!((c.old, c.new), (oid(&feature), oid(&main)));
+    assert_eq!((c.old, c.new), (rev(&feature), rev(&main)));
     let swapped = c.swapped();
-    assert_eq!((swapped.old, swapped.new), (oid(&main), oid(&feature)));
+    assert_eq!((swapped.old, swapped.new), (rev(&main), rev(&feature)));
 }
 
 #[test]
@@ -75,7 +73,7 @@ fn trees_are_compared_whole_or_since_the_common_ancestor() {
         ..c
     };
     let compared = c.run(&Git::new(r.path())).unwrap();
-    assert_eq!(compared.base, Some(oid(&base)));
+    assert_eq!(compared.base, Some(rev(&base)));
     assert_eq!(listed(&r, c), [("feature.txt".into(), FileStatus::Added)]);
 }
 
@@ -103,8 +101,8 @@ fn unrelated_histories_have_no_common_ancestor() {
     r.write("other.txt", b"o\n");
     let other = r.commit_all("other");
     let c = Comparison {
-        old: oid(&main),
-        new: oid(&other),
+        old: rev(&main),
+        new: rev(&other),
         since_ancestor: true,
     };
     let compared = c.run(&Git::new(r.path())).unwrap();
@@ -171,7 +169,7 @@ fn since_the_common_ancestor_the_working_tree_counts_as_head() {
     let (r, [base, feature, _]) = dirty();
     let c = Comparison::with_working_tree(Oid::from_hex(&feature).unwrap(), true);
     let compared = c.run(&Git::new(r.path())).unwrap();
-    assert_eq!(compared.base, Some(oid(&base)));
+    assert_eq!(compared.base, Some(rev(&base)));
     // What main's working tree changed since it forked from feature: main.txt was added
     // and deleted again.
     assert_eq!(

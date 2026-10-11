@@ -1,5 +1,4 @@
-//! Colours, following TortoiseGit's defaults (`src/TortoiseProc/Colors.cpp`), plus colours
-//! chosen per branch name.
+//! The graph's colours follow TortoiseGit's defaults (`src/TortoiseProc/Colors.cpp`).
 
 use eframe::egui::Color32;
 use parterre_core::RefKind;
@@ -8,7 +7,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeChoice {
-    /// Follow the operating system.
     #[default]
     System,
     Light,
@@ -27,18 +25,16 @@ impl ThemeChoice {
     }
 }
 
-/// A colour for branches whose names match `patterns` (e.g. `feature/*`). Not in TortoiseGit,
-/// which colours by ref kind only.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BranchColor {
-    /// Wildcards separated by commas or spaces; see [`BranchPatterns`].
+    /// Parsed by [`BranchPatterns::parse`], e.g. `feature/*, bugfix/*`.
     pub patterns: String,
     pub color: Color32,
 }
 
 impl BranchColor {
-    /// Colours offered for new rules, in turn: distinct from the ref-kind colours and legible
-    /// with either black or white text.
+    /// Offered for new rules in turn: distinct from the ref-kind colours, and legible with
+    /// either black or white text.
     pub const SUGGESTED: [Color32; 6] = [
         Color32::from_rgb(0x9B, 0x59, 0xB6),
         Color32::from_rgb(0x29, 0x80, 0xB9),
@@ -54,11 +50,7 @@ impl BranchColor {
             .rsplit_once('=')
             .ok_or_else(|| format!("expected PATTERNS=COLOR, got `{s}`"))?;
         let hex = color.trim();
-        let hex = if hex.starts_with('#') {
-            hex.to_owned()
-        } else {
-            format!("#{hex}")
-        };
+        let hex = format!("#{}", hex.strip_prefix('#').unwrap_or(hex));
         let color = Color32::from_hex(&hex)
             .map_err(|_| format!("`{color}` is not a colour like #8e44ad"))?;
         Ok(BranchColor {
@@ -68,12 +60,9 @@ impl BranchColor {
     }
 }
 
-/// Resolved colours for drawing the graph.
 #[derive(Clone, Debug)]
 pub struct Palette {
-    /// Whether this is the dark palette, drawn with egui's dark visuals (which draw text
-    /// bolder).
-    pub dark: bool,
+    pub is_dark: bool,
     pub background: Color32,
     pub edge: Color32,
     pub plain_fill: Color32,
@@ -85,31 +74,25 @@ pub struct Palette {
     pub tag: Color32,
     pub stash: Color32,
     pub other_ref: Color32,
-    /// Open pull requests, and draft ones. Not in TortoiseGit.
     pub pull_request: Color32,
     pub draft_pull_request: Color32,
-    /// Other worktrees, branch or detached, and those whose folder is gone. Not in
-    /// TortoiseGit.
     pub worktree: Color32,
     pub missing_worktree: Color32,
     pub selection: Color32,
     pub search_hit: Color32,
-    /// The commit marked for comparison. Not in TortoiseGit's graph, which has no mark.
+    /// The commit marked for comparison.
     pub marked: Color32,
     /// Commits between a branch and its upstream: ahead, behind, lost to a force push, and
-    /// replaced by a rebase. Not in TortoiseGit.
+    /// replaced by a rebase.
     pub ahead: Color32,
     pub behind: Color32,
     pub lost: Color32,
     pub replaced: Color32,
-    /// A worktree stuck with an operation in progress: its rebase's zigzag edge, as its banner.
     pub stuck: Color32,
-    /// Colours by branch name, first match first; they override the ref-kind colours.
     pub branch_colors: Vec<(BranchPatterns, Color32)>,
 }
 
 impl Palette {
-    /// The light or dark palette with `branch_colors` applied.
     pub fn new(dark: bool, branch_colors: &[BranchColor]) -> Palette {
         let mut p = if dark {
             Palette::dark()
@@ -127,7 +110,7 @@ impl Palette {
 
     pub fn light() -> Palette {
         Palette {
-            dark: false,
+            is_dark: false,
             background: Color32::WHITE,
             edge: Color32::BLACK,
             // TortoiseGit's "brightColor", which works out to a pale lavender on white.
@@ -140,11 +123,8 @@ impl Palette {
             tag: Color32::from_rgb(255, 255, 0),
             stash: Color32::from_rgb(128, 128, 128),
             other_ref: Color32::from_rgb(224, 224, 224),
-            // Pale blue next to TortoiseGit's pale ref colours; drafts greyer.
             pull_request: Color32::from_rgb(0xB6, 0xD9, 0xFF),
             draft_pull_request: Color32::from_rgb(0xD2, 0xDA, 0xE2),
-            // Cyan, apart from the ref kinds' colours and the pull requests' pale blue; a
-            // gone folder greyer.
             worktree: Color32::from_rgb(0x00, 0xB4, 0xD8),
             missing_worktree: Color32::from_rgb(0xB4, 0xCC, 0xD2),
             selection: Color32::from_rgb(0, 120, 215),
@@ -163,7 +143,7 @@ impl Palette {
     pub fn dark() -> Palette {
         let l = Palette::light();
         Palette {
-            dark: true,
+            is_dark: true,
             background: Color32::from_rgb(0x1E, 0x1E, 0x1E),
             edge: Color32::from_rgb(0xD0, 0xD0, 0xD0),
             plain_fill: Color32::from_rgb(0x2E, 0x2E, 0x48),
@@ -191,7 +171,7 @@ impl Palette {
         }
     }
 
-    /// Fill of a row for the ref `name`. The current branch stays red whatever its name.
+    /// The current branch keeps its colour whatever its name.
     pub fn ref_fill(&self, kind: RefKind, is_head: bool, name: &str) -> Color32 {
         if !is_head
             && let Some(&(_, color)) = self
@@ -215,16 +195,17 @@ impl Palette {
 
 /// Black or white, whichever reads better on `fill` (TortoiseGit: WCAG luminance > 0.5).
 pub fn text_on(fill: Color32) -> Color32 {
-    fn channel(c: u8) -> f32 {
-        let c = c as f32 / 255.0;
+    fn linear(c: u8) -> f32 {
+        let c = f32::from(c) / 255.0;
         if c <= 0.03928 {
             c / 12.92
         } else {
             ((c + 0.055) / 1.055).powf(2.4)
         }
     }
-    let l = 0.2126 * channel(fill.r()) + 0.7152 * channel(fill.g()) + 0.0722 * channel(fill.b());
-    if l > 0.5 {
+    let luminance =
+        0.2126 * linear(fill.r()) + 0.7152 * linear(fill.g()) + 0.0722 * linear(fill.b());
+    if luminance > 0.5 {
         Color32::BLACK
     } else {
         Color32::WHITE
@@ -233,11 +214,7 @@ pub fn text_on(fill: Color32) -> Color32 {
 
 /// Inverts HSL lightness (`l = 1 - l`, clamped to [0.05, 0.9]) keeping hue and saturation.
 fn invert_lightness(c: Color32) -> Color32 {
-    let (r, g, b) = (
-        c.r() as f32 / 255.0,
-        c.g() as f32 / 255.0,
-        c.b() as f32 / 255.0,
-    );
+    let [r, g, b] = [c.r(), c.g(), c.b()].map(|c| f32::from(c) / 255.0);
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
     let l = (max + min) / 2.0;

@@ -1,5 +1,3 @@
-//! Blaming files in throwaway repositories.
-
 mod common;
 
 use common::TestRepo;
@@ -61,7 +59,6 @@ fn lines_belong_to_the_commits_that_last_changed_them_across_a_rename() {
     assert_eq!(first_origin.path, "a.txt");
     assert_eq!(first_origin.commit, Oid::from_hex(&first));
 
-    // The line's previous revision is the file before the rename.
     let second_origin = &b.origins[b.lines[1].origin];
     let before = second_origin.previous_blame().unwrap();
     assert_eq!(before, at(&first, "a.txt"));
@@ -84,7 +81,6 @@ fn the_working_tree_has_lines_of_no_commit_yet() {
     };
     let b = blame(&r, &spec, BlameOptions::default());
     assert_eq!(lines(&b), pairs(&[("one", "first"), ("TWO", "-")]));
-    // Their change is the working tree against HEAD.
     let changes = b.origins[b.lines[1].origin].changes().unwrap();
     assert_eq!(changes.new.unwrap().rev, Rev::WorkingTree);
     let head = r.git(&["rev-parse", "HEAD"]);
@@ -124,7 +120,6 @@ fn whitespace_and_moved_lines_can_be_ignored() {
     let b = blame(&r, &spec, options);
     assert_eq!(lines(&b)[0].1, "first");
     assert_eq!(lines(&b)[4], (long.into(), "first".into()));
-    // Where the moved line was in the version it comes from.
     assert_eq!(b.lines[4].orig_line, 1);
 }
 

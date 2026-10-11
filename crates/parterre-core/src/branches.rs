@@ -1,19 +1,23 @@
-//! Local branch operations and their safety checks. No graph visibility or GUI state enters
-//! the loss calculation. Git's porcelain remains the final authority on checkout and deletion.
+//! What an operation loses is worked out from git alone, never from what the graph shows, and
+//! git's porcelain stays the final authority on checkout and deletion.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use parterre_util::{CancelTree, StartError};
+
 use crate::git::{Config, Git, GitError, Listing};
+use crate::repo::DEFAULT_ABBREV_LEN;
+use crate::worktree_folder::same_path;
 use crate::{Oid, Repo};
 
 #[derive(Clone, Debug)]
 pub struct LocalBranch {
     pub name: String,
     pub tip: Oid,
-    /// Logical remote/branch name, including an upstream that has not been fetched.
+    /// `origin/topic`, fetched or not.
     pub upstream: Option<String>,
     /// That upstream's remote, and its branch there: `origin` and `topic`.
     pub upstream_remote: Option<(String, String)>,
@@ -25,47 +29,39 @@ pub struct RemoteBranch {
     pub tip: Oid,
 }
 
-/// One of the repository's worktrees, as the worktree tool needs it.
 #[derive(Clone, Debug)]
 pub struct Worktree {
-    /// Its folder, as git lists it.
+    /// As git lists it.
     pub path: PathBuf,
     /// `None` for an unborn branch.
     pub head: Option<Oid>,
-    /// The branch checked out; `None` when detached.
     pub branch: Option<String>,
     pub main: bool,
-    /// The worktree this catalogue was loaded from.
     pub open: bool,
-    /// The lock's reason (empty when none was given), when it's locked.
+    /// The lock's reason, empty if none was given.
     pub locked: Option<String>,
     /// Its folder is gone.
     pub missing: bool,
-    /// An operation git left unfinished there, such as "a rebase".
+    /// Such as "a rebase".
     pub in_progress: Option<&'static str>,
-    /// The rebase stopped there, when the operation in progress is one.
     pub rebasing: Option<Rebasing>,
-    /// The commit being merged there (`MERGE_HEAD`), when the operation in progress is a merge.
+    /// `MERGE_HEAD`.
     pub merging: Option<Oid>,
-    /// The cherry-pick stopped there, when the operation in progress is one.
     pub picking: Option<Picking>,
-    /// The commit being reverted there (`REVERT_HEAD`), when the operation in progress is a
-    /// revert.
+    /// `REVERT_HEAD`.
     pub reverting: Option<Oid>,
 }
 
 /// Why the open worktree is stuck.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stuck {
-    /// An operation git left unfinished there, such as "a rebase".
+    /// Such as "a rebase".
     InProgress(&'static str),
-    /// Conflicted files with no operation in progress, as a stash that couldn't be put back
-    /// cleanly leaves them.
+    /// With no operation in progress, as a stash that couldn't be put back cleanly leaves them.
     Conflicts,
 }
 
 impl Stuck {
-    /// Why an operation isn't offered.
     pub fn reason(self) -> String {
         match self {
             Stuck::InProgress(what) => {
@@ -81,32 +77,27 @@ impl Stuck {
     }
 }
 
-/// A rebase git left stopped in a worktree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rebasing {
-    /// The branch being rebased; `None` for a detached HEAD.
     pub branch: Option<String>,
-    /// The commit it is being replayed onto. Git records no name for it.
+    /// Git records no name for it.
     pub onto: Option<Oid>,
-    /// The commits replayed so far, the one it stopped at included, of how many.
+    /// Replayed so far, the one it stopped at included.
     pub done: usize,
     pub total: usize,
 }
 
-/// A cherry-pick git left stopped in a worktree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Picking {
-    /// The commit it stopped at (`CHERRY_PICK_HEAD`).
+    /// `CHERRY_PICK_HEAD`.
     pub commit: Oid,
-    /// The commits picked so far, the one it stopped at included, of how many: 1 of 1 when
-    /// only one was picked.
+    /// Picked so far, the one it stopped at included: 1 of 1 when only one was picked.
     pub done: usize,
     pub total: usize,
 }
 
-/// The cherry-pick in a worktree's administrative folder, if one is stopped there at `head`.
-/// Git's sequencer keeps the commits still to pick, the one stopped at first, and where HEAD
-/// was when it started.
+/// The cherry-pick stopped in a worktree's administrative folder at `head`. Git's sequencer
+/// keeps the commits still to pick, the one stopped at first, and where HEAD was at the start.
 fn picking(git: &Git, admin: &Path, reftable: bool, head: Option<Oid>) -> Option<Picking> {
     let commit = pseudo_ref(admin, reftable, "CHERRY_PICK_HEAD")?;
     let sequencer = admin.join("sequencer");
@@ -120,9 +111,8 @@ fn picking(git: &Git, admin: &Path, reftable: bool, head: Option<Oid>) -> Option
         .and_then(|s| Oid::from_hex(s.trim()));
     let (done, total) = match (left, start, head) {
         (1.., Some(start), Some(head)) => {
-            let range = format!("{}..{}", start.to_hex(), head.to_hex());
             let picked: usize = git
-                .query(&["rev-list", "--count", &range])
+                .query(&["rev-list", "--count", &format!("{start}..{head}")])
                 .ok()
                 .flatten()
                 .and_then(|n| n.parse().ok())
@@ -138,7 +128,7 @@ fn picking(git: &Git, admin: &Path, reftable: bool, head: Option<Oid>) -> Option
     })
 }
 
-/// A pseudo-ref such as `CHERRY_PICK_HEAD` in a worktree's administrative folder: a file, or,
+/// A pseudo-ref such as `CHERRY_PICK_HEAD`: a file in a worktree's administrative folder, or,
 /// with a reftable, a ref.
 fn pseudo_ref(admin: &Path, reftable: bool, name: &str) -> Option<Oid> {
     if let Ok(text) = std::fs::read_to_string(admin.join(name)) {
@@ -147,6 +137,10 @@ fn pseudo_ref(admin: &Path, reftable: bool, name: &str) -> Option<Oid> {
     if !reftable {
         return None;
     }
+    reftable_pseudo_ref(admin, name)
+}
+
+fn reftable_pseudo_ref(admin: &Path, name: &str) -> Option<Oid> {
     let found = Git::new(admin)
         .query(&["--git-dir=.", "rev-parse", "--verify", "--quiet", name])
         .ok()
@@ -154,7 +148,6 @@ fn pseudo_ref(admin: &Path, reftable: bool, name: &str) -> Option<Oid> {
     Oid::from_hex(found.trim())
 }
 
-/// The rebase in a worktree's administrative folder, if one is stopped there.
 fn rebasing(admin: &Path) -> Option<Rebasing> {
     let (dir, done, total) = if admin.join("rebase-merge").is_dir() {
         (admin.join("rebase-merge"), "msgnum", "end")
@@ -182,21 +175,17 @@ fn rebasing(admin: &Path) -> Option<Rebasing> {
 impl Worktree {
     /// Its folder's name.
     pub fn name(&self) -> String {
-        self.path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.path.display().to_string())
+        folder_name(&self.path)
     }
 
-    /// What menus call it, as the graph labels it: its branch, or its folder's name when
-    /// detached.
+    /// Its branch, or its folder's name when detached, as the graph labels it.
     pub fn label(&self) -> String {
         self.branch.clone().unwrap_or_else(|| self.name())
     }
 }
 
-/// A fresh catalogue for menus and creation forms. Refresh after repository changes; execution
-/// always reads Git again, rather than trusting the catalogue the user first saw.
+/// For menus and forms. An operation reads git again rather than trust the catalogue the user
+/// saw.
 #[derive(Clone, Debug)]
 pub struct Catalog {
     pub locals: Vec<LocalBranch>,
@@ -204,26 +193,26 @@ pub struct Catalog {
     pub remote_names: Vec<String>,
     /// Each remote's default branch, as its `<remote>/HEAD` names it: `origin/main`.
     pub remote_defaults: Vec<String>,
+    /// Each branch checked out, or being rebased or bisected, by the worktree it's in.
     pub occupied: HashMap<String, PathBuf>,
     pub current: Option<String>,
     pub head: Option<Oid>,
     pub has_working_tree: bool,
-    /// Every worktree, the main one first. Not the main one of a bare repository.
+    /// The main one first; not a bare repository's.
     pub worktrees: Vec<Worktree>,
     /// The main worktree's folder (a bare repository's git dir).
     pub main: PathBuf,
     /// The open worktree's folder.
     pub root: PathBuf,
-    /// The open worktree's conflicted (unmerged) files.
+    /// In the open worktree.
     pub conflicted: Vec<String>,
     /// The stash entry parterre set the open worktree's changes aside in before the revert in
     /// progress there, such as `stash@{0}`.
     pub stashed_for_revert: Option<String>,
     auto_setup_rebase: bool,
-    roots: Vec<(String, Oid)>,
-    heads: Vec<(PathBuf, Oid)>,
-    /// Every worktree's use of a branch: checked out, or being rebased or bisected there.
-    /// Unlike `occupied`, a branch checked out in two worktrees is in it twice.
+    ref_tips: Vec<(String, Oid)>,
+    worktree_heads: Vec<(PathBuf, Oid)>,
+    /// Like `occupied`, but a branch checked out in two worktrees is in it twice.
     uses: Vec<(String, PathBuf)>,
 }
 
@@ -245,14 +234,34 @@ fn config_and_conflicts(
     })
 }
 
+/// Each worktree's administrative folder, by the worktree's folder: the common git dir for the
+/// main one at `main`, `worktrees/<name>` in it for each linked one.
+fn admin_folders(common_dir: &Path, main: &Path) -> Result<Vec<(PathBuf, PathBuf)>, Error> {
+    let mut admins = vec![(main.to_owned(), common_dir.to_owned())];
+    let linked = common_dir.join("worktrees");
+    let entries = match std::fs::read_dir(&linked) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(admins),
+        Err(e) => return Err(io_error(&linked, e)),
+    };
+    for entry in entries {
+        let dir = entry.map_err(|e| io_error(&linked, e))?.path();
+        let backlink = dir.join("gitdir");
+        let text = std::fs::read_to_string(&backlink).map_err(|e| io_error(&backlink, e))?;
+        if let Some(folder) = dir.join(text.trim()).parent() {
+            admins.push((folder.to_owned(), dir));
+        }
+    }
+    Ok(admins)
+}
+
 impl Catalog {
-    /// Reads the catalogue from git, for an operation to check what it does against.
+    /// Reads the catalogue from git, for an operation to check against.
     pub fn load(path: &Path) -> Result<Self, Error> {
         let location = Git::new(path).location()?;
         let git = Git::new(location.root());
         let has_working_tree = location.work_tree.is_some();
-        // The listings at once rather than one after the other: each is a git start, which on
-        // Windows is most of what it costs (#309).
+        // At once: each is a git start, which on Windows is most of what it costs (#309).
         let (listing, (config, conflicted)) = std::thread::scope(|s| {
             let rest = s.spawn(|| config_and_conflicts(&git, has_working_tree));
             (git.list(location), rest.join().expect("config read"))
@@ -260,8 +269,8 @@ impl Catalog {
         Self::build(&git, &listing?, config?, conflicted?)
     }
 
-    /// The catalogue of the graph's snapshot `repo`: its refs, worktrees and HEAD, as the
-    /// graph shows them, with the settings and conflicted files git is asked for (#310).
+    /// The catalogue of the graph's snapshot `repo`, with the settings and conflicted files git
+    /// is asked for (#310).
     pub fn of(repo: &Repo) -> Result<Self, Error> {
         let git = Git::new(&repo.path);
         let (config, conflicted) = config_and_conflicts(&git, repo.has_working_tree);
@@ -280,8 +289,7 @@ impl Catalog {
         }
         let location = &listing.location;
         let root = location.root().to_owned();
-        let has_working_tree = location.work_tree.is_some();
-        let conflicted: Vec<String> = conflicted
+        let conflicted = conflicted
             .split('\0')
             .filter(|p| !p.is_empty())
             .map(str::to_owned)
@@ -293,10 +301,6 @@ impl Catalog {
         let mut remote_names = config.remotes();
         // A remote may itself contain '/', so match the longest configured prefix.
         remote_names.sort_by_key(|r| std::cmp::Reverse(r.len()));
-        let mut locals = Vec::new();
-        let mut remotes = Vec::new();
-        let mut roots = Vec::new();
-        // `origin/HEAD` names the remote's default branch.
         let remote_defaults = listing
             .symrefs
             .iter()
@@ -304,6 +308,7 @@ impl Catalog {
             .filter_map(|(_, target)| target.strip_prefix("refs/remotes/"))
             .map(str::to_owned)
             .collect();
+        let (mut locals, mut remotes, mut ref_tips) = (Vec::new(), Vec::new(), Vec::new());
         for r in &listing.refs {
             let name = r.full_name.as_str();
             let tip = r.commit;
@@ -328,49 +333,30 @@ impl Catalog {
             } else if !name.starts_with("refs/tags/") {
                 continue;
             }
-            roots.push((name.to_owned(), tip));
+            ref_tips.push((name.to_owned(), tip));
         }
         locals.sort_by(|a, b| a.name.cmp(&b.name));
         remotes.sort_by(|a, b| a.name.cmp(&b.name));
-        let mut occupied = HashMap::new();
-        let mut uses = Vec::new();
-        let main_place = listing
+        let main_folder = listing
             .worktrees
             .first()
             .map(|w| PathBuf::from(&w.path))
             .unwrap_or_else(|| root.clone());
-        let common = &location.common_dir;
-        // Each linked worktree's administrative folder, by the worktree's own folder.
-        let mut admins = vec![(main_place.clone(), common.clone())];
-        let linked = common.join("worktrees");
-        match std::fs::read_dir(&linked) {
-            Ok(entries) => {
-                for entry in entries {
-                    let dir = entry.map_err(|e| io_error(&linked, e))?.path();
-                    let backlink = dir.join("gitdir");
-                    let text =
-                        std::fs::read_to_string(&backlink).map_err(|e| io_error(&backlink, e))?;
-                    let path = dir.join(text.trim());
-                    if let Some(p) = path.parent() {
-                        admins.push((p.to_owned(), dir));
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io_error(&linked, e)),
-        }
-        let reftable = common.join("reftable").is_dir();
+        let admins = admin_folders(&location.common_dir, &main_folder)?;
+        let reftable = location.common_dir.join("reftable").is_dir();
         let current = listing
             .head_branch
             .as_deref()
             .map(|b| b.trim_start_matches("refs/heads/").to_owned());
+        let mut occupied = HashMap::new();
+        let mut uses = Vec::new();
         let mut worktrees = Vec::new();
-        let mut heads = Vec::new();
+        let mut worktree_heads = Vec::new();
         for listed in &listing.worktrees {
             let path = PathBuf::from(&listed.path);
             let head = listed.head;
             if let Some(head) = head {
-                heads.push((path.clone(), head));
+                worktree_heads.push((path.clone(), head));
             }
             let branch = listed
                 .branch
@@ -384,44 +370,33 @@ impl Catalog {
             if listed.bare {
                 continue;
             }
-            let locked = listed.locked.clone();
             let admin = admins
                 .iter()
-                .find(|(p, _)| crate::worktree_folder::same_path(p, &path))
-                .map(|(_, a)| a.clone());
-            let in_progress = match &admin {
-                Some(admin) => in_progress(admin, reftable),
-                None => None,
-            };
-            let rebasing = admin.as_deref().and_then(rebasing);
-            let merging = admin.as_deref().and_then(|a| {
-                let text = std::fs::read_to_string(a.join("MERGE_HEAD")).ok()?;
-                Oid::from_hex(text.lines().next()?.trim())
-            });
-            let picking = admin
-                .as_deref()
-                .and_then(|a| picking(git, a, reftable, head));
-            let reverting = admin
-                .as_deref()
-                .filter(|_| in_progress == Some("a revert"))
-                .and_then(|a| pseudo_ref(a, reftable, "REVERT_HEAD"));
+                .find(|(folder, _)| same_path(folder, &path))
+                .map(|(_, admin)| admin.as_path());
+            let in_progress = admin.and_then(|a| in_progress(a, reftable));
             worktrees.push(Worktree {
-                main: path == main_place,
-                open: crate::worktree_folder::same_path(&path, &root),
+                main: path == main_folder,
+                open: same_path(&path, &root),
                 missing: !path.is_dir(),
+                rebasing: admin.and_then(rebasing),
+                merging: admin.and_then(|a| {
+                    let text = std::fs::read_to_string(a.join("MERGE_HEAD")).ok()?;
+                    Oid::from_hex(text.lines().next()?.trim())
+                }),
+                picking: admin.and_then(|a| picking(git, a, reftable, head)),
+                reverting: admin
+                    .filter(|_| in_progress == Some("a revert"))
+                    .and_then(|a| pseudo_ref(a, reftable, "REVERT_HEAD")),
+                in_progress,
+                locked: listed.locked.clone(),
                 path,
                 head,
                 branch,
-                locked,
-                in_progress,
-                rebasing,
-                merging,
-                picking,
-                reverting,
             });
         }
-        for (place, admin) in &admins {
-            reservations(admin, place, &mut occupied, &mut uses)?;
+        for (folder, admin) in &admins {
+            reserve_rebased_and_bisected(admin, folder, &mut occupied, &mut uses)?;
         }
         let stashed_for_revert = worktrees
             .iter()
@@ -436,22 +411,21 @@ impl Catalog {
             occupied,
             current,
             head: listing.head,
-            has_working_tree,
+            has_working_tree: location.work_tree.is_some(),
             worktrees,
-            main: main_place,
+            main: main_folder,
             root,
             conflicted,
             stashed_for_revert,
             auto_setup_rebase,
-            roots,
-            heads,
+            ref_tips,
+            worktree_heads,
             uses,
         })
     }
 
-    /// Why the open worktree is stuck, if it is: an operation in progress, or conflicted files.
-    /// Until that's sorted out with git, nothing that changes that worktree's HEAD, index or
-    /// files is offered.
+    /// Why the open worktree is stuck, if it is. Until that's sorted out with git, nothing that
+    /// changes its HEAD, index or files is offered.
     pub fn stuck(&self) -> Option<Stuck> {
         let in_progress = self
             .worktrees
@@ -465,13 +439,30 @@ impl Catalog {
         }
     }
 
+    /// Fails unless the open worktree still has `branch` checked out at `head`, and isn't
+    /// stuck.
+    pub(crate) fn check_unmoved(&self, branch: &str, head: Oid) -> Result<(), Error> {
+        if !self.has_working_tree
+            || self.current.as_deref() != Some(branch)
+            || self.head != Some(head)
+        {
+            return Err(Error::Invalid(format!(
+                "Branch {branch} moved, or is no longer checked out here. Reload and try again."
+            )));
+        }
+        if let Some(stuck) = self.stuck() {
+            return Err(Error::Invalid(format!("{}.", stuck.reason())));
+        }
+        Ok(())
+    }
+
     /// A worktree other than the open one that has branch `name` checked out, or is rebasing
     /// or bisecting it. Git 2.34 moves such a branch without a word, leaving that worktree's
     /// index stale, and `git reset` never checks other worktrees in any version.
     pub fn in_use_elsewhere(&self, name: &str) -> Option<&Path> {
         self.uses
             .iter()
-            .find(|(n, p)| n == name && !crate::worktree_folder::same_path(p, &self.root))
+            .find(|(n, p)| n == name && !same_path(p, &self.root))
             .map(|(_, p)| p.as_path())
     }
 
@@ -514,7 +505,7 @@ impl Catalog {
         (2..)
             .map(|n| format!("{base}-{n}"))
             .find(|n| self.name_error(n).is_none())
-            .unwrap()
+            .expect("some numbered name is free")
     }
 
     pub fn name_error(&self, name: &str) -> Option<&'static str> {
@@ -564,13 +555,7 @@ fn in_progress(admin: &Path, reftable: bool) -> Option<&'static str> {
         return Some("a merge");
     }
     let pseudo = |name: &str| {
-        admin.join(name).is_file()
-            || reftable
-                && Git::new(admin)
-                    .query(&["--git-dir=.", "rev-parse", "--verify", "--quiet", name])
-                    .ok()
-                    .flatten()
-                    .is_some()
+        admin.join(name).is_file() || reftable && reftable_pseudo_ref(admin, name).is_some()
     };
     if pseudo("CHERRY_PICK_HEAD") {
         return Some("a cherry-pick");
@@ -587,8 +572,8 @@ fn in_progress(admin: &Path, reftable: bool) -> Option<&'static str> {
     None
 }
 
-fn reservations(
-    dir: &Path,
+fn reserve_rebased_and_bisected(
+    admin: &Path,
     worktree: &Path,
     occupied: &mut HashMap<String, PathBuf>,
     uses: &mut Vec<(String, PathBuf)>,
@@ -598,7 +583,7 @@ fn reservations(
         "rebase-apply/head-name",
         "BISECT_START",
     ] {
-        let path = dir.join(name);
+        let path = admin.join(name);
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let name = text.trim().trim_start_matches("refs/heads/");
@@ -646,7 +631,8 @@ pub(crate) fn io_error(path: &Path, source: std::io::Error) -> Error {
 pub struct Create {
     pub start: Oid,
     pub name: String,
-    /// Empty/None means no upstream; otherwise a configured remote followed by a branch.
+    /// A configured remote followed by a branch, `origin/topic`; none or empty for no
+    /// upstream.
     pub track: Option<String>,
     pub switch: bool,
 }
@@ -787,18 +773,20 @@ impl CreateDraft {
 /// What a new worktree checks out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Checkout {
-    /// A new branch at the start commit, with an optional upstream as in [`Create::track`].
-    New { name: String, track: Option<String> },
-    /// An existing local branch that no worktree has, whose tip is the start commit.
+    /// A new branch at the start commit, with an upstream as in [`Create::track`].
+    New {
+        name: String,
+        track: Option<String>,
+    },
+    /// A local branch no worktree has, whose tip is the start commit.
     Existing(String),
-    /// The start commit, detached.
     Detached,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddWorktree {
     pub start: Oid,
-    /// The new worktree's folder: absolute, and empty or not there yet.
+    /// Absolute, and empty or not there yet.
     pub path: PathBuf,
     pub checkout: Checkout,
 }
@@ -814,47 +802,36 @@ pub struct BranchTip {
 pub enum Action {
     Create(Create),
     Switch(String),
-    /// Switches the open worktree to a commit, detached.
     Detach(Oid),
-    /// Deletes local branches, each still at the tip it was offered at.
     DeleteBranches(Vec<BranchTip>),
     AddWorktree(AddWorktree),
-    /// Removes other worktrees from git and deletes their folders, one by one, and then, when
-    /// `branches` is set, the local branches they had.
+    /// Removes other worktrees from git and deletes their folders, one by one, and then, with
+    /// `branches`, the local branches they had.
     DeleteWorktrees {
         paths: Vec<PathBuf>,
         branches: bool,
     },
-    /// Moves the open worktree's branch, with what the user agreed to lose.
     Reset(Box<crate::reset::Reset>),
-    /// Replays the open worktree's branch onto another commit.
     Rebase(Box<crate::rebase::Rebase>),
-    /// Merges another commit into the open worktree's branch.
     Merge(Box<crate::merge::Merge>),
-    /// Cherry-picks commits onto the open worktree's branch.
     CherryPick(Box<crate::cherry_pick::CherryPick>),
-    /// Reverts a commit on the open worktree's branch, with a new commit at its tip.
     Revert(Box<crate::revert::Revert>),
-    /// Puts back the changes parterre stashed before an operation, and drops the entry.
+    /// Puts back the changes parterre stashed before an operation, by the entry's commit, and
+    /// drops the entry.
     RestoreStash(Oid),
-    /// Finishes a conflicted file in the open worktree with one git command.
     Resolve(Box<crate::conflicts::Resolve>),
-    /// Fetches every remote, pruning what's gone from them.
     Fetch,
-    /// Pulls into the open worktree's branch.
     Pull(Box<crate::remote::Pull>),
-    /// Pushes a local branch to its own name on a remote.
     Push(Box<crate::remote::Push>),
-    /// Sets a local branch's upstream.
     SetUpstream(Box<crate::remote::SetUpstream>),
-    /// Deletes branches on their remotes, each still at the tip it was offered at.
     DeleteRemoteBranches(Vec<crate::remote::RemoteBranchTip>),
-    /// Clones a repository into a new folder: no repository need be open.
+    /// No repository need be open.
     Clone(Box<crate::clone::Cloning>),
 }
 
 impl Action {
     pub fn label(&self) -> String {
+        let short = |oid: &Oid| oid.short(DEFAULT_ABBREV_LEN);
         match self {
             Self::Create(c) => {
                 if c.switch {
@@ -864,17 +841,17 @@ impl Action {
                 }
             }
             Self::Switch(b) => format!("Switch to {b}"),
-            Self::Detach(oid) => format!("Switch to {} (detached)", short(*oid)),
+            Self::Detach(oid) => format!("Switch to {} (detached)", short(oid)),
             Self::DeleteBranches(branches) => match branches.as_slice() {
                 [one] => format!("Delete branch {}", one.name),
                 branches => format!("Delete {} local branches", branches.len()),
             },
-            Self::AddWorktree(a) => format!("Add worktree {}", folder(&a.path)),
+            Self::AddWorktree(a) => format!("Add worktree {}", folder_name(&a.path)),
             Self::DeleteWorktrees { paths, .. } => match paths.as_slice() {
-                [path] => format!("Delete worktree {}", folder(path)),
+                [path] => format!("Delete worktree {}", folder_name(path)),
                 paths => format!("Delete {} worktrees", paths.len()),
             },
-            Self::Reset(r) => format!("Reset {} to {}", r.branch, short(r.target)),
+            Self::Reset(r) => format!("Reset {} to {}", r.branch, short(&r.target)),
             Self::Rebase(r) => format!(
                 "Rebase {} onto {}",
                 r.branch,
@@ -882,7 +859,7 @@ impl Action {
             ),
             Self::Merge(m) => format!("Merge {} into {}", crate::merge::short_target(m), m.branch),
             Self::CherryPick(c) => format!("Cherry-pick {} onto {}", c.name, c.branch),
-            Self::Revert(r) => format!("Revert {} in {}", short(r.commit), r.name()),
+            Self::Revert(r) => format!("Revert {} in {}", short(&r.commit), r.name()),
             Self::RestoreStash(_) => "Restore stashed changes".into(),
             Self::Resolve(r) => r.label(),
             Self::Fetch => "Fetch".into(),
@@ -911,11 +888,7 @@ impl Action {
     }
 }
 
-fn short(oid: Oid) -> String {
-    oid.to_hex()[..7].to_owned()
-}
-
-fn folder(path: &Path) -> String {
+fn folder_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
@@ -933,12 +906,19 @@ pub enum Error {
     Cancelled,
 }
 
-use parterre_util::CancelTree;
+impl From<StartError> for Error {
+    fn from(error: StartError) -> Self {
+        match error {
+            StartError::Cancelled => Error::Cancelled,
+            StartError::Spawn(e) => GitError::Spawn(e).into(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Report {
     pub steps: Vec<Step>,
-    /// Done, but with something the user must see to: shown in orange until closed.
+    /// Done, but with something the user must see to.
     pub attention: Option<Attention>,
     /// The entry parterre stashed the changes in for the operation, left for the user to
     /// restore.
@@ -949,6 +929,15 @@ pub struct Report {
     pub suggest_fetch: bool,
 }
 
+impl Report {
+    pub(crate) fn last_output(&self) -> String {
+        self.steps
+            .last()
+            .map(|s| s.output.clone())
+            .unwrap_or_default()
+    }
+}
+
 /// A stash entry parterre made, by its commit: other worktrees and sessions share the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stashed {
@@ -956,7 +945,7 @@ pub struct Stashed {
     /// Its name when it was made, such as `stash@{0}`, for the command shown. It's found by
     /// its commit when restored.
     pub name: String,
-    /// The files in it, by path in the worktree.
+    /// By path in the worktree.
     pub files: Vec<String>,
 }
 
@@ -964,6 +953,24 @@ pub struct Stashed {
 pub struct Attention {
     pub title: String,
     pub message: String,
+}
+
+impl Attention {
+    /// `operation` stopped, and is in progress: "Rebase stopped on conflicts in 2 files".
+    pub(crate) fn stopped(operation: &str, conflicted: usize) -> Attention {
+        Attention {
+            title: match conflicted {
+                0 => format!("{operation} stopped"),
+                n => format!("{operation} stopped on conflicts in {}", plural(n, "file")),
+            },
+            message: "Finish or abort it with git, or go to another worktree.".into(),
+        }
+    }
+}
+
+/// `1 file`, `2 files`.
+pub(crate) fn plural(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
 }
 
 #[derive(Clone, Debug)]
@@ -983,8 +990,7 @@ pub struct Warning {
     pub commits: Vec<Oid>,
     /// A force push's: the remote's commits it replaces with copies the branch has.
     pub replaced: Vec<Oid>,
-    /// Each branch or worktree the action deletes, in its order, with what it loses. Empty for
-    /// a switch.
+    /// Each branch or worktree the action deletes, in its order. Empty for a switch.
     pub deletions: Vec<Deletion>,
     /// The graph to show the commits in, loaded with them. None when the graph on screen has
     /// them: a worktree's are reachable from its HEAD, which the graph loads (#354).
@@ -1007,7 +1013,6 @@ impl Warning {
                 .all(|d| d.files.is_empty() && d.refusal.is_none())
     }
 
-    /// Whether deleting worktrees also deletes their branches.
     pub fn deletes_branches(&self) -> bool {
         matches!(self.action, Action::DeleteWorktrees { branches: true, .. })
     }
@@ -1042,6 +1047,19 @@ pub struct Deletion {
 }
 
 impl Deletion {
+    /// A local or remote branch's, at `tip`.
+    pub(crate) fn of_branch(name: String, tip: Oid, commits: Vec<Oid>) -> Deletion {
+        Deletion {
+            name,
+            path: None,
+            commits,
+            files: Vec::new(),
+            refusal: None,
+            branch: None,
+            head: Some(tip),
+        }
+    }
+
     /// The same loss, whatever git said before.
     fn same_loss(&self, other: &Self) -> bool {
         self.head == other.head
@@ -1060,15 +1078,18 @@ pub struct WorktreeBranch {
     pub commits: Vec<Oid>,
 }
 
-/// Approved deletions, as loaded again just before running them.
+/// The `approved` deletions, as loaded again just before running them.
 pub(crate) fn same_losses(approved: &[Deletion], now: &[Deletion]) -> bool {
     approved.len() == now.len() && approved.iter().zip(now).all(|(a, b)| a.same_loss(b))
 }
 
 /// Every commit the deletions lose, once.
 pub(crate) fn all_commits(deletions: &[Deletion]) -> Vec<Oid> {
-    let mut commits: Vec<Oid> = deletions.iter().flat_map(|d| d.commits.clone()).collect();
-    commits.sort_by_key(|o| o.to_hex());
+    let mut commits: Vec<Oid> = deletions
+        .iter()
+        .flat_map(|d| d.commits.iter().copied())
+        .collect();
+    commits.sort_unstable();
     commits.dedup();
     commits
 }
@@ -1100,15 +1121,14 @@ impl Branches {
         }
     }
 
-    /// The network commands (fetch, pull, push) stream their output to `live`.
     pub fn with_live(mut self, live: crate::remote::Live) -> Self {
         self.live = Some(live);
         self
     }
 
-    /// Commands shown by the form. Execution freezes its start by full OID and validates again.
+    /// The commands the form shows. Execution freezes the start by full id and validates
+    /// again.
     pub fn commands(catalog: &Catalog, action: &Action) -> Result<Vec<Vec<String>>, Error> {
-        let words = |s: &[&str]| s.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         match action {
             Action::Create(c) => {
                 if let Some(error) = catalog.name_error(&c.name) {
@@ -1116,9 +1136,9 @@ impl Branches {
                 }
                 let start = c.start.to_hex();
                 let create = if c.switch {
-                    words(&["switch", "--create", &c.name, "--no-track", &start])
+                    git_args(&["switch", "--create", &c.name, "--no-track", &start])
                 } else {
-                    words(&["branch", "--no-track", "--", &c.name, &start])
+                    git_args(&["branch", "--no-track", "--", &c.name, &start])
                 };
                 let mut commands = vec![create];
                 commands.extend(track_commands(catalog, &c.name, c.track.as_deref())?);
@@ -1135,7 +1155,7 @@ impl Branches {
                         if let Some(error) = catalog.name_error(name) {
                             return Err(Error::Invalid(error.into()));
                         }
-                        let mut commands = vec![words(&[
+                        let mut commands = vec![git_args(&[
                             "worktree",
                             "add",
                             "--no-track",
@@ -1149,38 +1169,42 @@ impl Branches {
                         commands
                     }
                     Checkout::Existing(name) => {
-                        vec![words(&["worktree", "add", "--", &path, name])]
+                        vec![git_args(&["worktree", "add", "--", &path, name])]
                     }
                     Checkout::Detached => {
-                        vec![words(&["worktree", "add", "--detach", "--", &path, &start])]
+                        vec![git_args(&[
+                            "worktree", "add", "--detach", "--", &path, &start,
+                        ])]
                     }
                 })
             }
             Action::DeleteWorktrees { paths, branches } => {
-                let mut commands: Vec<_> = paths.iter().map(|p| remove(p, false)).collect();
+                let mut commands: Vec<_> = paths
+                    .iter()
+                    .map(|p| worktree_remove_command(p, false))
+                    .collect();
                 let names: Vec<String> = find_worktrees(catalog, paths)?
                     .into_iter()
                     .filter_map(|w| worktree_branch(catalog, w))
                     .map(|b| b.name)
                     .collect();
                 if *branches && !names.is_empty() {
-                    commands.push(delete_command("-d", names));
+                    commands.push(branch_delete_command("-d", names));
                 }
                 Ok(commands)
             }
-            Action::Detach(oid) => Ok(vec![words(&["switch", "--detach", &oid.to_hex()])]),
-            Action::Switch(name) => Ok(vec![words(&["switch", "--no-guess", "--", name])]),
-            Action::DeleteBranches(branches) => {
-                let mut force = words(&["branch", "-D", "--"]);
-                force.extend(branches.iter().map(|b| b.name.clone()));
-                Ok(vec![force])
-            }
+            Action::Detach(oid) => Ok(vec![git_args(&["switch", "--detach", &oid.to_hex()])]),
+            Action::Switch(name) => Ok(vec![git_args(&["switch", "--no-guess", "--", name])]),
+            Action::DeleteBranches(branches) => Ok(vec![branch_delete_command(
+                "-D",
+                branches.iter().map(|b| b.name.clone()),
+            )]),
             Action::Reset(r) => Ok(vec![crate::reset::command(r.mode, r.target)]),
             Action::Rebase(r) => Ok(vec![crate::rebase::command(r)]),
             Action::Merge(m) => Ok(crate::merge::commands(m)),
             Action::CherryPick(c) => Ok(crate::cherry_pick::commands(c)),
             Action::Revert(r) => Ok(crate::revert::commands(r)),
-            Action::RestoreStash(_) => Ok(vec![words(&["stash", "pop"])]),
+            Action::RestoreStash(_) => Ok(vec![git_args(&["stash", "pop"])]),
             Action::Resolve(r) => Ok(r.conflict.commands(r.answer)),
             Action::Fetch => Ok(vec![crate::remote::fetch_command()]),
             Action::Pull(p) => Ok(vec![crate::remote::pull_command(p.how)]),
@@ -1201,148 +1225,157 @@ impl Branches {
         cancel: &CancelTree,
     ) -> Outcome {
         let mut report = Report::default();
-        // Into a folder of its own: nothing here is a repository yet.
-        if let Action::Clone(cloning) = &action {
-            return match crate::clone::execute(cloning, cancel, &mut report, self.live.as_ref()) {
-                Ok(()) => Outcome::Done(report),
-                Err(error) => Outcome::Failed { error, report },
-            };
+        let live = self.live.as_ref();
+        match &action {
+            // Into a folder of its own: nothing here is a repository yet.
+            Action::Clone(cloning) => {
+                return match crate::clone::execute(cloning, cancel, &mut report, live) {
+                    Ok(()) => Outcome::Done(report),
+                    Err(error) => Outcome::Failed { error, report },
+                };
+            }
+            Action::Pull(pull) => {
+                let pulled = Catalog::load(&self.path).and_then(|catalog| {
+                    crate::remote::pull(&catalog, pull, cancel, &mut report, live)
+                });
+                return match pulled {
+                    Ok(Some(diverged)) => Outcome::Diverged(Box::new(diverged)),
+                    Ok(None) => Outcome::Done(report),
+                    Err(error) => Outcome::Failed { error, report },
+                };
+            }
+            _ => {}
         }
-        if let Action::Pull(pull) = &action {
-            let pulled = Catalog::load(&self.path).and_then(|catalog| {
-                crate::remote::pull(&catalog, pull, cancel, &mut report, self.live.as_ref())
-            });
-            return match pulled {
-                Ok(Some(diverged)) => Outcome::Diverged(Box::new(diverged)),
-                Ok(None) => Outcome::Done(report),
-                Err(error) => Outcome::Failed { error, report },
-            };
-        }
-        let requested = action.clone();
-        match self.execute_inner(action, approval, cancel, &mut report) {
+        match self.execute_inner(&action, approval, cancel, &mut report) {
             Ok(Some(mut warning)) => {
                 warning.changed = !report.steps.is_empty();
                 Outcome::Warning(warning)
             }
             Ok(None) => Outcome::Done(report),
             Err(error) => {
-                let error = if let Action::Create(c) = &requested
-                    && !report.steps.is_empty()
-                    && Git::new(&self.path)
-                        .query(&["rev-parse", "--verify", &format!("refs/heads/{}", c.name)])
-                        .ok()
-                        .flatten()
-                        .is_some_and(|tip| tip == c.start.to_hex())
-                {
-                    let checked_out = Git::new(&self.path)
-                        .query(&["symbolic-ref", "--quiet", "HEAD"])
-                        .ok()
-                        .flatten()
-                        .is_some_and(|head| head == format!("refs/heads/{}", c.name));
-                    let detail = if report.steps.first().is_some_and(|s| s.success) {
-                        format!("Configuring its upstream did not finish: {error}")
-                    } else {
-                        error.to_string()
-                    };
-                    Error::Failed(format!(
-                        "Branch {} now exists{}. {detail}",
-                        c.name,
-                        if checked_out {
-                            " and is checked out"
-                        } else {
-                            ""
-                        }
-                    ))
-                } else if let Action::AddWorktree(a) = &requested
-                    && report.steps.len() > 1
-                    && report.steps.first().is_some_and(|s| s.success)
-                {
-                    Error::Failed(format!(
-                        "Worktree {} was added. Configuring its branch's upstream did not finish: {error}",
-                        folder(&a.path)
-                    ))
-                } else {
-                    error
-                };
+                let error = self.partly_done(&action, &report, error);
                 Outcome::Failed { error, report }
             }
         }
     }
 
+    /// `error`, saying what the steps before it did: a branch created, or a worktree added,
+    /// whose upstream wasn't configured.
+    fn partly_done(&self, action: &Action, report: &Report, error: Error) -> Error {
+        let git = Git::new(&self.path);
+        let first_succeeded = report.steps.first().is_some_and(|s| s.success);
+        let created = |c: &Create| {
+            git.query(&["rev-parse", "--verify", &format!("refs/heads/{}", c.name)])
+                .ok()
+                .flatten()
+                .is_some_and(|tip| tip == c.start.to_hex())
+        };
+        match action {
+            Action::Create(c) if !report.steps.is_empty() && created(c) => {
+                let checked_out = git
+                    .query(&["symbolic-ref", "--quiet", "HEAD"])
+                    .ok()
+                    .flatten()
+                    .is_some_and(|head| head == format!("refs/heads/{}", c.name));
+                let detail = if first_succeeded {
+                    format!("Configuring its upstream did not finish: {error}")
+                } else {
+                    error.to_string()
+                };
+                Error::Failed(format!(
+                    "Branch {} now exists{}. {detail}",
+                    c.name,
+                    if checked_out {
+                        " and is checked out"
+                    } else {
+                        ""
+                    }
+                ))
+            }
+            Action::AddWorktree(a) if report.steps.len() > 1 && first_succeeded => {
+                Error::Failed(format!(
+                    "Worktree {} was added. Configuring its branch's upstream did not finish: {error}",
+                    folder_name(&a.path)
+                ))
+            }
+            _ => error,
+        }
+    }
+
     fn execute_inner(
         &self,
-        action: Action,
+        action: &Action,
+        approval: Option<&Warning>,
+        cancel: &CancelTree,
+        report: &mut Report,
+    ) -> Result<Option<Warning>, Error> {
+        let catalog = Catalog::load(&self.path)?;
+        let live = self.live.as_ref();
+        match action {
+            Action::Create(_) | Action::Switch(_) | Action::Detach(_) | Action::AddWorktree(_) => {
+                self.check_out(&catalog, action, approval, cancel, report)
+            }
+            Action::DeleteBranches(branches) => {
+                let approved = |head: Option<Oid>, commits: &[Oid]| {
+                    commits.is_empty()
+                        || approval.is_some_and(|w| {
+                            w.action == *action && w.head == head && w.commits == commits
+                        })
+                };
+                self.delete_branches(&catalog, branches, &approved, cancel, report)
+            }
+            Action::DeleteWorktrees { paths, branches } => {
+                self.delete_worktrees(&catalog, paths, *branches, approval, cancel, report)
+            }
+            Action::Reset(reset) => {
+                crate::reset::execute(&catalog, reset, cancel, report).map(|()| None)
+            }
+            Action::Rebase(rebase) => {
+                crate::rebase::execute(&catalog, rebase, cancel, report).map(|()| None)
+            }
+            Action::Merge(merge) => {
+                crate::merge::execute(&catalog, merge, cancel, report).map(|()| None)
+            }
+            Action::CherryPick(pick) => {
+                crate::cherry_pick::execute(&catalog, pick, cancel, report).map(|()| None)
+            }
+            Action::Revert(revert) => {
+                crate::revert::execute(&catalog, revert, cancel, report).map(|()| None)
+            }
+            Action::RestoreStash(stash) => {
+                crate::revert::restore(&catalog, *stash, cancel, report).map(|()| None)
+            }
+            Action::Resolve(resolve) => {
+                crate::conflicts::execute(&catalog, resolve, cancel, report).map(|()| None)
+            }
+            Action::Fetch => crate::remote::fetch(&catalog, cancel, report, live).map(|()| None),
+            Action::Push(push) => {
+                crate::remote::push(&catalog, action, push, approval, cancel, report, live)
+            }
+            Action::SetUpstream(set) => {
+                crate::remote::set_upstream(&catalog, set, cancel, report).map(|()| None)
+            }
+            Action::DeleteRemoteBranches(branches) => crate::remote::delete_remote_branches(
+                &catalog, action, branches, approval, cancel, report, live,
+            ),
+            Action::Pull(_) | Action::Clone(_) => unreachable!("run by Branches::execute"),
+        }
+    }
+
+    /// Creating or switching to a branch, detaching, and adding a worktree. Git's own checks
+    /// keep uncommitted changes; leaving a detached HEAD warns about the commits left behind.
+    fn check_out(
+        &self,
+        catalog: &Catalog,
+        action: &Action,
         approval: Option<&Warning>,
         cancel: &CancelTree,
         report: &mut Report,
     ) -> Result<Option<Warning>, Error> {
         let git = Git::new(&self.path);
-        let catalog = Catalog::load(&self.path)?;
-        if let Action::DeleteBranches(branches) = &action {
-            let approved = |head: Option<Oid>, commits: &[Oid]| {
-                commits.is_empty()
-                    || approval.is_some_and(|w| {
-                        w.action == action && w.head == head && w.commits == commits
-                    })
-            };
-            return self.delete_branches(&catalog, branches, &approved, cancel, report);
-        }
-        if let Action::DeleteWorktrees { paths, branches } = &action {
-            return self.delete_worktrees(&catalog, paths, *branches, approval, cancel, report);
-        }
-        if let Action::Reset(reset) = &action {
-            crate::reset::execute(&catalog, reset, cancel, report)?;
-            return Ok(None);
-        }
-        if let Action::Rebase(rebase) = &action {
-            crate::rebase::execute(&catalog, rebase, cancel, report)?;
-            return Ok(None);
-        }
-        if let Action::Merge(merge) = &action {
-            crate::merge::execute(&catalog, merge, cancel, report)?;
-            return Ok(None);
-        }
-        if let Action::CherryPick(pick) = &action {
-            crate::cherry_pick::execute(&catalog, pick, cancel, report)?;
-            return Ok(None);
-        }
-        if let Action::Revert(revert) = &action {
-            crate::revert::execute(&catalog, revert, cancel, report)?;
-            return Ok(None);
-        }
-        if let Action::RestoreStash(stash) = &action {
-            crate::revert::restore(&catalog, *stash, cancel, report)?;
-            return Ok(None);
-        }
-        if let Action::Resolve(resolve) = &action {
-            crate::conflicts::execute(&catalog, resolve, cancel, report)?;
-            return Ok(None);
-        }
-        let live = self.live.as_ref();
-        match &action {
-            Action::Fetch => {
-                crate::remote::fetch(&catalog, cancel, report, live)?;
-                return Ok(None);
-            }
-            Action::Push(push) => {
-                return crate::remote::push(
-                    &catalog, &action, push, approval, cancel, report, live,
-                );
-            }
-            Action::SetUpstream(set) => {
-                crate::remote::set_upstream(&catalog, set, cancel, report)?;
-                return Ok(None);
-            }
-            Action::DeleteRemoteBranches(branches) => {
-                return crate::remote::delete_remote_branches(
-                    &catalog, &action, branches, approval, cancel, report, live,
-                );
-            }
-            _ => {}
-        }
-        let mut commands = Self::commands(&catalog, &action)?;
+        let commands = Self::commands(catalog, action)?;
         let switching = matches!(
-            &action,
+            action,
             Action::Switch(_) | Action::Detach(_) | Action::Create(Create { switch: true, .. })
         );
         if switching && !catalog.has_working_tree {
@@ -1350,7 +1383,22 @@ impl Branches {
                 "This repository has no working tree to switch.".into(),
             ));
         }
-        match &action {
+        match action {
+            Action::Create(c) => {
+                // Git is the final ref-name authority as well as the namespace collision guard.
+                git.run(&["check-ref-format", &format!("refs/heads/{}", c.name)])?;
+            }
+            Action::Switch(name) => {
+                if !catalog.locals.iter().any(|b| b.name == *name) {
+                    return Err(Error::Invalid(
+                        "The local branch no longer exists. Reload and try again.".into(),
+                    ));
+                }
+                if catalog.current.as_ref() == Some(name) {
+                    return Ok(None);
+                }
+                check_occupied(catalog, name)?;
+            }
             Action::Detach(oid) => {
                 verify_commit(&git, *oid)?;
                 if catalog.current.is_none() && catalog.head == Some(*oid) {
@@ -1381,90 +1429,49 @@ impl Branches {
                                 "Branch {name} moved or no longer exists. Reload and try again."
                             )));
                         }
-                        check_occupied(&catalog, name)?;
+                        check_occupied(catalog, name)?;
                     }
                     Checkout::Detached => {}
                 }
             }
-            Action::DeleteBranches(_)
-            | Action::DeleteWorktrees { .. }
-            | Action::Reset(_)
-            | Action::Rebase(_)
-            | Action::Merge(_)
-            | Action::CherryPick(_)
-            | Action::Revert(_)
-            | Action::RestoreStash(_)
-            | Action::Resolve(_)
-            | Action::Fetch
-            | Action::Pull(_)
-            | Action::Push(_)
-            | Action::SetUpstream(_)
-            | Action::DeleteRemoteBranches(_)
-            | Action::Clone(_) => {
-                unreachable!("handled above")
-            }
-            Action::Switch(name) => {
-                if !catalog.locals.iter().any(|b| b.name == *name) {
-                    return Err(Error::Invalid(
-                        "The local branch no longer exists. Reload and try again.".into(),
-                    ));
-                }
-                if catalog.current.as_ref() == Some(name) {
-                    return Ok(None);
-                }
-                check_occupied(&catalog, name)?;
-            }
-            Action::Create(c) => {
-                // Git is the final ref-name authority as well as the namespace collision guard.
-                git.run(&["check-ref-format", &format!("refs/heads/{}", c.name)])?;
-            }
+            _ => unreachable!("not a checkout: {action:?}"),
         }
-        // Leaving a detached HEAD.
-        let start = catalog
+        let leaving_detached = catalog
             .head
             .filter(|_| switching && catalog.current.is_none());
-        if let Some(start) = start {
-            let future_root = match &action {
+        if let Some(start) = leaving_detached {
+            let head_after = match action {
                 Action::Create(c) => Some(c.start),
                 Action::Detach(oid) => Some(*oid),
                 _ => None,
             };
             let commits = lost_commits(
                 &git,
-                &catalog,
+                catalog,
                 start,
                 &[],
                 &[catalog.root.as_path()],
-                future_root,
+                head_after,
             )?;
             if !commits.is_empty()
                 && !approval.is_some_and(|w| {
-                    w.action == action && w.head == catalog.head && w.commits == commits
+                    w.action == *action && w.head == catalog.head && w.commits == commits
                 })
             {
-                let repo = Arc::new(git.load()?);
-                if commits.iter().any(|oid| repo.lookup(oid).is_none()) {
-                    return Err(Error::Invalid(
-                        "The repository changed while checking lost commits. Reload and try again."
-                            .into(),
-                    ));
-                }
                 return Ok(Some(Warning {
-                    action,
+                    action: action.clone(),
+                    repo: Some(graph_with(&git, &commits)?),
                     commits,
                     replaced: Vec::new(),
                     deletions: Vec::new(),
                     head: catalog.head,
-                    repo: Some(repo),
                     changed: false,
-                    commands: commands.clone(),
+                    commands,
                 }));
             }
         }
-        for args in commands.drain(..) {
-            if !run(&git, args, cancel, report)? {
-                return Err(Error::Failed(report.steps.last().unwrap().output.clone()));
-            }
+        for args in commands {
+            run_or_fail(&git, args, cancel, report)?;
         }
         Ok(None)
     }
@@ -1490,11 +1497,11 @@ impl Branches {
             let action = Action::DeleteBranches(branches.to_vec());
             return branch_warning(&git, action, catalog.head, deletions, commits);
         }
-        let safe = delete_command("-d", branches.iter().map(|b| b.name.clone()));
+        let safe = branch_delete_command("-d", branches.iter().map(|b| b.name.clone()));
         if run(&git, safe, cancel, report)? {
             return Ok(None);
         }
-        let output = report.steps.last().unwrap().output.clone();
+        let refusal = report.last_output();
         // A refusal on a merged branch is unrelated to commit loss (e.g. a lock or
         // permissions). Check Git's merge predicate instead of parsing its stderr.
         let refreshed = Catalog::load(&self.path)?;
@@ -1504,7 +1511,7 @@ impl Branches {
             .cloned()
             .collect();
         if left.is_empty() {
-            return Err(Error::Failed(output));
+            return Err(Error::Failed(refusal));
         }
         check_branches(&refreshed, &left)?;
         for b in &left {
@@ -1518,18 +1525,10 @@ impl Branches {
                 .transpose()?
                 .or(refreshed.head);
             let Some(into) = merged_into else {
-                return Err(Error::Failed(output));
+                return Err(Error::Failed(refusal));
             };
-            if git
-                .query(&[
-                    "merge-base",
-                    "--is-ancestor",
-                    &b.tip.to_hex(),
-                    &into.to_hex(),
-                ])?
-                .is_some()
-            {
-                return Err(Error::Failed(output));
+            if is_ancestor(&git, b.tip, into)? {
+                return Err(Error::Failed(refusal));
             }
         }
         // The ones git deleted were merged: what the rest lose is what was approved.
@@ -1539,10 +1538,8 @@ impl Branches {
             let action = Action::DeleteBranches(left);
             return branch_warning(&git, action, refreshed.head, deletions, commits);
         }
-        let force = delete_command("-D", left.into_iter().map(|b| b.name));
-        if !run(&git, force, cancel, report)? {
-            return Err(Error::Failed(report.steps.last().unwrap().output.clone()));
-        }
+        let force = branch_delete_command("-D", left.into_iter().map(|b| b.name));
+        run_or_fail(&git, force, cancel, report)?;
         Ok(None)
     }
 
@@ -1567,8 +1564,8 @@ impl Branches {
             branches,
         };
         let git = Git::new(&self.path);
-        let wts = find_worktrees(catalog, paths)?;
-        let deletions = worktree_losses(&git, catalog, &wts)?;
+        let worktrees = find_worktrees(catalog, paths)?;
+        let deletions = worktree_losses(&git, catalog, &worktrees)?;
         let commits = worktree_commits(&deletions, branches);
         let approved = approval.filter(|w| {
             w.action == *action && w.commits == commits && same_losses(&w.deletions, &deletions)
@@ -1587,19 +1584,17 @@ impl Branches {
         };
         let mut refused = Vec::new();
         let mut gone = Vec::new();
-        for (wt, approved) in wts.iter().zip(&approved.deletions) {
+        for (wt, approved) in worktrees.iter().zip(&approved.deletions) {
             let force = !approved.files.is_empty() || approved.refusal.is_some();
-            let removed = run(&git, remove(&wt.path, force), cancel, report)?;
-            let output = report
-                .steps
-                .last()
-                .map(|s| s.output.clone())
-                .unwrap_or_default();
+            let removed = run(
+                &git,
+                worktree_remove_command(&wt.path, force),
+                cancel,
+                report,
+            )?;
+            let output = report.last_output();
             let after = Catalog::load(&self.path)?;
-            let registered = after
-                .worktrees
-                .iter()
-                .any(|w| crate::worktree_folder::same_path(&w.path, &wt.path));
+            let registered = after.worktrees.iter().any(|w| same_path(&w.path, &wt.path));
             if !registered {
                 if wt.path.exists() {
                     // Windows: a file in use stops the deletion halfway, after git has let go.
@@ -1644,8 +1639,8 @@ impl Branches {
         // something parterre doesn't (submodules). Ask again, with what's at risk now.
         let after = Catalog::load(&self.path)?;
         let paths: Vec<PathBuf> = refused.iter().map(|(p, _)| p.clone()).collect();
-        let wts = find_worktrees(&after, &paths)?;
-        let mut deletions = worktree_losses(&git, &after, &wts)?;
+        let worktrees = find_worktrees(&after, &paths)?;
+        let mut deletions = worktree_losses(&git, &after, &worktrees)?;
         for (d, (_, output)) in deletions.iter_mut().zip(refused) {
             d.refusal = Some(output);
         }
@@ -1662,7 +1657,17 @@ impl Branches {
     }
 }
 
-/// The warning before deleting branches loses `commits`.
+/// The graph to show lost `commits` in, loaded with them.
+fn graph_with(git: &Git, commits: &[Oid]) -> Result<Arc<Repo>, Error> {
+    let repo = git.load()?;
+    if commits.iter().any(|oid| repo.lookup(oid).is_none()) {
+        return Err(Error::Invalid(
+            "The repository changed while checking lost commits. Reload and try again.".into(),
+        ));
+    }
+    Ok(Arc::new(repo))
+}
+
 fn branch_warning(
     git: &Git,
     action: Action,
@@ -1670,13 +1675,8 @@ fn branch_warning(
     deletions: Vec<Deletion>,
     commits: Vec<Oid>,
 ) -> Result<Option<Warning>, Error> {
-    let repo = Arc::new(git.load()?);
-    if commits.iter().any(|oid| repo.lookup(oid).is_none()) {
-        return Err(Error::Invalid(
-            "The repository changed while checking lost commits. Reload and try again.".into(),
-        ));
-    }
-    let force = delete_command("-D", deletions.iter().map(|d| d.name.clone()));
+    let repo = graph_with(git, &commits)?;
+    let force = branch_delete_command("-D", deletions.iter().map(|d| d.name.clone()));
     Ok(Some(Warning {
         action,
         commits,
@@ -1729,22 +1729,14 @@ fn branch_losses(
     branches
         .iter()
         .map(|b| {
-            Ok(Deletion {
-                name: b.name.clone(),
-                path: None,
-                commits: lost_commits(git, catalog, b.tip, &excluded, &[], None)?,
-                files: Vec::new(),
-                refusal: None,
-                branch: None,
-                head: Some(b.tip),
-            })
+            let commits = lost_commits(git, catalog, b.tip, &excluded, &[], None)?;
+            Ok(Deletion::of_branch(b.name.clone(), b.tip, commits))
         })
         .collect()
 }
 
-/// `git worktree remove`, forced when it would lose changes.
-fn remove(path: &Path, force: bool) -> Vec<String> {
-    let mut args = vec!["worktree".to_owned(), "remove".to_owned()];
+fn worktree_remove_command(path: &Path, force: bool) -> Vec<String> {
+    let mut args = git_args(&["worktree", "remove"]);
     if force {
         args.push("--force".to_owned());
     }
@@ -1757,27 +1749,23 @@ fn find_worktrees<'a>(catalog: &'a Catalog, paths: &[PathBuf]) -> Result<Vec<&'a
     if paths.is_empty() {
         return Err(Error::Invalid("Choose a worktree to delete.".into()));
     }
-    let mut wts: Vec<&Worktree> = Vec::new();
+    let mut found: Vec<&Worktree> = Vec::new();
     for path in paths {
         let wt = find_worktree(catalog, path)?;
-        if wts.iter().any(|w| std::ptr::eq(*w, wt)) {
+        if found.iter().any(|w| std::ptr::eq(*w, wt)) {
             return Err(Error::Invalid(format!(
                 "Worktree {} is listed twice.",
                 wt.name()
             )));
         }
-        wts.push(wt);
+        found.push(wt);
     }
-    Ok(wts)
+    Ok(found)
 }
 
 /// The worktree at `path`, when it may be deleted.
 fn find_worktree<'a>(catalog: &'a Catalog, path: &Path) -> Result<&'a Worktree, Error> {
-    let Some(wt) = catalog
-        .worktrees
-        .iter()
-        .find(|w| crate::worktree_folder::same_path(&w.path, path))
-    else {
+    let Some(wt) = catalog.worktrees.iter().find(|w| same_path(&w.path, path)) else {
         return Err(Error::Invalid(
             "The worktree is no longer there. Reload and try again.".into(),
         ));
@@ -1808,11 +1796,13 @@ fn find_worktree<'a>(catalog: &'a Catalog, path: &Path) -> Result<&'a Worktree, 
 fn worktree_losses(
     git: &Git,
     catalog: &Catalog,
-    wts: &[&Worktree],
+    worktrees: &[&Worktree],
 ) -> Result<Vec<Deletion>, Error> {
-    let leaving: Vec<&Path> = wts.iter().map(|w| w.path.as_path()).collect();
-    let branches: Vec<Option<BranchTip>> =
-        wts.iter().map(|w| worktree_branch(catalog, w)).collect();
+    let leaving: Vec<&Path> = worktrees.iter().map(|w| w.path.as_path()).collect();
+    let branches: Vec<Option<BranchTip>> = worktrees
+        .iter()
+        .map(|w| worktree_branch(catalog, w))
+        .collect();
     let excluded: Vec<String> = branches
         .iter()
         .flatten()
@@ -1822,7 +1812,7 @@ fn worktree_losses(
     // Every worktree's status and commits at once: each is a git start, which on Windows is
     // most of what it costs (#309, #354).
     std::thread::scope(|s| {
-        let pending: Vec<_> = wts
+        let pending: Vec<_> = worktrees
             .iter()
             .zip(branches)
             .map(|(&wt, branch)| {
@@ -1830,7 +1820,7 @@ fn worktree_losses(
                     if wt.missing {
                         Ok(Vec::new())
                     } else {
-                        changed_files(&wt.path)
+                        uncommitted_files(&wt.path)
                     }
                 });
                 let commits = s.spawn(move || -> Result<_, Error> {
@@ -1892,9 +1882,9 @@ fn worktree_commits(deletions: &[Deletion], branches: bool) -> Vec<Oid> {
             deletions
                 .iter()
                 .flat_map(|d| d.branch.iter())
-                .flat_map(|b| b.commits.clone()),
+                .flat_map(|b| b.commits.iter().copied()),
         );
-        commits.sort_by_key(|o| o.to_hex());
+        commits.sort_unstable();
         commits.dedup();
     }
     commits
@@ -1907,21 +1897,27 @@ fn worktree_commands(deletions: &[Deletion], branches: bool) -> Vec<Vec<String>>
         .iter()
         .map(|d| {
             let force = !d.files.is_empty() || d.refusal.is_some();
-            remove(d.path.as_deref().unwrap(), force)
+            let path = d
+                .path
+                .as_deref()
+                .expect("a worktree's deletion has its folder");
+            worktree_remove_command(path, force)
         })
         .collect();
     let owned: Vec<&WorktreeBranch> = deletions.iter().flat_map(|d| d.branch.iter()).collect();
     if branches && !owned.is_empty() {
         let lossy = owned.iter().any(|b| !b.commits.is_empty());
         let names = owned.iter().map(|b| b.name.clone());
-        commands.push(delete_command(if lossy { "-D" } else { "-d" }, names));
+        commands.push(branch_delete_command(
+            if lossy { "-D" } else { "-d" },
+            names,
+        ));
     }
     commands
 }
 
-/// `git branch <flag> -- <names>`.
-fn delete_command(flag: &str, names: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut args = vec!["branch".to_owned(), flag.to_owned(), "--".to_owned()];
+fn branch_delete_command(flag: &str, names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut args = git_args(&["branch", flag, "--"]);
     args.extend(names);
     args
 }
@@ -1932,7 +1928,6 @@ fn track_commands(
     name: &str,
     track: Option<&str>,
 ) -> Result<Vec<Vec<String>>, Error> {
-    let words = |s: &[&str]| s.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
     let Some(track) = track.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(Vec::new());
     };
@@ -1945,53 +1940,43 @@ fn track_commands(
         return Err(Error::Invalid("Enter a valid remote branch name.".into()));
     }
     if catalog.remotes.iter().any(|r| r.name == track) {
-        return Ok(vec![words(&[
-            "branch",
-            &format!("--set-upstream-to=refs/remotes/{track}"),
-            "--",
-            name,
-        ])]);
+        return Ok(vec![crate::remote::set_upstream_args(name, track)]);
     }
     // Configuration works before a remote ref exists, and does not change the selected start
     // commit even when the upstream points somewhere else.
+    let set = |key: &str, value: &str| {
+        git_args(&[
+            "config",
+            "--local",
+            "--replace-all",
+            &format!("branch.{name}.{key}"),
+            value,
+        ])
+    };
     let mut commands = vec![
-        words(&[
-            "config",
-            "--local",
-            "--replace-all",
-            &format!("branch.{name}.remote"),
-            remote,
-        ]),
-        words(&[
-            "config",
-            "--local",
-            "--replace-all",
-            &format!("branch.{name}.merge"),
-            &format!("refs/heads/{branch}"),
-        ]),
+        set("remote", remote),
+        set("merge", &format!("refs/heads/{branch}")),
     ];
     if catalog.auto_setup_rebase {
-        commands.push(words(&[
-            "config",
-            "--local",
-            "--replace-all",
-            &format!("branch.{name}.rebase"),
-            "true",
-        ]));
+        commands.push(set("rebase", "true"));
     }
     Ok(commands)
 }
 
-fn verify_commit(git: &Git, oid: Oid) -> Result<(), Error> {
-    if git
+/// The commit `rev` names, if it names one.
+pub(crate) fn resolve_commit(git: &Git, rev: &str) -> Result<Option<Oid>, Error> {
+    Ok(git
         .query(&[
             "rev-parse",
             "--verify",
             "--quiet",
-            &format!("{}^{{commit}}", oid.to_hex()),
+            &format!("{rev}^{{commit}}"),
         ])?
-        .is_none()
-    {
+        .and_then(|s| Oid::from_hex(&s)))
+}
+
+fn verify_commit(git: &Git, oid: Oid) -> Result<(), Error> {
+    if resolve_commit(git, &oid.to_hex())?.is_none() {
         return Err(Error::Invalid(
             "The commit is no longer in the repository. Reload and try again.".into(),
         ));
@@ -1999,9 +1984,16 @@ fn verify_commit(git: &Git, oid: Oid) -> Result<(), Error> {
     Ok(())
 }
 
+pub(crate) fn is_ancestor(git: &Git, ancestor: Oid, of: Oid) -> Result<bool, Error> {
+    let (ancestor, of) = (ancestor.to_hex(), of.to_hex());
+    Ok(git
+        .query(&["merge-base", "--is-ancestor", &ancestor, &of])?
+        .is_some())
+}
+
 /// Uncommitted changes to files that aren't ignored, in the worktree at `path`: staged,
-/// modified and untracked. Ignored files never count.
-fn changed_files(path: &Path) -> Result<Vec<String>, Error> {
+/// modified and untracked.
+fn uncommitted_files(path: &Path) -> Result<Vec<String>, Error> {
     let out = Git::new(path).run(&[
         "status",
         "--porcelain=v1",
@@ -2042,48 +2034,45 @@ fn check_occupied(catalog: &Catalog, name: &str) -> Result<(), Error> {
 }
 
 /// Commits reachable from `start` that nothing else will reach: no ref but the `excluded`
-/// ones, and no worktree's HEAD but the ones at `leaving`.
+/// ones, no worktree's HEAD but the ones at `leaving`, and not `head_after`, where HEAD goes.
 pub(crate) fn lost_commits(
     git: &Git,
     catalog: &Catalog,
     start: Oid,
     excluded: &[String],
     leaving: &[&Path],
-    future_root: Option<Oid>,
+    head_after: Option<Oid>,
 ) -> Result<Vec<Oid>, Error> {
     let mut protected: HashSet<Oid> = catalog
-        .roots
+        .ref_tips
         .iter()
         .filter(|(name, _)| !excluded.contains(name))
         .map(|(_, oid)| *oid)
         .collect();
     protected.extend(
         catalog
-            .heads
+            .worktree_heads
             .iter()
-            .filter(|(p, _)| {
-                !leaving
-                    .iter()
-                    .any(|l| crate::worktree_folder::same_path(p, l))
-            })
+            .filter(|(path, _)| !leaving.iter().any(|l| same_path(path, l)))
             .map(|(_, oid)| *oid),
     );
-    let mut input = format!("{}\n", start.to_hex());
-    if let Some(oid) = future_root {
-        protected.insert(oid);
-    }
-    for oid in protected {
-        input.push_str(&format!("^{}\n", oid.to_hex()));
-    }
-    let result = git.run_with_input(&["rev-list", "--stdin"], input)?;
-    let mut commits = result
+    protected.extend(head_after);
+    let mut input = format!("{start}\n");
+    input.extend(protected.iter().map(|oid| format!("^{oid}\n")));
+    let listed = git.run_with_input(&["rev-list", "--stdin"], input)?;
+    let mut commits = listed
         .lines()
         .map(parse_oid)
         .collect::<Result<Vec<_>, _>>()?;
-    commits.sort_by_key(|o| o.to_hex());
+    commits.sort_unstable();
     Ok(commits)
 }
 
+pub(crate) fn git_args(words: &[&str]) -> Vec<String> {
+    words.iter().map(|w| (*w).to_owned()).collect()
+}
+
+/// Runs an operation's git command, recording it in `report`: whether git succeeded.
 pub(crate) fn run(
     git: &Git,
     args: Vec<String>,
@@ -2091,6 +2080,20 @@ pub(crate) fn run(
     report: &mut Report,
 ) -> Result<bool, Error> {
     run_with(git, args, &[], cancel, report)
+}
+
+/// [`run`], failing with what git printed.
+pub(crate) fn run_or_fail(
+    git: &Git,
+    args: Vec<String>,
+    cancel: &CancelTree,
+    report: &mut Report,
+) -> Result<(), Error> {
+    if run(git, args, cancel, report)? {
+        Ok(())
+    } else {
+        Err(Error::Failed(report.last_output()))
+    }
 }
 
 /// [`run`], with `env` set for git.
@@ -2101,18 +2104,13 @@ pub(crate) fn run_with(
     cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<bool, Error> {
-    let mut child = cancel
-        .start(git.operation_command(&args).envs(env.iter().copied()))
-        .map_err(|e| match e {
-            parterre_util::Start::Cancelled => Error::Cancelled,
-            parterre_util::Start::Spawn(e) => GitError::Spawn(e).into(),
-        })?;
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
+    let mut child = cancel.start(git.operation_command(&args).envs(env.iter().copied()))?;
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut stderr = child.stderr.take().expect("stderr is piped");
     let errors = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        let _ = stderr.read_to_end(&mut b);
-        b
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
     });
     let mut output = Vec::new();
     let read_result = stdout.read_to_end(&mut output);

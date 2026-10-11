@@ -1,7 +1,3 @@
-//! The toolbar and its popovers: what is used every day. The menu bar (`menu_bar`) offers all
-//! of it again, and the rest besides. Chosen on 2026-09-26; the prototype is on the branch
-//! `prototype/menus`.
-
 use eframe::egui::{
     self, Align, Id, Key, Layout, Margin, Popup, PopupCloseBehavior, RectAlign, Response, Sense,
     Stroke, Ui, vec2,
@@ -16,13 +12,13 @@ use crate::menu;
 use crate::usage::{self, Menu};
 use crate::widgets::{self, tip, tip_explained};
 
-const SHOW: [(Simplification, Glyph, &str); 3] = [
+const DETAIL_LEVELS: [(Simplification, Glyph, &str); 3] = [
     (
         Simplification::Decorated,
         glyphs::LABELLED,
         "Only commits with a branch or tag, and the merges joining them",
     ),
-    // "Branchings and merges" is in the menu only.
+    // Branchings and merges: in the menu only.
     (
         Simplification::Forks,
         glyphs::BRANCHINGS,
@@ -35,23 +31,23 @@ const SHOW: [(Simplification, Glyph, &str); 3] = [
     ),
 ];
 
-const DRAG: [(DragModel, Glyph, &str); 3] = [
-    (DragModel::Adapt, glyphs::ADAPT, "1"),
-    (DragModel::Free, glyphs::FREE, "2"),
-    (DragModel::Subtree, glyphs::SUBTREE, "3"),
+const DRAG_MODELS: [(DragModel, Glyph); 3] = [
+    (DragModel::Adapt, glyphs::ADAPT),
+    (DragModel::Free, glyphs::FREE),
+    (DragModel::Subtree, glyphs::SUBTREE),
 ];
+
+const ZOOM_STEP: f32 = 0.8;
 
 const FILTER_ID: &str = "filter-popover";
 const ZOOM_ID: &str = "zoom-popover";
 const DRAG_ID: &str = "drag-popover";
 
-/// The popup of the button with `id`, for opening it from elsewhere (the screenshot
-/// automation).
-pub fn popup_id(name: &str) -> Id {
+pub(super) fn popup_id(name: &str) -> Id {
     toolbar_button_id(name).with("popup")
 }
 
-/// The toolbar button that opens `filter`, `zoom` or `drag`, for a script to click.
+/// The button opening the popover `filter`, `zoom` or `drag`.
 pub fn toolbar_button_id(name: &str) -> Id {
     let id = match name {
         "filter" => FILTER_ID,
@@ -66,17 +62,17 @@ impl ParterreApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             self.fetch_button(ui);
-            gap(ui);
+            group_separator(ui);
 
             let g = &mut self.settings.graph;
-            let items = SHOW.map(|(s, glyph, _)| (s, glyph));
-            let show = widgets::segmented(ui, g.simplification, &items, |s, r| {
-                tip_explained(r, s.label(), "", show_description(s))
+            let items = DETAIL_LEVELS.map(|(s, glyph, _)| (s, glyph));
+            let detail = widgets::segmented(ui, g.simplification, &items, |s, r| {
+                tip_explained(r, s.label(), "", detail_description(s))
             });
-            if let Some(s) = show {
+            if let Some(s) = detail {
                 g.simplification = s;
             }
-            gap(ui);
+            group_separator(ui);
 
             for (on, glyph, name) in [
                 (&mut g.show_local_branches, glyphs::LOCAL, "local branches"),
@@ -100,21 +96,19 @@ impl ParterreApp {
             popover(&response, RectAlign::BOTTOM_START)
                 .show(|ui| menu::fit_window(ui, |ui| self.filter_popover(ui)));
 
+            // Right to left from here.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // Right to left from here.
                 let response = widgets::popover_button(ui, Id::new(DRAG_ID), None, false);
                 let response = tip(response, "Dragging options", "");
                 popover(&response, RectAlign::BOTTOM_END)
                     .show(|ui| menu::fit_window(ui, |ui| self.drag_popover(ui)));
-                let items = DRAG.map(|(m, glyph, _)| (m, glyph));
-                let drag = widgets::segmented(ui, self.settings.net.model, &items, |m, r| {
-                    let key = DRAG.iter().find(|d| d.0 == m).map_or("", |d| d.2);
-                    tip_explained(r, m.label(), key, m.description())
+                let drag = widgets::segmented(ui, self.settings.net.model, &DRAG_MODELS, |m, r| {
+                    tip_explained(r, m.label(), &drag_key(m), m.description())
                 });
                 if let Some(m) = drag {
                     self.set_drag_model(m);
                 }
-                gap(ui);
+                group_separator(ui);
 
                 let overview = self.settings.show_overview;
                 let verb = if overview { "Hide" } else { "Show" };
@@ -124,7 +118,6 @@ impl ParterreApp {
                 }
                 let response = widgets::icon_button(ui, glyphs::HEAD, false);
                 if tip(response, "Go to HEAD", &keys::GO_TO_HEAD.label()).clicked() {
-                    usage::action(usage::Action::GoToHead);
                     self.go_to_head();
                 }
                 let response =
@@ -133,10 +126,9 @@ impl ParterreApp {
                 popover(&response, RectAlign::BOTTOM_END)
                     .show(|ui| menu::fit_window(ui, |ui| self.zoom_popover(ui)));
 
-                // Find, in the middle of what is left.
                 let room = ui.available_width();
                 ui.allocate_ui_with_layout(
-                    vec2(room, widgets::BUTTON),
+                    vec2(room, widgets::BUTTON_SIZE),
                     Layout::left_to_right(Align::Center),
                     |ui| {
                         // Narrow windows squeeze the field rather than the tools.
@@ -149,7 +141,6 @@ impl ParterreApp {
         });
     }
 
-    /// Shows or hides open pull requests; greyed out unless `origin` is on GitHub.
     fn pull_requests_button(&mut self, ui: &mut Ui) {
         let available = self.pull_requests.origin().is_some();
         let on = self.pull_requests_active();
@@ -170,7 +161,6 @@ impl ParterreApp {
         }
     }
 
-    /// Fetches every remote; greyed out without one, or while git runs.
     fn fetch_button(&mut self, ui: &mut Ui) {
         let blocked = self.fetch_blocked();
         let response = ui
@@ -185,7 +175,6 @@ impl ParterreApp {
         }
     }
 
-    /// Shows or hides the worktrees.
     fn worktrees_button(&mut self, ui: &mut Ui) {
         let on = self.settings.graph.show_worktrees;
         let response = widgets::icon_button(ui, glyphs::FOLDER, on);
@@ -198,7 +187,7 @@ impl ParterreApp {
 
     fn find_field(&mut self, ui: &mut Ui, width: f32) {
         let n = self.search.hits.len();
-        let count = match self.search.current {
+        let count = match self.search.current_hit {
             Some(c) => format!("{} / {n}", c + 1),
             None if n == 0 => "None".to_owned(),
             None => format!("{n} found"),
@@ -215,13 +204,13 @@ impl ParterreApp {
         let searching = !self.search.query.trim().is_empty();
         let found = widgets::find_field(ui, &find, &mut self.search.query);
         if found.changed {
-            // Counted once per search: as its first character is typed.
+            // Counted once per search, as its first character is typed.
             if !searching && !self.search.query.trim().is_empty() {
                 usage::action(usage::Action::Find);
             }
             self.update_search();
             if !self.search.hits.is_empty() {
-                self.goto_search_hit(true);
+                self.find_next();
             }
         }
         if found.cleared {
@@ -229,10 +218,10 @@ impl ParterreApp {
             self.update_search();
         }
         if found.next {
-            self.goto_search_hit(true);
+            self.find_next();
         }
         if found.previous {
-            self.goto_search_hit(false);
+            self.find_previous();
         }
     }
 
@@ -242,22 +231,17 @@ impl ParterreApp {
         ui.weak("Filter")
             .on_hover_text("Each repository keeps its own filters.");
         let g = &mut self.settings.graph;
-        popover_row(ui, "Current branch only", "Only HEAD's history.", |ui| {
+        popover_row(ui, "Current branch only", CURRENT_BRANCH_ONLY_TIP, |ui| {
             widgets::switch(ui, &mut g.current_branch_only);
         });
-        popover_row(
-            ui,
-            "First parent only",
-            "Follow only first parents: merged side branches without refs disappear.",
-            |ui| {
-                widgets::switch(ui, &mut g.first_parent_only);
-            },
-        );
+        popover_row(ui, "First parent only", FIRST_PARENT_ONLY_TIP, |ui| {
+            widgets::switch(ui, &mut g.first_parent_only);
+        });
         let width = ui.available_width();
         ui.label("Only branches containing")
             .on_hover_text(REF_FILTER_TIP);
         widgets::text_field(ui, &mut g.ref_filter, "e.g. main, release", width);
-        ui.label("Hide branches").on_hover_text(HIDE_TIP);
+        ui.label("Hide branches").on_hover_text(HIDE_BRANCHES_TIP);
         widgets::text_field(
             ui,
             &mut g.hide_branches,
@@ -278,7 +262,7 @@ impl ParterreApp {
             )
             .clicked()
             {
-                self.zoom_by(0.8);
+                self.zoom_out();
             }
             if tip(
                 widgets::icon_button(ui, glyphs::PLUS, false),
@@ -287,16 +271,15 @@ impl ParterreApp {
             )
             .clicked()
             {
-                self.zoom_by(1.0 / 0.8);
+                self.zoom_in();
             }
             let fit = widgets::text_button(ui, "Fit");
             if tip(fit, "Fit the whole graph", &keys::ZOOM_TO_FIT.label()).clicked() {
-                usage::action(usage::Action::Fit);
-                self.fit();
+                self.zoom_to_fit();
             }
             let reset = widgets::text_button(ui, "Reset");
             if tip(reset, "Zoom to 100%", &keys::ACTUAL_SIZE.label()).clicked() {
-                self.zoom_by(1.0 / self.view.zoom);
+                self.zoom_to_actual_size();
             }
         });
     }
@@ -306,7 +289,7 @@ impl ParterreApp {
         ui.set_width(250.0);
         ui.weak("Dragging");
         let mut remember = self.settings.remember_moves;
-        popover_row(ui, "Remember moved nodes", REMEMBER_TIP, |ui| {
+        popover_row(ui, "Remember moved nodes", REMEMBER_MOVES_TIP, |ui| {
             widgets::switch(ui, &mut remember);
         });
         self.set_remember_moves(remember);
@@ -320,8 +303,6 @@ impl ParterreApp {
         }
     }
 
-    /// The zoom level, which can be typed over: "70" or "70%" zooms to 70 %, on Enter or when
-    /// the field loses the focus (Esc leaves the zoom as it was).
     fn zoom_field(&mut self, ui: &mut Ui) {
         let id = Id::new("zoom-level");
         let focused = ui.memory(|m| m.has_focus(id));
@@ -350,7 +331,6 @@ impl ParterreApp {
             .inner;
         let response = tip(response, "Type a zoom level", "");
         if response.gained_focus() {
-            // Start from the number alone, all of it selected, ready to be typed over.
             self.zoom_text = format!("{:.0}", self.view.zoom * 100.0);
             if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
                 let all = egui::text::CCursorRange::two(
@@ -369,9 +349,21 @@ impl ParterreApp {
         }
     }
 
-    pub(super) fn zoom_by(&mut self, factor: f32) {
+    fn zoom_by(&mut self, factor: f32) {
         self.view
             .zoom_around(self.canvas, self.canvas.center(), factor);
+    }
+
+    pub(super) fn zoom_in(&mut self) {
+        self.zoom_by(1.0 / ZOOM_STEP);
+    }
+
+    pub(super) fn zoom_out(&mut self) {
+        self.zoom_by(ZOOM_STEP);
+    }
+
+    pub(super) fn zoom_to_actual_size(&mut self) {
+        self.zoom_by(1.0 / self.view.zoom);
     }
 
     pub(super) fn set_remember_moves(&mut self, remember: bool) {
@@ -385,10 +377,13 @@ impl ParterreApp {
 
 pub(super) const REF_FILTER_TIP: &str = "Only branches and tags whose names contain one of these \
     comma-separated words start history.";
-pub(super) const HIDE_TIP: &str = "Leave out branches matching these comma-separated wildcards \
-    (* is any text, ? one character; origin/release/1 matches release/*), with the history only \
-    they lead to. Branches that a shown branch's history contains stay, and so does the current \
-    branch.";
+pub(super) const CURRENT_BRANCH_ONLY_TIP: &str = "Only HEAD's history.";
+pub(super) const FIRST_PARENT_ONLY_TIP: &str =
+    "Follow only first parents: merged side branches without refs disappear.";
+pub(super) const HIDE_BRANCHES_TIP: &str = "Leave out branches matching these comma-separated \
+    wildcards (* is any text, ? one character; origin/release/1 matches release/*), with the \
+    history only they lead to. Branches that a shown branch's history contains stay, and so does \
+    the current branch.";
 pub(super) const PULL_REQUESTS_TIP: &str = "Open pull requests of origin on GitHub, and a \
     fork's into its parent, as labels on the commits they propose, where those have been \
     fetched. Click one to open it. Asks GitHub only when gh is signed in (gh auth login).";
@@ -399,20 +394,26 @@ pub(super) const WORKTREES_TIP: &str = "The repository's worktrees, marked with 
     HEADs in a colour of their own. Right-click one to open it.";
 const FETCH_TIP: &str = "Fetch every remote, pruning the branches deleted there (git fetch \
     --all --prune). Only remote-tracking branches move.";
-pub(super) const REMEMBER_TIP: &str =
+pub(super) const REMEMBER_MOVES_TIP: &str =
     "Keep nodes where you moved them, per repository, across runs and relayouts.";
 
-/// "70", "70%" or "70.5 %" as a number of percent.
 fn parse_percent(text: &str) -> Option<f32> {
     let number: f32 = text.trim().trim_end_matches('%').trim().parse().ok()?;
     (number.is_finite() && number > 0.0).then_some(number)
 }
 
-fn show_description(s: Simplification) -> &'static str {
-    SHOW.iter().find(|x| x.0 == s).map_or("", |x| x.2)
+fn detail_description(s: Simplification) -> &'static str {
+    DETAIL_LEVELS.iter().find(|x| x.0 == s).map_or("", |x| x.2)
 }
 
-/// A popover under `button`, open until a click outside it.
+fn drag_key(model: DragModel) -> String {
+    DragModel::ALL
+        .iter()
+        .zip(keys::DRAG)
+        .find(|(m, _)| **m == model)
+        .map_or_else(String::new, |(_, key)| key.label())
+}
+
 fn popover(button: &Response, align: RectAlign) -> Popup<'_> {
     Popup::from_toggle_button_response(button)
         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
@@ -421,7 +422,6 @@ fn popover(button: &Response, align: RectAlign) -> Popup<'_> {
         .style(menu::popover_style)
 }
 
-/// A label on the left (explained by `tip`, if any) and a control on the right.
 fn popover_row(ui: &mut Ui, label: &str, tip: &str, control: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         let label = ui.label(label);
@@ -432,8 +432,7 @@ fn popover_row(ui: &mut Ui, label: &str, tip: &str, control: impl FnOnce(&mut Ui
     });
 }
 
-/// Space between groups of tools.
-fn gap(ui: &mut Ui) {
+fn group_separator(ui: &mut Ui) {
     ui.add_space(4.0);
     let (rect, _) = ui.allocate_exact_size(vec2(1.0, 20.0), Sense::hover());
     ui.painter().vline(

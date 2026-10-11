@@ -1,10 +1,8 @@
-//! Syntax colour in a child process (#209): a grammar that aborts, or a parse that never
-//! ends, costs the colours and nothing else.
+use std::path::PathBuf;
+use std::time::Duration;
 
 use parterre_highlight::{BUDGET, Engine, Kind, Language, in_child};
 use parterre_util::Cancel;
-use std::path::PathBuf;
-use std::time::Duration;
 
 fn exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_parterre"))
@@ -25,12 +23,9 @@ fn the_child_highlights_like_the_process() {
 #[test]
 fn a_grammar_that_aborts_costs_only_the_colours() {
     // tree-sitter-yaml 0.7.2's scanner overruns the runtime's serialization buffer at this
-    // depth, and the runtime's assertion aborts the process: the child's, not ours. Once
-    // upstream bounds its buffer the child will answer instead; this process lives on either
-    // way.
-    let text = "- ".repeat(254)
-        + "x
-";
+    // depth, and the runtime's assertion aborts the child. Once upstream bounds its buffer the
+    // child will answer instead.
+    let text = "- ".repeat(254) + "x\n";
     let cancel = Cancel::new();
     let answer = in_child(&exe(), Language::Yaml, &text, &cancel, BUDGET);
     assert!(

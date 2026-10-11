@@ -1,11 +1,7 @@
-//! The menu bar (#339, laid out in #344): parterre's commands, in menus at the top. On macOS
-//! the system's menu bar, in Title Case; on Windows and Linux a row of parterre's own above the
-//! toolbar, in sentence case. The menus are built afresh each frame from what the app holds
-//! ([`State`]), as a tree of [`Entry`]s that both renderers draw: `bar` with egui, `macos`
-//! with AppKit. A chosen item gives its [`Command`], which acts on the window in front: what
-//! only the graph does is greyed out while another window is in front.
+//! The menus are built afresh each frame from [`State`], as a tree of [`Entry`]s that both
+//! renderers draw: `bar` with egui on Windows and Linux, `macos` with AppKit.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use parterre_core::layout::Direction;
 use parterre_core::physics::DragModel;
@@ -17,13 +13,10 @@ use crate::export::Format;
 use crate::keys::{self, Platform, Shortcut};
 use crate::menu::Mark;
 
-// Drawn on Windows and Linux; macOS has the system's.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub mod bar;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
-/// What a menu item does.
 #[derive(Clone, Debug)]
 pub enum Command {
     About,
@@ -35,7 +28,6 @@ pub enum Command {
     CloneRepository,
     OpenRecent(PathBuf),
     ClearRecent,
-    /// Close Folder, or with another window in front (macOS), Close Window.
     Close,
     Export(Format),
     Undo,
@@ -71,7 +63,6 @@ pub enum Command {
     Direction(Direction),
     KeyboardAndMouse,
     Legend,
-    // The graph's right-click menus' own (`node_menu`).
     CopyText(String),
     OpenPullRequest(String),
     OpenIn(super::Opener, PathBuf),
@@ -80,7 +71,6 @@ pub enum Command {
     CentreOn(usize),
 }
 
-/// What View › Show turns on and off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shown {
     LocalBranches,
@@ -117,10 +107,9 @@ impl Shown {
     }
 }
 
-/// Which menu it is, for the usage statistics and for the renderers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// The application menu, named parterre (macOS).
+    /// macOS's application menu.
     App,
     File,
     Edit,
@@ -147,13 +136,11 @@ impl Kind {
     }
 }
 
-/// A menu of the bar.
 #[derive(Clone, Debug)]
 pub struct Menu {
     pub kind: Kind,
     pub title: String,
     pub entries: Vec<Entry>,
-    /// The title in the accent colour: Help while a newer release is out (Windows, Linux).
     pub accent: bool,
 }
 
@@ -161,10 +148,8 @@ pub struct Menu {
 pub enum Entry {
     Item(Item),
     Separator,
-    /// A small title over the items that follow, such as Detail or Filter.
     Heading(String),
     Submenu(Submenu),
-    /// What macOS itself provides.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     System(System),
 }
@@ -176,16 +161,12 @@ pub struct Item {
     pub shortcut: Option<Shortcut>,
     pub enabled: bool,
     pub mark: Mark,
-    /// In the accent colour, bold: *Download*.
     pub accent: bool,
-    /// Said on hover, enabled or not.
     pub tip: Option<String>,
-    /// Said on hover while it is greyed out: why.
-    pub why: Option<String>,
-    /// Weak text where a shortcut would go: the folder a recent one is in (Windows, Linux).
+    pub why_disabled: Option<String>,
+    /// Weak text in the shortcut's place.
     pub detail: Option<String>,
-    /// A folder whose icon it shows (macOS's Open Recent).
-    pub icon: Option<PathBuf>,
+    pub folder_icon: Option<PathBuf>,
 }
 
 impl Item {
@@ -198,9 +179,9 @@ impl Item {
             mark: Mark::None,
             accent: false,
             tip: None,
-            why: None,
+            why_disabled: None,
             detail: None,
-            icon: None,
+            folder_icon: None,
         }
     }
 
@@ -214,11 +195,10 @@ impl Item {
         self
     }
 
-    /// Greyed out for `why`, if there is one.
     pub fn blocked(mut self, why: Option<impl Into<String>>) -> Item {
         if let Some(why) = why {
             self.enabled = false;
-            self.why = Some(why.into());
+            self.why_disabled = Some(why.into());
         }
         self
     }
@@ -250,7 +230,7 @@ pub struct Submenu {
     pub label: String,
     pub entries: Vec<Entry>,
     pub enabled: bool,
-    pub why: Option<String>,
+    pub why_disabled: Option<String>,
 }
 
 impl Submenu {
@@ -259,7 +239,7 @@ impl Submenu {
             label: label.into(),
             entries,
             enabled: true,
-            why: None,
+            why_disabled: None,
         }
     }
 }
@@ -270,7 +250,6 @@ impl From<Submenu> for Entry {
     }
 }
 
-/// An item macOS provides, which AppKit carries out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum System {
     Services,
@@ -283,54 +262,47 @@ pub enum System {
     FullScreen,
 }
 
-/// The window in front, which the commands act on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Front {
     Graph,
-    /// The log, a diff, a blame, the compare or the settings window (macOS only: elsewhere the
-    /// menu bar is in the main window, and that is in front when it is used).
+    /// macOS only: elsewhere the menu bar is in the graph's window.
     Other,
 }
 
-/// What the menus show: the state of the app as it matters to them.
 #[derive(Clone, Debug)]
 pub struct State {
     pub platform: Platform,
     pub front: Front,
-    /// A text field has the keyboard in the window in front: Cut, Paste and Select All are its.
+    /// In the window in front.
     pub text_focus: bool,
-    /// A modal dialog locks the windows: nothing but Quit until it is answered.
+    /// A modal dialog is up.
     pub locked: bool,
     pub has_repo: bool,
-    /// The recent folders, the open one left out.
+    /// The open one left out.
     pub recent: Vec<PathBuf>,
     pub can_undo: bool,
     pub can_redo: bool,
-    /// A node is selected, whose hash Copy copies.
-    pub selected: bool,
+    pub has_selection: bool,
     pub auto_reload: bool,
     pub detail: Simplification,
-    /// Each of View › Show: on, and why it can't be, if it can't.
+    /// What View › Show has: on, and why it can't be, if it can't.
     pub shown: Vec<(Shown, bool, Option<&'static str>)>,
     pub current_branch_only: bool,
     pub first_parent_only: bool,
     pub overview: bool,
     pub status_bar: bool,
     pub remember_moves: bool,
-    /// Some node is away from its place in the layout.
-    pub displaced: bool,
+    pub any_displaced: bool,
     pub drag: DragModel,
     pub direction: Direction,
-    /// The version of a newer release, while one is out.
-    pub newer: Option<String>,
-    /// The Git menu's sections, built by `git_menu`.
-    pub git: Vec<Entry>,
+    pub newer_version: Option<String>,
+    pub git_menu: Vec<Entry>,
 }
 
-/// `text` as menus on `platform` write it: Title Case on macOS (as Apple's guidelines have it:
-/// every word but articles, conjunctions and prepositions of four letters or fewer, and the
-/// first and last always), else as given, in sentence case. Words with a capital letter after
-/// their first (HEAD, WebP) and parterre's name stay as they are.
+/// Title Case on macOS, as Apple's guidelines have it: every word but articles, conjunctions
+/// and prepositions of four letters or fewer, and the first and last always. Words with a
+/// capital after their first letter (HEAD, WebP) and parterre's name stay as they are.
+/// Elsewhere sentence case: as given.
 pub fn case(platform: Platform, text: &str) -> String {
     if platform != Platform::Mac {
         return text.to_owned();
@@ -359,7 +331,6 @@ pub fn case(platform: Platform, text: &str) -> String {
             if keep {
                 word.to_owned()
             } else {
-                // Show/hide: each half.
                 word.split('/').map(capital).collect::<Vec<_>>().join("/")
             }
         })
@@ -367,7 +338,7 @@ pub fn case(platform: Platform, text: &str) -> String {
         .join(" ")
 }
 
-/// [`case`] of `template`, its `{}`s then filled with `names` in turn, as they are.
+/// [`case`] of `template`, its `{}`s then filled in with `names`, which keep their case.
 pub fn case_with(platform: Platform, template: &str, names: &[&str]) -> String {
     let cased = case(platform, template);
     let mut parts = cased.split("{}");
@@ -379,11 +350,9 @@ pub fn case_with(platform: Platform, template: &str, names: &[&str]) -> String {
     out
 }
 
-/// The access keys of a menu's entries on Windows and Linux (Alt+F for File, then O for Open):
-/// for each label, the index of its underlined character, unique in the menu ignoring case.
+/// For each label, the index of its underlined character, unique in the menu ignoring case.
 /// Chosen as KDE chooses them for menus that name none: the first letters of words first, in
-/// order, then any other letter or digit of what is still without one. `None` for an entry
-/// that isn't chosen (separators, headings) and for a label with no free letter left.
+/// order, then any other letter or digit of what is still without one.
 pub fn access_keys(labels: &[Option<&str>]) -> Vec<Option<usize>> {
     let mut taken = std::collections::HashSet::new();
     let mut keys: Vec<Option<usize>> = vec![None; labels.len()];
@@ -416,13 +385,12 @@ pub fn access_keys(labels: &[Option<&str>]) -> Vec<Option<usize>> {
     keys
 }
 
-/// The letter of `label`'s access key `key`, as typed: lower case.
+/// Lower case, as typed.
 pub fn access_letter(label: &str, key: Option<usize>) -> Option<String> {
     let c = label.chars().nth(key?)?;
     Some(c.to_lowercase().collect())
 }
 
-/// The menus of the bar, as `state` has them.
 pub fn build(state: &State) -> Vec<Menu> {
     let p = state.platform;
     let mac = p == Platform::Mac;
@@ -447,35 +415,34 @@ pub fn build(state: &State) -> Vec<Menu> {
     menus.push(titled(
         Kind::Git,
         "Git",
-        graph_only(state, state.git.clone()),
+        graph_only(state, state.git_menu.clone()),
     ));
     menus.push(titled(Kind::Layout, "Layout", layout_menu(state)));
     if mac {
         menus.push(titled(Kind::Window, "Window", window_menu()));
     }
     let mut help = titled(Kind::Help, "Help", help_menu(state));
-    help.accent = !mac && state.newer.is_some();
+    help.accent = !mac && state.newer_version.is_some();
     menus.push(help);
     if state.locked {
         for menu in &mut menus {
-            lock(&mut menu.entries);
+            grey_all_but_quit(&mut menu.entries);
         }
     }
     menus
 }
 
-/// Greys out every item but Quit, while a modal dialog waits for its answer.
-fn lock(entries: &mut [Entry]) {
+fn grey_all_but_quit(entries: &mut [Entry]) {
     for entry in entries {
         match entry {
             Entry::Item(item) if !matches!(item.command, Command::Quit) => item.enabled = false,
-            Entry::Submenu(submenu) => lock(&mut submenu.entries),
+            Entry::Submenu(submenu) => grey_all_but_quit(&mut submenu.entries),
             _ => {}
         }
     }
 }
 
-/// While another window is in front, what only the graph does is greyed out.
+/// Greyed out while another window is in front.
 fn graph_only(state: &State, mut entries: Vec<Entry>) -> Vec<Entry> {
     if state.front == Front::Graph {
         return entries;
@@ -533,9 +500,8 @@ fn app_menu(state: &State) -> Vec<Entry> {
     entries
 }
 
-/// *Download ‹version›*, in the accent colour, while a newer release is out (#258).
 fn download(state: &State) -> Option<Entry> {
-    let version = state.newer.as_ref()?;
+    let version = state.newer_version.as_ref()?;
     let mut item = Item::new(format!("Download {version}"), Command::Download);
     item.accent = true;
     Some(item.into())
@@ -545,38 +511,37 @@ fn file_menu(state: &State) -> Vec<Entry> {
     let p = state.platform;
     let mac = p == Platform::Mac;
     let graph = state.front == Front::Graph;
+    let names_and_places: Vec<(String, String)> = state
+        .recent
+        .iter()
+        .map(|path| super::name_and_place(path))
+        .collect();
     let mut recent: Vec<Entry> = state
         .recent
         .iter()
-        .map(|path| {
-            let (name, place) = super::name_and_place(path);
+        .zip(&names_and_places)
+        .map(|(path, (name, place))| {
             let mut item = if mac {
                 // Names alone, with the folder above where two are the same.
-                let clash = state
-                    .recent
-                    .iter()
-                    .filter(|other| super::name_and_place(other).0 == name)
-                    .count()
-                    > 1;
+                let clash = names_and_places.iter().filter(|(n, _)| n == name).count() > 1;
                 let label = if clash {
-                    let above = std::path::Path::new(&place)
-                        .file_name()
-                        .map_or(place.clone(), |n| n.to_string_lossy().into_owned());
+                    let above = path
+                        .parent()
+                        .and_then(Path::file_name)
+                        .map_or_else(|| place.clone(), |n| n.to_string_lossy().into_owned());
                     format!("{name} — {above}")
                 } else {
-                    name
+                    name.clone()
                 };
                 let mut item = Item::new(label, Command::OpenRecent(path.clone()));
-                item.icon = Some(path.clone());
+                item.folder_icon = Some(path.clone());
                 item
             } else {
-                Item::new(name, Command::OpenRecent(path.clone()))
+                let mut item = Item::new(name.clone(), Command::OpenRecent(path.clone()));
+                item.detail = Some(place.clone());
+                item
             };
             item.tip = Some(path.display().to_string());
-            if !mac {
-                // Where the shortcut would be: the folder it is in, telling same names apart.
-                item.detail = Some(place);
-            }
             item.into()
         })
         .collect();
@@ -640,7 +605,6 @@ fn edit_menu(state: &State) -> Vec<Entry> {
     let p = state.platform;
     let mac = p == Platform::Mac;
     let graph = state.front == Front::Graph;
-    // In a text field, its own undo, as the keys would be without the menu bar.
     let (undo, redo) = if state.text_focus && graph {
         ("Undo", "Redo")
     } else {
@@ -658,10 +622,9 @@ fn edit_menu(state: &State) -> Vec<Entry> {
     ];
     let mut entries = graph_only(state, moves);
     entries.push(Entry::Separator);
-    // Copy is the selected commit's hash, or what is chosen in a text field or another window.
     let copy = item(p, "Copy", Command::Copy)
         .key(keys::COPY)
-        .enabled(state.text_focus || !graph || state.selected);
+        .enabled(state.text_focus || !graph || state.has_selection);
     if mac {
         let text = state.text_focus;
         entries.extend([
@@ -719,7 +682,7 @@ fn view_menu(state: &State) -> Vec<Entry> {
         ],
     ));
     entries.push(Entry::Separator);
-    // In another window, the zoom items set its text size.
+    // Not graph only: in another window they set its text size.
     entries.extend([
         item(p, "Zoom in", Command::ZoomIn)
             .key(keys::ZOOM_IN)
@@ -778,7 +741,7 @@ fn view_menu(state: &State) -> Vec<Entry> {
         .into(),
         Entry::Separator,
     ]);
-    // Apple's way: the item says what it does. Elsewhere a check mark.
+    // Apple's way: the item says what it does, rather than a check mark.
     if mac {
         let verb = |on: bool| if on { "Hide" } else { "Show" };
         rest.push(
@@ -822,7 +785,7 @@ fn layout_menu(state: &State) -> Vec<Entry> {
             .check(state.remember_moves)
             .into(),
         item(p, "Return all nodes to layout", Command::ReturnAllToLayout)
-            .enabled(state.displaced)
+            .enabled(state.any_displaced)
             .into(),
         Entry::Separator,
         Entry::Heading(case(p, "Dragging")),
@@ -887,7 +850,7 @@ mod tests {
             recent: vec![PathBuf::from("/src/a/app"), PathBuf::from("/src/b/app")],
             can_undo: true,
             can_redo: false,
-            selected: true,
+            has_selection: true,
             auto_reload: true,
             detail: Simplification::Decorated,
             shown: Shown::ALL.iter().map(|&s| (s, true, None)).collect(),
@@ -896,11 +859,11 @@ mod tests {
             overview: false,
             status_bar: true,
             remember_moves: false,
-            displaced: false,
+            any_displaced: false,
             drag: DragModel::Adapt,
             direction: Direction::NewestTop,
-            newer: None,
-            git: vec![
+            newer_version: None,
+            git_menu: vec![
                 Item::new("Show log", Command::ShowLog).into(),
                 Item::new("Fetch", Command::Fetch).into(),
             ],
@@ -1002,7 +965,6 @@ mod tests {
                 s("q")
             ]
         );
-        // Nothing free: none.
         assert_eq!(
             access_keys(&[Some("ab"), Some("ba"), Some("b")]),
             [Some(0), Some(0), None]
@@ -1064,7 +1026,7 @@ mod tests {
     #[test]
     fn a_newer_release_is_offered_first_in_help_or_under_about() {
         let mut s = state(Platform::Linux);
-        s.newer = Some("0.8.0".into());
+        s.newer_version = Some("0.8.0".into());
         let menus = build(&s);
         let help = find(&menus, Kind::Help);
         assert!(help.accent);
@@ -1113,14 +1075,12 @@ mod tests {
         assert!(!item_labelled(edit, "Undo Move").enabled);
         assert!(item_labelled(edit, "Copy").enabled);
         let view = &find(&menus, Kind::View).entries;
-        // The window's own: reload and text size.
         assert!(item_labelled(view, "Reload").enabled);
         assert!(item_labelled(view, "Zoom In").enabled);
         assert!(!item_labelled(view, "Zoom to Fit").enabled);
         assert!(!item_labelled(view, "Go to HEAD").enabled);
         let git = &find(&menus, Kind::Git).entries;
         assert!(!item_labelled(git, "Show log").enabled);
-        // Every window fetches; a submenu's items grey with it.
         assert!(item_labelled(git, "Fetch").enabled);
         let Some(Entry::Submenu(show)) = view
             .iter()

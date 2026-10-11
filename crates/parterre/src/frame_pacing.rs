@@ -1,32 +1,24 @@
-//! Workaround for the Wayland freeze of egui#5145
-//! (<https://github.com/emilk/egui/issues/5145>): with vsync on, Mesa's (and NVIDIA's) EGL
-//! swap waits for the compositor's frame callback, which never comes for a minimized or hidden
-//! window. All viewports share one thread, so when the Settings window (or the main window
-//! while Settings is open) is minimized, the whole app stops. With swap interval 0 the swap no
-//! longer waits, so on Wayland vsync is turned off and [`FrameLimiter`] caps the frame rate
-//! instead (a sleep: `request_repaint_after` caps nothing, since other code keeps calling
-//! `request_repaint`). Details: `docs/research/wayland-viewport-freeze.md` on the branch
-//! `research/wayland-viewport-freeze`.
+//! Works around <https://github.com/emilk/egui/issues/5145>: with vsync on, Mesa's (and
+//! NVIDIA's) EGL swap waits for the compositor's frame callback, which never comes for a
+//! minimized or hidden window. All viewports share one thread, so minimizing one stops the whole
+//! app. On Wayland vsync is off, and [`FrameLimiter`] caps the frame rate instead with a sleep:
+//! `request_repaint_after` caps nothing while other code calls `request_repaint`.
 //!
-//! Remove the cap (and turn vsync back on) once <https://github.com/emilk/egui/pull/8631>,
-//! which makes eframe itself avoid the blocking swap on Wayland, ships in a released eframe.
+//! Remove the cap and turn vsync back on once eframe avoids the blocking swap itself
+//! (<https://github.com/emilk/egui/pull/8631>).
 
 use std::ffi::OsString;
 use std::time::{Duration, Instant};
 
-/// Shortest time between two frames while vsync is off: about 120 frames per second.
 const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
-/// Whether parterre runs in a Wayland session, where vsync must be off. Windows, macOS and
-/// X11 sessions keep vsync on.
 pub fn wayland_session() -> bool {
     cfg!(all(unix, not(target_os = "macos"))) && is_wayland_session(|name| std::env::var_os(name))
 }
 
-/// Whether the environment `var` describes a Wayland session: winit picks Wayland when
-/// `WAYLAND_DISPLAY` or `WAYLAND_SOCKET` is set and not empty. `XDG_SESSION_TYPE=wayland`
-/// also counts, so that X11 forced inside a Wayland session (XWayland) gets the workaround too;
-/// without it a hidden window slows it to a crawl.
+/// winit picks Wayland when `WAYLAND_DISPLAY` or `WAYLAND_SOCKET` is set and not empty.
+/// `XDG_SESSION_TYPE=wayland` counts too: X11 forced inside a Wayland session (XWayland) also
+/// crawls while a window is hidden.
 fn is_wayland_session(var: impl Fn(&str) -> Option<OsString>) -> bool {
     let set = |name| var(name).is_some_and(|value| !value.is_empty());
     set("WAYLAND_DISPLAY")
@@ -34,15 +26,12 @@ fn is_wayland_session(var: impl Fn(&str) -> Option<OsString>) -> bool {
         || var("XDG_SESSION_TYPE").is_some_and(|value| value == "wayland")
 }
 
-/// Caps the frame rate while vsync is off, by sleeping away what is left of
-/// [`MIN_FRAME_INTERVAL`] since the previous frame.
 #[derive(Debug, Default)]
 pub struct FrameLimiter {
     last_frame: Option<Instant>,
 }
 
 impl FrameLimiter {
-    /// Call once per frame: returns when the next frame may start.
     pub fn wait(&mut self) {
         if let Some(last) = self.last_frame {
             std::thread::sleep(MIN_FRAME_INTERVAL.saturating_sub(last.elapsed()));

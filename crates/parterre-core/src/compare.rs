@@ -1,43 +1,25 @@
-//! Comparing two commits, TortoiseGit's "Compare revisions": which commit goes on which side,
-//! and the files that differ between them.
-//!
-//! The file list compares the two trees, as TortoiseGit does by default (`git diff A B`).
-//! [`Comparison::since_ancestor`] instead compares the right side with where the two histories
-//! forked (`git diff A...B`), what a pull request shows; TortoiseGit has it as "diff against
-//! the common ancestor" in its Diff Options.
-//!
-//! Either side can be the working tree (TortoiseGit's "Compare with working tree"): its files
-//! as they are on disk, staged or not, as `git diff <commit>` compares them. Its conflicted
-//! files come too, every one listed, also those whose file equals the commit's.
-
 use crate::changed_files::{ChangedFile, FileStatus, compare_paths};
 use crate::conflicts::{Conflict, Sides};
 use crate::file_diff::Rev;
 use crate::git::{Git, GitError};
-use crate::log::is_ancestor;
+use crate::log::{ancestor_first, is_ancestor};
 use crate::oid::Oid;
 use crate::repo::{CommitIx, Repo};
 
-/// Two versions to compare: `old` on the left, `new` on the right. Either can be the working
-/// tree.
+/// `old` goes on the left.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Comparison {
     pub old: Rev,
     pub new: Rev,
-    /// Compare `new` with the common ancestor of the two rather than with `old`. The working
-    /// tree counts as `HEAD` in finding it, as with `git diff --merge-base`.
+    /// Compare `new` with the merge base, as `git diff --merge-base` does, what a pull request
+    /// shows. The working tree counts as `HEAD`.
     pub since_ancestor: bool,
 }
 
 impl Comparison {
-    /// `first` and `second` in the order they were picked, `first` on the left, except that an
-    /// ancestor always goes on the left, as with the range of Show log (#28).
+    /// In the order picked, except that an ancestor goes on the left.
     pub fn of(repo: &Repo, first: CommitIx, second: CommitIx, since_ancestor: bool) -> Comparison {
-        let (old, new) = if first != second && is_ancestor(repo, second, first) {
-            (second, first)
-        } else {
-            (first, second)
-        };
+        let (old, new) = ancestor_first(repo, first, second);
         Comparison {
             old: Rev::Commit(repo.commit(old).oid),
             new: Rev::Commit(repo.commit(new).oid),
@@ -45,7 +27,6 @@ impl Comparison {
         }
     }
 
-    /// A commit against the working tree, which goes on the right, as in TortoiseGit.
     pub fn with_working_tree(commit: Oid, since_ancestor: bool) -> Comparison {
         Comparison {
             old: Rev::Commit(commit),
@@ -54,7 +35,6 @@ impl Comparison {
         }
     }
 
-    /// The same two versions the other way round.
     pub fn swapped(self) -> Comparison {
         Comparison {
             old: self.new,
@@ -63,9 +43,9 @@ impl Comparison {
         }
     }
 
-    /// True if [`Comparison::since_ancestor`] can change what is compared: false when `old` is
-    /// an ancestor of `new`, or the same commit, which makes it their common ancestor. The
-    /// working tree counts as `HEAD`; a side missing from `repo` counts as forked.
+    /// Whether [`Comparison::since_ancestor`] changes anything: not when `old` is an ancestor
+    /// of `new`, and so their merge base. The working tree counts as `HEAD`; a commit missing
+    /// from `repo` as forked.
     pub fn ancestor_matters(&self, repo: &Repo) -> bool {
         let ix = |rev: Rev| match rev {
             Rev::Commit(oid) => repo.lookup(&oid),
@@ -77,12 +57,10 @@ impl Comparison {
         }
     }
 
-    /// True if a side is the working tree, whose files can change at any time.
     pub fn reads_working_tree(&self) -> bool {
         self.old == Rev::WorkingTree || self.new == Rev::WorkingTree
     }
 
-    /// Asks git for the files that differ.
     pub fn run(&self, git: &Git) -> Result<Compared, GitError> {
         let base = if self.since_ancestor {
             let name = |rev: Rev| rev.commit().map_or("HEAD".to_owned(), |o| o.to_hex());
@@ -117,19 +95,14 @@ impl Comparison {
     }
 }
 
-/// Lists the conflicted files `git diff` left out (their file equals the commit's), as
-/// unmerged, in path order.
+/// Adds the conflicted files `git diff` left out for equalling the commit's.
 fn add_conflicted(files: &mut Vec<ChangedFile>, conflicts: &[Conflict]) {
-    let missing: Vec<&Conflict> = conflicts
-        .iter()
-        .filter(|c| !files.iter().any(|f| f.path == c.path))
-        .collect();
-    if missing.is_empty() {
-        return;
-    }
-    for c in missing {
+    let listed = files.len();
+    for c in conflicts {
+        if files.iter().any(|f| f.path == c.path) {
+            continue;
+        }
         let mode = |stage: usize| c.stages[stage].map_or(0, |e| e.mode);
-        // Left out for being the same as the commit: no lines changed, unless it's binary.
         let lines = (!c.binary && !c.is_submodule()).then_some(0);
         files.push(ChangedFile {
             path: c.path.clone(),
@@ -140,33 +113,30 @@ fn add_conflicted(files: &mut Vec<ChangedFile>, conflicts: &[Conflict]) {
             removed: lines,
         });
     }
-    files.sort_by(|a, b| compare_paths(&a.path, &b.path));
+    if files.len() > listed {
+        files.sort_by(|a, b| compare_paths(&a.path, &b.path));
+    }
 }
 
-/// The working tree's side of a comparison: where it is, and its conflicted files.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkingTree {
-    /// The worktree's folder; the files' paths are relative to it.
+    /// The files' paths are relative to it.
     pub root: std::path::PathBuf,
     pub conflicts: Vec<Conflict>,
-    /// The conflicts' two sides, by the labels git gave them.
     pub sides: Sides,
 }
 
 impl WorkingTree {
-    /// The conflict of the file at `path`, if it is conflicted.
     pub fn conflict(&self, path: &str) -> Option<&Conflict> {
         self.conflicts.iter().find(|c| c.path == path)
     }
 }
 
-/// What [`Comparison::run`] found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Compared {
-    /// Where the left side of the file diffs is read from: `old`, or the common ancestor.
-    /// `None` when asked for the common ancestor of unrelated histories; `files` is then empty.
+    /// Where the file diffs' left side is read from: `old`, or the merge base. `None`, with no
+    /// files, for the merge base of unrelated histories.
     pub base: Option<Rev>,
     pub files: Vec<ChangedFile>,
-    /// When a side is the working tree: its folder and conflicted files.
     pub working_tree: Option<WorkingTree>,
 }

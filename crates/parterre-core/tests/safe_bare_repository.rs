@@ -2,13 +2,13 @@
 //! set to `explicit`, which Git 3.0 makes the default (#228).
 mod common;
 
-use std::path::Path;
 use std::process::Command;
 
 use common::TestRepo;
 use parterre_core::Oid;
 use parterre_core::branches::{Action, Branches, Catalog, Create, Outcome};
 use parterre_core::git::{Git, GitError, load_repo};
+use parterre_core::worktree_folder::same_path;
 use parterre_util::CancelTree;
 
 /// Set for git through the environment, in command-line scope: git ignores the setting in a
@@ -105,20 +105,15 @@ fn a_bare_repository_git_refuses_names_the_folder_to_open() {
     let dir = tempfile::tempdir().unwrap();
     let bare = dir.path().join("bare.git");
     r.git(&["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
-    let same =
-        |a: &Path, b: &Path| std::fs::canonicalize(a).unwrap() == std::fs::canonicalize(b).unwrap();
 
     // From a folder inside it, git finds it and stops. Before 2.38 git has no such setting.
-    let version = r.git(&["--version"]);
-    let mut numbers = version
-        .trim_start_matches("git version ")
-        .split('.')
-        .map(|n| n.parse::<u32>().unwrap_or(0));
+    let version = parterre_core::git::version().expect("git's version");
+    let mut numbers = version.split('.').map(|n| n.parse::<u32>().unwrap_or(0));
     let has_setting = (numbers.next().unwrap(), numbers.next().unwrap()) >= (2, 38);
     match load_repo(&bare.join("refs")).err() {
         Some(GitError::BareRepositoryRefused { found, open }) if has_setting => {
-            assert!(same(&found, &bare));
-            assert!(same(&open, &bare));
+            assert!(same_path(&found, &bare));
+            assert!(same_path(&open, &bare));
         }
         None if !has_setting => {}
         other => panic!("{version}: {other:?}"),
@@ -126,7 +121,7 @@ fn a_bare_repository_git_refuses_names_the_folder_to_open() {
     // A work tree's `.git`: git 2.45 and later take it, older ones point at the work tree.
     match load_repo(&r.path().join(".git")) {
         Ok(_) => {}
-        Err(GitError::BareRepositoryRefused { open, .. }) => assert!(same(&open, r.path())),
+        Err(GitError::BareRepositoryRefused { open, .. }) => assert!(same_path(&open, r.path())),
         Err(e) => panic!("{e}"),
     }
 }

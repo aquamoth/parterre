@@ -1,6 +1,6 @@
-//! The dialog for resetting the open worktree's branch, from a log row's menu. On the left, the
-//! files the reset concerns as the picked mode leaves them, in the log window's changed-files
-//! table; on the right, what happens to the branch, git's modes, what's lost and the command.
+//! On the left, the files the reset concerns as the picked mode leaves them, in the log window's
+//! changed-files table; on the right, what happens to the branch, git's modes, what's lost and
+//! the command.
 
 use std::sync::Arc;
 
@@ -10,26 +10,25 @@ use parterre_core::file_diff::FileDiffSpec;
 use parterre_core::reset::{self, FileOutcome, Mode, Preview};
 use parterre_core::{Oid, Repo};
 
-use super::file_table::{Badge, Badges, FileTable};
-use super::log_window::Colors;
+use super::branches::{answer_of, commit_line, plural, radio_with_help};
+use super::file_table::{FileTable, StatusBadge, StatusBadges};
+use super::log_window::{self, Colors};
 use crate::{dialogs, widgets};
 
-/// The files table's width as the dialog opens, and the least it shrinks to; the gap with the
-/// divider in it, and the side with the modes.
-const TABLE: f32 = 520.0;
-const MIN_TABLE: f32 = 240.0;
-const GAP: f32 = 40.0;
-const SIDE: f32 = 420.0;
-/// The modes' names, so their help starts at the same edge.
-const MODE_NAME: f32 = 70.0;
+const TABLE_INITIAL_WIDTH: f32 = 520.0;
+const TABLE_MIN_WIDTH: f32 = 240.0;
+/// Between the files table and the side, with the divider in it.
+const GAP_WIDTH: f32 = 40.0;
+const SIDE_WIDTH: f32 = 420.0;
+const MODE_NAME_WIDTH: f32 = 70.0;
 
-/// The files pane is shown, remembered as the Git command section is.
+/// Remembered as the Git command section is.
 fn files_shown_id() -> Id {
     Id::new("reset-files-shown")
 }
 
-/// How the right side is laid out: its width, and the room left above its Git command, which
-/// keeps the buttons at the window's bottom.
+/// How the side is laid out: its width, and the room left above its Git command, which keeps
+/// the buttons at the window's bottom.
 #[derive(Clone, Copy, Debug)]
 struct Side {
     width: f32,
@@ -41,7 +40,6 @@ pub struct ResetDialog {
     pub preview: Arc<Preview>,
     repo: Arc<Repo>,
     pub mode: Mode,
-    /// The window it was asked from.
     pub opener: ViewportId,
     fresh: bool,
     /// Asked for again while open: left out for a frame, so its window opens anew in front.
@@ -50,12 +48,29 @@ pub struct ResetDialog {
 }
 
 /// What the dialog asks for in a frame.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Asked {
-    pub answer: Option<dialogs::Answer>,
+    pub answer: dialogs::Answer,
     /// The log of these commits: the lost ones (exactly them), or the target.
     pub log: Option<(Vec<Oid>, bool)>,
     pub diffs: Vec<FileDiffSpec>,
+}
+
+/// What the side's controls are set to, or asked for, in a frame.
+struct SideState {
+    mode: Mode,
+    log: Option<(Vec<Oid>, bool)>,
+    toggle_files: bool,
+}
+
+impl SideState {
+    fn new(mode: Mode) -> Self {
+        SideState {
+            mode,
+            log: None,
+            toggle_files: false,
+        }
+    }
 }
 
 impl ResetDialog {
@@ -78,35 +93,36 @@ impl ResetDialog {
         self.repo = repo;
     }
 
-    /// `busy` while another Git operation runs.
     pub fn show(&mut self, ctx: &egui::Context, busy: bool) -> Asked {
-        let mut asked = Asked::default();
+        let mut diffs = Vec::new();
         if std::mem::take(&mut self.reopen) {
             ctx.request_repaint();
-            return asked;
+            return Asked {
+                answer: dialogs::Answer::Open,
+                log: None,
+                diffs,
+            };
         }
-        let preview = self.preview.clone();
         let abbrev = self.repo.abbrev_len.max(7);
         let title = format!(
             "Reset {} to {}",
-            preview.branch,
-            preview.target.short(abbrev)
+            self.preview.branch,
+            self.preview.target.short(abbrev)
         );
         let files_shown = ctx.data_mut(|d| *d.get_persisted_mut_or(files_shown_id(), true));
         let width = if files_shown {
-            TABLE + GAP + SIDE
+            TABLE_INITIAL_WIDTH + GAP_WIDTH + SIDE_WIDTH
         } else {
-            SIDE
+            SIDE_WIDTH
         };
-        let mut mode = self.mode;
-        let mut toggle = false;
-        // A width with the files pane, and another without.
+        let mut state = SideState::new(self.mode);
         let shown = dialogs::Dialog::new("reset-branch", &title)
             .screen(crate::usage::Screen::Reset)
             .width(width)
             .opener(self.opener)
             .raise(self.fresh)
             .resizable()
+            // A width with the files pane, and another without.
             .remember_as(("reset-branch", files_shown))
             .show(ctx, |ui| {
                 // Before the table takes Enter to open the files picked in it.
@@ -116,11 +132,10 @@ impl ResetDialog {
                         width: ui.available_width(),
                         room: 0.0,
                     };
-                    let answer =
-                        self.right(ui, &preview, busy, &mut mode, &mut asked, &mut toggle, side);
-                    return self.enter(answer, enter, false, &preview, mode, busy);
+                    let answer = self.side(ui, busy, &mut state, side);
+                    return self.enter(answer, enter, false, state.mode, busy);
                 }
-                // The right side laid out unseen first: the files pane is at least as tall.
+                // The side laid out unseen first: the files pane is at least as tall.
                 let mut sizer = ui.new_child(
                     egui::UiBuilder::new()
                         .id_salt("reset-sizing")
@@ -130,53 +145,36 @@ impl ResetDialog {
                         .invisible(),
                 );
                 let side = Side {
-                    width: SIDE,
+                    width: SIDE_WIDTH,
                     room: 0.0,
                 };
-                self.right(
-                    &mut sizer,
-                    &preview,
-                    busy,
-                    &mut mode.clone(),
-                    &mut Asked::default(),
-                    &mut false,
-                    side,
-                );
+                self.side(&mut sizer, busy, &mut SideState::new(state.mode), side);
                 let natural = sizer.min_rect().height();
-                // The files pane grows; the right side keeps its buttons at the bottom.
+                // The files pane grows; the side keeps its buttons at the bottom.
                 dialogs::growing(ui, natural, |ui, height| {
                     let height = height.unwrap_or(natural).max(natural);
                     let answer = ui
                         .horizontal_top(|ui| {
                             // The files pane's background, painted once the row's height is known.
                             let background = [(); 2].map(|_| ui.painter().add(egui::Shape::Noop));
-                            let table = (ui.available_width() - GAP - SIDE).max(MIN_TABLE);
-                            let (pane, diffs) = self.files_pane(ui, &preview, mode, height, table);
-                            let opened = !diffs.is_empty();
-                            asked.diffs.extend(diffs);
-                            ui.add_space(GAP);
+                            let table_width = (ui.available_width() - GAP_WIDTH - SIDE_WIDTH)
+                                .max(TABLE_MIN_WIDTH);
+                            let (mut pane, opened) =
+                                self.files_pane(ui, state.mode, height, table_width);
+                            let opened_any = !opened.is_empty();
+                            diffs.extend(opened);
+                            ui.add_space(GAP_WIDTH);
                             let side = Side {
-                                width: SIDE,
+                                width: SIDE_WIDTH,
                                 room: height - natural,
                             };
-                            let right = ui.vertical(|ui| {
-                                self.right(
-                                    ui,
-                                    &preview,
-                                    busy,
-                                    &mut mode,
-                                    &mut asked,
-                                    &mut toggle,
-                                    side,
-                                )
-                            });
-                            let mut pane = pane;
+                            let side = ui.vertical(|ui| self.side(ui, busy, &mut state, side));
                             // To the window's bottom edge, which the taller side decides.
                             pane.max.y = pane
                                 .max
                                 .y
-                                .max(right.response.rect.bottom() + dialogs::MARGIN);
-                            let c = super::log_window::colors(ui);
+                                .max(side.response.rect.bottom() + dialogs::MARGIN);
+                            let c = log_window::colors(ui);
                             let line = egui::Stroke::new(1.0, c.line);
                             ui.painter()
                                 .set(background[0], egui::Shape::rect_filled(pane, 0.0, c.pane));
@@ -184,23 +182,22 @@ impl ResetDialog {
                                 background[1],
                                 egui::Shape::vline(pane.right(), pane.y_range(), line),
                             );
-                            self.enter(right.inner, enter, opened, &preview, mode, busy)
+                            self.enter(side.inner, enter, opened_any, state.mode, busy)
                         })
                         .inner;
                     (answer, natural)
                 })
             });
         self.fresh = false;
-        self.mode = mode;
-        if toggle {
+        self.mode = state.mode;
+        if state.toggle_files {
             ctx.data_mut(|d| d.insert_persisted(files_shown_id(), !files_shown));
         }
-        asked.answer = Some(if shown.should_close() {
-            dialogs::Answer::Cancel
-        } else {
-            shown.inner
-        });
-        asked
+        Asked {
+            answer: answer_of(shown),
+            log: state.log,
+            diffs,
+        }
     }
 
     /// Enter runs a reset that loses nothing, unless it opened the files picked in the table.
@@ -209,10 +206,10 @@ impl ResetDialog {
         answer: dialogs::Answer,
         enter: bool,
         opened: bool,
-        preview: &Preview,
         mode: Mode,
         busy: bool,
     ) -> dialogs::Answer {
+        let preview = &self.preview;
         let runs = preview.refusal(mode).is_none() && !busy;
         if answer == dialogs::Answer::Open && enter && !opened && !preview.loses(mode) && runs {
             dialogs::Answer::Primary
@@ -221,24 +218,22 @@ impl ResetDialog {
         }
     }
 
-    /// The right side: the fields, the Git command, and the buttons' row with *Hide files*.
-    #[allow(clippy::too_many_arguments)]
-    fn right(
+    /// The fields, the Git command, and the buttons' row with *Hide files*.
+    fn side(
         &self,
         ui: &mut Ui,
-        preview: &Preview,
         busy: bool,
-        mode: &mut Mode,
-        asked: &mut Asked,
-        toggle: &mut bool,
+        state: &mut SideState,
         layout: Side,
     ) -> dialogs::Answer {
         ui.set_width(layout.width);
-        let picked = side(ui, preview, &self.repo, mode, asked);
+        let preview = &self.preview;
+        side_fields(ui, preview, &self.repo, state);
         ui.add_space(layout.room);
-        dialogs::command_box(ui, &[command_text(&reset::command(picked, preview.target))]);
-        let loses = preview.loses(picked);
-        let runs = preview.refusal(picked).is_none() && !busy;
+        let command = reset::command(state.mode, preview.target);
+        dialogs::command_box(ui, &[command_text(&command)]);
+        let loses = preview.loses(state.mode);
+        let runs = preview.refusal(state.mode).is_none() && !busy;
         let label = if loses { "Reset anyway" } else { "Reset" };
         let files_shown = ui.data_mut(|d| *d.get_persisted_mut_or(files_shown_id(), true));
         ui.horizontal(|ui| {
@@ -248,7 +243,7 @@ impl ResetDialog {
                 "Show files"
             };
             // As tall as the row `actions` lays out, to line up with Cancel.
-            *toggle |= ui
+            state.toggle_files |= ui
                 .allocate_ui_with_layout(
                     vec2(0.0, 34.0),
                     egui::Layout::left_to_right(egui::Align::Center),
@@ -261,24 +256,26 @@ impl ResetDialog {
         .inner
     }
 
-    /// The files, as a pane of the log window, `table` wide: to the window's edges, then a
+    /// The files, as a pane of the log window, `width` wide: to the window's edges, then a
     /// divider. Returns the pane, for its background, and the diffs a double-click (or Enter)
     /// asks for.
     fn files_pane(
         &mut self,
         ui: &mut Ui,
-        preview: &Preview,
         mode: Mode,
         height: f32,
-        table: f32,
+        width: f32,
     ) -> (egui::Rect, Vec<FileDiffSpec>) {
         let top = ui.cursor().top();
-        let (slot, _) = ui.allocate_exact_size(vec2(table, height), egui::Sense::hover());
+        let (slot, _) = ui.allocate_exact_size(vec2(width, height), egui::Sense::hover());
         let pane = egui::Rect::from_min_max(
             egui::pos2(slot.left() - dialogs::MARGIN, top - dialogs::MARGIN),
-            egui::pos2(slot.right() + GAP / 2.0, top + height + dialogs::MARGIN),
+            egui::pos2(
+                slot.right() + GAP_WIDTH / 2.0,
+                top + height + dialogs::MARGIN,
+            ),
         );
-        let c = super::log_window::colors(ui);
+        let c = log_window::colors(ui);
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(pane)
@@ -286,12 +283,12 @@ impl ResetDialog {
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
         child.set_clip_rect(pane);
+        let preview = &self.preview;
         let outcomes = preview.files(mode);
         let files: Vec<_> = outcomes.iter().map(|o| preview.changed_file(o)).collect();
         let badges: Vec<_> = outcomes.iter().map(|o| badges(o, &c)).collect();
         let action = self.table.show_badged(
             &mut child,
-            &c,
             "reset-branch",
             Id::new("reset-branch-files"),
             &files,
@@ -308,80 +305,63 @@ impl ResetDialog {
     }
 }
 
-/// The right side's fields: the target commit, what happens to the branch, the modes with
-/// their help, git's refusal and the lost commits. Returns the mode picked.
-fn side(ui: &mut Ui, preview: &Preview, repo: &Repo, mode: &mut Mode, asked: &mut Asked) -> Mode {
+/// The side's fields: the target commit, what happens to the branch, the modes with their
+/// help, git's refusal and the lost commits.
+fn side_fields(ui: &mut Ui, preview: &Preview, repo: &Repo, state: &mut SideState) {
     let abbrev = repo.abbrev_len.max(7);
     dialogs::fields(ui, |ui| {
-        if let Some(ix) = repo.lookup(&preview.target)
-            && dialogs::commit_line(ui, repo.commit(ix), repo.abbrev_len)
-        {
-            asked.log = Some((vec![preview.target], false));
+        if commit_line(ui, repo, preview.target) {
+            state.log = Some((vec![preview.target], false));
         }
         ui.label(preview.movement(abbrev));
         ui.add_space(4.0);
         for m in Mode::ALL {
-            ui.horizontal_top(|ui| {
-                let radio = ui
-                    .allocate_ui_with_layout(
-                        vec2(MODE_NAME, 18.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.set_min_width(MODE_NAME);
-                            ui.radio(*mode == m, m.name())
-                        },
-                    )
-                    .inner
-                    .on_hover_text(m.flag());
-                let help = ui.add(
-                    egui::Label::new(RichText::new(preview.help(m, abbrev)).small().weak())
-                        .wrap()
-                        .sense(egui::Sense::click()),
-                );
-                if radio.clicked() || help.clicked() {
-                    *mode = m;
-                }
-            });
+            let help = preview.help(m, abbrev);
+            if radio_with_help(
+                ui,
+                state.mode == m,
+                m.name(),
+                MODE_NAME_WIDTH,
+                m.flag(),
+                help,
+            ) {
+                state.mode = m;
+            }
         }
         let red = ui.visuals().error_fg_color;
         if let Some(refusal) = preview.blocked() {
             ui.add_space(4.0);
             ui.label(RichText::new(refusal).color(red));
-        } else if let Some(refusal) = preview.refusal(*mode) {
+        } else if let Some(refusal) = preview.refusal(state.mode) {
             ui.add_space(4.0);
-            ui.label(RichText::new(format!("git reset {} refuses:", mode.flag())).color(red));
+            let refuses = format!("git reset {} refuses:", state.mode.flag());
+            ui.label(RichText::new(refuses).color(red));
             ui.label(RichText::new(refusal).monospace().small().color(red));
         }
-        if !preview.commits.is_empty() {
+        if !preview.lost_commits.is_empty() {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                let n = preview.commits.len();
-                ui.label(
-                    RichText::new(format!(
-                        "Lost: {n} commit{}, on no branch, tag or worktree afterwards.",
-                        if n == 1 { "" } else { "s" }
-                    ))
-                    .color(red),
-                );
+                let lost = plural(preview.lost_commits.len(), "commit");
+                let text = format!("Lost: {lost}, on no branch, tag or worktree afterwards.");
+                ui.label(RichText::new(text).color(red));
                 if ui.link("Show in log").clicked() {
-                    asked.log = Some((preview.commits.clone(), true));
+                    state.log = Some((preview.lost_commits.clone(), true));
                 }
             });
         }
     });
-    *mode
 }
 
 /// A file's Status column: what it is afterwards, as `git status --short` letters (filled when
 /// staged, outlined when on disk only, U untracked); a check mark for a file rewritten; a red
 /// ! for lost work, or the file git refuses on.
-fn badges(o: &FileOutcome, c: &Colors) -> Badges {
+fn badges(o: &FileOutcome, c: &Colors) -> StatusBadges {
     let color = |letter: char| match letter {
         'A' | 'U' | '✔' => c.added,
         'D' | '!' => c.removed,
         _ => c.modified,
     };
-    let badge = |letter: char, filled: bool| Badge {
+    let badge = |letter: char, filled: bool| StatusBadge {
         letter,
         filled,
         color: color(letter),
@@ -398,14 +378,12 @@ fn badges(o: &FileOutcome, c: &Colors) -> Badges {
     if o.lost.is_some() || o.refused {
         badges.push(badge('!', true));
     }
-    Badges {
+    StatusBadges {
         badges,
         words: o.words(),
     }
 }
 
-/// The dialog and the branch tool around it, driven frame by frame in a headless context
-/// against real, disposable repositories: clicked by the text on screen, as a person would.
 #[cfg(test)]
 mod tests {
     use eframe::egui;

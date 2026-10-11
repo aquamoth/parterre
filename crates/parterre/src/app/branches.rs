@@ -1,22 +1,23 @@
-//! The local-branch and worktree tools: the log rows' menu, what the Git menu offers, and the
-//! controller they share. Slow Git queries and all mutations run on workers; forms retain their
-//! selected commit. Its dialogs are modeless windows, opened over the window they were asked
-//! from.
+//! Git queries and operations run on worker threads. The dialogs are modeless windows, opened
+//! over the window they were asked from.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
-use eframe::egui::{self, Color32, Id, RichText, Ui, ViewportId, vec2};
+use eframe::egui::{self, Color32, Id, Response, RichText, Ui, ViewportId, vec2};
 use parterre_core::banner::BannerTimer;
 use parterre_core::branches::{
-    Action, AddWorktree, BranchTip, Branches, Catalog, Checkout, Create, CreateDraft, Outcome,
-    Report, Warning, command_text,
+    Action, AddWorktree, BranchTip, Branches, Catalog, Checkout, Create, CreateDraft, Deletion,
+    Outcome, Report, Stuck, Warning, Worktree, command_text,
 };
 use parterre_core::file_diff::FileDiffSpec;
 use parterre_core::remote::{Live, RemoteBranchTip};
-use parterre_core::reset::{Mode, Preview};
+use parterre_core::reset::{self, Mode};
+use parterre_core::revgraph::GraphOptions;
 use parterre_core::worktree_folder;
-use parterre_core::{Oid, RefKind, Repo};
+use parterre_core::{GitRef, Oid, RefKind, Repo, cherry_pick, glyphs, merge, rebase, revert};
 use parterre_util::CancelTree;
 
 use super::cherry_pick::CherryPickDialog;
@@ -26,14 +27,10 @@ use super::rebase::{RebaseDialog, stuck_color};
 use super::remote::{PullDialog, PullRequestCheck, SetUpstreamDialog};
 use super::reset::ResetDialog;
 use super::revert::{RestoreDialog, RevertDialog};
+use crate::file_dialog::Pending;
 use crate::theme::Palette;
 use crate::usage::{self, Screen};
 use crate::{dialogs, menu, widgets};
-use parterre_core::cherry_pick;
-use parterre_core::merge;
-use parterre_core::rebase;
-use parterre_core::revert;
-use parterre_core::revgraph::GraphOptions;
 
 #[derive(Clone, Debug)]
 pub enum Request {
@@ -42,55 +39,45 @@ pub enum Request {
         track: Option<String>,
         switch: bool,
     },
-    /// The creation form with its worktree section.
     AddWorktree {
         start: Oid,
     },
-    /// Make this worktree the open one. Nothing runs in git.
     GoTo(PathBuf),
     Run(Action),
-    /// The dialog for resetting the open worktree's branch to a commit, with a mode picked
-    /// rather than the default (for screenshots).
+    /// `mode` overrides the default one, for screenshots.
     Reset {
         target: Oid,
         mode: Option<Mode>,
     },
-    /// The confirmation for rebasing the open worktree's branch onto `onto`, which the command
-    /// names by `target`: a branch's name, or the full hash.
+    /// `target` is what the command names `onto` by: a branch's name, or the full hash.
     Rebase {
         onto: Oid,
         target: String,
     },
-    /// The dialog for merging `theirs` into the open worktree's branch, which the command
-    /// names by `target`: a branch's name, or the full hash.
+    /// `target` is what the command names `theirs` by: a branch's name, or the full hash.
     Merge {
         theirs: Oid,
         target: String,
     },
-    /// The dialog for merging the open worktree's branch into local branch `into`, as a pull
-    /// request does.
+    /// Merging the open worktree's branch into local branch `into`.
     MergeInto {
         into: String,
     },
-    /// The confirmation for cherry-picking `picks` onto the open worktree's branch; `name` is
-    /// what the graph's menu named them by.
+    /// `name` is what the graph's menu named the picks by.
     CherryPick {
         picks: cherry_pick::Picks,
         name: Option<String>,
     },
-    /// The dialog for reverting `commit` on the open worktree's branch.
     Revert {
         commit: Oid,
     },
-    /// The dialog for setting local branch `branch`'s upstream.
     SetUpstream {
         branch: String,
     },
 }
 
-/// The menu of a row of the log: its branches, remotes and worktrees, as the graph's Git menu
-/// has them (`git_menu`), where *Cherry-pick* takes the `selection`, as listed, rather than
-/// everything the branch lacks.
+/// A log row's menu, as the graph's Git menu has it, except that *Cherry-pick* takes the
+/// `selection` rather than everything the branch lacks.
 pub fn row_node_menu(
     ui: &mut Ui,
     repo: &Repo,
@@ -108,9 +95,11 @@ pub fn row_node_menu(
     branch.or(remote).or(worktree)
 }
 
+const OPERATION_RUNNING: &str = "A Git operation is running";
+
 pub(super) fn loading_reason(busy: bool) -> &'static str {
     if busy {
-        "A Git operation is running"
+        OPERATION_RUNNING
     } else {
         "Loading branch information"
     }
@@ -149,7 +138,7 @@ fn branch_section(
     target_menu(ui, "Switch to", &switches, busy, &mut request);
     let deletions = Deletions {
         verb: "Delete branch",
-        many: "local branches",
+        plural_name: "local branches",
         name: |b: &BranchTip| b.name.clone(),
         delete: Action::DeleteBranches,
     };
@@ -161,10 +150,45 @@ fn branch_section(
         busy,
         &mut request,
     );
-    remote_deletions(ui, repo, commit, selection, catalog, busy, &mut request);
-    rebase_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
-    merge_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
-    merge_into_targets(ui, repo, commit, &refs, catalog, busy, &mut request);
+    let remote_deletions = Deletions {
+        verb: "Delete remote branch",
+        plural_name: "remote branches",
+        name: RemoteBranchTip::name,
+        delete: Action::DeleteRemoteBranches,
+    };
+    remote_deletions.items(
+        ui,
+        commit,
+        selection,
+        |c| deletable_remotes(repo, catalog, c),
+        busy,
+        &mut request,
+    );
+    if let Some((branch, targets)) = rebase_offer(repo, commit, &refs, catalog) {
+        let verb = format!("Rebase {branch} onto");
+        target_menu(ui, &verb, &targets, busy, &mut request);
+    }
+    if let Some((branch, targets)) = merge_offer(repo, commit, &refs, catalog) {
+        let into = format!(" into {branch}…");
+        target_menu_named(
+            ui,
+            &format!("Merge into {branch}"),
+            |name| format!("Merge {name}{into}"),
+            &targets,
+            busy,
+            &mut request,
+        );
+    }
+    if let Some((source, targets)) = merge_into_offer(repo, commit, &refs, catalog) {
+        target_menu_named(
+            ui,
+            &format!("Merge {source} into"),
+            |name| format!("Merge {source} into {name}…"),
+            &targets,
+            busy,
+            &mut request,
+        );
+    }
     if let Some(pick) = cherry_pick_selection(ui, repo, selection, catalog, busy) {
         request = Some(pick);
     }
@@ -178,11 +202,7 @@ fn branch_section(
 }
 
 /// The local and remote-tracking branches at `commit`, as the catalog has them there too.
-pub(super) fn refs_at<'a>(
-    repo: &'a Repo,
-    commit: Oid,
-    catalog: &Catalog,
-) -> Vec<&'a parterre_core::GitRef> {
+pub(super) fn refs_at<'a>(repo: &'a Repo, commit: Oid, catalog: &Catalog) -> Vec<&'a GitRef> {
     repo.refs
         .iter()
         .filter(|r| repo.commit(r.target).oid == commit)
@@ -206,11 +226,11 @@ pub(super) fn refs_at<'a>(
 pub(super) fn switch_targets(
     repo: &Repo,
     commit: Oid,
-    refs: &[&parterre_core::GitRef],
+    refs: &[&GitRef],
     catalog: &Catalog,
 ) -> Vec<Target> {
     let mut switches: Vec<Target> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     if catalog.has_working_tree {
         for r in refs {
             let candidates: Vec<&str> = match r.kind {
@@ -246,7 +266,7 @@ pub(super) fn switch_targets(
             }
         }
     }
-    let local_targets: std::collections::HashSet<_> = switches
+    let local_targets: HashSet<_> = switches
         .iter()
         .filter(|(_, request, _)| matches!(request, Request::Run(Action::Switch(_))))
         .map(|(name, _, _)| name.clone())
@@ -257,19 +277,14 @@ pub(super) fn switch_targets(
         }
     }
     switches.sort_by(|a, b| a.0.cmp(&b.0));
-    // A stuck worktree switches nowhere until its operation is finished with git.
-    let stuck = catalog.stuck().map(|s| s.reason());
-    // The commit itself, detached, last.
     if catalog.has_working_tree && !(catalog.current.is_none() && catalog.head == Some(commit)) {
-        let hex = commit.to_hex();
-        let short = &hex[..repo.abbrev_len.clamp(4, hex.len())];
         switches.push((
-            format!("{short} (detached)"),
+            format!("{} (detached)", commit.short(repo.abbrev_len.max(4))),
             Request::Run(Action::Detach(commit)),
             None,
         ));
     }
-    if let Some(reason) = &stuck {
+    if let Some(reason) = catalog.stuck().map(Stuck::reason) {
         for target in &mut switches {
             target.2 = Some(reason.clone());
         }
@@ -279,16 +294,10 @@ pub(super) fn switch_targets(
 
 /// The local branches at `commit` that are checked out nowhere.
 pub(super) fn deletable_locals(repo: &Repo, catalog: &Catalog, commit: Oid) -> Vec<BranchTip> {
-    let mut found: Vec<BranchTip> = repo
-        .refs
-        .iter()
+    let mut found: Vec<BranchTip> = refs_at(repo, commit, catalog)
+        .into_iter()
         .filter(|r| {
             r.kind == RefKind::LocalBranch
-                && repo.commit(r.target).oid == commit
-                && catalog
-                    .locals
-                    .iter()
-                    .any(|b| b.name == r.name && b.tip == commit)
                 && catalog.current.as_ref() != Some(&r.name)
                 && !catalog.occupied.contains_key(&r.name)
         })
@@ -307,18 +316,9 @@ pub(super) fn deletable_remotes(
     catalog: &Catalog,
     commit: Oid,
 ) -> Vec<RemoteBranchTip> {
-    let mut found: Vec<RemoteBranchTip> = repo
-        .refs
-        .iter()
-        .filter(|r| {
-            r.kind == RefKind::RemoteBranch
-                && !r.name.ends_with("/HEAD")
-                && repo.commit(r.target).oid == commit
-                && catalog
-                    .remotes
-                    .iter()
-                    .any(|b| b.name == r.name && b.tip == commit)
-        })
+    let mut found: Vec<RemoteBranchTip> = refs_at(repo, commit, catalog)
+        .into_iter()
+        .filter(|r| r.kind == RefKind::RemoteBranch && !r.name.ends_with("/HEAD"))
         .filter_map(|r| {
             let (remote, branch) = catalog.tracking_parts(&r.name)?;
             Some(RemoteBranchTip {
@@ -332,39 +332,11 @@ pub(super) fn deletable_remotes(
     found
 }
 
-/// *Delete remote branch* `origin/b` for each remote-tracking branch on the node, or *Delete N
-/// remote branches* when every node of a group has one.
-fn remote_deletions(
-    ui: &mut Ui,
-    repo: &Repo,
-    commit: Oid,
-    group: &[Oid],
-    catalog: &Catalog,
-    busy: bool,
-    request: &mut Option<Request>,
-) {
-    let deletions = Deletions {
-        verb: "Delete remote branch",
-        many: "remote branches",
-        name: RemoteBranchTip::name,
-        delete: Action::DeleteRemoteBranches,
-    };
-    deletions.items(
-        ui,
-        commit,
-        group,
-        |c| deletable_remotes(repo, catalog, c),
-        busy,
-        request,
-    );
-}
-
 /// Deleting what's at a node: one item each (*Delete branch* X), or, when every node of a
 /// group has some, one for them all (*Delete 3 branches*).
 struct Deletions<T> {
     verb: &'static str,
-    /// What several are, after their count.
-    many: &'static str,
+    plural_name: &'static str,
     name: fn(&T) -> String,
     delete: fn(Vec<T>) -> Action,
 }
@@ -383,7 +355,7 @@ impl<T: Clone> Deletions<T> {
         if group.len() > 1 && each.iter().all(|found| !found.is_empty()) {
             let all: Vec<T> = each.into_iter().flatten().collect();
             let names: Vec<String> = all.iter().map(self.name).collect();
-            let label = format!("Delete {} {}", all.len(), self.many);
+            let label = format!("Delete {} {}", all.len(), self.plural_name);
             let delete = Request::Run((self.delete)(all));
             all_item(ui, label, &names, delete, None, busy, request);
         } else {
@@ -397,7 +369,7 @@ impl<T: Clone> Deletions<T> {
 }
 
 /// The branch names at a node, its remotes' HEADs and the current branch left out, sorted.
-fn names_at<'a>(refs: &[&'a parterre_core::GitRef], catalog: &Catalog) -> Vec<&'a str> {
+fn names_at<'a>(refs: &[&'a GitRef], catalog: &Catalog) -> Vec<&'a str> {
     let mut names: Vec<&str> = refs
         .iter()
         .filter(|r| !r.name.ends_with("/HEAD"))
@@ -409,138 +381,79 @@ fn names_at<'a>(refs: &[&'a parterre_core::GitRef], catalog: &Catalog) -> Vec<&'
     names
 }
 
-/// *Rebase main onto X*: the branch rebased, and each branch on the node and last the commit
-/// itself as targets, when it would really rebase. Greyed out while the open worktree is stuck.
-pub(super) fn rebase_offer(
-    repo: &Repo,
-    commit: Oid,
-    refs: &[&parterre_core::GitRef],
+/// The branch an operation's item names. While the open worktree is stuck, the item is greyed
+/// out rather than hidden, and names the branch it's stuck on; otherwise the item is there only
+/// if `offered` gives a branch.
+fn offered_branch<S: Into<String>>(
     catalog: &Catalog,
-) -> Option<(String, Vec<Target>)> {
-    let stuck = catalog.stuck().map(|s| s.reason());
-    let branch = match &stuck {
-        Some(_) => stuck_branch(catalog),
-        None => rebase::offered(repo, catalog, commit)?.to_owned(),
-    };
-    let mut targets: Vec<Target> = names_at(refs, catalog)
-        .iter()
-        .map(|name| {
-            (
-                (*name).to_owned(),
-                Request::Rebase {
-                    onto: commit,
-                    target: (*name).to_owned(),
-                },
-                stuck.clone(),
-            )
-        })
-        .collect();
-    // The commit itself, last, as Switch to has it: for nodes with no branch on them, and
-    // for log rows.
-    targets.push((
-        commit.short(repo.abbrev_len.max(7)),
-        Request::Rebase {
-            onto: commit,
-            target: commit.to_hex(),
-        },
-        stuck,
-    ));
-    Some((branch, targets))
-}
-
-/// *Rebase main onto X* for each branch on the node and, last, the commit itself, when it
-/// would really rebase; greyed out while the open worktree is stuck. The log's rows have it
-/// too, through [`node_menu`]; the graph's Git menu takes the same offers.
-fn rebase_targets(
-    ui: &mut Ui,
-    repo: &Repo,
-    commit: Oid,
-    refs: &[&parterre_core::GitRef],
-    catalog: &Catalog,
-    busy: bool,
-    request: &mut Option<Request>,
-) {
-    if let Some((branch, targets)) = rebase_offer(repo, commit, refs, catalog) {
-        let verb = format!("Rebase {branch} onto");
-        target_menu(ui, &verb, &targets, busy, request);
+    offered: impl FnOnce() -> Option<S>,
+) -> Option<String> {
+    match catalog.stuck() {
+        Some(_) => Some(stuck_branch(catalog)),
+        None => offered().map(Into::into),
     }
 }
 
-/// *Merge X into main…*: the branch merged into, and each branch on the node and last the
-/// commit itself as what is merged, when there's something to merge. Greyed out while the open
-/// worktree is stuck.
-pub(super) fn merge_offer(
+/// Each branch on the node and, last, the commit itself, as *Switch to* has it (for nodes with
+/// no branch, and for log rows), asked for by `request` with the name the command takes.
+fn node_targets(
     repo: &Repo,
     commit: Oid,
-    refs: &[&parterre_core::GitRef],
+    refs: &[&GitRef],
+    catalog: &Catalog,
+    request: impl Fn(String) -> Request,
+) -> Vec<Target> {
+    let stuck = catalog.stuck().map(Stuck::reason);
+    let mut targets: Vec<Target> = names_at(refs, catalog)
+        .into_iter()
+        .map(|name| (name.to_owned(), request(name.to_owned()), stuck.clone()))
+        .collect();
+    let short = commit.short(repo.abbrev_len.max(7));
+    targets.push((short, request(commit.to_hex()), stuck));
+    targets
+}
+
+/// *Rebase main onto X*: the branch rebased and its targets, when it would really rebase.
+pub(super) fn rebase_offer(
+    repo: &Repo,
+    commit: Oid,
+    refs: &[&GitRef],
     catalog: &Catalog,
 ) -> Option<(String, Vec<Target>)> {
-    let stuck = catalog.stuck().map(|s| s.reason());
-    let branch = match &stuck {
-        Some(_) => stuck_branch(catalog),
-        None => merge::offered(repo, catalog, commit)?.to_owned(),
-    };
-    let mut targets: Vec<Target> = names_at(refs, catalog)
-        .iter()
-        .map(|name| {
-            (
-                (*name).to_owned(),
-                Request::Merge {
-                    theirs: commit,
-                    target: (*name).to_owned(),
-                },
-                stuck.clone(),
-            )
-        })
-        .collect();
-    targets.push((
-        commit.short(repo.abbrev_len.max(7)),
-        Request::Merge {
-            theirs: commit,
-            target: commit.to_hex(),
-        },
-        stuck,
-    ));
+    let branch = offered_branch(catalog, || rebase::offered(repo, catalog, commit))?;
+    let targets = node_targets(repo, commit, refs, catalog, |target| Request::Rebase {
+        onto: commit,
+        target,
+    });
     Some((branch, targets))
 }
 
-/// *Merge X into main…* for each branch on the node and, last, the commit itself, when there's
-/// something to merge; greyed out while the open worktree is stuck. The log's rows have it
-/// too, through [`node_menu`]; the graph's Git menu takes the same offers.
-fn merge_targets(
-    ui: &mut Ui,
+/// *Merge X into main…*: the branch merged into and what to merge, when there's something to
+/// merge.
+pub(super) fn merge_offer(
     repo: &Repo,
     commit: Oid,
-    refs: &[&parterre_core::GitRef],
+    refs: &[&GitRef],
     catalog: &Catalog,
-    busy: bool,
-    request: &mut Option<Request>,
-) {
-    let Some((branch, targets)) = merge_offer(repo, commit, refs, catalog) else {
-        return;
-    };
-    let into = format!(" into {branch}…");
-    target_menu_named(
-        ui,
-        &format!("Merge into {branch}"),
-        |name| format!("Merge {name}{into}"),
-        &targets,
-        busy,
-        request,
-    );
+) -> Option<(String, Vec<Target>)> {
+    let branch = offered_branch(catalog, || merge::offered(repo, catalog, commit))?;
+    let targets = node_targets(repo, commit, refs, catalog, |target| Request::Merge {
+        theirs: commit,
+        target,
+    });
+    Some((branch, targets))
 }
 
 /// *Merge main into feature…*: the open worktree's branch, and each local branch on the node
-/// that lacks its commits, as a pull request merges. Greyed out while the open worktree is
-/// stuck.
+/// that lacks its commits.
 pub(super) fn merge_into_offer(
     repo: &Repo,
     commit: Oid,
-    refs: &[&parterre_core::GitRef],
+    refs: &[&GitRef],
     catalog: &Catalog,
 ) -> Option<(String, Vec<Target>)> {
     let source = merge::offered_into(repo, catalog, commit)?;
-    let stuck = catalog.stuck().map(|s| s.reason());
+    let stuck = catalog.stuck().map(Stuck::reason);
     let mut names: Vec<&str> = refs
         .iter()
         .filter(|r| r.kind == RefKind::LocalBranch && r.name != source)
@@ -549,53 +462,26 @@ pub(super) fn merge_into_offer(
     names.sort_unstable();
     names.dedup();
     let targets: Vec<Target> = names
-        .iter()
+        .into_iter()
         .map(|name| {
-            let into = (*name).to_owned();
+            let into = name.to_owned();
             (into.clone(), Request::MergeInto { into }, stuck.clone())
         })
         .collect();
     Some((source.to_owned(), targets))
 }
 
-/// *Merge feature into main…* for each local branch on the node that lacks commits of the open
-/// worktree's branch, as a pull request merges; greyed out while the open worktree is stuck.
-fn merge_into_targets(
-    ui: &mut Ui,
-    repo: &Repo,
-    commit: Oid,
-    refs: &[&parterre_core::GitRef],
-    catalog: &Catalog,
-    busy: bool,
-    request: &mut Option<Request>,
-) {
-    let Some((source, targets)) = merge_into_offer(repo, commit, refs, catalog) else {
-        return;
-    };
-    target_menu_named(
-        ui,
-        &format!("Merge {source} into"),
-        |name| format!("Merge {source} into {name}…"),
-        &targets,
-        busy,
-        request,
-    );
-}
-
 /// *Cherry-pick feature onto main…*: every commit of the node main lacks, named after a branch
 /// on the node (a local one first), or its short hash: that name, the branch picked onto, and
-/// the request. Greyed out while the open worktree is stuck.
+/// the request.
 pub(super) fn cherry_pick_offer(
     repo: &Repo,
     commit: Oid,
-    refs: &[&parterre_core::GitRef],
+    refs: &[&GitRef],
     catalog: &Catalog,
 ) -> Option<(String, String, Request)> {
-    let branch = match catalog.stuck() {
-        Some(_) => stuck_branch(catalog),
-        None => cherry_pick::offered(repo, catalog, commit)?.to_owned(),
-    };
-    let mut names: Vec<&parterre_core::GitRef> = refs
+    let branch = offered_branch(catalog, || cherry_pick::offered(repo, catalog, commit))?;
+    let mut names: Vec<&GitRef> = refs
         .iter()
         .copied()
         .filter(|r| !r.name.ends_with("/HEAD") && r.name != branch)
@@ -612,8 +498,7 @@ pub(super) fn cherry_pick_offer(
     Some((name, branch, request))
 }
 
-/// *Cherry-pick 3 commits onto main…*: the log's selection, as listed; greyed out while the
-/// open worktree is stuck.
+/// *Cherry-pick 3 commits onto main…*: the log's selection, as listed.
 fn cherry_pick_selection(
     ui: &mut Ui,
     repo: &Repo,
@@ -621,10 +506,9 @@ fn cherry_pick_selection(
     catalog: &Catalog,
     busy: bool,
 ) -> Option<Request> {
-    let branch = match catalog.stuck() {
-        Some(_) => stuck_branch(catalog),
-        None => cherry_pick::offered_chosen(repo, catalog, selection)?.to_owned(),
-    };
+    let branch = offered_branch(catalog, || {
+        cherry_pick::offered_chosen(repo, catalog, selection)
+    })?;
     let what = match selection {
         [one] => one.short(repo.abbrev_len.max(7)),
         many => format!("{} commits", many.len()),
@@ -634,27 +518,27 @@ fn cherry_pick_selection(
         picks: cherry_pick::Picks::Chosen(selection.to_vec()),
         name: None,
     };
-    cherry_pick_item(ui, label, request, catalog, busy)
+    operation_item(ui, label, catalog, busy)
+        .clicked()
+        .then_some(request)
 }
 
-fn cherry_pick_item(
+/// An operation's menu item, greyed out while `busy` or the open worktree is stuck, with why on
+/// hover. Closes the menu when clicked.
+pub(super) fn operation_item(
     ui: &mut Ui,
     label: String,
-    request: Request,
     catalog: &Catalog,
     busy: bool,
-) -> Option<Request> {
-    let stuck = catalog.stuck().map(|s| s.reason());
-    let response = ui.add_enabled(!busy && stuck.is_none(), egui::Button::new(label));
-    let response = match stuck {
-        Some(reason) => response.on_disabled_hover_text(capitalized(&reason)),
-        None => response.on_disabled_hover_text(loading_reason(true)),
-    };
+) -> Response {
+    let stuck = catalog.stuck();
+    let response = ui
+        .add_enabled(!busy && stuck.is_none(), egui::Button::new(label))
+        .on_disabled_hover_text(stuck.map_or_else(|| OPERATION_RUNNING.to_owned(), Stuck::reason));
     if response.clicked() {
         ui.close();
-        return Some(request);
     }
-    None
+    response
 }
 
 /// The branch a stuck worktree is rebasing, else its branch, for greyed-out labels.
@@ -696,9 +580,12 @@ fn worktree_section(
     };
     let go_to = go_to_targets(catalog, commit);
     target_menu(ui, "Go to worktree", &go_to, false, &mut request);
-    let deletable = |commit: Oid| deletable_worktrees(catalog, commit);
-    if group.len() > 1 && group.iter().all(|&c| !deletable(c).is_empty()) {
-        let all: Vec<_> = group.iter().flat_map(|&c| deletable(c)).collect();
+    let each: Vec<Vec<&Worktree>> = group
+        .iter()
+        .map(|&c| deletable_worktrees(catalog, c))
+        .collect();
+    if group.len() > 1 && each.iter().all(|found| !found.is_empty()) {
+        let all: Vec<&Worktree> = each.into_iter().flatten().collect();
         let blocked = all.iter().find_map(|w| {
             let reason = w.locked.as_ref()?;
             Some(if reason.is_empty() {
@@ -742,10 +629,7 @@ pub(super) fn go_to_targets(catalog: &Catalog, commit: Oid) -> Vec<Target> {
 }
 
 /// The worktrees at `commit` that can be deleted: neither the open one nor the main one.
-pub(super) fn deletable_worktrees(
-    catalog: &Catalog,
-    commit: Oid,
-) -> Vec<&parterre_core::branches::Worktree> {
+pub(super) fn deletable_worktrees(catalog: &Catalog, commit: Oid) -> Vec<&Worktree> {
     let mut found: Vec<_> = catalog
         .worktrees
         .iter()
@@ -758,7 +642,7 @@ pub(super) fn deletable_worktrees(
 /// *Delete worktree*: each of [`deletable_worktrees`], greyed out while locked. An operation in
 /// progress there doesn't keep one: deleting it ends that too.
 pub(super) fn worktree_deletions(catalog: &Catalog, commit: Oid) -> Vec<Target> {
-    let locked = |w: &parterre_core::branches::Worktree| match &w.locked {
+    let locked = |w: &Worktree| match &w.locked {
         Some(reason) if reason.is_empty() => Some("Locked".to_owned()),
         Some(reason) => Some(format!("Locked: {reason}")),
         None => None,
@@ -791,11 +675,8 @@ fn all_item(
 ) {
     let response = ui
         .add_enabled(!busy && blocked.is_none(), egui::Button::new(label))
-        .on_hover_text(names.join(", "));
-    let response = match blocked {
-        Some(reason) => response.on_disabled_hover_text(reason),
-        None => response.on_disabled_hover_text(loading_reason(true)),
-    };
+        .on_hover_text(names.join(", "))
+        .on_disabled_hover_text(blocked.unwrap_or_else(|| OPERATION_RUNNING.to_owned()));
     if response.clicked() {
         *request = Some(value);
         ui.close();
@@ -803,36 +684,26 @@ fn all_item(
 }
 
 /// *Reset `<branch>` to here…*: only the open worktree's branch, and only where there's a
-/// reset to offer. In the node menu, so the graph and the log's rows both have it.
+/// reset to offer.
 pub fn reset_item(
     ui: &mut Ui,
     commit: Oid,
     catalog: Option<&Catalog>,
     busy: bool,
 ) -> Option<Request> {
-    // Greyed out, not hidden, while the worktree is stuck: it's only for now.
-    if let Some(stuck) = catalog.and_then(Catalog::stuck) {
-        let label = format!("Reset {} to here…", stuck_branch(catalog?));
-        ui.add_enabled(false, egui::Button::new(label))
-            .on_disabled_hover_text(stuck.reason());
-        return None;
-    }
-    let branch = parterre_core::reset::branch(catalog?, commit).ok()?;
-    let clicked = ui
-        .add_enabled(!busy, egui::Button::new(format!("Reset {branch} to here…")))
-        .on_disabled_hover_text(loading_reason(true))
-        .clicked();
-    if clicked {
-        ui.close();
-    }
-    clicked.then_some(Request::Reset {
+    let catalog = catalog?;
+    let branch = offered_branch(catalog, || reset::branch(catalog, commit).ok())?;
+    let request = Request::Reset {
         target: commit,
         mode: None,
-    })
+    };
+    operation_item(ui, format!("Reset {branch} to here…"), catalog, busy)
+        .clicked()
+        .then_some(request)
 }
 
 /// *Revert in `<branch>`…*: in the log's rows only, where commits are acted on one by one, for
-/// a commit the open worktree's HEAD reaches. Greyed out while the worktree is stuck.
+/// a commit the open worktree's HEAD reaches.
 pub fn revert_item(
     ui: &mut Ui,
     repo: &Repo,
@@ -841,20 +712,10 @@ pub fn revert_item(
     busy: bool,
 ) -> Option<Request> {
     let name = revert::offered(repo, catalog, commit)?;
-    if let Some(stuck) = catalog.stuck() {
-        let label = format!("Revert in {}…", stuck_branch(catalog));
-        ui.add_enabled(false, egui::Button::new(label))
-            .on_disabled_hover_text(stuck.reason());
-        return None;
-    }
-    let clicked = ui
-        .add_enabled(!busy, egui::Button::new(format!("Revert in {name}…")))
-        .on_disabled_hover_text(loading_reason(true))
-        .clicked();
-    if clicked {
-        ui.close();
-    }
-    clicked.then_some(Request::Revert { commit })
+    let branch = offered_branch(catalog, || Some(name))?;
+    operation_item(ui, format!("Revert in {branch}…"), catalog, busy)
+        .clicked()
+        .then_some(Request::Revert { commit })
 }
 
 /// A menu target: its name, what choosing it asks for, and why it's greyed out, if it is.
@@ -890,8 +751,8 @@ pub(super) fn target_menu_named(
         let enabled = !busy && blocked.is_none();
         let response = ui.add_enabled(enabled, egui::Button::new(label));
         let response = match (busy, blocked) {
-            (_, Some(reason)) => response.on_disabled_hover_text(capitalized(reason)),
-            (true, None) => response.on_disabled_hover_text(loading_reason(true)),
+            (_, Some(reason)) => response.on_disabled_hover_text(reason),
+            (true, None) => response.on_disabled_hover_text(OPERATION_RUNNING),
             _ => response,
         };
         if response.clicked() {
@@ -909,7 +770,7 @@ pub(super) fn target_menu_named(
         [(name, target, blocked)] => item(ui, single(name), target, blocked),
         [_, _, ..] if let Some(reason) = same => {
             ui.add_enabled(false, egui::Button::new(verb))
-                .on_disabled_hover_text(capitalized(&reason));
+                .on_disabled_hover_text(reason);
         }
         many => menu::plain_submenu(ui, verb, |ui| {
             for (name, target, blocked) in many {
@@ -935,28 +796,33 @@ struct Form {
     draft: CreateDraft,
     switch: bool,
     fresh: bool,
-    /// The window it was asked from.
     opener: ViewportId,
-    /// The worktree section, when this form adds a worktree.
     worktree: Option<WorktreeFields>,
 }
 
-/// Where the new worktree goes, and whether to go to it afterwards.
 #[derive(Debug)]
 struct WorktreeFields {
     /// Always ends in the platform's separator.
     root: String,
-    /// The folder's name, following the branch until it's typed in.
-    name: String,
-    name_edited: bool,
+    folder_name: String,
+    folder_name_edited: bool,
     go_to: bool,
-    /// The folder last asked about, and the working tree it's unignored in.
-    inside: Option<(PathBuf, Option<worktree_folder::Inside>)>,
-    browse: Option<crate::file_dialog::Pending<()>>,
+    /// The folder last checked, and the working tree it's unignored in, if any.
+    enclosing: Option<(PathBuf, Option<worktree_folder::Inside>)>,
+    browse: Option<Pending<()>>,
+}
+
+impl WorktreeFields {
+    /// Unless typed in, the folder name follows `base`, numbered when that folder is taken.
+    fn follow(&mut self, base: &str, registered: &[PathBuf]) {
+        if !self.folder_name_edited {
+            self.folder_name = worktree_folder::free_name(Path::new(&self.root), base, registered);
+        }
+    }
 }
 
 /// What the branch name of a new worktree amounts to.
-enum Pick<'a> {
+enum WorktreeBranch<'a> {
     Detached,
     Existing(&'a str),
     New,
@@ -1003,10 +869,10 @@ impl Form {
         let root = worktree_folder::default_root(&form.catalog.main, &form.catalog.root);
         form.worktree = Some(WorktreeFields {
             root: with_separator(root.to_string_lossy().into_owned()),
-            name: String::new(),
-            name_edited: false,
+            folder_name: String::new(),
+            folder_name_edited: false,
             go_to: false,
-            inside: None,
+            enclosing: None,
             browse: None,
         });
         if let Some(local) = form.free_locals().first() {
@@ -1073,20 +939,15 @@ impl Form {
             .collect()
     }
 
-    fn pick(&self) -> Pick<'_> {
+    fn worktree_branch(&self) -> WorktreeBranch<'_> {
         let name = self.draft.name().trim();
         if name.is_empty() {
-            Pick::Detached
+            WorktreeBranch::Detached
         } else if self.catalog.locals.iter().any(|b| b.name == name) {
-            Pick::Existing(name)
+            WorktreeBranch::Existing(name)
         } else {
-            Pick::New
+            WorktreeBranch::New
         }
-    }
-
-    fn short(&self) -> String {
-        let hex = self.start.to_hex();
-        hex[..self.repo.abbrev_len.clamp(4, hex.len())].to_owned()
     }
 
     fn registered(&self) -> Vec<PathBuf> {
@@ -1097,24 +958,25 @@ impl Form {
             .collect()
     }
 
-    /// The folder name follows the branch until it's typed in: `/` becomes `-`, the short hash
-    /// when detached, and a number when the folder is taken.
-    fn follow_branch(&mut self) {
-        let base = match self.draft.name().trim() {
-            "" => self.short(),
+    /// The folder name the branch gives: `/` becomes `-`, and the short hash when detached.
+    fn folder_base(&self) -> String {
+        match self.draft.name().trim() {
+            "" => self.start.short(self.repo.abbrev_len.max(4)),
             name => worktree_folder::folder_name(name),
-        };
-        let registered = self.registered();
-        let Some(wt) = &mut self.worktree else { return };
-        if !wt.name_edited {
-            wt.name = worktree_folder::free_name(Path::new(&wt.root), &base, &registered);
+        }
+    }
+
+    fn follow_branch(&mut self) {
+        let (base, registered) = (self.folder_base(), self.registered());
+        if let Some(wt) = &mut self.worktree {
+            wt.follow(&base, &registered);
         }
     }
 
     fn folder(&self) -> Option<PathBuf> {
         self.worktree
             .as_ref()
-            .map(|wt| Path::new(&wt.root).join(wt.name.trim()))
+            .map(|wt| Path::new(&wt.root).join(wt.folder_name.trim()))
     }
 
     fn action(&self) -> Action {
@@ -1126,10 +988,10 @@ impl Form {
                 switch: self.switch,
             });
         };
-        let checkout = match self.pick() {
-            Pick::Detached => Checkout::Detached,
-            Pick::Existing(name) => Checkout::Existing(name.to_owned()),
-            Pick::New => Checkout::New {
+        let checkout = match self.worktree_branch() {
+            WorktreeBranch::Detached => Checkout::Detached,
+            WorktreeBranch::Existing(name) => Checkout::Existing(name.to_owned()),
+            WorktreeBranch::New => Checkout::New {
                 name: self.draft.name().trim().to_owned(),
                 track: self.draft.upstream(),
             },
@@ -1141,26 +1003,28 @@ impl Form {
         })
     }
 
-    /// What's wrong with the worktree section, if anything.
     fn worktree_error(&self) -> Option<String> {
         let wt = self.worktree.as_ref()?;
         if !Path::new(&wt.root).is_absolute() {
             return Some("Enter the full path of a folder.".into());
         }
-        if let Some(error) = worktree_folder::name_error(&wt.name) {
+        if let Some(error) = worktree_folder::name_error(&wt.folder_name) {
             return Some(error.into());
         }
         let folder = self.folder()?;
-        if wt.name_edited && worktree_folder::taken(&folder, &self.registered()) {
-            return Some(format!("The folder '{}' already exists.", wt.name.trim()));
+        if wt.folder_name_edited && worktree_folder::taken(&folder, &self.registered()) {
+            return Some(format!(
+                "The folder '{}' already exists.",
+                wt.folder_name.trim()
+            ));
         }
         None
     }
 
     fn branch_error(&self) -> Option<String> {
-        match self.pick() {
-            Pick::Detached if self.worktree.is_some() => None,
-            Pick::Existing(name) if self.worktree.is_some() => {
+        match self.worktree_branch() {
+            WorktreeBranch::Detached if self.worktree.is_some() => None,
+            WorktreeBranch::Existing(name) if self.worktree.is_some() => {
                 if self.catalog.current.as_deref() == Some(name) {
                     Some(format!("{name} is checked out here."))
                 } else if let Some(at) = self.catalog.occupied.get(name) {
@@ -1182,7 +1046,7 @@ impl Form {
         Branches::commands(&self.catalog, &self.action()).map_err(|e| e.to_string())
     }
 
-    /// `busy` while another Git operation runs: it can't start until that one is done.
+    /// Returns the answer, and whether the commit's hash was clicked.
     fn show(&mut self, ctx: &egui::Context, busy: bool) -> (dialogs::Answer, bool) {
         self.browsed();
         let mut log = false;
@@ -1199,18 +1063,14 @@ impl Form {
             .resizable()
             .show(ctx, |ui| {
                 let commands = dialogs::fields(ui, |ui| {
-                    if let Some(ix) = self.repo.lookup(&self.start) {
-                        log = dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len);
-                    }
-                    // The branch controls, then the worktree's, then the one checkbox that
-                    // applies: switching here, or going to the new worktree.
+                    log = commit_line(ui, &self.repo, self.start);
                     if adding {
                         self.worktree_branch_field(ui);
                     } else {
                         self.name_field(ui);
                     }
                     ui.add_space(8.0);
-                    if adding && !matches!(self.pick(), Pick::New) {
+                    if adding && !matches!(self.worktree_branch(), WorktreeBranch::New) {
                         self.frozen_track_field(ui);
                     } else {
                         self.track_field(ui);
@@ -1241,11 +1101,11 @@ impl Form {
                     }
                     self.commands()
                 });
-                let shown = commands
+                let lines: Vec<String> = commands
                     .as_ref()
-                    .map(|cmds| cmds.iter().map(|a| command_text(a)).collect::<Vec<_>>())
+                    .map(|cmds| cmds.iter().map(|a| command_text(a)).collect())
                     .unwrap_or_default();
-                dialogs::command_box(ui, &shown);
+                dialogs::command_box(ui, &lines);
                 let label = match &self.worktree {
                     Some(wt) if wt.go_to => "Add and go to",
                     Some(_) => "Add",
@@ -1292,8 +1152,8 @@ impl Form {
             }
             self.follow_branch();
         }
-        let error = match self.pick() {
-            Pick::New => self
+        let error = match self.worktree_branch() {
+            WorktreeBranch::New => self
                 .catalog
                 .name_error(self.draft.name().trim())
                 .map(str::to_owned),
@@ -1307,8 +1167,8 @@ impl Form {
     /// An existing branch keeps its own upstream, and detached has none: the tracking row
     /// shows that, disabled.
     fn frozen_track_field(&mut self, ui: &mut Ui) {
-        let upstream = match self.pick() {
-            Pick::Existing(name) => self
+        let upstream = match self.worktree_branch() {
+            WorktreeBranch::Existing(name) => self
                 .catalog
                 .locals
                 .iter()
@@ -1326,43 +1186,30 @@ impl Form {
     }
 
     fn folder_fields(&mut self, ui: &mut Ui) {
+        let base = self.folder_base();
         let registered = self.registered();
-        let base = match self.draft.name().trim() {
-            "" => self.short(),
-            name => worktree_folder::folder_name(name),
-        };
         let folder = self.folder();
         let error = self.worktree_error();
-        let catalog = self.catalog.clone();
         let Some(wt) = &mut self.worktree else { return };
         ui.label(RichText::new("Worktree root").strong());
         let browsing = wt.browse.is_some();
         let (field, browse) = widgets::folder_field(ui, &mut wt.root, "Folder", browsing);
         if field.changed() {
             wt.root = with_separator(std::mem::take(&mut wt.root));
-            if !wt.name_edited {
-                wt.name = worktree_folder::free_name(Path::new(&wt.root), &base, &registered);
-            }
+            wt.follow(&base, &registered);
         }
         if browse {
-            let mut dialog = rfd::AsyncFileDialog::new().set_title("Worktree root");
-            let start = Path::new(&wt.root);
-            if let Some(dir) = start.ancestors().find(|a| a.is_dir()) {
-                dialog = dialog.set_directory(dir);
-            }
-            wt.browse = Some(crate::file_dialog::Pending::start(
-                (),
-                dialog.pick_folder(),
-                ui.ctx(),
-            ));
+            wt.browse = Some(pick_folder(ui.ctx(), "Worktree root", &wt.root));
         }
         // A root inside a working tree, where git would see the worktree as untracked.
         if let Some(folder) = &folder {
-            if wt.inside.as_ref().is_none_or(|(f, _)| f != folder) {
-                wt.inside = Some((folder.clone(), worktree_folder::inside_repository(folder)));
+            if wt.enclosing.as_ref().is_none_or(|(f, _)| f != folder) {
+                let inside = worktree_folder::inside_repository(folder);
+                wt.enclosing = Some((folder.clone(), inside));
             }
-            if let Some((_, Some(inside))) = &wt.inside {
-                let place = match catalog
+            if let Some((_, Some(inside))) = &wt.enclosing {
+                let place = match self
+                    .catalog
                     .worktrees
                     .iter()
                     .find(|w| worktree_folder::same_path(&w.path, &inside.top))
@@ -1381,7 +1228,7 @@ impl Form {
                 });
                 if exclude {
                     match worktree_folder::exclude(inside) {
-                        Ok(()) => wt.inside = None,
+                        Ok(()) => wt.enclosing = None,
                         Err(e) => {
                             ui.colored_label(ui.visuals().error_fg_color, e.to_string());
                         }
@@ -1391,30 +1238,11 @@ impl Form {
         }
         ui.add_space(6.0);
         ui.label(RichText::new("Worktree name").strong());
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let width = ui.available_width() - widgets::BUTTON - 4.0;
-            let mut name = wt.name.clone();
-            if widgets::text_field(ui, &mut name, "Folder name", width).changed() {
-                // Separators and what Windows forbids can't be typed.
-                wt.name = name
-                    .chars()
-                    .filter(|c| !worktree_folder::forbidden(*c))
-                    .collect();
-                wt.name_edited = true;
-            }
-            if ui
-                .add_enabled_ui(wt.name_edited, |ui| {
-                    widgets::icon_button(ui, parterre_core::glyphs::RESET, false)
-                })
-                .inner
-                .on_hover_text("Follow the branch name")
-                .clicked()
-            {
-                wt.name_edited = false;
-                wt.name = worktree_folder::free_name(Path::new(&wt.root), &base, &registered);
-            }
-        });
+        let name = &mut wt.folder_name;
+        let follow_tip = "Follow the branch name";
+        if folder_name_field(ui, name, &mut wt.folder_name_edited, follow_tip) {
+            wt.follow(&base, &registered);
+        }
         if let Some(error) = error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
@@ -1422,21 +1250,14 @@ impl Form {
 
     /// Takes the folder picked with *Browse…*.
     fn browsed(&mut self) {
-        let base = match self.draft.name().trim() {
-            "" => self.short(),
-            name => worktree_folder::folder_name(name),
-        };
-        let registered = self.registered();
         let Some(wt) = &mut self.worktree else { return };
-        let Some(answer) = wt.browse.as_ref().and_then(|p| p.answer()) else {
+        let Some(answer) = wt.browse.as_ref().and_then(Pending::answer) else {
             return;
         };
         wt.browse = None;
         if let Some(dir) = answer {
             wt.root = with_separator(dir.to_string_lossy().into_owned());
-            if !wt.name_edited {
-                wt.name = worktree_folder::free_name(Path::new(&wt.root), &base, &registered);
-            }
+            self.follow_branch();
         }
     }
 
@@ -1445,7 +1266,7 @@ impl Form {
         let suggestion = self.draft.suggested_name(&self.catalog);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let width = ui.available_width() - widgets::BUTTON - 4.0;
+            let width = ui.available_width() - widgets::BUTTON_SIZE - 4.0;
             let mut name = self.draft.name().to_owned();
             let response = widgets::text_field(ui, &mut name, "Enter a branch name", width);
             if self.fresh {
@@ -1457,7 +1278,7 @@ impl Form {
             if ui
                 .add_enabled_ui(
                     !suggestion.is_empty() && self.draft.name() != suggestion,
-                    |ui| widgets::icon_button(ui, parterre_core::glyphs::RESET, false),
+                    |ui| widgets::icon_button(ui, glyphs::RESET, false),
                 )
                 .inner
                 .on_hover_text(format!("Use suggested name: {suggestion}"))
@@ -1478,11 +1299,10 @@ impl Form {
         self.track_notes(ui);
     }
 
-    /// The tracking label, remote, branch and reset.
     fn track_row(&mut self, ui: &mut Ui) {
         ui.label(RichText::new("Track branch").strong());
         ui.allocate_ui_with_layout(
-            vec2(ui.available_width(), widgets::BUTTON),
+            vec2(ui.available_width(), widgets::BUTTON_SIZE),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -1491,7 +1311,7 @@ impl Form {
                 remotes.sort();
                 let chosen = ui
                     .allocate_ui_with_layout(
-                        vec2(110.0, widgets::BUTTON),
+                        vec2(110.0, widgets::BUTTON_SIZE),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| dialogs::choice(ui, "track-remote", &mut selected, "None", &remotes),
                     )
@@ -1499,9 +1319,9 @@ impl Form {
                 if chosen {
                     self.draft.set_remote(selected);
                 }
-                let width = ui.available_width() - widgets::BUTTON - 4.0;
+                let width = ui.available_width() - widgets::BUTTON_SIZE - 4.0;
                 ui.allocate_ui_with_layout(
-                    vec2(width, widgets::BUTTON),
+                    vec2(width, widgets::BUTTON_SIZE),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         let choices = self.draft.remote_branches(&self.catalog);
@@ -1524,7 +1344,7 @@ impl Form {
                 );
                 if ui
                     .add_enabled_ui(self.draft.can_restore_track_name(), |ui| {
-                        widgets::icon_button(ui, parterre_core::glyphs::RESET, false)
+                        widgets::icon_button(ui, glyphs::RESET, false)
                     })
                     .inner
                     .on_hover_text(format!("Use local branch name: {}", self.draft.name()))
@@ -1583,6 +1403,152 @@ pub(super) fn caution(ui: &mut Ui, content: impl FnOnce(&mut Ui)) {
         });
 }
 
+pub(super) fn plural(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+}
+
+/// [`dialogs::commit_line`] of `oid`, if `repo` has it. Returns whether its hash was clicked.
+pub(super) fn commit_line(ui: &mut Ui, repo: &Repo, oid: Oid) -> bool {
+    repo.lookup(&oid)
+        .is_some_and(|ix| dialogs::commit_line(ui, repo.commit(ix), repo.abbrev_len))
+}
+
+/// A shown dialog's answer, *Cancel* once its window is closed.
+pub(super) fn answer_of(shown: dialogs::Shown<dialogs::Answer>) -> dialogs::Answer {
+    if shown.should_close() {
+        dialogs::Answer::Cancel
+    } else {
+        shown.inner
+    }
+}
+
+/// What an operation's dialog asks for in a frame.
+#[derive(Debug)]
+pub struct Asked {
+    pub answer: dialogs::Answer,
+    pub show_in_log: Option<Oid>,
+}
+
+/// A radio button, `name_width` wide so that the help after each starts at the same edge, with
+/// `flag` on hover. Clicking the help picks it too. Returns whether it was picked.
+pub(super) fn radio_with_help(
+    ui: &mut Ui,
+    selected: bool,
+    name: &str,
+    name_width: f32,
+    flag: &str,
+    help: String,
+) -> bool {
+    ui.horizontal_top(|ui| {
+        let radio = ui
+            .allocate_ui_with_layout(
+                vec2(name_width, 18.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(name_width);
+                    ui.radio(selected, name)
+                },
+            )
+            .inner
+            .on_hover_text(flag);
+        let help = ui.add(
+            egui::Label::new(RichText::new(help).small().weak())
+                .wrap()
+                .sense(egui::Sense::click()),
+        );
+        radio.clicked() || help.clicked()
+    })
+    .inner
+}
+
+/// The system's folder picker, opened at `near` or the nearest folder above it that exists.
+pub(super) fn pick_folder(ctx: &egui::Context, title: &str, near: &str) -> Pending<()> {
+    let mut dialog = rfd::AsyncFileDialog::new().set_title(title);
+    if let Some(dir) = Path::new(near).ancestors().find(|a| a.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    Pending::start((), dialog.pick_folder(), ctx)
+}
+
+/// A folder name field, which drops what can't be in a folder's name (separators, and what
+/// Windows forbids) as it's typed, and a button to have the name follow what it follows again.
+/// Returns whether that was clicked.
+pub(super) fn folder_name_field(
+    ui: &mut Ui,
+    name: &mut String,
+    edited: &mut bool,
+    follow_tip: &str,
+) -> bool {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let width = ui.available_width() - widgets::BUTTON_SIZE - 4.0;
+        let mut typed = name.clone();
+        if widgets::text_field(ui, &mut typed, "Folder name", width).changed() {
+            *name = typed
+                .chars()
+                .filter(|c| !worktree_folder::forbidden(*c))
+                .collect();
+            *edited = true;
+        }
+        let follow = ui
+            .add_enabled_ui(*edited, |ui| widgets::icon_button(ui, glyphs::RESET, false))
+            .inner
+            .on_hover_text(follow_tip)
+            .clicked();
+        if follow {
+            *edited = false;
+        }
+        follow
+    })
+    .inner
+}
+
+/// Copies `text` when clicked, with a check mark in the `done` colour for a moment after.
+pub(super) fn copy_button(
+    ui: &mut Ui,
+    id: Id,
+    text: impl FnOnce() -> String,
+    hover: &str,
+    done: Color32,
+) {
+    let now = ui.input(|i| i.time);
+    let copied_at: Option<f64> = ui.data(|d| d.get_temp(id));
+    let copied = copied_at.is_some_and(|at| now - at < 1.5);
+    if copied {
+        ui.ctx().request_repaint_after(Duration::from_millis(300));
+    }
+    if widgets::copy_button(ui, copied, done)
+        .on_hover_text(hover)
+        .clicked()
+    {
+        ui.ctx().copy_text(text());
+        ui.data_mut(|d| d.insert_temp(id, now));
+    }
+}
+
+/// Runs `work` on a worker thread, repainting when it's done.
+pub(super) fn worker<T: Send + 'static>(
+    ctx: &egui::Context,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> mpsc::Receiver<T> {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+        ctx.request_repaint();
+    });
+    rx
+}
+
+/// What `rx` has received, if anything; `stopped()` once its worker is gone without sending.
+pub(super) fn received<T>(rx: &mpsc::Receiver<T>, stopped: impl FnOnce() -> T) -> Option<T> {
+    match rx.try_recv() {
+        Ok(value) => Some(value),
+        Err(mpsc::TryRecvError::Empty) => None,
+        Err(mpsc::TryRecvError::Disconnected) => Some(stopped()),
+    }
+}
+
 #[derive(Debug)]
 struct Job {
     path: PathBuf,
@@ -1590,18 +1556,15 @@ struct Job {
     opener: ViewportId,
     cancel: CancelTree,
     rx: mpsc::Receiver<Outcome>,
-    /// The worktree to go to once it's done.
     go_to: Option<PathBuf>,
-    /// A clone's folder, to open once it's done.
-    open: Option<PathBuf>,
-    /// A revert's: where the branch was, for the log to follow it to the new commit.
-    reverting: Option<Oid>,
-    /// A fetch's, pull's or push's: git's output as it comes.
+    cloned: Option<PathBuf>,
+    /// Where a reverted branch was, for the log to follow it to the new commit.
+    revert_from: Option<Oid>,
     live: Option<Live>,
 }
 
-/// A revert done: the log follows the branch from `from` to the new commit `to`, which is
-/// all it says. A log that can't follow it gets the notification instead.
+/// A revert done: the log follows the branch from `from` to the new commit `to`, which is all
+/// it says. A log that can't follow it gets the notification instead.
 #[derive(Debug)]
 pub struct Reverted {
     pub path: PathBuf,
@@ -1610,8 +1573,7 @@ pub struct Reverted {
     pub label: String,
 }
 
-/// The most rows of its error a notice shows.
-const NOTICE_ROWS: usize = 6;
+const NOTICE_MAX_ERROR_ROWS: usize = 6;
 
 #[derive(Debug)]
 struct Notice {
@@ -1621,20 +1583,17 @@ struct Notice {
     report: Report,
     error: Option<String>,
     at: f64,
-    /// Done, but needing the user's attention: orange, and it stays until closed. `error`
-    /// holds its message.
+    /// Done, but needing the user's attention: orange, with its message in `error`.
     attention: bool,
 }
 
 impl Notice {
-    /// Nothing more to say than its title: no details to open.
-    fn is_plain(&self) -> bool {
-        self.error.is_none() && self.report.steps.is_empty()
+    fn has_details(&self) -> bool {
+        self.error.is_some() || !self.report.steps.is_empty()
     }
 }
 
-/// What the usage statistics call `action` (#264): its kind, nothing of what it names.
-fn operation(action: &Action) -> usage::Action {
+fn usage_action(action: &Action) -> usage::Action {
     match action {
         Action::Create(_) => usage::Action::CreateBranch,
         Action::Switch(_) => usage::Action::SwitchBranch,
@@ -1658,115 +1617,107 @@ fn operation(action: &Action) -> usage::Action {
     }
 }
 
-/// A warning before losing work, waiting for an answer.
+/// A warning before losing work, or a confirmation, waiting for an answer.
 #[derive(Debug)]
 struct Loss {
     path: PathBuf,
     warning: Warning,
     fresh: bool,
     opener: ViewportId,
-    /// The deletions whose changed files are listed, by index.
-    show_files: std::collections::HashSet<usize>,
-    /// Remote branches': whether pull requests propose them.
-    checks: Option<PullRequestCheck>,
+    /// Indices of the deletions whose changed files are listed.
+    listing_files: HashSet<usize>,
+    pull_request_check: Option<PullRequestCheck>,
 }
 
-/// A reset's preview, being read for the dialog.
+/// A dialog's preview being read on a worker, and what else the dialog was asked for with.
 #[derive(Debug)]
-struct Previewing {
-    target: Oid,
+struct PreviewLoading<P, K> {
+    request: K,
     opener: ViewportId,
-    /// Read again for the open dialog, after the repository changed.
+    rx: mpsc::Receiver<Result<P, String>>,
+}
+
+impl<P: Send + 'static, K> PreviewLoading<P, K> {
+    fn start<E: ToString>(
+        ctx: &egui::Context,
+        request: K,
+        opener: ViewportId,
+        load: impl FnOnce() -> Result<P, E> + Send + 'static,
+    ) -> Self {
+        let rx = worker(ctx, move || load().map_err(|e| e.to_string()));
+        PreviewLoading {
+            request,
+            opener,
+            rx,
+        }
+    }
+}
+
+/// Takes the preview loading in `slot` once it's read. `what` names it, should its worker stop.
+fn previewed<P, K>(
+    slot: &mut Option<PreviewLoading<P, K>>,
+    what: &str,
+) -> Option<(Result<P, String>, PreviewLoading<P, K>)> {
+    let stopped = || Err(format!("The {what} preview stopped unexpectedly."));
+    let result = received(&slot.as_ref()?.rx, stopped)?;
+    slot.take().map(|loading| (result, loading))
+}
+
+#[derive(Debug)]
+struct ResetPreview {
+    target: Oid,
+    /// Read again for the open dialog.
     refresh: bool,
     mode: Option<Mode>,
-    rx: mpsc::Receiver<Result<Preview, String>>,
 }
 
-/// A rebase's preview, being read for its confirmation.
-#[derive(Debug)]
-struct RebaseLoading {
-    target: String,
-    opener: ViewportId,
-    rx: mpsc::Receiver<Result<rebase::Preview, String>>,
-}
-
-/// A cherry-pick's preview, being read for its confirmation.
-#[derive(Debug)]
-struct CherryPickLoading {
-    opener: ViewportId,
-    rx: mpsc::Receiver<Result<cherry_pick::Preview, String>>,
-}
-
-/// A revert's preview, being read for its dialog.
-#[derive(Debug)]
-struct RevertLoading {
-    commit: Oid,
-    opener: ViewportId,
-    rx: mpsc::Receiver<Result<revert::Preview, String>>,
-}
-
-/// A merge's preview, being read for its dialog.
-#[derive(Debug)]
-struct MergeLoading {
-    target: String,
-    opener: ViewportId,
-    rx: mpsc::Receiver<Result<merge::Preview, String>>,
+/// The dialogs of the repository shown, and the previews read for them: another one's close.
+#[derive(Debug, Default)]
+struct RepoDialogs {
+    form: Option<Form>,
+    loss: Option<Loss>,
+    reset: Option<ResetDialog>,
+    reset_loading: Option<PreviewLoading<reset::Preview, ResetPreview>>,
+    rebase: Option<RebaseDialog>,
+    rebase_loading: Option<PreviewLoading<rebase::Preview, String>>,
+    merge: Option<MergeDialog>,
+    merge_loading: Option<PreviewLoading<merge::Preview, String>>,
+    cherry_pick: Option<CherryPickDialog>,
+    cherry_pick_loading: Option<PreviewLoading<cherry_pick::Preview, ()>>,
+    revert: Option<RevertDialog>,
+    revert_loading: Option<PreviewLoading<revert::Preview, Oid>>,
+    restore_stash: Option<RestoreDialog>,
+    pull_diverged: Option<PullDialog>,
+    set_upstream: Option<SetUpstreamDialog>,
 }
 
 #[derive(Debug, Default)]
 pub struct Tool {
     repo: Option<Arc<Repo>>,
     pub catalog: Option<Arc<Catalog>>,
-    loading: Option<mpsc::Receiver<Result<Catalog, String>>>,
-    form: Option<Form>,
-    warning: Option<Loss>,
-    reset: Option<ResetDialog>,
-    previewing: Option<Previewing>,
-    rebase: Option<RebaseDialog>,
-    rebase_loading: Option<RebaseLoading>,
-    merge: Option<MergeDialog>,
-    merge_loading: Option<MergeLoading>,
-    cherry_pick: Option<CherryPickDialog>,
-    cherry_pick_loading: Option<CherryPickLoading>,
-    revert: Option<RevertDialog>,
-    revert_loading: Option<RevertLoading>,
-    /// Putting back the changes stashed for a revert.
-    restore: Option<RestoreDialog>,
-    /// How to pull a diverged branch.
-    pull: Option<PullDialog>,
-    set_upstream: Option<SetUpstreamDialog>,
-    /// A revert done, for the log to follow.
+    catalog_loading: Option<mpsc::Receiver<Result<Catalog, String>>>,
+    dialogs: RepoDialogs,
     pub reverted: Option<Reverted>,
-    /// Diff windows asked for from a dialog.
     pub diff_requests: Vec<(Arc<Repo>, FileDiffSpec)>,
     job: Option<Job>,
     notices: Vec<Notice>,
-    next_notice: u64,
-    details: Option<u64>,
+    last_notice_id: u64,
+    notice_details: Option<u64>,
     pub log_request: Option<(Arc<Repo>, Vec<Oid>, bool)>,
     pub reload: Option<PathBuf>,
-    /// A worktree to make the open one.
     pub go_to: Option<PathBuf>,
-    /// *Clone repository…*, while it's open.
     clone: Option<CloneDialog>,
-    /// The parent folder the last clone went in, remembered across runs.
     pub clone_parent: Option<PathBuf>,
-    /// A repository just cloned, for the app to open.
-    pub open: Option<PathBuf>,
-    /// When the stuck banner shows.
-    banner: BannerTimer,
+    pub cloned: Option<PathBuf>,
+    stuck_banner: BannerTimer,
     /// The next look at the worktree shows the banner at once: it follows an operation of
     /// parterre's own, F5 or opening the repository.
     look_at_once: bool,
     /// An operation ended and the worktree hasn't been looked at since.
     unlooked: bool,
-    /// When the catalogue was last asked for, to ask again while the worktree is stuck.
-    looked_at: f64,
-    /// The open worktree's conflicted files changed with the catalogue last loaded.
+    catalog_asked_at: f64,
     pub conflicts_changed: bool,
-    /// `--pull-requests-from`'s list, asked instead of GitHub before deleting remote branches.
     canned_pull_requests: Option<Arc<str>>,
-    /// `--github-repositories-from`'s list, shown instead of GitHub's for cloning.
     pub canned_repositories: Option<Arc<str>>,
     /// *Clone repository…* starts with a URL on the clipboard: not in scripted runs or tests.
     pub read_clipboard: bool,
@@ -1790,226 +1741,203 @@ impl Tool {
         self.look_at_once = true;
     }
 
-    /// Whether the stuck banner shows (see [`BannerTimer`]).
     pub fn banner_shown(&mut self) -> bool {
-        self.banner.update(self.busy() || self.unlooked)
+        self.stuck_banner.update(self.busy() || self.unlooked)
     }
 
-    /// Asks for the catalogue of `repo` on a worker thread: its refs and worktrees as the graph
-    /// shows them.
+    /// Asks for the catalogue of `repo`: its refs and worktrees as the graph shows them.
     fn load_catalog(&mut self, ctx: &egui::Context, repo: &Arc<Repo>) {
         let repo = repo.clone();
-        let worker_ctx = ctx.clone();
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let result = Catalog::of(&repo).map_err(|e| e.to_string());
-            let _ = tx.send(result);
-            worker_ctx.request_repaint();
-        });
-        self.loading = Some(rx);
-        self.looked_at = ctx.input(|i| i.time);
+        let load = move || Catalog::of(&repo).map_err(|e| e.to_string());
+        self.catalog_loading = Some(worker(ctx, load));
+        self.catalog_asked_at = ctx.input(|i| i.time);
     }
 
     pub fn update(&mut self, ctx: &egui::Context, repo: Option<&Arc<Repo>>) {
+        self.follow(ctx, repo);
+        // While the worktree is stuck, look again every second: for the banner to show once
+        // it lasts, and to go, and for the conflicted files, which change no refs.
+        let now = ctx.input(|i| i.time);
+        if self.stuck_banner.watching()
+            && self.catalog_loading.is_none()
+            && let Some(repo) = self.repo.clone()
+        {
+            let since = now - self.catalog_asked_at;
+            if since >= 1.0 {
+                self.load_catalog(ctx, &repo);
+            } else {
+                ctx.request_repaint_after(Duration::from_secs_f64(1.0 - since));
+            }
+        }
+        self.catalog_loaded(ctx, now);
+        self.reset_previewed(ctx);
+        self.rebase_previewed(ctx);
+        self.merge_previewed(ctx);
+        self.cherry_pick_previewed(ctx);
+        self.revert_previewed(ctx);
+        let stopped = || Outcome::Failed {
+            error: parterre_core::branches::Error::Failed(
+                "Git operation worker stopped unexpectedly. Review the reloaded repository \
+                 before retrying."
+                    .into(),
+            ),
+            report: Report::default(),
+        };
+        let outcome = self.job.as_ref().and_then(|job| received(&job.rx, stopped));
+        if let Some(outcome) = outcome
+            && let Some(job) = self.job.take()
+        {
+            self.job_done(ctx, job, outcome);
+        }
+    }
+
+    fn follow(&mut self, ctx: &egui::Context, repo: Option<&Arc<Repo>>) {
         let changed = match (&self.repo, repo) {
             (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
             (None, None) => false,
             _ => true,
         };
-        if changed {
-            let different_path = self.repo.as_ref().map(|r| &r.path) != repo.map(|r| &r.path);
-            if different_path {
-                self.form = None;
-                self.warning = None;
-                self.reset = None;
-                self.previewing = None;
-                self.rebase = None;
-                self.rebase_loading = None;
-                self.merge = None;
-                self.merge_loading = None;
-                self.cherry_pick = None;
-                self.cherry_pick_loading = None;
-                self.revert = None;
-                self.revert_loading = None;
-                self.restore = None;
-                self.pull = None;
-                self.set_upstream = None;
-                self.catalog = None;
-                self.banner = BannerTimer::default();
-                self.look_at_once = true;
-            } else if let Some(dialog) = &self.reset
-                && self.previewing.is_none()
-            {
-                // What the reset does may have changed with the repository.
-                let (target, opener) = (dialog.preview.target, dialog.opener);
-                self.preview(ctx, target, None, opener, true);
-            }
-            self.repo = repo.cloned();
-            self.loading = None;
-            if let Some(repo) = repo {
-                self.load_catalog(ctx, repo);
-            }
+        if !changed {
+            return;
         }
-        // While the worktree is stuck, look again every second: for the banner to show once
-        // it lasts, and to go, and for the conflicted files, which change no refs.
-        let now = ctx.input(|i| i.time);
-        if self.banner.watching()
-            && self.loading.is_none()
-            && let Some(repo) = self.repo.clone()
+        let different_path = self.repo.as_ref().map(|r| &r.path) != repo.map(|r| &r.path);
+        if different_path {
+            self.dialogs = RepoDialogs::default();
+            self.catalog = None;
+            self.stuck_banner = BannerTimer::default();
+            self.look_at_once = true;
+        } else if let Some(dialog) = &self.dialogs.reset
+            && self.dialogs.reset_loading.is_none()
         {
-            if now - self.looked_at >= 1.0 {
-                self.load_catalog(ctx, &repo);
-            } else {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
-                    1.0 - (now - self.looked_at),
-                ));
+            // What the reset does may have changed with the repository.
+            let (target, opener) = (dialog.preview.target, dialog.opener);
+            self.preview_reset(ctx, target, None, opener, true);
+        }
+        self.repo = repo.cloned();
+        self.catalog_loading = None;
+        if let Some(repo) = repo {
+            self.load_catalog(ctx, repo);
+        }
+    }
+
+    fn catalog_loaded(&mut self, ctx: &egui::Context, now: f64) {
+        let stopped = || Err("Branch information worker stopped unexpectedly.".into());
+        let Some(loaded) = self
+            .catalog_loading
+            .as_ref()
+            .and_then(|rx| received(rx, stopped))
+        else {
+            return;
+        };
+        self.catalog_loading = None;
+        match loaded {
+            Ok(catalog) => {
+                crate::startup::mark("branch catalogue loaded");
+                let catalog = Arc::new(catalog);
+                if let Some(form) = &mut self.dialogs.form {
+                    form.catalog = catalog.clone();
+                }
+                let at_once = std::mem::take(&mut self.look_at_once);
+                self.stuck_banner
+                    .look(catalog.stuck().is_some(), now, at_once);
+                self.unlooked = false;
+                self.conflicts_changed |= self
+                    .catalog
+                    .as_ref()
+                    .is_some_and(|old| old.conflicted != catalog.conflicted);
+                self.catalog = Some(catalog);
+            }
+            Err(e) => {
+                self.catalog = None;
+                if let Some(repo) = &self.repo {
+                    let title = "Could not load branch information".into();
+                    self.notify_error(ctx, repo.path.clone(), title, e);
+                }
             }
         }
-        let loaded = self.loading.as_ref().and_then(|rx| match rx.try_recv() {
-            Ok(result) => Some(result),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Some(Err("Branch information worker stopped unexpectedly.".into()))
-            }
-        });
-        if let Some(result) = loaded {
-            self.loading = None;
-            match result {
-                Ok(catalog) => {
-                    crate::startup::mark("branch catalogue loaded");
-                    let catalog = Arc::new(catalog);
-                    if let Some(form) = &mut self.form {
-                        form.catalog = catalog.clone();
-                    }
-                    let at_once = std::mem::take(&mut self.look_at_once);
-                    self.banner.look(catalog.stuck().is_some(), now, at_once);
-                    self.unlooked = false;
-                    self.conflicts_changed |= self
-                        .catalog
-                        .as_ref()
-                        .is_some_and(|old| old.conflicted != catalog.conflicted);
-                    self.catalog = Some(catalog);
-                }
-                Err(e) => {
-                    self.catalog = None;
-                    if let Some(repo) = &self.repo {
-                        self.notice(
-                            ctx,
-                            repo.path.clone(),
-                            "Could not load branch information".into(),
-                            Report::default(),
-                            Some(e),
-                        );
-                    }
-                }
-            }
+    }
+
+    fn job_done(&mut self, ctx: &egui::Context, job: Job, outcome: Outcome) {
+        // A question asked before anything ran leaves the repository as it was: nothing to load
+        // again while it's asked (#354).
+        let unchanged = matches!(&outcome, Outcome::Warning(w) if !w.changed);
+        if !unchanged {
+            self.reload = Some(job.path.clone());
         }
-        self.previewed(ctx);
-        self.rebase_previewed(ctx);
-        self.merge_previewed(ctx);
-        self.cherry_pick_previewed(ctx);
-        self.revert_previewed(ctx);
-        let completed = self.job.as_ref().and_then(|job| match job.rx.try_recv() {
-            Ok(result) => Some(result),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => Some(Outcome::Failed {
-                error: parterre_core::branches::Error::Failed("Git operation worker stopped unexpectedly. Review the reloaded repository before retrying.".into()),
-                report: Report::default(),
-            }),
-        });
-        if let Some(result) = completed {
-            let job = self.job.take().unwrap();
-            // A question asked before anything ran leaves the repository as it was: nothing
-            // to load again while it's asked (#354).
-            let unchanged = matches!(&result, Outcome::Warning(w) if !w.changed);
-            if !unchanged {
-                self.reload = Some(job.path.clone());
-            }
-            let here = self.repo.as_ref().is_some_and(|r| r.path == job.path);
-            // What was loaded meanwhile is from before it ended: look at the worktree again
-            // at once, for whether it's stuck. The refs follow with the graph's reload.
-            if let Some(repo) = self.repo.clone().filter(|_| here && !unchanged) {
-                self.unlooked = true;
-                self.look_at_once = true;
-                self.load_catalog(ctx, &repo);
-            }
-            // Changes stashed for a revert that didn't stop: the user decides about them.
-            if let Outcome::Done(report) | Outcome::Failed { report, .. } = &result
-                && let Some(stash) = report.stash.clone()
-                && here
-            {
-                self.restore = Some(RestoreDialog::new(stash, job.opener));
-            }
-            if let (Outcome::Done(report), Some(from)) = (&result, job.reverting)
-                && report.attention.is_none()
-                && let Some(to) = report.created
-            {
-                self.reverted = Some(Reverted {
+        let here = self.repo.as_ref().is_some_and(|r| r.path == job.path);
+        // What was loaded meanwhile is from before it ended: look at the worktree again at
+        // once, for whether it's stuck. The refs follow with the graph's reload.
+        if let Some(repo) = self.repo.clone().filter(|_| here && !unchanged) {
+            self.unlooked = true;
+            self.look_at_once = true;
+            self.load_catalog(ctx, &repo);
+        }
+        // Changes stashed for a revert that didn't stop: the user decides about them.
+        if let Outcome::Done(report) | Outcome::Failed { report, .. } = &outcome
+            && let Some(stash) = report.stash.clone()
+            && here
+        {
+            self.dialogs.restore_stash = Some(RestoreDialog::new(stash, job.opener));
+        }
+        if let (Outcome::Done(report), Some(from)) = (&outcome, job.revert_from)
+            && report.attention.is_none()
+            && let Some(to) = report.created
+        {
+            self.reverted = Some(Reverted {
+                path: job.path,
+                from,
+                to,
+                label: job.label,
+            });
+            return;
+        }
+        match outcome {
+            Outcome::Warning(warning) if here => {
+                let pull_request_check = match &warning.action {
+                    Action::DeleteRemoteBranches(branches) => Some(PullRequestCheck::start(
+                        ctx,
+                        job.path.clone(),
+                        branches,
+                        self.canned_pull_requests.clone(),
+                    )),
+                    _ => None,
+                };
+                self.dialogs.loss = Some(Loss {
                     path: job.path,
-                    from,
-                    to,
-                    label: job.label,
+                    warning,
+                    fresh: true,
+                    opener: job.opener,
+                    listing_files: HashSet::new(),
+                    pull_request_check,
                 });
-                return;
             }
-            match result {
-                Outcome::Warning(warning)
-                    if self.repo.as_ref().is_some_and(|r| r.path == job.path) =>
-                {
-                    let checks = match &warning.action {
-                        Action::DeleteRemoteBranches(branches) => Some(PullRequestCheck::start(
-                            ctx,
-                            job.path.clone(),
-                            branches,
-                            self.canned_pull_requests.clone(),
-                        )),
-                        _ => None,
-                    };
-                    self.warning = Some(Loss {
-                        path: job.path,
-                        warning,
-                        fresh: true,
-                        opener: job.opener,
-                        show_files: Default::default(),
-                        checks,
-                    });
-                }
-                Outcome::Warning(_) => self.notice(
-                    ctx,
-                    job.path,
-                    job.label,
-                    Report::default(),
-                    Some(
-                        "Open this repository again to review the commits at risk before retrying."
-                            .into(),
-                    ),
-                ),
-                Outcome::Done(report) => {
-                    self.go_to = job.go_to;
-                    self.open = job.open;
-                    match report.attention.clone() {
-                        Some(a) => {
-                            self.notice(ctx, job.path, a.title, report, Some(a.message));
-                            if let Some(n) = self.notices.last_mut() {
-                                n.attention = true;
-                            }
+            Outcome::Warning(_) => {
+                let error = "Open this repository again to review the commits at risk before \
+                             retrying.";
+                self.notify_error(ctx, job.path, job.label, error.into());
+            }
+            Outcome::Done(report) => {
+                self.go_to = job.go_to;
+                self.cloned = job.cloned;
+                match report.attention.clone() {
+                    Some(a) => {
+                        self.notice(ctx, job.path, a.title, report, Some(a.message));
+                        if let Some(n) = self.notices.last_mut() {
+                            n.attention = true;
                         }
-                        None => self.notice(ctx, job.path, job.label, report, None),
                     }
+                    None => self.notice(ctx, job.path, job.label, report, None),
                 }
-                Outcome::Failed { error, report } => {
-                    self.notice(ctx, job.path, job.label, report, Some(error.to_string()))
-                }
-                Outcome::Diverged(diverged) if here => {
-                    self.pull = Some(PullDialog::new(*diverged, job.opener));
-                }
-                Outcome::Diverged(_) => self.notice(
-                    ctx,
-                    job.path,
-                    job.label,
-                    Report::default(),
-                    Some("Open this repository again to pull.".into()),
-                ),
+            }
+            Outcome::Failed { error, report } => {
+                self.notice(ctx, job.path, job.label, report, Some(error.to_string()))
+            }
+            Outcome::Diverged(diverged) if here => {
+                self.dialogs.pull_diverged = Some(PullDialog::new(*diverged, job.opener));
+            }
+            Outcome::Diverged(_) => {
+                let error = "Open this repository again to pull.".into();
+                self.notify_error(ctx, job.path, job.label, error);
             }
         }
     }
@@ -2026,6 +1954,7 @@ impl Tool {
         let Some(repo) = self.repo.clone() else {
             return;
         };
+        let path = repo.path.clone();
         match request {
             Request::Create {
                 start,
@@ -2033,122 +1962,76 @@ impl Tool {
                 switch,
             } => {
                 if let Some(catalog) = self.catalog.clone() {
-                    self.form = Some(Form::new(repo, catalog, start, track, switch, opener));
+                    self.dialogs.form =
+                        Some(Form::new(repo, catalog, start, track, switch, opener));
                 }
             }
             Request::AddWorktree { start } => {
                 if let Some(catalog) = self.catalog.clone() {
-                    self.form = Some(Form::new_worktree(repo, catalog, start, opener));
+                    self.dialogs.form = Some(Form::new_worktree(repo, catalog, start, opener));
                 }
             }
             Request::GoTo(_) => unreachable!("handled above"),
             Request::SetUpstream { branch } => {
                 if let Some(catalog) = &self.catalog {
-                    self.set_upstream = Some(SetUpstreamDialog::new(catalog, branch, opener));
+                    self.dialogs.set_upstream =
+                        Some(SetUpstreamDialog::new(catalog, branch, opener));
                 }
             }
-            Request::Run(action) => self.run(ctx, repo.path.clone(), action, None, opener),
-            Request::Reset { target, mode } => self.preview(ctx, target, mode, opener, false),
+            Request::Run(action) => {
+                self.run(ctx, path, action, None, opener);
+            }
+            Request::Reset { target, mode } => self.preview_reset(ctx, target, mode, opener, false),
             Request::Rebase { onto, target } => {
-                let path = repo.path.clone();
-                let (tx, rx) = mpsc::channel();
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    let _ = tx.send(rebase::Preview::load(&path, onto).map_err(|e| e.to_string()));
-                    ctx.request_repaint();
-                });
-                self.rebase_loading = Some(RebaseLoading { target, opener, rx });
+                let load = move || rebase::Preview::load(&path, onto);
+                self.dialogs.rebase_loading =
+                    Some(PreviewLoading::start(ctx, target, opener, load));
             }
             Request::Merge { theirs, target } => {
-                let path = repo.path.clone();
-                let (tx, rx) = mpsc::channel();
-                let ctx = ctx.clone();
                 let name = target.clone();
-                std::thread::spawn(move || {
-                    let preview = merge::Preview::load(&path, theirs, &name);
-                    let _ = tx.send(preview.map_err(|e| e.to_string()));
-                    ctx.request_repaint();
-                });
-                self.merge_loading = Some(MergeLoading { target, opener, rx });
-            }
-            Request::Revert { commit } => {
-                let path = repo.path.clone();
-                let (tx, rx) = mpsc::channel();
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    let preview = revert::Preview::load(&path, commit);
-                    let _ = tx.send(preview.map_err(|e| e.to_string()));
-                    ctx.request_repaint();
-                });
-                self.revert_loading = Some(RevertLoading { commit, opener, rx });
+                let load = move || merge::Preview::load(&path, theirs, &name);
+                self.dialogs.merge_loading = Some(PreviewLoading::start(ctx, target, opener, load));
             }
             Request::MergeInto { into } => {
-                let path = repo.path.clone();
-                let (tx, rx) = mpsc::channel();
-                let ctx = ctx.clone();
-                let name = into.clone();
-                std::thread::spawn(move || {
-                    let preview = merge::Preview::load_into(&path, &name);
-                    let _ = tx.send(preview.map_err(|e| e.to_string()));
-                    ctx.request_repaint();
-                });
                 let target = format!("into {into}");
-                self.merge_loading = Some(MergeLoading { target, opener, rx });
+                let load = move || merge::Preview::load_into(&path, &into);
+                self.dialogs.merge_loading = Some(PreviewLoading::start(ctx, target, opener, load));
+            }
+            Request::Revert { commit } => {
+                let load = move || revert::Preview::load(&path, commit);
+                self.dialogs.revert_loading =
+                    Some(PreviewLoading::start(ctx, commit, opener, load));
             }
             Request::CherryPick { picks, name } => {
-                let path = repo.path.clone();
-                let (tx, rx) = mpsc::channel();
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    let preview = cherry_pick::Preview::load(&path, &picks, name);
-                    let _ = tx.send(preview.map_err(|e| e.to_string()));
-                    ctx.request_repaint();
-                });
-                self.cherry_pick_loading = Some(CherryPickLoading { opener, rx });
+                let load = move || cherry_pick::Preview::load(&path, &picks, name);
+                self.dialogs.cherry_pick_loading =
+                    Some(PreviewLoading::start(ctx, (), opener, load));
             }
         }
     }
 
-    /// Opens the cherry-pick's confirmation once its preview is read.
     fn cherry_pick_previewed(&mut self, ctx: &egui::Context) {
-        let Some(loading) = &self.cherry_pick_loading else {
+        let Some((result, loading)) =
+            previewed(&mut self.dialogs.cherry_pick_loading, "cherry-pick")
+        else {
             return;
         };
-        let result = match loading.rx.try_recv() {
-            Ok(result) => result,
-            Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Err("The cherry-pick preview stopped unexpectedly.".into())
-            }
-        };
-        let loading = self.cherry_pick_loading.take().unwrap();
         let Some(repo) = self.repo.clone() else {
             return;
         };
         match result {
             Ok(preview) => {
-                self.cherry_pick = Some(CherryPickDialog::new(preview, repo, ctx, loading.opener));
+                self.dialogs.cherry_pick =
+                    Some(CherryPickDialog::new(preview, repo, ctx, loading.opener));
             }
-            Err(e) => {
-                let title = "Cherry-pick".to_owned();
-                self.notice(ctx, repo.path.clone(), title, Report::default(), Some(e));
-            }
+            Err(e) => self.notify_error(ctx, repo.path.clone(), "Cherry-pick".into(), e),
         }
     }
 
-    /// Opens the merge's dialog once its preview is read.
     fn merge_previewed(&mut self, ctx: &egui::Context) {
-        let Some(loading) = &self.merge_loading else {
+        let Some((result, loading)) = previewed(&mut self.dialogs.merge_loading, "merge") else {
             return;
         };
-        let result = match loading.rx.try_recv() {
-            Ok(result) => result,
-            Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Err("The merge preview stopped unexpectedly.".into())
-            }
-        };
-        let loading = self.merge_loading.take().unwrap();
         let Some(repo) = self.repo.clone() else {
             return;
         };
@@ -2157,41 +2040,32 @@ impl Tool {
                 // Merging the open worktree's branch, the command names it.
                 let target = match &preview.outgoing {
                     Some(out) => out.source.clone(),
-                    None => loading.target,
+                    None => loading.request,
                 };
-                self.merge = Some(MergeDialog::new(preview, repo, target, loading.opener));
+                self.dialogs.merge = Some(MergeDialog::new(preview, repo, target, loading.opener));
             }
             Err(e) => {
-                let title = format!("Merge {}", loading.target);
-                self.notice(ctx, repo.path.clone(), title, Report::default(), Some(e));
+                let title = format!("Merge {}", loading.request);
+                self.notify_error(ctx, repo.path.clone(), title, e);
             }
         }
     }
 
-    /// Opens the revert's dialog once its preview is read.
     fn revert_previewed(&mut self, ctx: &egui::Context) {
-        let Some(loading) = &self.revert_loading else {
+        let Some((result, loading)) = previewed(&mut self.dialogs.revert_loading, "revert") else {
             return;
         };
-        let result = match loading.rx.try_recv() {
-            Ok(result) => result,
-            Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Err("The revert preview stopped unexpectedly.".into())
-            }
-        };
-        let loading = self.revert_loading.take().unwrap();
         let Some(repo) = self.repo.clone() else {
             return;
         };
         match result {
             Ok(preview) => {
-                self.revert = Some(RevertDialog::new(preview, repo, loading.opener));
+                self.dialogs.revert = Some(RevertDialog::new(preview, repo, loading.opener));
             }
             Err(e) => {
-                let short = loading.commit.short(repo.abbrev_len.max(7));
+                let short = loading.request.short(repo.abbrev_len.max(7));
                 let title = format!("Revert {short}");
-                self.notice(ctx, repo.path.clone(), title, Report::default(), Some(e));
+                self.notify_error(ctx, repo.path.clone(), title, e);
             }
         }
     }
@@ -2201,40 +2075,27 @@ impl Tool {
         self.notice(ctx, reverted.path, reverted.label, Report::default(), None);
     }
 
-    /// Opens the rebase's confirmation once its preview is read.
     fn rebase_previewed(&mut self, ctx: &egui::Context) {
-        let Some(loading) = &self.rebase_loading else {
+        let Some((result, loading)) = previewed(&mut self.dialogs.rebase_loading, "rebase") else {
             return;
         };
-        let result = match loading.rx.try_recv() {
-            Ok(result) => result,
-            Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Err("The rebase preview stopped unexpectedly.".into())
-            }
-        };
-        let loading = self.rebase_loading.take().unwrap();
         let Some(repo) = self.repo.clone() else {
             return;
         };
         match result {
             Ok(preview) => {
-                self.rebase = Some(RebaseDialog::new(
-                    preview,
-                    repo,
-                    loading.target,
-                    loading.opener,
-                ));
+                let target = loading.request;
+                self.dialogs.rebase =
+                    Some(RebaseDialog::new(preview, repo, target, loading.opener));
             }
             Err(e) => {
-                let title = format!("Rebase onto {}", loading.target);
-                self.notice(ctx, repo.path.clone(), title, Report::default(), Some(e));
+                let title = format!("Rebase onto {}", loading.request);
+                self.notify_error(ctx, repo.path.clone(), title, e);
             }
         }
     }
 
-    /// Reads what a reset to `target` would do, for its dialog.
-    fn preview(
+    fn preview_reset(
         &mut self,
         ctx: &egui::Context,
         target: Oid,
@@ -2245,49 +2106,42 @@ impl Tool {
         let Some(path) = self.repo.as_ref().map(|r| r.path.clone()) else {
             return;
         };
-        let (tx, rx) = mpsc::channel();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(Preview::load(&path, target).map_err(|e| e.to_string()));
-            ctx.request_repaint();
-        });
-        self.previewing = Some(Previewing {
+        let request = ResetPreview {
             target,
-            opener,
             refresh,
             mode,
-            rx,
-        });
+        };
+        let load = move || reset::Preview::load(&path, target);
+        self.dialogs.reset_loading = Some(PreviewLoading::start(ctx, request, opener, load));
     }
 
     /// Opens the reset dialog once its preview is read, or brings it up to date.
-    fn previewed(&mut self, ctx: &egui::Context) {
-        let Some(p) = &self.previewing else { return };
-        let result = match p.rx.try_recv() {
-            Ok(result) => result,
-            Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Err("The reset preview stopped unexpectedly.".into())
-            }
+    fn reset_previewed(&mut self, ctx: &egui::Context) {
+        let Some((result, loading)) = previewed(&mut self.dialogs.reset_loading, "reset") else {
+            return;
         };
-        let p = self.previewing.take().unwrap();
         let Some(repo) = self.repo.clone() else {
             return;
         };
-        match (result, &mut self.reset) {
-            (Ok(preview), Some(dialog)) if p.refresh => dialog.refresh(preview, repo),
+        let ResetPreview {
+            target,
+            refresh,
+            mode,
+        } = loading.request;
+        match (result, &mut self.dialogs.reset) {
+            (Ok(preview), Some(dialog)) if refresh => dialog.refresh(preview, repo),
             // Closed meanwhile.
-            (Ok(_), None) if p.refresh => {}
+            (Ok(_), None) if refresh => {}
             (Ok(preview), dialog) => {
-                let mut opened = ResetDialog::new(preview, repo, p.opener, dialog.is_some());
-                opened.mode = p.mode.unwrap_or(opened.mode);
+                let mut opened = ResetDialog::new(preview, repo, loading.opener, dialog.is_some());
+                opened.mode = mode.unwrap_or(opened.mode);
                 *dialog = Some(opened);
             }
             // Gone since: reset elsewhere, or the branch is no longer checked out.
-            (Err(_), _) if p.refresh => self.reset = None,
+            (Err(_), _) if refresh => self.dialogs.reset = None,
             (Err(e), _) => {
-                let title = format!("Reset to {}", p.target.short(repo.abbrev_len.max(7)));
-                self.notice(ctx, repo.path.clone(), title, Report::default(), Some(e));
+                let title = format!("Reset to {}", target.short(repo.abbrev_len.max(7)));
+                self.notify_error(ctx, repo.path.clone(), title, e);
             }
         }
     }
@@ -2299,42 +2153,37 @@ impl Tool {
         action: Action,
         approval: Option<Warning>,
         opener: ViewportId,
-    ) {
+    ) -> &mut Job {
         // Counted when the user starts it, not again when they agree to lose work.
         if approval.is_none() {
-            usage::action(operation(&action));
+            usage::action(usage_action(&action));
         }
-        let (tx, rx) = mpsc::channel();
         let cancel = CancelTree::default();
-        let worker_cancel = cancel.clone();
-        let worker_path = path.clone();
-        let ctx = ctx.clone();
         let label = action.label();
-        let reverting = match &action {
+        let revert_from = match &action {
             Action::Revert(r) => Some(r.head),
             _ => None,
         };
         let live = action.is_network().then(Live::default);
-        let mut branches = Branches::new(worker_path);
+        let mut branches = Branches::new(path.clone());
         if let Some(live) = &live {
             branches = branches.with_live(live.clone());
         }
-        std::thread::spawn(move || {
-            let outcome = branches.execute(action, approval.as_ref(), &worker_cancel);
-            let _ = tx.send(outcome);
-            ctx.request_repaint();
+        let worker_cancel = cancel.clone();
+        let rx = worker(ctx, move || {
+            branches.execute(action, approval.as_ref(), &worker_cancel)
         });
-        self.job = Some(Job {
+        self.job.insert(Job {
             path,
             label,
             opener,
             cancel,
             rx,
             go_to: None,
-            open: None,
-            reverting,
+            cloned: None,
+            revert_from,
             live,
-        });
+        })
     }
 
     fn notice(
@@ -2345,9 +2194,9 @@ impl Tool {
         report: Report,
         error: Option<String>,
     ) {
-        self.next_notice += 1;
+        self.last_notice_id += 1;
         self.notices.push(Notice {
-            id: self.next_notice,
+            id: self.last_notice_id,
             title,
             path,
             report,
@@ -2357,6 +2206,10 @@ impl Tool {
         });
     }
 
+    fn notify_error(&mut self, ctx: &egui::Context, path: PathBuf, title: String, error: String) {
+        self.notice(ctx, path, title, Report::default(), Some(error));
+    }
+
     /// A green notification of something done outside the branch tool, such as a reload. The
     /// same one again shows it anew rather than adding another.
     pub fn inform(&mut self, ctx: &egui::Context, path: PathBuf, title: &str) {
@@ -2364,7 +2217,7 @@ impl Tool {
         if let Some(n) = self
             .notices
             .iter_mut()
-            .find(|n| n.title == title && n.path == path && n.is_plain())
+            .find(|n| n.title == title && n.path == path && !n.has_details())
         {
             n.at = at;
             return;
@@ -2372,47 +2225,43 @@ impl Tool {
         self.notice(ctx, path, title.to_owned(), Report::default(), None);
     }
 
-    /// The graph's `palette` and `options`, for the rebase's commit list.
     pub fn show(&mut self, ctx: &egui::Context, palette: &Palette, options: &GraphOptions) {
-        if let Some(mut form) = self.form.take() {
-            let (answer, log) = form.show(ctx, self.busy());
-            if log {
-                self.log_request = Some((form.repo.clone(), vec![form.start], false));
-            }
-            match answer {
-                dialogs::Answer::Primary => {
-                    self.run(
-                        ctx,
-                        form.repo.path.clone(),
-                        form.action(),
-                        None,
-                        form.opener,
-                    );
-                    let go_to = form
-                        .worktree
-                        .as_ref()
-                        .filter(|w| w.go_to)
-                        .and(form.folder());
-                    if let Some(job) = &mut self.job {
-                        job.go_to = go_to;
-                    }
-                }
-                dialogs::Answer::Cancel => {}
-                dialogs::Answer::Open => self.form = Some(form),
-            }
-        }
+        self.form_dialog(ctx);
         self.reset_dialog(ctx);
         self.rebase_dialog(ctx, palette, options);
         self.merge_dialog(ctx, palette, options);
         self.cherry_pick_dialog(ctx, palette, options);
         self.revert_dialog(ctx);
-        self.restore_dialog(ctx);
-        self.pull_dialog(ctx);
+        self.restore_stash_dialog(ctx);
+        self.pull_diverged_dialog(ctx);
         self.set_upstream_dialog(ctx);
         self.clone_dialog(ctx);
         self.loss_dialog(ctx);
         self.network_window(ctx);
         self.notifications(ctx);
+    }
+
+    fn form_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut form) = self.dialogs.form.take() else {
+            return;
+        };
+        let (answer, log) = form.show(ctx, self.busy());
+        if log {
+            self.log_request = Some((form.repo.clone(), vec![form.start], false));
+        }
+        match answer {
+            dialogs::Answer::Primary => {
+                let go_to = form
+                    .worktree
+                    .as_ref()
+                    .filter(|w| w.go_to)
+                    .and(form.folder());
+                let path = form.repo.path.clone();
+                self.run(ctx, path, form.action(), None, form.opener).go_to = go_to;
+            }
+            dialogs::Answer::Cancel => {}
+            dialogs::Answer::Open => self.dialogs.form = Some(form),
+        }
     }
 
     /// Opens *Clone repository…* over `opener`, or brings it forward if it's open.
@@ -2439,10 +2288,8 @@ impl Tool {
             dialogs::Answer::Primary => {
                 let cloning = dialog.cloning();
                 self.clone_parent = Some(cloning.parent.clone());
-                self.run(ctx, cloning.path(), dialog.action(), None, dialog.opener);
-                if let Some(job) = &mut self.job {
-                    job.open = Some(cloning.path());
-                }
+                let job = self.run(ctx, cloning.path(), dialog.action(), None, dialog.opener);
+                job.cloned = Some(cloning.path());
             }
             dialogs::Answer::Cancel => {}
             dialogs::Answer::Open => self.clone = Some(dialog),
@@ -2452,7 +2299,7 @@ impl Tool {
     /// Whether a fetch can start now, or why not.
     pub fn fetch_blocked(&self) -> Option<&'static str> {
         match &self.catalog {
-            _ if self.busy() => Some(loading_reason(true)),
+            _ if self.busy() => Some(OPERATION_RUNNING),
             None => Some(loading_reason(false)),
             Some(c) if c.remote_names.is_empty() => Some("This repository has no remote"),
             Some(_) => None,
@@ -2471,106 +2318,104 @@ impl Tool {
         }
     }
 
-    fn pull_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut dialog) = self.pull.take() else {
-            return;
-        };
-        let Some(path) = self.repo.as_ref().map(|r| r.path.clone()) else {
-            return;
-        };
-        match dialog.show(ctx, self.busy()) {
-            dialogs::Answer::Primary => {
-                let action = Action::Pull(Box::new(dialog.pull()));
-                self.run(ctx, path, action, None, dialog.opener);
+    /// Shows the log a dialog asked for, and runs `action` once the dialog is accepted. Returns
+    /// whether the dialog stays open.
+    fn answered(
+        &mut self,
+        ctx: &egui::Context,
+        asked: Asked,
+        opener: ViewportId,
+        action: impl FnOnce() -> Option<Action>,
+    ) -> bool {
+        if let (Some(oid), Some(repo)) = (asked.show_in_log, &self.repo) {
+            self.log_request = Some((repo.clone(), vec![oid], false));
+        }
+        match asked.answer {
+            dialogs::Answer::Primary if !self.busy() => {
+                if let Some(repo) = self.repo.clone()
+                    && let Some(action) = action()
+                {
+                    self.run(ctx, repo.path.clone(), action, None, opener);
+                }
+                false
             }
-            dialogs::Answer::Cancel => {}
-            dialogs::Answer::Open => self.pull = Some(dialog),
+            dialogs::Answer::Cancel => false,
+            _ => true,
+        }
+    }
+
+    fn pull_diverged_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.dialogs.pull_diverged.take() else {
+            return;
+        };
+        let asked = Asked {
+            answer: dialog.show(ctx, self.busy()),
+            show_in_log: None,
+        };
+        let pull = || Some(Action::Pull(Box::new(dialog.pull())));
+        if self.answered(ctx, asked, dialog.opener, pull) {
+            self.dialogs.pull_diverged = Some(dialog);
         }
     }
 
     fn set_upstream_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut dialog) = self.set_upstream.take() else {
+        let Some(mut dialog) = self.dialogs.set_upstream.take() else {
             return;
         };
-        let Some(path) = self.repo.as_ref().map(|r| r.path.clone()) else {
-            return;
+        let asked = Asked {
+            answer: dialog.show(ctx, self.busy()),
+            show_in_log: None,
         };
-        match dialog.show(ctx, self.busy()) {
-            dialogs::Answer::Primary => {
-                if let Some(action) = dialog.action() {
-                    self.run(ctx, path, action, None, dialog.opener);
-                }
-            }
-            dialogs::Answer::Cancel => {}
-            dialogs::Answer::Open => self.set_upstream = Some(dialog),
+        if self.answered(ctx, asked, dialog.opener, || dialog.action()) {
+            self.dialogs.set_upstream = Some(dialog);
         }
     }
 
     fn reset_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut dialog) = self.reset.take() else {
+        let Some(mut dialog) = self.dialogs.reset.take() else {
             return;
         };
         let asked = dialog.show(ctx, self.busy());
         let repo = self.repo.clone();
-        if let (Some((commits, exact)), Some(repo)) = (asked.log, &repo) {
-            self.log_request = Some((repo.clone(), commits, exact));
-        }
         if let Some(repo) = &repo {
+            if let Some((commits, exact)) = asked.log {
+                self.log_request = Some((repo.clone(), commits, exact));
+            }
             self.diff_requests
                 .extend(asked.diffs.into_iter().map(|spec| (repo.clone(), spec)));
         }
         match asked.answer {
-            Some(dialogs::Answer::Primary) if !self.busy() => {
+            dialogs::Answer::Primary if !self.busy() => {
                 if let Some(repo) = &repo {
                     let action = Action::Reset(Box::new(dialog.preview.reset(dialog.mode)));
-                    self.previewing = None;
+                    self.dialogs.reset_loading = None;
                     self.run(ctx, repo.path.clone(), action, None, dialog.opener);
                 }
             }
-            Some(dialogs::Answer::Cancel) => self.previewing = None,
-            _ => self.reset = Some(dialog),
+            dialogs::Answer::Cancel => self.dialogs.reset_loading = None,
+            _ => self.dialogs.reset = Some(dialog),
         }
     }
 
     fn rebase_dialog(&mut self, ctx: &egui::Context, palette: &Palette, options: &GraphOptions) {
-        let Some(mut dialog) = self.rebase.take() else {
+        let Some(mut dialog) = self.dialogs.rebase.take() else {
             return;
         };
         let asked = dialog.show(ctx, self.busy(), palette, options);
-        let repo = self.repo.clone();
-        if let (Some(oid), Some(repo)) = (asked.log, &repo) {
-            self.log_request = Some((repo.clone(), vec![oid], false));
-        }
-        match asked.answer {
-            Some(dialogs::Answer::Primary) if !self.busy() => {
-                if let Some(repo) = &repo {
-                    let action = Action::Rebase(Box::new(dialog.rebase()));
-                    self.run(ctx, repo.path.clone(), action, None, dialog.opener);
-                }
-            }
-            Some(dialogs::Answer::Cancel) => {}
-            _ => self.rebase = Some(dialog),
+        let rebase = || Some(Action::Rebase(Box::new(dialog.rebase())));
+        if self.answered(ctx, asked, dialog.opener, rebase) {
+            self.dialogs.rebase = Some(dialog);
         }
     }
 
     fn merge_dialog(&mut self, ctx: &egui::Context, palette: &Palette, options: &GraphOptions) {
-        let Some(mut dialog) = self.merge.take() else {
+        let Some(mut dialog) = self.dialogs.merge.take() else {
             return;
         };
         let asked = dialog.show(ctx, self.busy(), palette, options);
-        let repo = self.repo.clone();
-        if let (Some(oid), Some(repo)) = (asked.log, &repo) {
-            self.log_request = Some((repo.clone(), vec![oid], false));
-        }
-        match asked.answer {
-            Some(dialogs::Answer::Primary) if !self.busy() => {
-                if let Some(repo) = &repo {
-                    let action = Action::Merge(Box::new(dialog.merge()));
-                    self.run(ctx, repo.path.clone(), action, None, dialog.opener);
-                }
-            }
-            Some(dialogs::Answer::Cancel) => {}
-            _ => self.merge = Some(dialog),
+        let merge = || Some(Action::Merge(Box::new(dialog.merge())));
+        if self.answered(ctx, asked, dialog.opener, merge) {
+            self.dialogs.merge = Some(dialog);
         }
     }
 
@@ -2580,310 +2425,82 @@ impl Tool {
         palette: &Palette,
         options: &GraphOptions,
     ) {
-        let Some(mut dialog) = self.cherry_pick.take() else {
+        let Some(mut dialog) = self.dialogs.cherry_pick.take() else {
             return;
         };
         let asked = dialog.show(ctx, self.busy(), palette, options);
-        let repo = self.repo.clone();
-        if let (Some(oid), Some(repo)) = (asked.log, &repo) {
-            self.log_request = Some((repo.clone(), vec![oid], false));
-        }
-        match asked.answer {
-            Some(dialogs::Answer::Primary) if !self.busy() => {
-                if let Some(repo) = &repo {
-                    let action = Action::CherryPick(Box::new(dialog.cherry_pick()));
-                    self.run(ctx, repo.path.clone(), action, None, dialog.opener);
-                }
-            }
-            Some(dialogs::Answer::Cancel) => {}
-            _ => self.cherry_pick = Some(dialog),
+        let cherry_pick = || Some(Action::CherryPick(Box::new(dialog.cherry_pick())));
+        if self.answered(ctx, asked, dialog.opener, cherry_pick) {
+            self.dialogs.cherry_pick = Some(dialog);
         }
     }
 
     fn revert_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut dialog) = self.revert.take() else {
+        let Some(mut dialog) = self.dialogs.revert.take() else {
             return;
         };
         let asked = dialog.show(ctx, self.busy());
-        let repo = self.repo.clone();
-        if let (Some(oid), Some(repo)) = (asked.log, &repo) {
-            self.log_request = Some((repo.clone(), vec![oid], false));
-        }
-        match asked.answer {
-            Some(dialogs::Answer::Primary) if !self.busy() => {
-                if let Some(repo) = &repo {
-                    let action = Action::Revert(Box::new(dialog.revert()));
-                    self.run(ctx, repo.path.clone(), action, None, dialog.opener);
-                }
-            }
-            Some(dialogs::Answer::Cancel) => {}
-            _ => self.revert = Some(dialog),
+        let revert = || Some(Action::Revert(Box::new(dialog.revert())));
+        if self.answered(ctx, asked, dialog.opener, revert) {
+            self.dialogs.revert = Some(dialog);
         }
     }
 
-    fn restore_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut dialog) = self.restore.take() else {
+    fn restore_stash_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.dialogs.restore_stash.take() else {
             return;
         };
-        match dialog.show(ctx, self.busy()) {
-            dialogs::Answer::Primary if !self.busy() => {
-                if let Some(repo) = self.repo.clone() {
-                    let action = Action::RestoreStash(dialog.stash.oid);
-                    self.run(ctx, repo.path.clone(), action, None, dialog.opener);
-                }
-            }
-            dialogs::Answer::Cancel => {}
-            _ => self.restore = Some(dialog),
+        let asked = Asked {
+            answer: dialog.show(ctx, self.busy()),
+            show_in_log: None,
+        };
+        let restore = || Some(Action::RestoreStash(dialog.stash.oid));
+        if self.answered(ctx, asked, dialog.opener, restore) {
+            self.dialogs.restore_stash = Some(dialog);
         }
     }
 
     /// The confirmation or warning an operation came back with.
     fn loss_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut loss) = self.warning.take() else {
+        let Some(mut loss) = self.dialogs.loss.take() else {
             return;
         };
         let warning = &loss.warning;
-        let plural = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
-        let commits = plural(warning.commits.len(), "commit");
-        let changed: usize = warning.deletions.iter().map(|d| d.files.len()).sum();
-        let files = plural(changed, "changed file");
         let confirmation = warning.is_confirmation();
-        let refused = warning.deletions.iter().any(|d| d.refusal.is_some());
-        let several = warning.deletions.len() > 1;
-        let mut deletes_branches = warning.deletes_branches();
-        let (title, button) = match &warning.action {
-            Action::DeleteBranches(_) => {
-                let what = match warning.deletions.as_slice() {
-                    [one] => format!("branch {}", one.name),
-                    many => format!("{} local branches", many.len()),
-                };
-                (
-                    format!("Delete {what} and lose {commits}?"),
-                    "Delete anyway",
-                )
-            }
-            Action::DeleteWorktrees { .. } => {
-                let what = match warning.deletions.as_slice() {
-                    [one] => format!("worktree {}", one.name),
-                    many => format!("{} worktrees", many.len()),
-                };
-                let cost = match (changed == 0, warning.commits.is_empty()) {
-                    (false, false) => format!(" and lose {files} and {commits}"),
-                    (false, true) => format!(" and lose {files}"),
-                    (true, false) => format!(" and lose {commits}"),
-                    (true, true) if refused => " anyway".to_owned(),
-                    (true, true) => String::new(),
-                };
-                let button = if confirmation {
-                    "Delete"
-                } else {
-                    "Delete anyway"
-                };
-                (format!("Delete {what}{cost}?"), button)
-            }
-            Action::DeleteRemoteBranches(_) => {
-                let what = match warning.deletions.as_slice() {
-                    [one] => format!("remote branch {}", one.name),
-                    many => format!("{} remote branches", many.len()),
-                };
-                if confirmation {
-                    (format!("Delete {what}?"), "Delete")
-                } else {
-                    (
-                        format!("Delete {what} and lose {commits}?"),
-                        "Delete anyway",
-                    )
-                }
-            }
-            Action::Push(push) if confirmation => (
-                format!("Force push {} to {}?", push.branch, push.target()),
-                "Force push",
-            ),
-            Action::Push(push) => (
-                format!(
-                    "Force push {} to {} and lose {commits}?",
-                    push.branch,
-                    push.target()
-                ),
-                "Force push anyway",
-            ),
-            _ => (
-                format!(
-                    "Switch {} and lose {}?",
-                    if matches!(warning.action, Action::Detach(_)) {
-                        "to a detached HEAD"
-                    } else {
-                        "branches"
-                    },
-                    plural(warning.commits.len(), "detached commit")
-                ),
-                "Switch anyway",
-            ),
+        let (title, button) = loss_title(warning);
+        let screen = match &warning.action {
+            Action::Push(_) => Screen::ForcePush,
+            Action::DeleteRemoteBranches(_) => Screen::DeleteRemoteBranch,
+            _ => Screen::LostWork,
         };
-        const TRIANGLE: parterre_core::glyphs::Glyph = &[parterre_core::glyphs::Part::Path(
-            "M12 3 2 21h20ZM12 9v5m0 3v1",
-        )];
-        let mut show_log = None;
-        let busy = self.busy();
-        let force_push = match &warning.action {
-            Action::Push(push) => Some(push),
-            _ => None,
-        };
-        let screen = match (&warning.action, force_push) {
-            (_, Some(_)) => crate::usage::Screen::ForcePush,
-            (Action::DeleteRemoteBranches(_), _) => crate::usage::Screen::DeleteRemoteBranch,
-            _ => crate::usage::Screen::LostWork,
-        };
-        let catalog = self.catalog.clone();
         let mut dialog = dialogs::Dialog::new("branch-loss", &title)
             .screen(screen)
             .opener(loss.opener)
             .raise(loss.fresh)
             .resizable();
         if !confirmation {
-            dialog = dialog.icon(TRIANGLE, true);
+            dialog = dialog.icon(LOSS_ICON, true);
         }
-        let show_files = &mut loss.show_files;
-        let checks = &mut loss.checks;
+        let busy = self.busy();
+        let catalog = self.catalog.clone();
+        let mut show_log = None;
+        let mut deletes_branches = warning.deletes_branches();
+        let listing_files = &mut loss.listing_files;
+        let check = &mut loss.pull_request_check;
         let shown = dialog.show(ctx, |ui| {
             dialogs::fields(ui, |ui| {
-                if let (Action::DeleteRemoteBranches(branches), Some(checks)) =
-                    (&warning.action, checks.as_mut())
+                if let (Action::DeleteRemoteBranches(branches), Some(check)) =
+                    (&warning.action, check.as_mut())
                 {
-                    super::remote::deletion_notes(ui, branches, catalog.as_deref(), checks);
+                    super::remote::deletion_notes(ui, branches, catalog.as_deref(), check);
                 }
-                let worktrees = matches!(warning.action, Action::DeleteWorktrees { .. });
-                match warning.deletions.as_slice() {
-                    [one] if worktrees => {
-                        if let Some(path) = &one.path {
-                            ui.label(format!(
-                                "The folder {} and everything in it will be deleted.",
-                                path.display()
-                            ));
-                        }
-                    }
-                    _ if worktrees => {
-                        ui.label("These folders and everything in them will be deleted.");
-                    }
-                    _ => {}
-                }
-                let owned: Vec<&str> = warning
-                    .deletions
-                    .iter()
-                    .filter_map(|d| d.branch.as_ref())
-                    .map(|b| b.name.as_str())
-                    .collect();
-                if worktrees && !owned.is_empty() {
-                    let label = match owned.as_slice() {
-                        [one] => format!("Also delete local branch {one}"),
-                        _ => "Also delete their local branches".to_owned(),
-                    };
-                    ui.checkbox(&mut deletes_branches, label);
-                }
-                let unreachable = match force_push {
-                    Some(push) => format!(
-                        "These commits on {} are not on {}.",
-                        push.remote_branch(),
-                        push.branch
-                    ),
-                    None => "These commits are not reachable from any surviving branch, tag or \
-                             worktree."
-                        .to_owned(),
-                };
-                let row = |ui: &mut Ui, content: &mut dyn FnMut(&mut Ui)| {
-                    egui::Frame::new()
-                        .fill(widgets::tones(ui).seg_bg)
-                        .corner_radius(8)
-                        .inner_margin(egui::Margin::symmetric(12, 8))
-                        .show(ui, |ui| ui.horizontal(|ui| content(ui)));
-                };
-                // What one deletion loses: one row each for its files and its commits.
-                let mut losses = |ui: &mut Ui, i: usize, d: &parterre_core::branches::Deletion| {
-                    if let Some(refusal) = &d.refusal {
-                        ui.label("Git refused to delete it:");
-                        ui.label(RichText::new(refusal).monospace());
-                    }
-                    if !d.files.is_empty() {
-                        let shown = show_files.contains(&i);
-                        row(ui, &mut |ui| {
-                            ui.label(plural(d.files.len(), "changed file"));
-                            if ui.link(if shown { "Hide" } else { "Show" }).clicked()
-                                && !show_files.remove(&i)
-                            {
-                                show_files.insert(i);
-                            }
-                        });
-                        if shown {
-                            for file in &d.files {
-                                ui.label(RichText::new(file).monospace());
-                            }
-                        }
-                    }
-                    let branch = d
-                        .branch
-                        .as_ref()
-                        .filter(|b| deletes_branches && !b.commits.is_empty());
-                    if !several && (!d.commits.is_empty() || branch.is_some()) {
-                        ui.label(&unreachable);
-                    }
-                    if !d.commits.is_empty() {
-                        row(ui, &mut |ui| {
-                            ui.label(plural(d.commits.len(), "commit"));
-                            if ui.link("Show in log").clicked() {
-                                show_log = Some(d.commits.clone());
-                            }
-                        });
-                    }
-                    if let Some(b) = branch {
-                        row(ui, &mut |ui| {
-                            ui.label(format!("{} on {}", plural(b.commits.len(), "commit"), b.name));
-                            if ui.link("Show in log").clicked() {
-                                show_log = Some(b.commits.clone());
-                            }
-                        });
-                    }
-                };
-                if several {
-                    for (i, d) in warning.deletions.iter().enumerate() {
-                        ui.separator();
-                        let name = d
-                            .path
-                            .as_ref()
-                            .map_or(d.name.clone(), |p| p.display().to_string());
-                        ui.label(RichText::new(name).strong());
-                        losses(ui, i, d);
-                    }
-                    if !warning.commits.is_empty() {
-                        ui.separator();
-                        ui.label("The commits are not reachable from any surviving branch, tag or worktree.");
-                    }
-                } else if let [one] = warning.deletions.as_slice() {
-                    losses(ui, 0, one);
-                } else if !warning.commits.is_empty() {
-                    ui.label(&unreachable);
-                    row(ui, &mut |ui| {
-                        ui.label(&commits);
-                        if ui.link("Show in log").clicked() {
-                            show_log = Some(warning.commits.clone());
-                        }
-                    });
-                }
-                // A force push's copies: rebased, amended or resolved on the branch.
-                if !warning.replaced.is_empty() {
-                    row(ui, &mut |ui| {
-                        ui.label(plural(warning.replaced.len(), "replaced commit"))
-                            .on_hover_text("The branch has a copy of each");
-                        if ui.link("Show in log").clicked() {
-                            show_log = Some(warning.replaced.clone());
-                        }
-                    });
-                }
+                show_log = loss_fields(ui, warning, listing_files, &mut deletes_branches);
             });
-            let commands = warning.commands.iter().map(|a| command_text(a)).collect::<Vec<_>>();
+            let commands: Vec<String> = warning.commands.iter().map(|a| command_text(a)).collect();
             dialogs::command_box(ui, &commands);
             // Changing a remote for everyone: Cancel has the focus even when nothing is lost.
-            let remote = checks.is_some();
-            let allowed = checks.as_ref().is_none_or(PullRequestCheck::allow);
+            let remote = check.is_some();
+            let allowed = check.as_ref().is_none_or(PullRequestCheck::allow);
             let focus = loss.fresh && (remote || !confirmation);
             dialogs::actions(ui, button, !busy && allowed, !confirmation, focus)
         });
@@ -2899,11 +2516,11 @@ impl Tool {
         match shown.inner {
             dialogs::Answer::Primary => {
                 let action = loss.warning.action.clone();
-                self.run(ctx, loss.path, action, Some(loss.warning), loss.opener)
+                self.run(ctx, loss.path, action, Some(loss.warning), loss.opener);
             }
             dialogs::Answer::Cancel => {}
             dialogs::Answer::Open if !shown.should_close() => {
-                self.warning = Some(Loss {
+                self.dialogs.loss = Some(Loss {
                     fresh: false,
                     ..loss
                 })
@@ -2915,9 +2532,9 @@ impl Tool {
     fn notifications(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         self.notices
-            .retain(|n| n.error.is_some() || self.details == Some(n.id) || now - n.at < 5.0);
+            .retain(|n| n.error.is_some() || self.notice_details == Some(n.id) || now - n.at < 5.0);
         if !self.notices.is_empty() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            ctx.request_repaint_after(Duration::from_millis(250));
         }
         egui::Area::new(Id::new("branch-notifications"))
             .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-16.0, -40.0))
@@ -2957,10 +2574,10 @@ impl Tool {
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 let title = RichText::new(&n.title).color(color);
-                                if n.is_plain() {
+                                if !n.has_details() {
                                     ui.label(title);
                                 } else if ui.link(title).clicked() {
-                                    self.details = Some(n.id);
+                                    self.notice_details = Some(n.id);
                                 }
                                 if ui.small_button("×").clicked() {
                                     remove = Some(n.id);
@@ -2976,7 +2593,7 @@ impl Tool {
                                         egui::Align::Center,
                                     ),
                                 );
-                                job.wrap.max_rows = NOTICE_ROWS;
+                                job.wrap.max_rows = NOTICE_MAX_ERROR_ROWS;
                                 job.wrap.max_width = ui.available_width();
                                 let galley = ui.fonts_mut(|f| f.layout_job(job));
                                 let cut = galley.elided;
@@ -2991,7 +2608,7 @@ impl Tool {
                                         .clicked()
                                         || ui.link("Show all").clicked())
                                 {
-                                    self.details = Some(n.id);
+                                    self.notice_details = Some(n.id);
                                 }
                             }
                             // What failed is likely out of date.
@@ -3012,9 +2629,13 @@ impl Tool {
                     self.run(ctx, path, Action::Fetch, None, ViewportId::ROOT);
                 }
             });
-        if let Some(n) = self.notices.iter().find(|n| Some(n.id) == self.details) {
+        if let Some(n) = self
+            .notices
+            .iter()
+            .find(|n| Some(n.id) == self.notice_details)
+        {
             let shown = dialogs::Dialog::new("git-operation-details", &n.title)
-                .screen(crate::usage::Screen::OperationDetails)
+                .screen(Screen::OperationDetails)
                 .width(600.0)
                 .resizable()
                 .show(ctx, |ui| {
@@ -3024,7 +2645,9 @@ impl Tool {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    copy_button(ui, n.id, details_text(n));
+                                    let id = Id::new("copied-operation-details").with(n.id);
+                                    let done = Color32::from_rgb(0x2e, 0xa0, 0x43);
+                                    copy_button(ui, id, || details_text(n), "Copy", done);
                                 },
                             );
                         });
@@ -3050,10 +2673,234 @@ impl Tool {
                     dialogs::actions(ui, "", false, false, false)
                 });
             if shown.inner == dialogs::Answer::Cancel || shown.should_close() {
-                self.details = None;
+                self.notice_details = None;
             }
         }
     }
+}
+
+const LOSS_ICON: glyphs::Glyph = &[glyphs::Part::Path("M12 3 2 21h20ZM12 9v5m0 3v1")];
+
+/// The loss dialog's title, and its button's label.
+fn loss_title(warning: &Warning) -> (String, &'static str) {
+    let commits = plural(warning.commits.len(), "commit");
+    let confirmation = warning.is_confirmation();
+    match &warning.action {
+        Action::DeleteBranches(_) => {
+            let what = match warning.deletions.as_slice() {
+                [one] => format!("branch {}", one.name),
+                many => format!("{} local branches", many.len()),
+            };
+            (
+                format!("Delete {what} and lose {commits}?"),
+                "Delete anyway",
+            )
+        }
+        Action::DeleteWorktrees { .. } => {
+            let what = match warning.deletions.as_slice() {
+                [one] => format!("worktree {}", one.name),
+                many => format!("{} worktrees", many.len()),
+            };
+            let changed: usize = warning.deletions.iter().map(|d| d.files.len()).sum();
+            let files = plural(changed, "changed file");
+            let refused = warning.deletions.iter().any(|d| d.refusal.is_some());
+            let cost = match (changed == 0, warning.commits.is_empty()) {
+                (false, false) => format!(" and lose {files} and {commits}"),
+                (false, true) => format!(" and lose {files}"),
+                (true, false) => format!(" and lose {commits}"),
+                (true, true) if refused => " anyway".to_owned(),
+                (true, true) => String::new(),
+            };
+            let button = if confirmation {
+                "Delete"
+            } else {
+                "Delete anyway"
+            };
+            (format!("Delete {what}{cost}?"), button)
+        }
+        Action::DeleteRemoteBranches(_) => {
+            let what = match warning.deletions.as_slice() {
+                [one] => format!("remote branch {}", one.name),
+                many => format!("{} remote branches", many.len()),
+            };
+            if confirmation {
+                (format!("Delete {what}?"), "Delete")
+            } else {
+                (
+                    format!("Delete {what} and lose {commits}?"),
+                    "Delete anyway",
+                )
+            }
+        }
+        Action::Push(push) if confirmation => (
+            format!("Force push {} to {}?", push.branch, push.target()),
+            "Force push",
+        ),
+        Action::Push(push) => (
+            format!(
+                "Force push {} to {} and lose {commits}?",
+                push.branch,
+                push.target()
+            ),
+            "Force push anyway",
+        ),
+        _ => (
+            format!(
+                "Switch {} and lose {}?",
+                if matches!(warning.action, Action::Detach(_)) {
+                    "to a detached HEAD"
+                } else {
+                    "branches"
+                },
+                plural(warning.commits.len(), "detached commit")
+            ),
+            "Switch anyway",
+        ),
+    }
+}
+
+/// What the loss dialog says is lost: by each deletion, its changed files and its commits, and
+/// the commits lost or replaced. Returns the commits whose *Show in log* was clicked.
+fn loss_fields(
+    ui: &mut Ui,
+    warning: &Warning,
+    listing_files: &mut HashSet<usize>,
+    deletes_branches: &mut bool,
+) -> Option<Vec<Oid>> {
+    let mut show_log = None;
+    let worktrees = matches!(warning.action, Action::DeleteWorktrees { .. });
+    match warning.deletions.as_slice() {
+        [one] if worktrees => {
+            if let Some(path) = &one.path {
+                ui.label(format!(
+                    "The folder {} and everything in it will be deleted.",
+                    path.display()
+                ));
+            }
+        }
+        _ if worktrees => {
+            ui.label("These folders and everything in them will be deleted.");
+        }
+        _ => {}
+    }
+    let owned: Vec<&str> = warning
+        .deletions
+        .iter()
+        .filter_map(|d| d.branch.as_ref())
+        .map(|b| b.name.as_str())
+        .collect();
+    if worktrees && !owned.is_empty() {
+        let label = match owned.as_slice() {
+            [one] => format!("Also delete local branch {one}"),
+            _ => "Also delete their local branches".to_owned(),
+        };
+        ui.checkbox(deletes_branches, label);
+    }
+    let deletes_branches = *deletes_branches;
+    let several = warning.deletions.len() > 1;
+    let unreachable = match &warning.action {
+        Action::Push(push) => format!(
+            "These commits on {} are not on {}.",
+            push.remote_branch(),
+            push.branch
+        ),
+        _ => {
+            "These commits are not reachable from any surviving branch, tag or worktree.".to_owned()
+        }
+    };
+    let row = |ui: &mut Ui, content: &mut dyn FnMut(&mut Ui)| {
+        egui::Frame::new()
+            .fill(widgets::tones(ui).seg_bg)
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| ui.horizontal(|ui| content(ui)));
+    };
+    // What one deletion loses: one row each for its files and its commits.
+    let mut losses = |ui: &mut Ui, i: usize, d: &Deletion| {
+        if let Some(refusal) = &d.refusal {
+            ui.label("Git refused to delete it:");
+            ui.label(RichText::new(refusal).monospace());
+        }
+        if !d.files.is_empty() {
+            let listed = listing_files.contains(&i);
+            row(ui, &mut |ui| {
+                ui.label(plural(d.files.len(), "changed file"));
+                if ui.link(if listed { "Hide" } else { "Show" }).clicked()
+                    && !listing_files.remove(&i)
+                {
+                    listing_files.insert(i);
+                }
+            });
+            if listed {
+                for file in &d.files {
+                    ui.label(RichText::new(file).monospace());
+                }
+            }
+        }
+        let branch = d
+            .branch
+            .as_ref()
+            .filter(|b| deletes_branches && !b.commits.is_empty());
+        if !several && (!d.commits.is_empty() || branch.is_some()) {
+            ui.label(&unreachable);
+        }
+        if !d.commits.is_empty() {
+            row(ui, &mut |ui| {
+                ui.label(plural(d.commits.len(), "commit"));
+                if ui.link("Show in log").clicked() {
+                    show_log = Some(d.commits.clone());
+                }
+            });
+        }
+        if let Some(b) = branch {
+            row(ui, &mut |ui| {
+                ui.label(format!(
+                    "{} on {}",
+                    plural(b.commits.len(), "commit"),
+                    b.name
+                ));
+                if ui.link("Show in log").clicked() {
+                    show_log = Some(b.commits.clone());
+                }
+            });
+        }
+    };
+    if several {
+        for (i, d) in warning.deletions.iter().enumerate() {
+            ui.separator();
+            let name = d
+                .path
+                .as_ref()
+                .map_or(d.name.clone(), |p| p.display().to_string());
+            ui.label(RichText::new(name).strong());
+            losses(ui, i, d);
+        }
+        if !warning.commits.is_empty() {
+            ui.separator();
+            ui.label("The commits are not reachable from any surviving branch, tag or worktree.");
+        }
+    } else if let [one] = warning.deletions.as_slice() {
+        losses(ui, 0, one);
+    } else if !warning.commits.is_empty() {
+        ui.label(&unreachable);
+        row(ui, &mut |ui| {
+            ui.label(plural(warning.commits.len(), "commit"));
+            if ui.link("Show in log").clicked() {
+                show_log = Some(warning.commits.clone());
+            }
+        });
+    }
+    // A force push's copies: rebased, amended or resolved on the branch.
+    if !warning.replaced.is_empty() {
+        row(ui, &mut |ui| {
+            ui.label(plural(warning.replaced.len(), "replaced commit"))
+                .on_hover_text("The branch has a copy of each");
+            if ui.link("Show in log").clicked() {
+                show_log = Some(warning.replaced.clone());
+            }
+        });
+    }
+    show_log
 }
 
 /// What the details dialog of `n` shows, to copy: its error, then each command with what it
@@ -3071,26 +2918,6 @@ fn details_text(n: &Notice) -> String {
         }
     }
     text
-}
-
-/// Copies `text`, with a check mark for a moment after the click.
-fn copy_button(ui: &mut Ui, id: u64, text: String) {
-    let copied_id = Id::new("copied-operation-details").with(id);
-    let now = ui.input(|i| i.time);
-    let at: Option<f64> = ui.data(|d| d.get_temp(copied_id));
-    let copied = at.is_some_and(|at| now - at < 1.5);
-    if copied {
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(300));
-    }
-    let done = Color32::from_rgb(0x2e, 0xa0, 0x43);
-    if widgets::copy_button(ui, copied, done)
-        .on_hover_text("Copy")
-        .clicked()
-    {
-        ui.ctx().copy_text(text);
-        ui.data_mut(|d| d.insert_temp(copied_id, now));
-    }
 }
 
 impl Drop for Tool {

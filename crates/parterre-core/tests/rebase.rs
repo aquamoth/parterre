@@ -1,6 +1,3 @@
-//! Rebasing the open worktree's branch, against real, disposable repositories: when it's
-//! offered, what the confirmation says git leaves out (checked against what `git rebase` then
-//! does), and every way it can stop, refuse or keep changes aside.
 mod common;
 
 use common::TestRepo;

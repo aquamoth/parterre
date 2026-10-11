@@ -1,18 +1,12 @@
-//! The channels parterre is installed through, as far as the update check cares (#258).
-//!
-//! `build.rs` includes this file to check the stamp a packaging job gives, so it must not use
-//! anything outside `std`.
+//! `build.rs` includes this file, so it must use nothing outside `std`.
 
-/// Where this copy of parterre came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
     /// The Windows installer, which winget and Chocolatey install too.
     Msi,
-    /// The Windows zip.
     Zip,
     /// The Linux and macOS tarballs.
     Tarball,
-    /// The macOS disk image with `parterre.app`.
     Dmg,
     Deb,
     Rpm,
@@ -23,8 +17,8 @@ pub enum Channel {
 }
 
 impl Channel {
-    /// The channels whose packaging job stamps them into the build, by the name it sets
-    /// `PARTERRE_CHANNEL` to (`.github/workflows/release.yml`).
+    /// Those a packaging job stamps into the build as `PARTERRE_CHANNEL`
+    /// (`.github/workflows/release.yml`).
     pub const STAMPED: [Channel; 6] = [
         Channel::Msi,
         Channel::Zip,
@@ -48,7 +42,6 @@ impl Channel {
         }
     }
 
-    /// The stamped channel named `name`.
     pub fn stamped(name: &str) -> Option<Channel> {
         Channel::STAMPED.into_iter().find(|c| c.name() == name)
     }

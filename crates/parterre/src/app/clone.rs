@@ -1,6 +1,4 @@
-//! *Clone repository…* (#358): one field for the URL, which also filters the signed-in user's
-//! GitHub repositories listed under it, then the parent folder and the clone's folder name.
-//! The branch tool runs the clone like a fetch, and the app opens it once it's done.
+//! The URL field also filters the signed-in user's GitHub repositories, listed under it.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
@@ -11,16 +9,14 @@ use parterre_core::clone::{self, Cloning};
 use parterre_forge::ForgeError;
 use parterre_forge::github::{self, Listed, Repositories};
 
+use super::branches::{folder_name_field, pick_folder, received, worker};
 use crate::file_dialog::Pending;
 use crate::{dialogs, widgets};
 
-/// The list's rows, at least, while the dialog is resized.
-const MIN_ROWS: usize = 4;
-/// The list's rows at most when the dialog opens.
-const SHOWN_ROWS: usize = 6;
-const ROW: f32 = 24.0;
+const MIN_LIST_ROWS: usize = 4;
+const INITIAL_LIST_ROWS: usize = 6;
+const LIST_ROW_HEIGHT: f32 = 24.0;
 
-/// The user's GitHub repositories, as far as they've come.
 #[derive(Debug)]
 enum Github {
     Loading(mpsc::Receiver<Result<Repositories, ForgeError>>),
@@ -32,15 +28,12 @@ enum Github {
 pub struct CloneDialog {
     url: String,
     parent: String,
-    name: String,
-    /// The folder name was typed, so it no longer follows the URL.
-    name_edited: bool,
+    folder_name: String,
+    folder_name_edited: bool,
     browse: Option<Pending<()>>,
     github: Github,
-    /// The list scrolls to the repository picked, which may have been found by words.
-    reveal: bool,
-    /// A URL from the clipboard, for an empty field.
-    clipboard: Option<mpsc::Receiver<Option<String>>>,
+    scroll_to_picked: bool,
+    clipboard_url: Option<mpsc::Receiver<Option<String>>>,
     pub opener: ViewportId,
     fresh: bool,
 }
@@ -71,12 +64,12 @@ impl CloneDialog {
         CloneDialog {
             url: String::new(),
             parent,
-            name: String::new(),
-            name_edited: false,
+            folder_name: String::new(),
+            folder_name_edited: false,
             browse: None,
             github,
-            reveal: false,
-            clipboard: clipboard
+            scroll_to_picked: false,
+            clipboard_url: clipboard
                 .then(|| worker(ctx, || clipboard_text().filter(|t| remote_url(t)))),
             opener,
             fresh: true,
@@ -92,7 +85,7 @@ impl CloneDialog {
         Cloning {
             url: self.url.trim().to_owned(),
             parent: PathBuf::from(self.parent.trim()),
-            name: self.name.trim().to_owned(),
+            name: self.folder_name.trim().to_owned(),
         }
     }
 
@@ -100,11 +93,11 @@ impl CloneDialog {
         Action::Clone(Box::new(self.cloning()))
     }
 
-    /// The URL is set: the folder name follows it unless typed.
+    /// The folder name follows the URL unless typed.
     fn set_url(&mut self, url: String) {
         self.url = url;
-        if !self.name_edited {
-            self.name = self.followed_name();
+        if !self.folder_name_edited {
+            self.folder_name = self.followed_name();
         }
     }
 
@@ -120,29 +113,26 @@ impl CloneDialog {
     /// Takes in what the workers found, and a folder picked with *Browse…*.
     fn receive(&mut self) {
         if let Github::Loading(rx) = &self.github {
-            match rx.try_recv() {
-                Ok(Ok(repos)) => self.github = Github::Loaded(repos),
-                Ok(Err(e)) => self.github = Github::Failed(e),
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.github = Github::Failed(ForgeError::Network("the request stopped".into()))
-                }
+            let stopped = || Err(ForgeError::Network("the request stopped".into()));
+            match received(rx, stopped) {
+                Some(Ok(repos)) => self.github = Github::Loaded(repos),
+                Some(Err(e)) => self.github = Github::Failed(e),
+                None => {}
             }
         }
-        let clipboard = self.clipboard.as_ref().and_then(|rx| match rx.try_recv() {
-            Ok(text) => Some(text),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => Some(None),
-        });
-        if let Some(text) = clipboard {
-            self.clipboard = None;
-            if let Some(text) = text
+        let clipboard_url = self
+            .clipboard_url
+            .as_ref()
+            .and_then(|rx| received(rx, || None));
+        if let Some(url) = clipboard_url {
+            self.clipboard_url = None;
+            if let Some(url) = url
                 && self.url.is_empty()
             {
-                self.set_url(text.trim().to_owned());
+                self.set_url(url.trim().to_owned());
             }
         }
-        if let Some(answer) = self.browse.as_ref().and_then(|p| p.answer()) {
+        if let Some(answer) = self.browse.as_ref().and_then(Pending::answer) {
             self.browse = None;
             if let Some(dir) = answer {
                 self.parent = dir.to_string_lossy().into_owned();
@@ -150,7 +140,6 @@ impl CloneDialog {
         }
     }
 
-    /// `busy` while another git operation runs.
     pub fn show(&mut self, ctx: &egui::Context, busy: bool) -> dialogs::Answer {
         self.receive();
         let fresh = std::mem::take(&mut self.fresh);
@@ -186,19 +175,18 @@ impl CloneDialog {
                 ui.add_space(8.0);
                 self.folder_fields(ui);
                 let cloning = self.cloning();
-                let error = clone::is_url(&cloning.url)
-                    .then(|| cloning.error())
-                    .flatten();
+                let is_url = clone::is_url(&cloning.url);
+                let error = is_url.then(|| cloning.error()).flatten();
                 if let Some(error) = &error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
-                let commands: Vec<String> = if clone::is_url(&cloning.url) {
+                let commands: Vec<String> = if is_url {
                     vec![command_text(&clone::command(&cloning))]
                 } else {
                     Vec::new()
                 };
                 dialogs::command_box(ui, &commands);
-                let ready = clone::is_url(&cloning.url) && error.is_none() && !busy;
+                let ready = is_url && error.is_none() && !busy;
                 dialogs::actions(ui, "Clone", ready, false, false)
             });
         let mut answer = shown.inner;
@@ -251,16 +239,16 @@ impl CloneDialog {
         } else {
             repos.matching(url)
         };
-        let reveal = std::mem::take(&mut self.reveal)
+        let reveal = std::mem::take(&mut self.scroll_to_picked)
             .then(|| shown.iter().position(|l| Some(*l) == picked))
             .flatten();
         // Rows and the frame around them: its margins and line. The box keeps its height
         // whatever is found, at most the dialog's.
         let spacing = ui.spacing().item_spacing.y;
         let frame = 2.0 * 4.0 + 2.0;
-        let rows = |n: usize| n as f32 * (ROW + spacing) - spacing + frame;
-        dialogs::growing(ui, rows(MIN_ROWS), |ui, height| {
-            let height = height.unwrap_or(rows(SHOWN_ROWS)) - frame;
+        let rows = |n: usize| n as f32 * (LIST_ROW_HEIGHT + spacing) - spacing + frame;
+        dialogs::growing(ui, rows(MIN_LIST_ROWS), |ui, height| {
+            let height = height.unwrap_or(rows(INITIAL_LIST_ROWS)) - frame;
             egui::Frame::new()
                 .stroke(egui::Stroke::new(1.0, widgets::tones(ui).field_line))
                 .corner_radius(7)
@@ -280,10 +268,11 @@ impl CloneDialog {
                         .min_scrolled_height(height)
                         .auto_shrink([false, false]);
                     if let Some(ix) = reveal {
-                        let offset = ix as f32 * (ROW + spacing) - (height - ROW) / 2.0;
+                        let offset = ix as f32 * (LIST_ROW_HEIGHT + spacing)
+                            - (height - LIST_ROW_HEIGHT) / 2.0;
                         area = area.vertical_scroll_offset(offset.max(0.0));
                     }
-                    area.show_rows(ui, ROW, shown.len(), |ui, rows| {
+                    area.show_rows(ui, LIST_ROW_HEIGHT, shown.len(), |ui, rows| {
                         for listed in &shown[rows] {
                             let selected = picked.is_some_and(|p| p.name == listed.name);
                             let row = list_row(ui, listed, selected);
@@ -298,10 +287,10 @@ impl CloneDialog {
                         }
                     });
                 });
-            ((), rows(SHOWN_ROWS))
+            ((), rows(INITIAL_LIST_ROWS))
         });
         if chosen.is_some() {
-            self.reveal = true;
+            self.scroll_to_picked = true;
         }
     }
 
@@ -310,47 +299,20 @@ impl CloneDialog {
         let browsing = self.browse.is_some();
         let (_, browse) = widgets::folder_field(ui, &mut self.parent, "Folder", browsing);
         if browse {
-            let mut dialog = rfd::AsyncFileDialog::new().set_title("Parent folder");
-            if let Some(dir) = Path::new(self.parent.trim())
-                .ancestors()
-                .find(|a| a.is_dir())
-            {
-                dialog = dialog.set_directory(dir);
-            }
-            self.browse = Some(Pending::start((), dialog.pick_folder(), ui.ctx()));
+            self.browse = Some(pick_folder(ui.ctx(), "Parent folder", self.parent.trim()));
         }
         ui.add_space(6.0);
         ui.label(RichText::new("Folder name").strong());
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let width = ui.available_width() - widgets::BUTTON - 4.0;
-            let mut name = self.name.clone();
-            if widgets::text_field(ui, &mut name, "Folder name", width).changed() {
-                // Separators and what Windows forbids can't be typed.
-                self.name = name
-                    .chars()
-                    .filter(|c| !parterre_core::worktree_folder::forbidden(*c))
-                    .collect();
-                self.name_edited = true;
-            }
-            if ui
-                .add_enabled_ui(self.name_edited, |ui| {
-                    widgets::icon_button(ui, parterre_core::glyphs::RESET, false)
-                })
-                .inner
-                .on_hover_text("Follow the URL")
-                .clicked()
-            {
-                self.name_edited = false;
-                self.name = self.followed_name();
-            }
-        });
+        let name = &mut self.folder_name;
+        if folder_name_field(ui, name, &mut self.folder_name_edited, "Follow the URL") {
+            self.folder_name = self.followed_name();
+        }
     }
 }
 
 /// A row of the list, as wide as it, highlighted when `selected` or hovered.
 fn list_row(ui: &mut Ui, listed: &Listed, selected: bool) -> egui::Response {
-    let size = egui::vec2(ui.available_width(), ROW);
+    let size = egui::vec2(ui.available_width(), LIST_ROW_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     let visuals = ui.visuals();
@@ -399,20 +361,6 @@ fn row_text(ui: &Ui, listed: &Listed) -> egui::text::LayoutJob {
     job
 }
 
-/// Runs `work` on a worker thread, repainting when it's done.
-fn worker<T: Send + 'static>(
-    ctx: &egui::Context,
-    work: impl FnOnce() -> T + Send + 'static,
-) -> mpsc::Receiver<T> {
-    let (tx, rx) = mpsc::channel();
-    let ctx = ctx.clone();
-    std::thread::spawn(move || {
-        let _ = tx.send(work());
-        ctx.request_repaint();
-    });
-    rx
-}
-
 /// A URL of a remote, not a local path: what's worth taking from the clipboard.
 fn remote_url(text: &str) -> bool {
     let text = text.trim();
@@ -422,7 +370,6 @@ fn remote_url(text: &str) -> bool {
         && !Path::new(text).is_absolute()
 }
 
-/// The text on the clipboard.
 fn clipboard_text() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
@@ -493,9 +440,9 @@ mod tests {
         let name = clone::folder_name(&url);
         assert!(h.shows(&name), "{:?}", h.texts);
         h.click("Clone");
-        h.until("the clone is done", |h| h.tool.open.is_some());
+        h.until("the clone is done", |h| h.tool.cloned.is_some());
         let path = parent.path().join(&name);
-        assert_eq!(h.tool.open.as_deref(), Some(path.as_path()));
+        assert_eq!(h.tool.cloned.as_deref(), Some(path.as_path()));
         assert!(parterre_core::git::load_repo(&path).is_ok());
     }
 

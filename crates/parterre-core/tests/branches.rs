@@ -1,4 +1,3 @@
-//! Exercise the public branch-operation interface against real, disposable repositories.
 mod common;
 
 use common::TestRepo;
@@ -23,6 +22,14 @@ fn warning(out: Outcome) -> Warning {
         other => panic!("expected a warning: {other:?}"),
     }
 }
+fn create(start: Oid, name: &str, track: Option<&str>, switch: bool) -> Action {
+    Action::Create(Create {
+        start,
+        name: name.into(),
+        track: track.map(str::to_owned),
+        switch,
+    })
+}
 fn deletion(r: &TestRepo, name: &str) -> Action {
     deletions(r, &[name])
 }
@@ -43,6 +50,15 @@ fn exists(r: &TestRepo, name: &str) -> bool {
         .locals
         .iter()
         .any(|b| b.name == name)
+}
+fn upstream(r: &TestRepo, name: &str) -> Option<String> {
+    Catalog::load(r.path())
+        .unwrap()
+        .locals
+        .into_iter()
+        .find(|b| b.name == name)
+        .unwrap()
+        .upstream
 }
 fn unique_branch() -> (TestRepo, Action, Oid) {
     let mut r = TestRepo::new();
@@ -92,7 +108,6 @@ fn selected_remote_follows_local_name_until_a_tracking_branch_is_chosen() {
     draft.set_track_name(&catalog, "renamed-work".into());
     draft.set_name("local-only-name".into());
     assert_eq!(draft.upstream().as_deref(), Some("origin/renamed-work"));
-    // Choosing another remote starts automatic naming again.
     draft.set_remote(Some("upstream".into()));
     assert_eq!(
         draft.upstream().as_deref(),
@@ -175,33 +190,14 @@ fn none_remote_clears_tracking_and_reselection_generates_a_future_branch() {
     assert!(draft.remote_branches(&catalog).is_empty());
     done(execute(
         &r,
-        Action::Create(Create {
-            start,
-            name: draft.name().into(),
-            track: draft.upstream(),
-            switch: false,
-        }),
+        create(start, draft.name(), draft.upstream().as_deref(), false),
     ));
-    assert!(
-        Catalog::load(r.path())
-            .unwrap()
-            .locals
-            .iter()
-            .find(|b| b.name == "untracked")
-            .unwrap()
-            .upstream
-            .is_none()
-    );
+    assert!(upstream(&r, "untracked").is_none());
     draft.set_name("future-local".into());
     draft.set_remote(Some("origin".into()));
     done(execute(
         &r,
-        Action::Create(Create {
-            start,
-            name: draft.name().into(),
-            track: draft.upstream(),
-            switch: false,
-        }),
+        create(start, draft.name(), draft.upstream().as_deref(), false),
     ));
     assert_eq!(
         r.git(&["config", "branch.future-local.merge"]),
@@ -257,15 +253,7 @@ fn create_at_selected_commit_with_a_different_or_future_upstream() {
         ("local-one", "origin/topic"),
         ("local-two", "origin/not-created"),
     ] {
-        done(execute(
-            &r,
-            Action::Create(Create {
-                start,
-                name: name.into(),
-                track: Some(track.into()),
-                switch: false,
-            }),
-        ));
+        done(execute(&r, create(start, name, Some(track), false)));
         assert_eq!(r.git(&["rev-parse", name]), start.to_hex());
         assert_eq!(
             r.git(&["config", &format!("branch.{name}.remote")]),
@@ -291,25 +279,8 @@ fn create_without_tracking_overrides_auto_setup_merge() {
     let mut r = TestRepo::new();
     let start = oid(&r.commit("base"));
     r.git(&["config", "branch.autoSetupMerge", "always"]);
-    done(execute(
-        &r,
-        Action::Create(Create {
-            start,
-            name: "new".into(),
-            track: None,
-            switch: false,
-        }),
-    ));
-    assert!(
-        Catalog::load(r.path())
-            .unwrap()
-            .locals
-            .iter()
-            .find(|b| b.name == "new")
-            .unwrap()
-            .upstream
-            .is_none()
-    );
+    done(execute(&r, create(start, "new", None, false)));
+    assert!(upstream(&r, "new").is_none());
 }
 
 #[test]
@@ -321,15 +292,7 @@ fn combined_create_and_switch_preserves_changes_and_creates_nothing_on_refusal()
     r.commit_all("main advances");
     r.write("file", b"dirty");
     r.git(&["remote", "add", "origin", "https://example.invalid/r.git"]);
-    let out = execute(
-        &r,
-        Action::Create(Create {
-            start,
-            name: "new".into(),
-            track: Some("origin/new".into()),
-            switch: true,
-        }),
-    );
+    let out = execute(&r, create(start, "new", Some("origin/new"), true));
     assert!(matches!(out, Outcome::Failed { .. }), "{out:?}");
     let c = Catalog::load(r.path()).unwrap();
     assert!(!c.locals.iter().any(|b| b.name == "new"));
@@ -351,15 +314,7 @@ fn reject_collisions_invalid_names_and_unknown_remotes_before_creating() {
         ("@{-1}", None),
         ("valid", Some("missing/topic")),
     ] {
-        let out = execute(
-            &r,
-            Action::Create(Create {
-                start,
-                name: name.into(),
-                track: track.map(str::to_owned),
-                switch: false,
-            }),
-        );
+        let out = execute(&r, create(start, name, track, false));
         assert!(matches!(out, Outcome::Failed { .. }), "{name}: {out:?}");
     }
     assert_eq!(Catalog::load(r.path()).unwrap().locals.len(), 2);
@@ -370,8 +325,7 @@ fn longest_remote_prefix_and_duplicate_tracking_use_upstream_relationships() {
     let mut r = TestRepo::new();
     let start = oid(&r.commit("base"));
     r.git(&["remote", "add", "team", "https://example.invalid/a"]);
-    // Existing configurations can have overlapping remote names. Recent Git refuses
-    // creating that overlap with `remote add`, so reproduce the older config directly.
+    // Recent Git refuses to add `team/sub` beside `team`, but older configs can have both.
     r.git(&["config", "remote.team/sub.url", "https://example.invalid/b"]);
     r.git(&[
         "config",
@@ -381,12 +335,7 @@ fn longest_remote_prefix_and_duplicate_tracking_use_upstream_relationships() {
     for name in ["different-name", "another-name"] {
         done(execute(
             &r,
-            Action::Create(Create {
-                start,
-                name: name.into(),
-                track: Some("team/sub/topic".into()),
-                switch: false,
-            }),
+            create(start, name, Some("team/sub/topic"), false),
         ));
     }
     let c = Catalog::load(r.path()).unwrap();
@@ -412,15 +361,7 @@ fn clean_switch_and_create_and_switch_use_the_open_worktree() {
     r.git(&["branch", "topic"]);
     done(execute(&r, Action::Switch("topic".into())));
     assert_eq!(r.git(&["branch", "--show-current"]), "topic");
-    done(execute(
-        &r,
-        Action::Create(Create {
-            start,
-            name: "new".into(),
-            track: None,
-            switch: true,
-        }),
-    ));
+    done(execute(&r, create(start, "new", None, true)));
     assert_eq!(r.git(&["branch", "--show-current"]), "new");
 }
 
@@ -459,18 +400,10 @@ fn rebase_and_bisect_reserve_a_branch_even_when_head_is_detached() {
         r.git(&["branch", "topic"]);
         let wt = tempfile::tempdir().unwrap();
         let path = wt.path().join("linked");
-        r.git(&["worktree", "add", "--detach", path.to_str().unwrap(), &hash]);
-        let dir = std::process::Command::new(parterre_core::git::program())
-            .args([
-                "-C",
-                path.to_str().unwrap(),
-                "rev-parse",
-                "--absolute-git-dir",
-            ])
-            .output()
-            .unwrap();
-        let file =
-            std::path::PathBuf::from(String::from_utf8(dir.stdout).unwrap().trim()).join(state);
+        let linked = path.to_str().unwrap();
+        r.git(&["worktree", "add", "--detach", linked, &hash]);
+        let admin = r.git(&["-C", linked, "rev-parse", "--absolute-git-dir"]);
+        let file = std::path::Path::new(&admin).join(state);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(
             &file,
@@ -503,13 +436,7 @@ fn merged_branch_deletion_is_one_click() {
     r.commit("base");
     r.git(&["branch", "topic"]);
     done(execute(&r, deletion(&r, "topic")));
-    assert!(
-        !Catalog::load(r.path())
-            .unwrap()
-            .locals
-            .iter()
-            .any(|b| b.name == "topic")
-    );
+    assert!(!exists(&r, "topic"));
 }
 
 #[test]
@@ -535,15 +462,8 @@ fn unmerged_but_protected_by_branch_remote_or_commit_tags_deletes_without_warnin
                 r.git(&["tag", "-d", "inner"]);
             }
         }
-        let out = execute(&r, action);
-        done(out);
-        assert!(
-            !Catalog::load(r.path())
-                .unwrap()
-                .locals
-                .iter()
-                .any(|b| b.name == "topic")
-        );
+        done(execute(&r, action));
+        assert!(!exists(&r, "topic"));
     }
 }
 
@@ -573,13 +493,7 @@ fn warning_contains_exact_endangered_ids_and_approval_deletes_only_that_branch()
     let (r, action, tip) = unique_branch();
     let w = warning(execute(&r, action.clone()));
     assert_eq!(w.commits, [tip]);
-    assert!(
-        Catalog::load(r.path())
-            .unwrap()
-            .locals
-            .iter()
-            .any(|b| b.name == "topic")
-    );
+    assert!(exists(&r, "topic"));
     done(Branches::new(r.path()).execute(action, Some(&w), &CancelTree::default()));
     assert_eq!(r.git(&["branch", "--show-current"]), "main");
     assert_eq!(Catalog::load(r.path()).unwrap().locals.len(), 1);
@@ -689,18 +603,13 @@ fn one_branch_that_cannot_go_keeps_them_all() {
 
 #[test]
 fn departing_detached_head_warns_before_switch_and_create_and_switch() {
-    for create in [false, true] {
+    for switch_by_creating in [false, true] {
         let mut r = TestRepo::new();
         let base = r.commit("base");
         r.checkout("--detach");
         let tip = oid(&r.commit("detached work"));
-        let action = if create {
-            Action::Create(Create {
-                start: oid(&base),
-                name: "new".into(),
-                track: None,
-                switch: true,
-            })
+        let action = if switch_by_creating {
+            create(oid(&base), "new", None, true)
         } else {
             Action::Switch("main".into())
         };
@@ -717,15 +626,7 @@ fn creating_a_branch_at_detached_head_preserves_it_without_loss_warning() {
     r.commit("base");
     r.checkout("--detach");
     let start = oid(&r.commit("detached work"));
-    done(execute(
-        &r,
-        Action::Create(Create {
-            start,
-            name: "saved".into(),
-            track: None,
-            switch: true,
-        }),
-    ));
+    done(execute(&r, create(start, "saved", None, true)));
     assert_eq!(r.git(&["branch", "--show-current"]), "saved");
 }
 
@@ -782,16 +683,7 @@ fn pre_cancelled_operation_has_no_side_effects() {
     let start = oid(&r.commit("base"));
     let cancel = CancelTree::default();
     cancel.cancel();
-    let out = Branches::new(r.path()).execute(
-        Action::Create(Create {
-            start,
-            name: "new".into(),
-            track: None,
-            switch: true,
-        }),
-        None,
-        &cancel,
-    );
+    let out = Branches::new(r.path()).execute(create(start, "new", None, true), None, &cancel);
     assert!(matches!(out, Outcome::Failed { .. }));
     assert_eq!(Catalog::load(r.path()).unwrap().locals.len(), 1);
 }
@@ -804,15 +696,7 @@ fn auto_setup_rebase_is_honored_for_existing_and_future_upstreams() {
     r.git(&["update-ref", "refs/remotes/origin/topic", &start.to_hex()]);
     r.git(&["config", "branch.autoSetupRebase", "remote"]);
     for (name, upstream) in [("existing", "origin/topic"), ("future", "origin/future")] {
-        done(execute(
-            &r,
-            Action::Create(Create {
-                start,
-                name: name.into(),
-                track: Some(upstream.into()),
-                switch: false,
-            }),
-        ));
+        done(execute(&r, create(start, name, Some(upstream), false)));
         assert_eq!(r.git(&["config", &format!("branch.{name}.rebase")]), "true");
     }
 }
@@ -923,15 +807,7 @@ fn upstream_configuration_failure_reports_the_branch_that_was_created() {
     let start = oid(&r.commit("base"));
     r.git(&["remote", "add", "origin", "https://example.invalid/r"]);
     std::fs::write(r.path().join(".git/config.lock"), "locked").unwrap();
-    let out = execute(
-        &r,
-        Action::Create(Create {
-            start,
-            name: "created".into(),
-            track: Some("origin/future".into()),
-            switch: false,
-        }),
-    );
+    let out = execute(&r, create(start, "created", Some("origin/future"), false));
     let Outcome::Failed { error, .. } = out else {
         panic!("{out:?}");
     };
@@ -952,15 +828,7 @@ fn failing_checkout_hook_reports_that_the_new_branch_is_checked_out() {
     let hook = r.path().join(".git/hooks/post-checkout");
     std::fs::write(&hook, "#!/bin/sh\nprintf 'hook refused' >&2\nexit 1\n").unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let out = execute(
-        &r,
-        Action::Create(Create {
-            start,
-            name: "created".into(),
-            track: None,
-            switch: true,
-        }),
-    );
+    let out = execute(&r, create(start, "created", None, true));
     let Outcome::Failed { error, .. } = out else {
         panic!("{out:?}");
     };
@@ -978,8 +846,7 @@ fn remotes_are_named_as_git_remote_lists_them() {
     let mut r = TestRepo::new();
     let tip = oid(&r.commit("base"));
     // A name with a dot in it, one set up by its fetch line alone, and `remote.pushDefault`,
-    // which names no remote: the catalogue reads them from the config in one call, as
-    // `git remote` does (#309).
+    // which names no remote (#309).
     r.git(&["remote", "add", "a.b", "https://example.invalid/a"]);
     r.git(&[
         "config",
@@ -992,7 +859,6 @@ fn remotes_are_named_as_git_remote_lists_them() {
     names.sort();
     assert_eq!(names, ["a.b", "fo"]);
     assert_eq!(r.git(&["remote"]), "a.b\nfo");
-    // HEAD's branch and commit come from the worktree listing now.
     assert_eq!(catalog.current.as_deref(), Some("main"));
     assert_eq!(catalog.head, Some(tip));
     r.git(&["checkout", "-q", "--detach"]);
@@ -1076,7 +942,6 @@ fn the_catalogue_of_the_graphs_snapshot_is_the_one_git_lists() {
     assert_eq!(w("detached").head, Some(oid(&base)));
     assert_eq!(catalog.occupied.get("topic"), Some(&w("locked").path));
 
-    // From a linked worktree, and from a bare repository.
     let linked = Catalog::of(&parterre_core::git::load_repo(&detached).unwrap()).unwrap();
     assert_eq!(listed(&linked), listed(&Catalog::load(&detached).unwrap()));
     let bare = tempfile::tempdir().unwrap();
@@ -1092,7 +957,7 @@ fn the_catalogue_of_the_graphs_snapshot_agrees_with_the_graph() {
     r.commit("base");
     let repo = r.load();
     r.git(&["branch", "later"]);
-    // The branch made since the graph loaded shows in neither, until both load again.
+    // A branch made since the graph loaded isn't in its catalogue, until both load again.
     let catalog = Catalog::of(&repo).unwrap();
     assert!(catalog.locals.iter().all(|b| b.name != "later"));
     assert!(exists(&r, "later"));

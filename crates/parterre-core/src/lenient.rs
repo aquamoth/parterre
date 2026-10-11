@@ -1,10 +1,8 @@
-//! Reading settings written by another version of parterre, one setting at a time.
-//!
-//! Settings are kept as JSON objects. [`read`] puts each setting a file has onto a base value
-//! where the result still reads, so one setting a newer version gave a value this one doesn't
-//! know (a new theme, say), or one of the wrong type, keeps the base's and the rest still load.
-//! Settings the file lacks keep the base's, and those the base doesn't know are left out.
-//! [`write_back`] then saves without losing what was left out, for the newer version to find.
+//! Settings written by another version of parterre are read one at a time: [`read`] puts each
+//! setting a file has onto a base value where the result still reads, so one setting a newer
+//! version gave a value this one doesn't know (a new theme, say), or one of the wrong type,
+//! keeps the base's and the rest still load. [`write_back`] then saves without losing what was
+//! left out, for the newer version to find.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -15,33 +13,31 @@ use serde_json::{Map, Value};
 pub struct Skipped {
     /// Its keys from the top of the file, e.g. `["log_window", "layout"]`.
     pub path: Vec<String>,
-    /// What was used instead: the base's value, or `None` for a setting the base doesn't know.
+    /// The base's value, or `None` for a setting the base doesn't know.
     pub used: Option<Value>,
 }
 
 impl Skipped {
-    /// The path with dots, e.g. `log_window.layout`.
+    /// `log_window.layout`.
     pub fn name(&self) -> String {
         self.path.join(".")
     }
 
-    /// The same, under `key`: for a part of a larger file.
+    /// For a part of a larger file.
     pub fn under(mut self, key: &str) -> Skipped {
         self.path.insert(0, key.to_owned());
         self
     }
 }
 
-/// `file` read onto `base`, and what was left out of it.
 #[derive(Clone, Debug)]
 pub struct Read<T> {
     pub value: T,
     pub skipped: Vec<Skipped>,
 }
 
-/// Reads the settings in `file` onto `base`, one at a time. Nested objects are read setting by
-/// setting; any other value, a list for one, is a single setting. A `file` that isn't an object
-/// leaves the base as it is.
+/// Nested objects are read setting by setting; any other value, a list for one, is a single
+/// setting. A `file` that isn't an object leaves the base as it is.
 pub fn read<T: Serialize + DeserializeOwned + Clone>(base: &T, file: &Value) -> Read<T> {
     let Ok(mut merged) = serde_json::to_value(base) else {
         return Read {
@@ -95,13 +91,11 @@ fn collect<'a>(
     }
 }
 
-/// The setting at `path` in `value`.
 pub fn get_mut<'a>(value: &'a mut Value, path: &[String]) -> Option<&'a mut Value> {
     path.iter()
         .try_fold(value, |value, key| value.as_object_mut()?.get_mut(key))
 }
 
-/// The setting at `path` in `value`.
 pub fn get<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
     path.iter()
         .try_fold(value, |value, key| value.as_object()?.get(key))
@@ -110,23 +104,21 @@ pub fn get<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
 /// What to save in place of `file`, which was read with `skipped` left out: `now`, with the
 /// settings it doesn't know put back from `file`, and the skipped values put back where `now`
 /// still has what was used instead of them.
-pub fn write_back(now: Value, file: &Value, skipped: &[Skipped]) -> Value {
-    let mut out = now;
+pub fn write_back(mut now: Value, file: &Value, skipped: &[Skipped]) -> Value {
     let keep: Vec<(&[String], &Value)> = skipped
         .iter()
-        .filter(|s| s.used.as_ref() == get(&out, &s.path))
+        .filter(|s| s.used.as_ref() == get(&now, &s.path))
         .filter_map(|s| Some((s.path.as_slice(), get(file, &s.path)?)))
         .collect();
     for (path, value) in keep {
-        if let Some(slot) = get_mut(&mut out, path) {
+        if let Some(slot) = get_mut(&mut now, path) {
             *slot = value.clone();
         }
     }
-    add_unknown(&mut out, file);
-    out
+    add_unknown(&mut now, file);
+    now
 }
 
-/// Adds the settings of `file` that `out` doesn't have, at any depth.
 fn add_unknown(out: &mut Value, file: &Value) {
     let (Some(out), Some(file)) = (out.as_object_mut(), file.as_object()) else {
         return;

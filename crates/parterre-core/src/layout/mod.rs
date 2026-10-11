@@ -1,16 +1,9 @@
-//! Layered ("Sugiyama") layout of a revision graph.
+//! Layered ("Sugiyama") layout, as TortoiseGit (through OGDF) and graphviz `dot` do it: rank
+//! the nodes into layers, split long edges into chains of dummy items, order every layer to
+//! reduce crossings, assign coordinates, and route every edge through its dummies.
 //!
-//! The pipeline is the classic one, as used by TortoiseGit through OGDF and by graphviz `dot`:
-//!
-//! 1. [`rank`]: assign every node to a layer so that parents lie below their children.
-//! 2. [`LayeredGraph`]: split edges spanning several layers into chains of dummy items.
-//! 3. [`order`]: permute items within each layer to reduce edge crossings.
-//! 4. [`position`]: assign coordinates within each layer, keeping edges short and straight.
-//! 5. Route every edge through its dummy items, and rotate the result to the requested
-//!    [`Direction`].
-//!
-//! Everything is computed in an abstract frame where `u` runs along a layer and `v` runs across
-//! layers (newest first); [`Direction`] maps that frame onto screen x/y at the end.
+//! It all happens in a frame where `u` runs along a layer and `v` across layers, newest first;
+//! [`Direction`] maps that frame onto the screen at the end.
 
 mod layered;
 mod order;
@@ -20,9 +13,9 @@ mod trunk;
 
 use serde::{Deserialize, Serialize};
 
-pub use layered::{Item, LayeredGraph};
+use layered::LayeredGraph;
 
-/// A point or size in layout space (logical pixels at zoom 1).
+/// In logical pixels at zoom 1.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub x: f32,
@@ -35,7 +28,6 @@ impl Point {
     }
 }
 
-/// Where the newest commits are placed; history flows away from that side.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Direction {
     #[default]
@@ -57,7 +49,7 @@ impl Direction {
         matches!(self, Direction::NewestTop | Direction::NewestBottom)
     }
 
-    /// Unit vector pointing from newer to older commits on screen.
+    /// The unit vector from newer to older commits on screen.
     pub fn flow(self) -> Point {
         match self {
             Direction::NewestTop => Point::new(0.0, 1.0),
@@ -77,17 +69,15 @@ impl Direction {
     }
 }
 
-/// How nodes are assigned to layers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Ranking {
-    /// Minimise total edge length (network simplex, as OGDF's `OptimalRanking` and graphviz
-    /// do). Produces the compact, tree-like look.
+    /// The least total edge length, by network simplex (as OGDF's `OptimalRanking` and
+    /// graphviz).
     #[default]
     Compact,
-    /// Every node sits directly above its highest parent (longest path from the roots).
-    /// Fast; branches hang close to where they forked.
+    /// Every node directly above its highest parent.
     LongestPath,
-    /// One layer per node, strictly ordered by commit date like a log view.
+    /// One layer per node, by commit date.
     Chronological,
 }
 
@@ -108,7 +98,7 @@ impl Ranking {
 }
 
 /// Where the trunk goes: the first-parent line of the first [`LayoutInput::priority`] node,
-/// i.e. the default branch.
+/// the default branch.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Trunk {
     /// One straight line, each side branch on the side where its layers stay narrowest.
@@ -137,22 +127,21 @@ impl Trunk {
 pub struct LayoutOptions {
     pub direction: Direction,
     pub ranking: Ranking,
-    /// Gap between adjacent layers (between node boxes), in layout units. TortoiseGit: 30.
+    /// The least gap between the boxes of adjacent layers. TortoiseGit: 30.
     pub layer_gap: f32,
-    /// Minimum gap between neighbouring nodes within a layer. TortoiseGit: 25.
+    /// The least gap between neighbouring nodes in a layer. TortoiseGit: 25.
     pub node_gap: f32,
-    /// Width reserved for an edge passing through a layer.
+    /// The room an edge takes where it passes through a layer.
     pub edge_gap: f32,
-    /// Extra gap between layers per unit of the widest horizontal edge span across the gap,
-    /// keeping long edges steep (0 = fixed spacing).
+    /// Extra gap between layers per unit of the widest span along the layers of an edge
+    /// across the gap, keeping long edges steep (0 = fixed spacing).
     pub gap_per_span: f32,
-    /// Upper bound for the variable layer gap. TortoiseGit (OGDF): 300.
+    /// TortoiseGit (OGDF): 300.
     pub max_layer_gap: f32,
-    /// Layers wider than this are split into several (0 = never, as TortoiseGit).
+    /// Wider layers are split into several (0 = never, as TortoiseGit).
     pub max_layer_width: f32,
-    /// Merge edges that run into the same parent into one trunk.
+    /// Edges into the same parent share their bend points (graphviz's `concentrate`).
     pub concentrate_edges: bool,
-    /// Where the default branch's first-parent line goes.
     pub trunk: Trunk,
 }
 
@@ -173,55 +162,58 @@ impl Default for LayoutOptions {
     }
 }
 
-/// Graph to be laid out. Nodes are identified by their index.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LayoutInput {
-    /// On-screen box size of every node (width, height), independent of direction.
+    /// The box of every node on screen, whatever the direction.
     pub sizes: Vec<Point>,
-    /// Commit timestamp of every node, used for chronological ranking and tie-breaking.
+    /// The commit time of every node; missing ones count as 0.
     pub times: Vec<i64>,
-    /// Edges from child (newer) to parent (older).
     pub edges: Vec<LayoutEdge>,
     /// Nodes to place first, e.g. the default branch. The first one's first-parent line is the
     /// [`Trunk`].
     pub priority: Vec<u32>,
 }
 
+impl LayoutInput {
+    fn time(&self, node: usize) -> i64 {
+        self.times.get(node).copied().unwrap_or(0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LayoutEdge {
     pub child: u32,
     pub parent: u32,
-    /// True if `parent` is the child's first parent (the "mainline" of that commit).
     pub first_parent: bool,
 }
 
-/// Result of a layout, in screen-oriented layout space.
 #[derive(Clone, Debug, Default)]
 pub struct Layout {
     pub direction: Direction,
-    /// Centre of every node.
+    /// The centre of every node.
     pub nodes: Vec<Point>,
-    /// For every input edge: the polyline from the child's border through its bend points to
-    /// the parent's border. Renderers should draw smooth curves with tangents along
-    /// [`Direction::flow`] at every point.
+    /// For every input edge, the polyline from the child's border through its bend points to
+    /// the parent's border. Drawn as smooth curves with tangents along [`Direction::flow`] at
+    /// every point.
     pub edges: Vec<Vec<Point>>,
-    /// (child, parent) node of every edge.
+    /// The (child, parent) of every edge.
     pub edge_ends: Vec<(u32, u32)>,
-    /// Whether every edge leads to its child's first parent.
     pub edge_first_parent: Vec<bool>,
-    /// Identity of every bend point of every edge (same id = the same point, shared by
-    /// bundled edges). Parallel to the interior points of [`Layout::edges`].
+    /// Every bend point's identity, parallel to the interior points of [`Layout::edges`]:
+    /// bundled edges share their bend points.
     pub edge_bends: Vec<Vec<u32>>,
-    /// Layer of every node (0 = newest).
+    /// The layer of every node, 0 the newest.
     pub layers: Vec<u32>,
-    /// Edge crossings between adjacent layers after ordering (bundled edges count once).
+    /// Bundled edges count once.
     pub crossings: u64,
-    /// Top-left and bottom-right corner of the drawing.
     pub min: Point,
     pub max: Point,
 }
 
-/// Runs the full layout pipeline.
+fn layer_count(layers: &[u32]) -> usize {
+    layers.iter().map(|&l| l as usize + 1).max().unwrap_or(0)
+}
+
 pub fn layout(input: &LayoutInput, options: &LayoutOptions) -> Layout {
     let n = input.sizes.len();
     if n == 0 {
@@ -231,7 +223,7 @@ pub fn layout(input: &LayoutInput, options: &LayoutOptions) -> Layout {
         };
     }
     let vertical = options.direction.is_vertical();
-    // Extent of every node along a layer (breadth) and across layers (depth).
+    // Every node's extent along a layer (breadth) and across layers (depth).
     let (breadth, depth): (Vec<f32>, Vec<f32>) = input
         .sizes
         .iter()
@@ -248,31 +240,14 @@ pub fn layout(input: &LayoutInput, options: &LayoutOptions) -> Layout {
             options.node_gap,
         );
     }
-    let sides = trunk::sides(
-        input,
-        options.trunk,
-        &trunk::Room {
-            layers: &layers,
-            breadth: &breadth,
-            node_gap: options.node_gap,
-            edge_gap: options.edge_gap,
-            concentrate: options.concentrate_edges,
-        },
-    );
-    let mut graph = LayeredGraph::build(
-        input,
-        &layers,
-        &breadth,
-        options.edge_gap,
-        options.concentrate_edges,
-        sides.as_ref(),
-    );
+    let sides = trunk::sides(input, &layers, &breadth, options);
+    let mut graph = LayeredGraph::build(input, &layers, &breadth, options, sides.as_ref());
     let crossings = order::minimize_crossings(&mut graph, input);
     let u = position::assign(&graph, options.node_gap);
 
-    // Layer depth = deepest node in the layer. Layers are stacked with at least `layer_gap`
-    // between them, more where edges cross the gap at a shallow angle (as OGDF's
-    // FastHierarchyLayout does), so that edges stay steep enough to follow.
+    // Layers are stacked at least `layer_gap` apart, more where edges cross the gap at a
+    // shallow angle (as OGDF's FastHierarchyLayout does), so that edges stay steep enough to
+    // follow.
     let layer_count = graph.layers.len();
     let mut layer_depth = vec![0.0f32; layer_count];
     for (node, &l) in layers.iter().enumerate() {
@@ -313,13 +288,13 @@ pub fn layout(input: &LayoutInput, options: &LayoutOptions) -> Layout {
                 )
             });
 
-    let to_screen = |u_: f32, v_: f32| -> Point {
-        let u_ = u_ - min_u;
+    let to_screen = |u: f32, v: f32| -> Point {
+        let u = u - min_u;
         match options.direction {
-            Direction::NewestTop => Point::new(u_, v_),
-            Direction::NewestBottom => Point::new(u_, total_v - v_),
-            Direction::NewestLeft => Point::new(v_, u_),
-            Direction::NewestRight => Point::new(total_v - v_, u_),
+            Direction::NewestTop => Point::new(u, v),
+            Direction::NewestBottom => Point::new(u, total_v - v),
+            Direction::NewestLeft => Point::new(v, u),
+            Direction::NewestRight => Point::new(total_v - v, u),
         }
     };
 

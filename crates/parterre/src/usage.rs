@@ -1,7 +1,3 @@
-//! Feature events (#264): the app's side. Which windows, dialogs, menus and actions are used
-//! goes to [`parterre_telemetry::record`], which sends it only while usage statistics are sent;
-//! the settings every event carries are [`properties`].
-
 use eframe::egui::{self, Id, ViewportId};
 use parterre_core::layout::Direction;
 use parterre_core::log_layout::LogLayout;
@@ -13,19 +9,16 @@ pub use parterre_telemetry::{Action, Feature, Menu, Screen};
 use crate::settings::{DiffForm, Settings};
 use crate::theme::ThemeChoice;
 
-/// The user started `action`.
 pub fn action(action: Action) {
     telemetry::record(Feature::Action(action));
 }
 
-/// `screen` is shown, as `id`: recorded as it opens, the first frame it is shown after a frame
-/// without. Call every frame it is shown.
+/// Records `screen` as it opens. Call every frame it is shown, with an `id` of its own.
 pub fn screen(ctx: &egui::Context, id: Id, screen: Screen) {
     shown(ctx, id, Feature::Screen(screen));
 }
 
-/// `menu` is open, in the window `ctx` is drawing: recorded as it opens. Call every frame it is
-/// shown.
+/// Records `menu` as it opens in the window `ctx` is drawing. Call every frame it is shown.
 pub fn menu(ctx: &egui::Context, menu: Menu) {
     let id = Id::new(("menu", menu.name())).with(ctx.viewport_id());
     shown(ctx, id, Feature::Menu(menu));
@@ -45,12 +38,11 @@ fn shown(ctx: &egui::Context, id: Id, feature: Feature) {
     }
 }
 
-/// What every event says of the settings, the screen (its scale, `density`) and the
-/// repositories: how many are in the recent list, and the open one's commits and nodes.
+/// What every event says of the settings, the screen and the repositories.
 pub fn properties(
     settings: &Settings,
-    density: Option<f32>,
-    repositories: usize,
+    screen_density: Option<f32>,
+    recent_repositories: usize,
     commits: Option<usize>,
     nodes: Option<usize>,
 ) -> telemetry::Properties {
@@ -60,7 +52,7 @@ pub fn properties(
             ThemeChoice::Light => telemetry::Theme::Light,
             ThemeChoice::Dark => telemetry::Theme::Dark,
         },
-        text_size: text_size(settings.text_size),
+        text_size: nearest_text_size_step(settings.text_size),
         graph_mode: match settings.graph.simplification {
             Simplification::Decorated => telemetry::GraphMode::LabelledCommits,
             Simplification::Forks => telemetry::GraphMode::LabelledForks,
@@ -90,15 +82,14 @@ pub fn properties(
         },
         auto_reload: settings.auto_reload,
         pull_requests: settings.graph.show_pull_requests,
-        screen_density: density,
-        repositories,
+        screen_density,
+        repositories: recent_repositories,
         commits,
         nodes,
     }
 }
 
-/// The text size step nearest `size`: always one of the steps offered.
-fn text_size(size: f32) -> f32 {
+fn nearest_text_size_step(size: f32) -> f32 {
     let distance = |step: &f32| (step - size).abs();
     parterre_core::text_size::STEPS
         .into_iter()
@@ -183,8 +174,8 @@ mod tests {
     #[test]
     fn every_text_size_step_is_sent_as_itself() {
         for step in parterre_core::text_size::STEPS {
-            assert_eq!(text_size(step), step);
+            assert_eq!(nearest_text_size_step(step), step);
         }
-        assert_eq!(text_size(9.0), parterre_core::text_size::MAX);
+        assert_eq!(nearest_text_size_step(9.0), parterre_core::text_size::MAX);
     }
 }

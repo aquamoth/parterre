@@ -1,34 +1,10 @@
 mod common;
 
-use std::path::Path;
-use std::process::Command;
-
-use common::TestRepo;
+use common::{TestRepo, git_at, git_command};
 use parterre_core::revgraph::{self, GraphOptions, Simplification};
 use parterre_core::upstream::{Side, Upstream};
 use parterre_core::{CommitIx, Repo};
 use tempfile::TempDir;
-
-/// Runs git in `dir`, as [`TestRepo::git`] does in the repository, at `minutes` past its base
-/// date.
-fn git_in(dir: &Path, minutes: u32, args: &[&str]) -> String {
-    let date = format!("{} +0000", 1_700_000_000 + minutes * 60);
-    let out = Command::new(parterre_core::git::program())
-        .current_dir(dir)
-        .args(args)
-        .env("GIT_AUTHOR_DATE", &date)
-        .env("GIT_COMMITTER_DATE", &date)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .expect("run git");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
 
 /// A repository with a bare `origin`, and a colleague's clone of it that can push.
 struct Setup {
@@ -44,7 +20,7 @@ impl Setup {
         let remote = tempfile::tempdir().expect("tempdir");
         let origin = remote.path().join("origin.git");
         let origin = origin.to_str().expect("utf-8 path");
-        git_in(
+        git_at(
             remote.path(),
             0,
             &["init", "-q", "--bare", "-b", "main", origin],
@@ -73,22 +49,22 @@ impl Setup {
         if !other.exists() {
             let origin = self.remote.path().join("origin.git");
             let args = ["clone", "-q", origin.to_str().unwrap(), "other"];
-            git_in(self.remote.path(), 500, &args);
-            git_in(&other, 500, &["config", "user.name", "Colleague"]);
-            git_in(&other, 500, &["config", "user.email", "c@example.com"]);
+            git_at(self.remote.path(), 500, &args);
+            git_at(&other, 500, &["config", "user.name", "Colleague"]);
+            git_at(&other, 500, &["config", "user.email", "c@example.com"]);
         }
-        git_in(&other, 500, &["fetch", "-q", "origin"]);
-        git_in(
+        git_at(&other, 500, &["fetch", "-q", "origin"]);
+        git_at(
             &other,
             500,
             &["checkout", "-q", "-B", branch, &format!("origin/{branch}")],
         );
         std::fs::write(other.join(file), format!("{message}\n")).expect("write file");
-        git_in(&other, 500, &["add", "-A"]);
-        git_in(&other, 500, &["commit", "-q", "-m", message]);
-        git_in(&other, 500, &["push", "-q", "origin", branch]);
+        git_at(&other, 500, &["add", "-A"]);
+        git_at(&other, 500, &["commit", "-q", "-m", message]);
+        git_at(&other, 500, &["push", "-q", "origin", branch]);
         self.repo.git(&["fetch", "-q", "origin"]);
-        git_in(&other, 500, &["rev-parse", "HEAD"])
+        git_at(&other, 500, &["rev-parse", "HEAD"])
     }
 
     /// A branch `name` off `main`, with commits `messages` (each to `name`.txt), pushed and
@@ -379,11 +355,8 @@ fn a_conflict_resolved_in_a_rebase_still_replaces() {
     s.repo.write("clash.txt", b"main's version\n");
     s.repo.commit_all("Main clashes");
     s.repo.git(&["switch", "-q", "clash"]);
-    let rebase = Command::new(parterre_core::git::program())
-        .current_dir(s.repo.path())
+    let rebase = git_command(s.repo.path())
         .args(["rebase", "-q", "main"])
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .expect("run git");
     assert!(!rebase.status.success(), "the rebase should conflict");

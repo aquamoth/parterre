@@ -1,5 +1,3 @@
-//! User-adjustable settings, persisted between runs by eframe.
-
 use parterre_core::Repo;
 use parterre_core::blame::Moves;
 use parterre_core::file_diff::{Whitespace, WordMode};
@@ -12,21 +10,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::theme::{BranchColor, ThemeChoice};
 
-/// The app id: the Wayland app id and X11 window class, which a desktop pairs with the desktop
-/// entry of the same name (`packaging/linux/se.trustfall.parterre.desktop`) for the icon. Also
-/// the Flatpak id.
+/// The Wayland app id and X11 window class, which a desktop pairs with the desktop entry of the
+/// same name for the icon. Also the Flatpak id.
 pub const APP_ID: &str = "se.trustfall.parterre";
 /// Names the storage directory, which is older than the app id and stays where it was.
 const STORAGE_ID: &str = "parterre";
 
-/// The file eframe saves the settings in. Left to itself it would name the directory after the
-/// root viewport's app id.
+/// Left to itself, eframe would name the directory after the root viewport's app id.
 pub fn storage_file() -> Option<std::path::PathBuf> {
     eframe::storage_dir(STORAGE_ID).map(|dir| dir.join("app.ron"))
 }
 
-/// True if the file eframe saves in is there but can't be read: eframe then starts from
-/// nothing, and overwrites it on saving.
+/// Whether eframe's file is there but can't be read: eframe then starts from nothing, and
+/// overwrites it on saving.
 pub fn storage_corrupt() -> bool {
     storage_file().is_some_and(|file| file_corrupt(&file))
 }
@@ -38,38 +34,32 @@ fn file_corrupt(file: &std::path::Path) -> bool {
     }
 }
 
-/// Storage key for remembered node positions: repository path -> commit hash -> rest offset
-/// from the layout, and whether the node was moved by hand. Lists the children of displaced
-/// nodes too, so that commits missing from it are new (see
-/// `parterre_core::physics::Net::rest_offsets`).
 pub const MOVES_KEY: &str = "parterre-moves";
-/// Storage key for the recently opened repositories, newest first.
+/// Newest first.
 pub const RECENT_KEY: &str = "parterre-recent-repositories";
-/// Storage key for the parent folder the last clone went in.
+/// The parent folder the last clone went in.
 pub const CLONE_PARENT_KEY: &str = "parterre-clone-parent";
+/// Repository path → commit hash → the node's rest offset from the layout, and whether it was
+/// moved by hand. Lists the children of displaced nodes too, so that commits missing from it
+/// are new (see `parterre_core::physics::Net::rest_offsets`).
 pub type RememberedMoves =
     std::collections::HashMap<String, std::collections::HashMap<String, (f32, f32, bool)>>;
 
-/// Storage key for what is sent to PostHog: the first-run prompt's answer, the install ID and
-/// the version that ran last (#261). Kept apart from the settings: not exported, imported or
-/// reset with them.
+/// Kept apart from the settings: not exported, imported or reset with them (#261).
 pub const PRIVACY_KEY: &str = "parterre-privacy";
 
-/// What is sent to PostHog, as stored under [`PRIVACY_KEY`].
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Privacy {
-    /// The first-run prompt's answer, as Settings › Privacy has changed it since; `None` until
-    /// it is answered.
+    /// The first-run prompt's answer, as Settings › Privacy has changed it since.
     pub answer: Option<PrivacyAnswer>,
-    /// The version that ran last, as `$app_version` names it, for `Application Updated`.
+    /// As `$app_version` names it, for `Application Updated`.
     pub last_version: Option<String>,
 }
 
-/// The first-run prompt's answer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivacyAnswer {
-    /// Made when the prompt was answered, and never changed.
+    /// Made when the prompt is answered, and never changed.
     pub install_id: String,
     pub usage_statistics: bool,
     pub crash_reports: bool,
@@ -85,13 +75,11 @@ impl PrivacyAnswer {
 }
 
 impl Privacy {
-    /// The stored one; as before the first run without one, or if it can't be read (asked
-    /// again then, with a new install ID).
+    /// Unanswered when it can't be read: asked again then, with a new install ID.
     pub fn load(storage: &dyn eframe::Storage) -> Privacy {
         eframe::get_value(storage, PRIVACY_KEY).unwrap_or_default()
     }
 
-    /// The first-run prompt answered with `choices`: the install ID is made.
     pub fn answer(&mut self, choices: parterre_telemetry::Choices) {
         self.answer = Some(PrivacyAnswer {
             install_id: parterre_telemetry::new_install_id(),
@@ -105,13 +93,11 @@ impl Privacy {
     }
 }
 
-/// Loads remembered node positions.
 pub fn load_moves(storage: &dyn eframe::Storage) -> RememberedMoves {
     eframe::get_value(storage, MOVES_KEY).unwrap_or_default()
 }
 
-/// The settings of one repository: what the Filter popover sets. Every other setting is
-/// parterre's, the same in every repository.
+/// What the Filter popover sets. Every other setting is the same in every repository.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RepoSettings {
@@ -122,7 +108,6 @@ pub struct RepoSettings {
 }
 
 impl RepoSettings {
-    /// The repository settings among `graph`, which holds those of the repository shown.
     pub fn of(graph: &GraphOptions) -> RepoSettings {
         RepoSettings {
             current_branch_only: graph.current_branch_only,
@@ -139,14 +124,13 @@ impl RepoSettings {
         graph.hide_branches.clone_from(&self.hide_branches);
     }
 
-    /// Which repository `repo` is, for its settings: its main worktree, so that every worktree
-    /// of a repository has the same.
+    /// The main worktree's path, so that every worktree of a repository has the same settings.
     pub fn key(repo: &Repo) -> String {
         let main = repo.worktrees.first().map_or(&repo.path, |main| &main.path);
         main.display().to_string()
     }
 
-    /// The name of the repository `key` is, for showing.
+    /// The folder name of a [`RepoSettings::key`], for showing.
     pub fn name(key: &str) -> String {
         let path = std::path::Path::new(key);
         path.file_name()
@@ -156,10 +140,8 @@ impl RepoSettings {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgeStyle {
-    /// Straight segments through the bend points, as TortoiseGit draws them.
     #[default]
     Straight,
-    /// Smooth curves that leave and enter nodes along the direction of history.
     Curved,
 }
 
@@ -176,10 +158,8 @@ impl EdgeStyle {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Arrows {
-    /// Arrowhead at the parent (older) end, TortoiseGit's default.
     #[default]
     ToParent,
-    /// Arrowhead at the child end: "Arrows point towards merges".
     ToChild,
     None,
 }
@@ -196,14 +176,10 @@ impl Arrows {
     }
 }
 
-/// Bundles of drawing choices.
+/// A bundle of drawing choices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Look {
-    /// As close to TortoiseGit as possible: straight edges, every edge separate, rows as wide
-    /// as they need to be.
     Classic,
-    /// parterre's default: curved edges bundled into trunks, and very wide rows split so that
-    /// sibling branches stack up.
     Modern,
 }
 
@@ -233,7 +209,6 @@ impl Look {
         }
     }
 
-    /// The look `s` currently matches, if any.
     pub fn of(s: &Settings) -> Option<Look> {
         Look::ALL.into_iter().find(|look| {
             let mut probe = s.clone();
@@ -250,28 +225,24 @@ pub struct Settings {
     pub layout: LayoutOptions,
     pub net: NetParams,
     pub theme: ThemeChoice,
-    /// The text size of every window (egui's zoom factor; 1.0 = 100%). The graph has its own
-    /// zoom.
+    /// egui's zoom factor in every window. The graph has its own zoom.
     pub text_size: f32,
     pub edge_style: EdgeStyle,
     pub arrows: Arrows,
-    /// Overview map of the whole graph in the bottom-right corner.
     pub show_overview: bool,
     pub show_status_bar: bool,
     /// Label edges with the number of commits collapsed into them.
     pub show_hidden_counts: bool,
-    /// Highlight the edges of the hovered and selected nodes.
+    /// Of the hovered and selected nodes.
     pub highlight_edges: bool,
-    /// Keep moved nodes where they are, per repository, across runs and relayouts.
+    /// Per repository, across runs and relayouts.
     pub remember_moves: bool,
-    /// Reload when the repository's refs change (TortoiseGit reloads only on F5).
+    /// When the repository's refs change.
     pub auto_reload: bool,
-    /// Colour code by its language in the diff and blame windows (#209). Their toolbars
-    /// toggle it too.
+    /// In the diff and blame windows.
     pub syntax_colour: bool,
-    /// Ask GitHub once a day whether a newer release is out (#258).
     pub check_for_updates: bool,
-    /// Colours for branches by name; the first matching rule wins.
+    /// The first matching rule wins.
     pub branch_colors: Vec<BranchColor>,
     pub log_window: LogWindowSettings,
     pub diff_window: DiffWindowSettings,
@@ -280,28 +251,25 @@ pub struct Settings {
     pub settings_window: SettingsWindowSettings,
 }
 
-/// What the settings window remembers across runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SettingsWindowSettings {
-    /// Inner size in points.
+    /// Inner size, in points.
     pub size: [f32; 2],
 }
 
 impl Default for SettingsWindowSettings {
     fn default() -> Self {
-        // The sidebar, a page and the margins.
         SettingsWindowSettings {
             size: [646.0, 480.0],
         }
     }
 }
 
-/// What the compare window remembers across runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CompareWindowSettings {
-    /// Inner size in points.
+    /// Inner size, in points.
     pub size: [f32; 2],
     /// Compare with the common ancestor rather than with the left commit.
     pub since_ancestor: bool,
@@ -320,15 +288,13 @@ impl Default for CompareWindowSettings {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BlameWindowSettings {
-    /// Inner size in points.
+    /// Inner size, in points.
     pub size: [f32; 2],
-    /// Changes in whitespace alone don't make a line new (`git blame -w`).
+    /// `git blame -w`.
     pub ignore_whitespace: bool,
-    /// Whether moved and copied lines keep the commit that wrote them.
     pub moves: Moves,
-    /// The history pane below the text is shown.
     pub show_history: bool,
-    /// Height of the history pane in points, with its headings.
+    /// In points, with its headings.
     pub history_height: f32,
 }
 
@@ -345,17 +311,14 @@ impl Default for BlameWindowSettings {
     }
 }
 
-/// What the log window remembers across runs.
+/// No position: it can't be set on Wayland.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogWindowSettings {
-    /// Inner size in points. (Its position can't be set on Wayland, so it isn't kept.)
+    /// Inner size, in points.
     pub size: [f32; 2],
-    /// How the panes are arranged.
     pub layout: LogLayout,
-    /// Where the dividers are, for each layout.
     pub dividers: Dividers,
-    /// Which commits the log walks, and their order.
     pub options: LogOptions,
 }
 
@@ -370,13 +333,10 @@ impl Default for LogWindowSettings {
     }
 }
 
-/// A diff window's two forms.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DiffForm {
-    /// The old version on the left, the new on the right.
     #[default]
     SideBySide,
-    /// One column: a change's removed lines, then its added lines.
     Unified,
 }
 
@@ -384,7 +344,7 @@ pub enum DiffForm {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiffWindowSettings {
-    /// Inner size in points.
+    /// Inner size, in points.
     pub size: [f32; 2],
     pub form: DiffForm,
     pub words: WordMode,
@@ -407,7 +367,7 @@ impl Default for DiffWindowSettings {
 
 impl Settings {
     /// Puts back in reach what settings edited by hand or saved by another version may put out
-    /// of it: a divider, the text size.
+    /// of it.
     pub fn sanitize(&mut self) {
         self.log_window.dividers = self.log_window.dividers.clamped();
         self.text_size = parterre_core::text_size::sanitize(self.text_size);
@@ -463,7 +423,6 @@ mod tests {
 
     #[test]
     fn settings_stay_where_they_were_before_the_app_id() {
-        // eframe would name the directory after the app id; the settings stay under parterre.
         assert_ne!(APP_ID, STORAGE_ID);
         assert_eq!(
             storage_file(),
@@ -497,7 +456,6 @@ mod tests {
         )));
     }
 
-    /// Settings as stored: JSON, read one setting at a time onto the defaults.
     fn read(json: &str) -> Settings {
         let file = serde_json::from_str(json).unwrap();
         parterre_core::lenient::read(&Settings::default(), &file).value

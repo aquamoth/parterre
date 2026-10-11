@@ -3,9 +3,9 @@ mod common;
 use common::TestRepo;
 use parterre_core::git::CommitNote;
 use parterre_core::revgraph::{self, GraphOptions, PullRequestHead, RevGraph, Simplification};
-use parterre_core::{Head, RefKind, Repo};
+use parterre_core::{CommitIx, Head, RefKind, Repo};
 
-/// Subjects of the graph's nodes, sorted, for order-independent comparison.
+/// Sorted.
 fn node_subjects(repo: &Repo, g: &RevGraph) -> Vec<String> {
     let mut s: Vec<String> = g
         .nodes
@@ -16,7 +16,7 @@ fn node_subjects(repo: &Repo, g: &RevGraph) -> Vec<String> {
     s
 }
 
-/// Edges as (child subject, parent subject, first_parent, hidden), sorted.
+/// As (child subject, parent subject, first_parent, hidden), sorted.
 fn edge_list(repo: &Repo, g: &RevGraph) -> Vec<(String, String, bool, u32)> {
     let subject = |node: u32| repo.commit(g.nodes[node as usize].commit).subject.clone();
     let mut e: Vec<_> = g
@@ -44,6 +44,17 @@ fn with_mode(simplification: Simplification) -> GraphOptions {
 
 fn edge(c: &str, p: &str, first: bool, hidden: u32) -> (String, String, bool, u32) {
     (c.into(), p.into(), first, hidden)
+}
+
+/// The subjects of the commits collapsed into the first edge of the node with subject `child`.
+fn collapsed_subjects(repo: &Repo, g: &RevGraph, child: &str) -> Vec<String> {
+    let subject = |c: CommitIx| repo.commit(c).subject.clone();
+    let e = g
+        .edges
+        .iter()
+        .position(|e| subject(g.nodes[e.child as usize].commit) == child)
+        .unwrap();
+    g.collapsed(e).iter().copied().map(subject).collect()
 }
 
 /// main: A - B - C ------- M
@@ -257,20 +268,12 @@ fn forks_mode_forks_a_branch_off_where_it_last_merged_its_base() {
             edge("F3", "D", false, 2),
         ]
     );
-    let subject = |c: parterre_core::CommitIx| repo.commit(c).subject.clone();
-    let collapsed = |child: &str| -> Vec<String> {
-        let e = g
-            .edges
-            .iter()
-            .position(|e| subject(g.nodes[e.child as usize].commit) == child)
-            .unwrap();
-        g.collapsed(e).iter().copied().map(subject).collect()
-    };
-    assert_eq!(collapsed("F3"), ["F2", "F1"]);
-    assert_eq!(collapsed("D"), ["C", "B"]);
+    assert_eq!(collapsed_subjects(&repo, &g, "F3"), ["F2", "F1"]);
+    assert_eq!(collapsed_subjects(&repo, &g, "D"), ["C", "B"]);
+    let subject = |c: CommitIx| repo.commit(c).subject.clone();
     let shown_as = |s: &str| {
         let c = (0..repo.commits.len() as u32)
-            .map(parterre_core::CommitIx)
+            .map(CommitIx)
             .find(|&c| subject(c) == s)
             .unwrap();
         subject(g.nodes[g.represented_by(c).unwrap() as usize].commit)
@@ -470,7 +473,7 @@ fn filters_limit_history_to_matching_refs() {
     );
 }
 
-/// Labels of the graph's nodes, by node subject.
+/// By node subject.
 fn labels(repo: &Repo, g: &RevGraph) -> Vec<(String, Vec<String>)> {
     let mut v: Vec<(String, Vec<String>)> = g
         .nodes
@@ -624,26 +627,13 @@ fn lists_commits_collapsed_into_an_edge() {
     let r = feature_merge();
     let repo = r.load();
     let g = revgraph::build(&repo, &with_mode(Simplification::BranchesAndMerges));
-    let subject = |c: parterre_core::CommitIx| repo.commit(c).subject.clone();
-    // E -> B collapses D.
-    let e_to_b = g
-        .edges
-        .iter()
-        .position(|e| subject(g.nodes[e.child as usize].commit) == "E")
-        .unwrap();
-    let hidden: Vec<String> = g.collapsed(e_to_b).iter().copied().map(subject).collect();
-    assert_eq!(hidden, ["D"]);
+    // E -> B
+    assert_eq!(collapsed_subjects(&repo, &g, "E"), ["D"]);
 
     let g = revgraph::build(&repo, &with_mode(Simplification::Decorated));
-    // E -> A collapses D and B (newest first).
-    let e_to_a = g
-        .edges
-        .iter()
-        .position(|e| subject(g.nodes[e.child as usize].commit) == "E")
-        .unwrap();
-    assert_eq!(g.edges[e_to_a].hidden, 2);
-    let hidden: Vec<String> = g.collapsed(e_to_a).iter().copied().map(subject).collect();
-    assert_eq!(hidden, ["D", "B"]);
+    assert_eq!(edge_list(&repo, &g)[0], edge("E", "A", true, 2));
+    // Newest first.
+    assert_eq!(collapsed_subjects(&repo, &g, "E"), ["D", "B"]);
 }
 
 /// main: A - B - C - M - E
@@ -666,7 +656,7 @@ fn an_edge_holds_both_sides_of_a_hidden_merge() {
     let g = revgraph::build(&repo, &with_mode(Simplification::Decorated));
     // As `git log A..E` lists them (#290).
     assert_eq!(edge_list(&repo, &g), [edge("E", "A", true, 4)]);
-    let subject = |c: parterre_core::CommitIx| repo.commit(c).subject.clone();
+    let subject = |c: CommitIx| repo.commit(c).subject.clone();
     let mut hidden: Vec<String> = g.collapsed(0).iter().copied().map(subject).collect();
     assert_eq!(hidden[0], "M");
     hidden.sort();
@@ -768,7 +758,7 @@ fn pull_request_head(repo: &Repo, subject: &str, base: &str) -> PullRequestHead 
         .commits
         .iter()
         .position(|c| c.subject == subject)
-        .map(|i| parterre_core::CommitIx(i as u32))
+        .map(|i| CommitIx(i as u32))
         .unwrap();
     PullRequestHead {
         commit,
@@ -780,7 +770,7 @@ fn pull_request_head(repo: &Repo, subject: &str, base: &str) -> PullRequestHead 
     }
 }
 
-/// Subjects of the nodes that carry pull requests, with the pull requests' indices.
+/// The subjects of the nodes that carry pull requests, with the pull requests' indices.
 fn pull_request_nodes(repo: &Repo, g: &RevGraph) -> Vec<(String, Vec<usize>)> {
     g.nodes
         .iter()

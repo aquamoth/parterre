@@ -1,12 +1,6 @@
-//! Conflicted files, against real, disposable repositories stopped by a merge, rebase,
-//! cherry-pick, revert or stash pop: every kind git leaves, what can finish each (checked
-//! against the index after running it), the sides' names as git writes them, and the
-//! comparison with the working tree listing them all.
 mod common;
 
-use std::process::Command;
-
-use common::TestRepo;
+use common::{TestRepo, git_command};
 use parterre_core::branches::{Action, Branches, Outcome};
 use parterre_core::compare::Comparison;
 use parterre_core::conflicts::{self, Answer, Conflict, Resolve, Sides};
@@ -14,13 +8,9 @@ use parterre_core::git::Git;
 use parterre_core::{Oid, changed_files::FileStatus};
 use parterre_util::CancelTree;
 
-/// Runs git, which may fail (a merge that stops on conflicts).
 fn try_git(r: &TestRepo, args: &[&str]) -> bool {
-    Command::new(parterre_core::git::program())
-        .current_dir(r.path())
+    git_command(r.path())
         .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_EDITOR", "true")
         .output()
         .expect("run git")
@@ -28,8 +18,8 @@ fn try_git(r: &TestRepo, args: &[&str]) -> bool {
         .success()
 }
 
-/// Commits a symlink (or a gitlink) straight into the index, so no file system support is
-/// needed: `target` is the link's text (or the submodule's commit).
+/// Stages a symlink or a submodule straight into the index, so no file system support is
+/// needed: `target` is the link's text or the submodule's commit.
 fn stage_mode(r: &TestRepo, mode: &str, path: &str, target: &str) {
     let oid = if mode == "160000" {
         target.to_owned()
@@ -82,7 +72,6 @@ fn unmerged(r: &TestRepo) -> Vec<String> {
     listed(r).into_iter().map(|c| c.path).collect()
 }
 
-/// The blob the index holds for `path` at stage 0, by its text.
 fn staged(r: &TestRepo, path: &str) -> String {
     r.git(&["show", &format!(":0:{path}")])
 }
@@ -95,7 +84,6 @@ fn staged_mode(r: &TestRepo, path: &str) -> String {
         .to_owned()
 }
 
-/// A merge of `feature` into `main` that stops with every kind of conflict.
 fn merge_of_every_kind() -> TestRepo {
     let mut r = TestRepo::new();
     r.write("text.txt", b"one\ntwo\nthree\n");
@@ -278,12 +266,11 @@ fn an_answer_the_kind_doesn_t_have_is_refused() {
     assert!(unmerged(&r).contains(&"sub".to_owned()));
 }
 
-/// Sides with names, mine being stage `mine`.
-fn named(ours: &str, theirs: &str, mine: u8) -> Sides {
+fn named(ours: &str, theirs: &str, mine_stage: u8) -> Sides {
     Sides {
         ours: Some(ours.to_owned()),
         theirs: Some(theirs.to_owned()),
-        mine,
+        mine_stage,
     }
 }
 
@@ -316,7 +303,6 @@ fn a_merge_of_a_deletion_names_the_branch_merged() {
     assert_eq!(sides(&r), named("main", "topic", 2));
 }
 
-/// A file both sides of a history change, for a stop in each operation.
 fn diverged() -> (TestRepo, String) {
     let mut r = TestRepo::new();
     r.write("list.txt", b"one\ntwo\nthree\n");

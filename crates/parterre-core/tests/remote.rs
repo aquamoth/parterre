@@ -1,11 +1,10 @@
-//! Fetching, pulling and pushing against a local bare remote (#181), with a second clone that
-//! pushes behind parterre's back. Every path that can lose work is covered: the force push and
-//! its lease, a pull that stops on conflicts, and a push the remote rejects.
 mod common;
 
-use common::TestRepo;
+use common::{TestRepo, git_command, git_in};
 use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck, Warning};
+use parterre_core::branches::{
+    Action, Branches, Catalog, Outcome, Report, Stuck, Warning, command_text,
+};
 use parterre_core::remote::{
     self, Diverged, Live, Pull, Push, PushState, Reconcile, RemoteBranchTip, SetUpstream,
 };
@@ -13,33 +12,17 @@ use parterre_util::CancelTree;
 use tempfile::TempDir;
 
 /// The bare remote `origin`, the repository parterre has open (`work`), and another clone
-/// (`other`), both on `main` tracking `origin/main`, at one shared commit.
+/// (`other`) that pushes behind its back, both on `main` tracking `origin/main`, at one shared
+/// commit.
 struct Setup {
     origin: TempDir,
     work: TestRepo,
     other: TestRepo,
 }
 
-fn bare(dir: &TempDir, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir.path())
-        .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
-
 fn setup() -> Setup {
     let origin = tempfile::tempdir().unwrap();
-    bare(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    git_in(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
     let url = origin.path().to_str().unwrap().to_owned();
     let mut work = TestRepo::new();
     work.write("base", b"base\n");
@@ -66,9 +49,7 @@ fn rev(r: &TestRepo, rev: &str) -> Oid {
 }
 
 fn on_origin(s: &Setup, branch: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(s.origin.path())
+    let out = git_command(s.origin.path())
         .args([
             "rev-parse",
             "--verify",
@@ -108,11 +89,7 @@ fn warning(out: Outcome) -> Warning {
 }
 
 fn commands(report: &Report) -> Vec<String> {
-    report
-        .steps
-        .iter()
-        .map(|s| parterre_core::branches::command_text(&s.args))
-        .collect()
+    report.steps.iter().map(|s| command_text(&s.args)).collect()
 }
 
 fn pull(r: &TestRepo, how: Option<Reconcile>) -> Action {
@@ -164,6 +141,28 @@ fn push_from_other(s: &mut Setup, file: &str, text: &str) -> String {
     let c = s.other.commit_all(&format!("other {file}"));
     s.other.git(&["push", "-q", "origin", "HEAD"]);
     c
+}
+
+/// `other` checks out `origin/feature` as its own `feature`.
+fn other_on_feature(s: &Setup) {
+    s.other.git(&["fetch", "-q", "origin"]);
+    s.other.git(&[
+        "checkout",
+        "-q",
+        "-b",
+        "feature",
+        "--track",
+        "origin/feature",
+    ]);
+}
+
+/// `other` adds a commit to `feature` and pushes it; returns the commit.
+fn other_adds_to_feature(s: &mut Setup) -> String {
+    other_on_feature(s);
+    s.other.write("three", b"three\n");
+    let three = s.other.commit_all("three");
+    s.other.git(&["push", "-q", "origin", "feature"]);
+    three
 }
 
 #[test]
@@ -268,7 +267,7 @@ fn pulling_a_diverged_branch_asks_how_when_git_isnt_told() {
     assert_eq!((diverged.ahead, diverged.behind), (1, 1));
     assert_eq!(diverged.upstream, "origin/main");
     assert_eq!(
-        parterre_core::branches::command_text(&diverged.command(Reconcile::Rebase)),
+        command_text(&diverged.command(Reconcile::Rebase)),
         "git pull --progress --rebase"
     );
     // Fetched, and nothing else.
@@ -398,11 +397,14 @@ fn pulling_a_moved_or_stuck_branch_is_refused() {
     s.work.checkout("main");
     s.work.write("base", b"main\n");
     s.work.commit_all("main");
-    let _ = std::process::Command::new("git")
-        .current_dir(s.work.path())
+    let merge = git_command(s.work.path())
         .args(["merge", "side"])
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output();
+        .output()
+        .unwrap();
+    assert!(
+        !merge.status.success(),
+        "the merge should stop on its conflict"
+    );
     let (error, report) = failed(execute(&s.work, pull(&s.work, None), None));
     assert!(error.contains("in progress"), "{error}");
     assert!(report.steps.is_empty());
@@ -554,7 +556,7 @@ fn a_force_push_that_only_replaces_rebased_commits_is_a_confirmation() {
     assert_eq!(
         w.commands
             .iter()
-            .map(|c| parterre_core::branches::command_text(c))
+            .map(|c| command_text(c))
             .collect::<Vec<_>>(),
         [
             "git push --progress --force-with-lease=refs/heads/feature --force-if-includes origin feature"
@@ -571,19 +573,8 @@ fn a_force_push_that_only_replaces_rebased_commits_is_a_confirmation() {
 #[test]
 fn a_force_push_that_loses_someone_elses_commit_warns_with_it() {
     let mut s = rebased_feature();
-    // `other` adds to feature, and `work` fetches it but never takes it in.
-    s.other.git(&["fetch", "-q", "origin"]);
-    s.other.git(&[
-        "checkout",
-        "-q",
-        "-b",
-        "feature",
-        "--track",
-        "origin/feature",
-    ]);
-    s.other.write("three", b"three\n");
-    let three = s.other.commit_all("three");
-    s.other.git(&["push", "-q", "origin", "feature"]);
+    let three = other_adds_to_feature(&mut s);
+    // `work` fetches it but never takes it in.
     s.work.git(&["fetch", "-q", "origin"]);
     let w = warning(execute(&s.work, push(&s.work, "feature"), None));
     assert!(!w.is_confirmation());
@@ -598,18 +589,7 @@ fn an_approved_force_push_whose_remote_moved_unseen_is_stopped_by_the_lease() {
     let mut s = rebased_feature();
     let w = warning(execute(&s.work, push(&s.work, "feature"), None));
     // After the answer, `other` pushes to feature; `work` hasn't fetched it.
-    s.other.git(&["fetch", "-q", "origin"]);
-    s.other.git(&[
-        "checkout",
-        "-q",
-        "-b",
-        "feature",
-        "--track",
-        "origin/feature",
-    ]);
-    s.other.write("three", b"three\n");
-    let three = s.other.commit_all("three");
-    s.other.git(&["push", "-q", "origin", "feature"]);
+    let three = other_adds_to_feature(&mut s);
     let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
     assert_eq!(error, "origin/feature has commits you don't have.");
     assert_eq!(report.steps.len(), 2, "the push, then a fetch");
@@ -620,18 +600,7 @@ fn an_approved_force_push_whose_remote_moved_unseen_is_stopped_by_the_lease() {
 fn an_approval_from_before_a_fetch_asks_again_with_whats_lost_now() {
     let mut s = rebased_feature();
     let w = warning(execute(&s.work, push(&s.work, "feature"), None));
-    s.other.git(&["fetch", "-q", "origin"]);
-    s.other.git(&[
-        "checkout",
-        "-q",
-        "-b",
-        "feature",
-        "--track",
-        "origin/feature",
-    ]);
-    s.other.write("three", b"three\n");
-    let three = s.other.commit_all("three");
-    s.other.git(&["push", "-q", "origin", "feature"]);
+    let three = other_adds_to_feature(&mut s);
     s.work.git(&["fetch", "-q", "origin"]);
     let again = warning(execute(&s.work, w.action.clone(), Some(&w)));
     assert_eq!(again.commits, vec![oid(&three)]);
@@ -871,18 +840,7 @@ fn forcing_past_a_commit_the_branch_dropped_loses_it_once_approved() {
 #[test]
 fn git_wont_force_past_commits_the_branch_never_had_and_says_why() {
     let mut s = rebased_feature();
-    s.other.git(&["fetch", "-q", "origin"]);
-    s.other.git(&[
-        "checkout",
-        "-q",
-        "-b",
-        "feature",
-        "--track",
-        "origin/feature",
-    ]);
-    s.other.write("three", b"three\n");
-    let three = s.other.commit_all("three");
-    s.other.git(&["push", "-q", "origin", "feature"]);
+    let three = other_adds_to_feature(&mut s);
     s.work.git(&["fetch", "-q", "origin"]);
     let w = warning(execute(&s.work, push(&s.work, "feature"), None));
     let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
@@ -964,7 +922,7 @@ fn deleting_a_remote_branch_always_asks_first_then_deletes_it_for_everyone() {
     assert_eq!(
         w.commands
             .iter()
-            .map(|c| parterre_core::branches::command_text(c))
+            .map(|c| command_text(c))
             .collect::<Vec<_>>(),
         [format!(
             "git push --progress --force-with-lease=refs/heads/feature:{tip} origin --delete feature"
@@ -980,7 +938,7 @@ fn deleting_a_remote_branch_always_asks_first_then_deletes_it_for_everyone() {
 
 #[test]
 fn deleting_a_remote_branch_lists_the_commits_only_it_has() {
-    let mut s = pushed_feature();
+    let s = pushed_feature();
     s.work.git(&["branch", "-D", "feature"]);
     let only = rev(&s.work, "origin/feature");
     let w = warning(execute(&s.work, delete_remote(&s.work, &["feature"]), None));
@@ -990,7 +948,6 @@ fn deleting_a_remote_branch_lists_the_commits_only_it_has() {
     assert_eq!(w.deletions[0].name, "origin/feature");
     done(execute(&s.work, w.action.clone(), Some(&w)));
     assert_eq!(on_origin(&s, "feature"), None);
-    let _ = &mut s;
 }
 
 #[test]
@@ -1028,15 +985,7 @@ fn a_remote_branch_that_moved_since_it_was_offered_is_not_deleted() {
 fn a_remote_branch_that_moved_on_the_remote_unseen_is_kept_and_a_fetch_suggested() {
     let mut s = pushed_feature();
     let w = warning(execute(&s.work, delete_remote(&s.work, &["feature"]), None));
-    s.other.git(&["fetch", "-q", "origin"]);
-    s.other.git(&[
-        "checkout",
-        "-q",
-        "-b",
-        "feature",
-        "--track",
-        "origin/feature",
-    ]);
+    other_on_feature(&s);
     let theirs = s.other.commit("theirs");
     s.other.git(&["push", "-q", "origin", "feature"]);
     let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
@@ -1097,15 +1046,7 @@ fn a_deletion_that_stops_partway_says_which_were_already_gone() {
         delete_remote(&s.work, &["copy", "feature"]),
         None,
     ));
-    s.other.git(&["fetch", "-q", "origin"]);
-    s.other.git(&[
-        "checkout",
-        "-q",
-        "-b",
-        "feature",
-        "--track",
-        "origin/feature",
-    ]);
+    other_on_feature(&s);
     s.other.commit("theirs");
     s.other.git(&["push", "-q", "origin", "feature", ":copy"]);
     let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
@@ -1153,15 +1094,7 @@ fn a_deletion_that_stops_partway_says_which_went() {
         delete_remote(&s.work, &["copy", "feature"]),
         None,
     ));
-    s.other.git(&["fetch", "-q", "origin"]);
-    s.other.git(&[
-        "checkout",
-        "-q",
-        "-b",
-        "feature",
-        "--track",
-        "origin/feature",
-    ]);
+    other_on_feature(&s);
     s.other.commit("theirs");
     s.other.git(&["push", "-q", "origin", "feature"]);
     let (error, _) = failed(execute(&s.work, w.action.clone(), Some(&w)));

@@ -1,50 +1,33 @@
-//! The user's merge tool: the one git's config names, as `git mergetool` picks it, or one
-//! installed that the user picks when none is usable. Parterre only starts it, through
-//! `git mergetool`, and leaves it be: the tool does the resolving, and git stages the file.
-
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use crate::git::{Config, Git, GitError};
 
-/// Tools that run in a terminal, which parterre has none of.
-fn is_terminal(name: &str) -> bool {
+fn runs_in_terminal(name: &str) -> bool {
     name == "emerge" || name.starts_with("vimdiff") || name.starts_with("nvimdiff")
 }
 
-/// What git's config says, for opening a file in a GUI merge tool.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Configured {
-    /// `merge.guitool`, or else `merge.tool`, names an installed GUI tool.
     Usable(String),
-    /// A tool is named but can't be used here, and why, in a line.
-    Unusable {
-        why: String,
-        /// The configured tool was a terminal one: a choice goes to `merge.guitool`.
-        terminal: bool,
-    },
-    /// Neither is set.
+    Unusable { why: String, terminal: bool },
     None,
 }
 
-/// A tool the user can pick, and where parterre found it when git wouldn't.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tool {
     pub name: String,
-    /// Found by Windows' App Paths, not by git: passed as `mergetool.<name>.path`.
+    /// Where Windows' App Paths found it, when git wouldn't.
     pub path: Option<PathBuf>,
 }
 
-/// The config and the installed GUI tools.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Detected {
     pub configured: Configured,
-    /// For the picker: installed, not terminal ones; a configured one App Paths found first.
     pub installed: Vec<Tool>,
 }
 
 impl Detected {
-    /// The tool to open files in without asking.
     pub fn usable(&self) -> Option<Tool> {
         match &self.configured {
             Configured::Usable(name) => Some(Tool {
@@ -56,7 +39,7 @@ impl Detected {
     }
 }
 
-/// Reads git's config in one call and looks for the tools' programs as git would, where
+/// Reads git's config in one call and looks for the tools' programs as git would:
 /// `git mergetool --tool-help` starts git over a hundred times, which takes a minute on
 /// Windows (#355).
 pub fn detect(git: &Git) -> Result<Detected, GitError> {
@@ -70,7 +53,6 @@ pub fn detect(git: &Git) -> Result<Detected, GitError> {
     Ok(decide(&git.config()?, &lookup, app_paths))
 }
 
-/// What `config` says and `lookup` finds; `app_paths` finds a tool by Windows' App Paths.
 fn decide(
     config: &Config,
     lookup: &Lookup<impl Fn(&Path) -> bool>,
@@ -100,13 +82,13 @@ fn decide(
             path: Some(path),
         })
     };
-    let get = |key: &str| config.get(key).filter(|v| !v.is_empty()).map(str::to_owned);
+    let setting = |key: &str| config.get(key).filter(|v| !v.is_empty()).map(str::to_owned);
     // git's `--gui` order: `merge.guitool`, then `merge.tool`.
-    let named = get("merge.guitool").or_else(|| get("merge.tool"));
+    let named = setting("merge.guitool").or_else(|| setting("merge.tool"));
     let mut installed: Vec<Tool> = Vec::new();
     let configured = match &named {
         None => Configured::None,
-        Some(name) if is_terminal(name) => Configured::Unusable {
+        Some(name) if runs_in_terminal(name) => Configured::Unusable {
             why: format!("{name} runs in a terminal"),
             terminal: true,
         },
@@ -124,7 +106,7 @@ fn decide(
     // In `--tool-help`'s order: git's own, then the user's, by name.
     let names = BUILT_IN.iter().flat_map(|t| t.names.iter().copied());
     for name in names.chain(user.iter().map(String::as_str)) {
-        if !is_terminal(name) && available(name) && !installed.iter().any(|t| t.name == name) {
+        if !runs_in_terminal(name) && available(name) && !installed.iter().any(|t| t.name == name) {
             installed.push(Tool {
                 name: name.to_owned(),
                 path: None,
@@ -144,9 +126,8 @@ fn decide(
     }
 }
 
-/// A GUI tool git has a script for in `mergetools/`: the names it goes by, and the programs
-/// the script runs, the first one found on `PATH`. Terminal tools, and `kompare`, which
-/// can't merge, aren't here.
+/// A GUI tool git has a `mergetools/` script for, which runs the first of `programs` found.
+/// `kompare` is left out: it can't merge.
 struct BuiltIn {
     names: &'static [&'static str],
     programs: &'static [&'static str],
@@ -154,7 +135,6 @@ struct BuiltIn {
     program_files: Option<&'static str>,
 }
 
-/// A tool that git finds on `PATH` only.
 const fn built_in(names: &'static [&'static str], programs: &'static [&'static str]) -> BuiltIn {
     BuiltIn {
         names,
@@ -163,7 +143,7 @@ const fn built_in(names: &'static [&'static str], programs: &'static [&'static s
     }
 }
 
-/// git's GUI tools, by name, as of git 2.53.
+/// As of git 2.53.
 const BUILT_IN: &[BuiltIn] = &[
     built_in(&["araxis"], &["compare"]),
     built_in(&["bc", "bc3", "bc4"], &["bcomp", "bcompare"]),
@@ -199,8 +179,7 @@ const BUILT_IN: &[BuiltIn] = &[
     built_in(&["xxdiff"], &["xxdiff"]),
 ];
 
-/// Where git's `sh` finds programs: in the folders of `PATH`, and for some tools on Windows,
-/// in the Program Files folders.
+/// Where git's `sh` finds programs.
 struct Lookup<F> {
     path: Vec<PathBuf>,
     program_files: Vec<PathBuf>,
@@ -208,7 +187,6 @@ struct Lookup<F> {
 }
 
 impl<F: Fn(&Path) -> bool> Lookup<F> {
-    /// `program` as `sh` finds it: a path as it is, a name in a folder of `PATH`.
     fn finds(&self, program: &str) -> bool {
         let program = Path::new(program);
         if program.components().count() > 1 {
@@ -219,7 +197,6 @@ impl<F: Fn(&Path) -> bool> Lookup<F> {
             .any(|dir| self.is_program(&dir.join(program)))
     }
 
-    /// Any of `tool`'s programs on `PATH`, or in its Program Files folder.
     fn finds_built_in(&self, tool: &BuiltIn) -> bool {
         tool.programs.iter().any(|p| self.finds(p))
             || tool.program_files.is_some_and(|folder| {
@@ -231,21 +208,19 @@ impl<F: Fn(&Path) -> bool> Lookup<F> {
             })
     }
 
-    /// `path`, or on Windows `path.exe`, which `sh` runs for it there.
+    /// On Windows, `sh` runs `path.exe` for `path`.
     fn is_program(&self, path: &Path) -> bool {
         (self.is_file)(path) || (cfg!(windows) && (self.is_file)(&with_exe(path)))
     }
 }
 
-/// `path` with `.exe` added, as Windows names a program.
 fn with_exe(path: &Path) -> PathBuf {
     let mut path = path.as_os_str().to_owned();
     path.push(".exe");
     PathBuf::from(path)
 }
 
-/// The Program Files folders, as git's `mergetool_find_win32_cmd` takes them from the
-/// environment; none outside Windows.
+/// As git's `mergetool_find_win32_cmd` takes them from the environment; none outside Windows.
 fn program_files() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
         .iter()
@@ -261,7 +236,6 @@ fn program_files() -> Vec<PathBuf> {
 /// git's built-ins that a per-user install hides from git's own lookup, by App Paths entry.
 const APP_PATHS: &[(&str, &str)] = &[("winmerge", "WinMergeU.exe")];
 
-/// Where Windows' App Paths registry says `name`'s program is.
 fn app_paths(name: &str) -> Option<PathBuf> {
     let exe = APP_PATHS.iter().find(|(n, _)| *n == name)?.1;
     app_paths_entry(exe)
@@ -291,9 +265,7 @@ fn app_paths_entry(_exe: &str) -> Option<PathBuf> {
     None
 }
 
-/// The `git config --global` commands that remember `tool` for good: `merge.guitool` when a
-/// terminal tool is configured (the user's terminal workflow stays), else `merge.tool`; and
-/// the path App Paths found it at.
+/// Beside a configured terminal tool, `merge.guitool`, so the user's terminal workflow stays.
 pub fn remember_commands(tool: &Tool, terminal: bool) -> Vec<Vec<String>> {
     let key = if terminal {
         "merge.guitool"
@@ -317,7 +289,6 @@ pub fn remember_commands(tool: &Tool, terminal: bool) -> Vec<Vec<String>> {
     commands
 }
 
-/// Remembers `tool` in the user's global git config.
 pub fn remember(git: &Git, tool: &Tool, terminal: bool) -> Result<(), GitError> {
     for args in remember_commands(tool, terminal) {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -326,8 +297,7 @@ pub fn remember(git: &Git, tool: &Tool, terminal: bool) -> Result<(), GitError> 
     Ok(())
 }
 
-/// The arguments that open `path` in `tool`, without the leading `git`.
-pub fn open_args(tool: &Tool, path: &str) -> Vec<String> {
+fn open_args(tool: &Tool, path: &str) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(p) = &tool.path {
         args.push("-c".to_owned());
@@ -347,9 +317,8 @@ pub fn open_args(tool: &Tool, path: &str) -> Vec<String> {
     args
 }
 
-/// Starts `git mergetool` on `path` in the worktree at `root`, and leaves it: no output is
-/// read (nothing to break when parterre closes first), nothing waits for it. git stages the
-/// file when the tool is done; the index shows it.
+/// Starts `git mergetool` and leaves it: no output is read, so nothing breaks when parterre
+/// closes first. Git stages the file when the tool is done.
 pub fn open(root: &Path, tool: &Tool, path: &str) -> Result<(), GitError> {
     let mut child = Git::new(root)
         .operation_command(&open_args(tool, path))
@@ -372,9 +341,9 @@ mod tests {
 
     use crate::git::parse_config;
 
-    /// `decide` with `settings` (`key=value` each) and only `files` there, `bin` on `PATH`
-    /// and `pf` the Program Files folder; App Paths names `C:/W/WinMergeU.exe`
-    /// for WinMerge, if it is among `files`.
+    /// `settings` are `key=value`, and `files` the only files there are, with `bin` on `PATH`
+    /// and `pf` the Program Files folder. App Paths has `C:/W/WinMergeU.exe`, if it's among
+    /// `files`.
     fn decide_with(settings: &[&str], files: &[&str]) -> Detected {
         let config: Vec<u8> = settings
             .iter()
@@ -406,7 +375,6 @@ mod tests {
         );
         assert_eq!(d.configured, Configured::Usable("meld".into()));
         assert_eq!(names(&d), ["meld", "vscode"]);
-        // Every name a tool goes by, as `--tool-help` lists them.
         let bcompare = Path::new("bin").join("bcompare");
         let d = decide_with(&["merge.tool=bc4"], &[bcompare.to_str().unwrap()]);
         assert_eq!(d.configured, Configured::Usable("bc4".into()));
@@ -418,7 +386,7 @@ mod tests {
         let kdiff3 = Path::new("pf").join("Kdiff3").join("kdiff3");
         let d = decide_with(&["merge.tool=kdiff3"], &[kdiff3.to_str().unwrap()]);
         assert_eq!(d.configured, Configured::Usable("kdiff3".into()));
-        // meld isn't looked for there.
+        // git doesn't look for meld there.
         let meld = Path::new("pf").join("Meld").join("meld");
         assert!(
             decide_with(&[], &[meld.to_str().unwrap()])
@@ -501,7 +469,6 @@ mod tests {
                 path: Some(PathBuf::from("C:/W/WinMergeU.exe"))
             }]
         );
-        // Found by git, it needs no path.
         let found = Path::new("pf").join("WinMerge").join("WinMergeU.exe");
         let d = decide_with(&[], &[found.to_str().unwrap()]);
         assert_eq!(d.configured, Configured::None);
@@ -525,9 +492,9 @@ mod tests {
     #[test]
     fn terminal_tools_are_known_by_name() {
         for t in ["vimdiff", "vimdiff3", "nvimdiff1", "emerge"] {
-            assert!(is_terminal(t), "{t}");
+            assert!(runs_in_terminal(t), "{t}");
         }
-        assert!(!is_terminal("meld"));
+        assert!(!runs_in_terminal("meld"));
     }
 
     #[test]

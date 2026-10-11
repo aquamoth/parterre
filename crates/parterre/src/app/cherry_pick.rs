@@ -1,12 +1,10 @@
-//! Cherry-picking onto the open worktree's branch: the confirmation, which lists the commits as
-//! the log window does, newest first (they go on from the bottom up), greying those left out,
-//! with whether to pick or drop each: for a selection of them at once, or for one by clicking
-//! its icon. `-x` is remembered; *Stash changes* is offered only with uncommitted changes.
+//! The confirmation lists the commits newest first, as the log window does: they go on from
+//! the bottom up.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use eframe::egui::{self, Color32, Id, Ui, ViewportId, vec2};
+use eframe::egui::{self, Id, Key, Ui, ViewportId};
 use parterre_core::branches::command_text;
 use parterre_core::cherry_pick::{self, Preview};
 use parterre_core::glyphs;
@@ -14,51 +12,28 @@ use parterre_core::log_graph::LogGraph;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::{CommitIx, Oid, Repo};
 
-use super::commit_table::{CommitList, CommitTable, Row, Select};
-use super::log_window;
-use super::merge::list_height;
-use super::rebase::Asked;
+use super::branches::{Asked, answer_of, commit_line};
+use super::commit_table::Row;
+use super::rebase::{
+    Choice, ListedCommits, choice_buttons, choice_menu, icon_of, listing_dialog_width, shared,
+    stash_checkbox,
+};
 use crate::dialogs;
 use crate::theme::Palette;
-
-/// The commits listed at least, however small the window: the table scrolls.
-const MIN_ROWS: usize = 3;
 
 /// Where the last choice of `-x` is remembered.
 fn record_origin_id() -> Id {
     Id::new("cherry-pick-record-origin")
 }
 
-/// The icon of a pick or a drop, its colour, and what it's called.
-fn pick_icon(ui: &Ui, picked: bool) -> (glyphs::Glyph, Color32, &'static str) {
-    if picked {
-        (glyphs::PICK, ui.visuals().text_color(), "pick")
-    } else {
-        (glyphs::DROP, ui.visuals().error_fg_color, "drop")
-    }
-}
-
+#[derive(Debug)]
 pub struct CherryPickDialog {
-    pub preview: Preview,
-    repo: Arc<Repo>,
+    preview: Preview,
     record_origin: bool,
     stash: bool,
-    /// The window it was asked from.
     pub opener: ViewportId,
     fresh: bool,
-    /// The listed commits, as the log lists them.
-    commits: Vec<CommitIx>,
-    graph: LogGraph,
-    refs: Vec<Vec<usize>>,
-    list: CommitList,
-}
-
-impl std::fmt::Debug for CherryPickDialog {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CherryPickDialog")
-            .field("preview", &self.preview)
-            .finish_non_exhaustive()
-    }
+    listed: ListedCommits,
 }
 
 impl CherryPickDialog {
@@ -86,17 +61,14 @@ impl CherryPickDialog {
                 (listed, outside)
             })
             .unzip();
+        let graph = LogGraph::from_parents(parents, outside);
         CherryPickDialog {
             record_origin: ctx.data_mut(|d| *d.get_persisted_mut_or(record_origin_id(), false)),
             stash: false,
-            refs: repo.refs_by_commit(),
-            graph: LogGraph::from_parents(parents, outside),
-            commits,
+            listed: ListedCommits::new(repo, Id::new("cherry-pick-commits"), commits, graph),
             preview,
-            repo,
             opener,
             fresh: true,
-            list: CommitList::default(),
         }
     }
 
@@ -104,7 +76,6 @@ impl CherryPickDialog {
         self.preview.cherry_pick(self.record_origin, self.stash)
     }
 
-    /// `busy` while another Git operation runs.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -112,34 +83,24 @@ impl CherryPickDialog {
         palette: &Palette,
         options: &GraphOptions,
     ) -> Asked {
-        let mut asked = Asked::default();
         let pick = self.cherry_pick();
         let title = format!("Cherry-pick {} onto {}", pick.name, pick.branch);
-        let width = (ctx.content_rect().width() - 80.0).clamp(420.0, 780.0);
+        let mut show_in_log = None;
         let shown = dialogs::Dialog::new("cherry-pick", &title)
             .screen(crate::usage::Screen::CherryPick)
-            .width(width)
+            .width(listing_dialog_width(ctx))
             .opener(self.opener)
             .raise(self.fresh)
             .resizable()
             .show(ctx, |ui| {
                 // Only the commits scroll: everything else stays in view.
-                if let Some(ix) = self.repo.lookup(&self.preview.head)
-                    && dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len)
-                {
-                    asked.log = Some(self.preview.head);
+                if commit_line(ui, self.listed.repo(), self.preview.head) {
+                    show_in_log = Some(self.preview.head);
                 }
-                let n = self.commits.len();
-                let min = list_height(n.min(MIN_ROWS));
-                let natural = list_height(n);
-                let picked = dialogs::growing(ui, min, |ui, height| {
-                    let height = height.unwrap_or(natural);
-                    (self.commits_table(ui, palette, options, height), natural)
-                });
-                if let Some(oid) = picked {
-                    asked.log = Some(oid);
+                if let Some(oid) = self.commits_table(ui, palette, options) {
+                    show_in_log = Some(oid);
                 }
-                self.pick_buttons(ui);
+                self.choose(ui);
                 if ui
                     .checkbox(
                         &mut self.record_origin,
@@ -156,10 +117,7 @@ impl CherryPickDialog {
                     ui.data_mut(|d| d.insert_persisted(id, value));
                 }
                 if self.preview.dirty {
-                    ui.checkbox(&mut self.stash, "Stash changes").on_hover_text(
-                        "Set your uncommitted changes aside first, and put them back \
-                         afterwards (git stash).",
-                    );
+                    stash_checkbox(ui, &mut self.stash, "git stash");
                 }
                 let blocked = self.preview.blocked();
                 if let Some(why) = blocked {
@@ -170,24 +128,19 @@ impl CherryPickDialog {
                     .map(|c| command_text(c))
                     .collect();
                 dialogs::command_box(ui, &commands);
-                let enabled = blocked.is_none() && !busy;
-                dialogs::actions(ui, "Cherry-pick", enabled, false, false)
+                dialogs::actions(ui, "Cherry-pick", blocked.is_none() && !busy, false, false)
             });
         self.fresh = false;
-        asked.answer = Some(if shown.should_close() {
-            dialogs::Answer::Cancel
-        } else {
-            shown.inner
-        });
-        asked
+        Asked {
+            answer: answer_of(shown),
+            show_in_log,
+        }
     }
 
     /// The selected commits that can be picked.
     fn selected(&self) -> Vec<Oid> {
-        self.list
-            .many
-            .iter()
-            .map(|&i| self.repo.commit(self.commits[i]).oid)
+        self.listed
+            .selected()
             .filter(|&oid| self.preview.picked(oid).is_some())
             .collect()
     }
@@ -198,150 +151,86 @@ impl CherryPickDialog {
         }
     }
 
-    /// Whether the selected commits are all picked, or all dropped.
-    fn selected_picked(&self) -> Option<bool> {
-        let mut picked = self
-            .selected()
-            .into_iter()
-            .filter_map(|o| self.preview.picked(o));
-        let first = picked.next()?;
-        picked.all(|p| p == first).then_some(first)
+    /// Pick and Drop, as git's todo list abbreviates them.
+    fn choices(ui: &Ui) -> [Choice<bool>; 2] {
+        [
+            Choice {
+                value: true,
+                glyph: glyphs::PICK,
+                color: ui.visuals().text_color(),
+                word: "pick",
+                key: Key::P,
+                tip: "Cherry-pick it (p)",
+                unavailable: None,
+            },
+            Choice {
+                value: false,
+                glyph: glyphs::DROP,
+                color: ui.visuals().error_fg_color,
+                word: "drop",
+                key: Key::D,
+                tip: "Leave it out (d)",
+                unavailable: None,
+            },
+        ]
     }
 
-    /// Pick and Drop for the selected commits, also by their keys (git's abbreviations in a
-    /// todo list), and Ctrl+A to select them all.
-    fn pick_buttons(&mut self, ui: &mut Ui) {
-        let mut chosen = None;
-        ui.input_mut(|i| {
-            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::A) {
-                self.list.select_all(self.commits.len());
-            }
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::P) {
-                chosen = Some(true);
-            }
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::D) {
-                chosen = Some(false);
-            }
-        });
+    fn choose(&mut self, ui: &mut Ui) {
+        self.listed.select_all_shortcut(ui);
         let any = !self.selected().is_empty();
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(any, |ui| {
-                for (picked, label, tip) in [
-                    (true, "Pick", "Cherry-pick it (p)"),
-                    (false, "Drop", "Leave it out (d)"),
-                ] {
-                    let (glyph, color, _) = pick_icon(ui, picked);
-                    let button = crate::widgets::icon_text_button(ui, glyph, color, label)
-                        .on_hover_text(tip)
-                        .on_disabled_hover_text(format!(
-                            "Select commits first: {} or {}",
-                            crate::keys::with_command("click"),
-                            crate::keys::with_shift("click")
-                        ));
-                    if button.clicked() {
-                        chosen = Some(picked);
-                    }
-                }
-            });
-        });
-        if let Some(picked) = chosen {
+        if let Some(picked) = choice_buttons(ui, any, &Self::choices(ui)) {
             self.set_picked(picked);
         }
     }
 
-    /// The listed commits, as the log window lists them, `height` tall, with whether each is
-    /// picked; those left out are greyed, with the reason on hover, as are those dropped.
-    /// Returns the commit double-clicked.
+    /// The listed commits, with whether each is picked; those left out are greyed, as are those
+    /// dropped. Returns the commit double-clicked.
     fn commits_table(
         &mut self,
         ui: &mut Ui,
         palette: &Palette,
         options: &GraphOptions,
-        height: f32,
     ) -> Option<Oid> {
-        let c = log_window::colors(ui);
-        let table = CommitTable {
-            id: Id::new("cherry-pick-commits"),
-            rows: self.commits.len(),
-            graph: &self.graph,
-            abbrev_len: self.repo.abbrev_len,
-            palette,
-            select: Select::Many,
-            icons: true,
-        };
-        let (repo, commits, preview) = (&*self.repo, &self.commits, &self.preview);
-        let refs = &self.refs;
-        let shared = self.selected_picked();
-        let icons = [pick_icon(ui, false), pick_icon(ui, true)];
+        let choices = Self::choices(ui);
+        let shared_pick = shared(
+            self.selected()
+                .into_iter()
+                .filter_map(|o| self.preview.picked(o)),
+        );
+        let preview = &self.preview;
         let mut chosen = None;
-        let mut tip = |ui: &mut Ui, i: usize| {
-            if let Some(skipped) = preview.skipped(repo.commit(commits[i]).oid) {
-                ui.label(skipped.reason());
-            }
-        };
-        let list = &mut self.list;
-        let clicks = ui
-            .allocate_ui(vec2(ui.available_width(), height), |ui| {
-                ui.set_min_height(height);
-                ui.set_max_height(height);
-                table.show(
-                    ui,
-                    &c,
-                    list,
-                    |i| {
-                        let commit = repo.commit(commits[i]);
-                        let picked = preview.picked(commit.oid);
-                        Row {
-                            hash: commit.oid.short(repo.abbrev_len),
-                            refs: log_window::badges(
-                                repo,
-                                &refs[commits[i].ix()],
-                                Some(commits[i]),
-                                options,
-                            ),
-                            subject: &commit.subject,
-                            author: &commit.author_name,
-                            author_email: &commit.author_email,
-                            date: &commit.author_date,
-                            icon: picked.map(|p| icons[p as usize]),
-                            greyed: picked != Some(true),
-                            ..Row::default()
-                        }
-                    },
-                    |ui, i, _| {
-                        let pickable = preview.picked(repo.commit(commits[i]).oid).is_some();
-                        ui.add_enabled_ui(pickable, |ui| {
-                            for (picked, label, key) in [(true, "Pick", "P"), (false, "Drop", "D")]
-                            {
-                                let mark = crate::menu::Mark::Radio(shared == Some(picked));
-                                if crate::menu::item(ui, label, key, mark).clicked() {
-                                    chosen = Some(picked);
-                                }
-                            }
-                        });
-                    },
-                    Some(&mut tip),
-                )
-            })
-            .inner;
+        let clicked = self.listed.show_choosing(
+            ui,
+            palette,
+            options,
+            |oid, row| {
+                let picked = preview.picked(oid);
+                Row {
+                    icon: picked.and_then(|p| icon_of(&choices, p)),
+                    greyed: picked != Some(true),
+                    ..row
+                }
+            },
+            |ui, oid| {
+                let pickable = preview.picked(oid).is_some();
+                if let Some(picked) = choice_menu(ui, pickable, shared_pick, &choices) {
+                    chosen = Some(picked);
+                }
+            },
+            |oid| preview.skipped(oid).map(|s| s.reason()),
+        );
         if let Some(picked) = chosen {
             self.set_picked(picked);
         }
-        if let Some(i) = clicks.icon {
-            let oid = self.repo.commit(self.commits[i]).oid;
-            if let Some(picked) = self.preview.picked(oid) {
-                self.preview.set_picked(oid, !picked);
-            }
+        if let Some(oid) = clicked.icon
+            && let Some(picked) = self.preview.picked(oid)
+        {
+            self.preview.set_picked(oid, !picked);
         }
-        clicks
-            .double_clicked
-            .map(|i| self.repo.commit(self.commits[i]).oid)
+        clicked.double_clicked
     }
 }
 
-/// The confirmation and the menus, driven frame by frame in a headless context against real,
-/// disposable repositories: clicked by the text on screen, as a person would.
 #[cfg(test)]
 mod tests {
     use std::path::Path;

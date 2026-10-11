@@ -1,11 +1,3 @@
-//! The compare window, TortoiseGit's "Changed Files" dialog: the files two commits differ in,
-//! in the log window's changed-files table, with each opening a diff window. One at a time,
-//! like the log window; comparing other commits replaces what it shows.
-//!
-//! Opened on two graph nodes (Compare revisions), on one node or log row against HEAD or the
-//! working tree, on the range of a range log, and against the commit marked for comparison. The mark is kept by the
-//! app ([`ParterreApp::marked`](super::ParterreApp)) so that it outlives the log it was made in.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,8 +12,8 @@ use parterre_core::log::commit_name;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::{Oid, Repo};
 
-use super::file_table::{DiffQueue, FileTable, Lister, Listing, RowPick, file_folder};
-use super::log_window::{Colors, badge, badges, colors};
+use super::file_table::{DiffQueue, FileTable, Lister, Listing, WorkingTreePick, file_folder};
+use super::log_window::{Colors, badge, badges, colors, window_input};
 use super::{Opener, ParterreApp};
 use crate::keys;
 use crate::settings::CompareWindowSettings;
@@ -29,71 +21,62 @@ use crate::text_size;
 use crate::theme::Palette;
 use crate::widgets;
 
-/// Height of a side's line in the header.
-const SIDE_ROW: f32 = 26.0;
+const SIDE_ROW_HEIGHT: f32 = 26.0;
 
 pub(super) fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("compare")
 }
 
-/// What the graph and the log window ask for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompareRequest {
-    /// Mark a commit for comparison, or clear the mark.
+    /// `None` clears the mark.
     Mark(Option<Oid>),
-    /// Compare two commits, in the order they were picked (see [`Comparison::of`]).
+    /// In the order they were picked.
     Compare(Oid, Oid),
-    /// Compare a commit with the working tree.
     WorkingTree(Oid),
 }
 
-/// Where the left side is read from (`None` for unrelated histories' common ancestor, or on
-/// failure), the files, and the working tree's conflicts when a side is the working tree.
-type Compared = (Option<Rev>, Listing, Option<WorkingTree>);
+#[derive(Debug)]
+struct Compared {
+    /// Where the left side is read from: `None` for unrelated histories' common ancestor, or on
+    /// failure.
+    base: Option<Rev>,
+    files: Listing,
+    working_tree: Option<WorkingTree>,
+}
 
-/// What a working-tree row asked the app for.
 #[derive(Clone, Debug)]
 pub enum FileRequest {
-    /// Open the file in the merge tool; `root` is the worktree's folder.
     MergeTool { root: PathBuf, path: String },
-    /// Finish the file in parterre.
     Resolve(Resolve),
-    /// Open the file's folder in a terminal or the file system.
     Open(Opener, PathBuf),
 }
 
-/// The compare window's state that outlives what it shows.
 #[derive(Debug, Default)]
 pub struct CompareWindow {
-    /// What the window shows; `None` while it is closed.
     view: Option<CompareView>,
     table: FileTable,
-    files: Lister<Comparison, Compared>,
-    /// The size the window opened with (see the log window's).
+    compared: Lister<Comparison, Compared>,
+    /// Fixed while the window is open: egui resizes a window whose viewport builder changes.
     size: Vec2,
-    /// The theme last given to the window's title bar.
     title_theme: Option<egui::SystemTheme>,
     diffs: DiffQueue<(Arc<Repo>, FileDiffSpec)>,
-    /// Blame windows asked for, for the app to take.
-    blames: Vec<(Arc<Repo>, BlameSpec)>,
-    /// What working-tree rows asked for, for the app to take.
+    blame_requests: Vec<(Arc<Repo>, BlameSpec)>,
     pub requests: Vec<FileRequest>,
 }
 
 #[derive(Debug)]
 struct CompareView {
     repo: Arc<Repo>,
-    /// [`Repo::refs_by_commit`] of `repo`.
-    refs: Vec<Vec<usize>>,
+    refs_by_commit: Vec<Vec<usize>>,
     comparison: Comparison,
-    /// [`Comparison::ancestor_matters`], found when the comparison or the snapshot changes.
     ancestor_matters: bool,
 }
 
 impl CompareView {
     fn new(repo: Arc<Repo>, comparison: Comparison) -> CompareView {
         CompareView {
-            refs: repo.refs_by_commit(),
+            refs_by_commit: repo.refs_by_commit(),
             ancestor_matters: comparison.ancestor_matters(&repo),
             repo,
             comparison,
@@ -101,7 +84,6 @@ impl CompareView {
     }
 }
 
-/// What the window needs from the app.
 struct Env<'a> {
     palette: Palette,
     graph: &'a GraphOptions,
@@ -109,11 +91,10 @@ struct Env<'a> {
 }
 
 impl CompareWindow {
-    /// Shows `comparison` on `repo`, in place of what the window showed before.
     fn open(&mut self, repo: Arc<Repo>, comparison: Comparison, size: Vec2) {
         if self.view.is_none() {
             self.size = size;
-            // The column widths picked last as long as the window is open.
+            // Column widths last as long as the window is open.
             self.table.widths = Default::default();
         }
         self.view = Some(CompareView::new(repo, comparison));
@@ -123,38 +104,34 @@ impl CompareWindow {
         self.view.is_some()
     }
 
-    /// Closes the window and forgets the lists made for the repository it showed.
     pub fn close(&mut self) {
         self.view = None;
-        self.files = Lister::default();
+        self.compared = Lister::default();
         self.table.clear_selection();
         self.diffs.cancel();
     }
 
-    /// After a reload: names the commits by the new snapshot's refs. The commits stay; the
-    /// working tree is listed again.
+    /// The commits stay; the working tree is listed again.
     pub fn reload(&mut self, repo: &Arc<Repo>) {
         if let Some(view) = &mut self.view {
             *view = CompareView::new(repo.clone(), view.comparison);
             if view.comparison.reads_working_tree() {
-                self.files = Lister::default();
+                self.compared = Lister::default();
             }
         }
     }
 
-    /// Lists the working tree again, if a side is the working tree: its conflicted files
-    /// changed, which moves no refs.
+    /// For a change to the conflicted files, which moves no refs.
     pub fn relist_working_tree(&mut self) {
         if self
             .view
             .as_ref()
             .is_some_and(|v| v.comparison.reads_working_tree())
         {
-            self.files = Lister::default();
+            self.compared = Lister::default();
         }
     }
 
-    /// `<repo> – Compare`
     fn title(&self) -> String {
         let name = self
             .view
@@ -164,7 +141,6 @@ impl CompareWindow {
         format!("{name} – Compare")
     }
 
-    /// Esc (⌘W on macOS) closes, while no text field has the keyboard.
     fn handle_keys(&mut self, ui: &Ui) {
         if !ui.ctx().egui_wants_keyboard_input()
             && ui.input_mut(|i| keys::close_window().consume(i))
@@ -176,15 +152,13 @@ impl CompareWindow {
     fn contents(&mut self, ui: &mut Ui, env: &mut Env) {
         let c = colors(ui);
         self.header(ui, &c, env);
-        self.files(ui, &c, env);
+        self.changed_files(ui, env);
         self.diffs.confirm_many(ui, Id::new("compare-many-diffs"));
     }
 
-    /// The two commits, one per line, and the button that swaps them; not the working tree,
-    /// which stays on the right as in `git diff <commit>`.
     fn header(&mut self, ui: &mut Ui, c: &Colors, env: &mut Env) {
         let Some(view) = &mut self.view else { return };
-        let height = 2.0 * SIDE_ROW + 12.0;
+        let height = 2.0 * SIDE_ROW_HEIGHT + 12.0;
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
         ui.painter().hline(
             rect.x_range(),
@@ -196,6 +170,7 @@ impl CompareWindow {
                 .max_rect(rect.shrink2(vec2(8.0, 0.0)))
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
+        // The working tree stays on the right, as in `git diff <commit>`.
         if !view.comparison.reads_working_tree() {
             let swap = widgets::tip_explained(
                 widgets::icon_button(&mut tools, glyphs::SWAP, false),
@@ -210,37 +185,43 @@ impl CompareWindow {
         let right = tools.min_rect().left() - 12.0;
         let sides = [("From", view.comparison.old), ("To", view.comparison.new)];
         for (row, (label, rev)) in sides.into_iter().enumerate() {
-            let top = rect.top() + 6.0 + row as f32 * SIDE_ROW;
-            let y = top + SIDE_ROW / 2.0;
+            let top = rect.top() + 6.0 + row as f32 * SIDE_ROW_HEIGHT;
+            let y = top + SIDE_ROW_HEIGHT / 2.0;
             side(ui, view, env, label, rev, (rect.left() + 12.0, right), y);
         }
     }
 
-    /// The changed-files table, with the common-ancestor switch in its bar where it changes
-    /// what is compared.
-    fn files(&mut self, ui: &mut Ui, c: &Colors, env: &mut Env) {
+    fn changed_files(&mut self, ui: &mut Ui, env: &mut Env) {
         let Some(view) = &mut self.view else { return };
         view.comparison.since_ancestor = env.settings.since_ancestor;
         let comparison = view.comparison;
-        let ctx = ui.ctx().clone();
-        let listed = self.files.get(&view.repo.path, comparison, &ctx, |git, c| {
-            match c.run(git) {
-                Ok(compared) => (compared.base, Ok(compared.files), compared.working_tree),
-                Err(e) => (None, Err(e.to_string()), None),
-            }
-        });
-        let base = listed.and_then(|(base, files, _)| files.is_ok().then_some(*base));
-        let tree = listed.and_then(|(_, _, tree)| tree.as_ref());
+        let listed = self
+            .compared
+            .get(&view.repo.path, comparison, ui.ctx(), |git, c| {
+                match c.run(git) {
+                    Ok(compared) => Compared {
+                        base: compared.base,
+                        files: Ok(compared.files),
+                        working_tree: compared.working_tree,
+                    },
+                    Err(e) => Compared {
+                        base: None,
+                        files: Err(e.to_string()),
+                        working_tree: None,
+                    },
+                }
+            });
+        let base = listed.and_then(|l| l.files.is_ok().then_some(l.base));
+        let tree = listed.and_then(|l| l.working_tree.as_ref());
         let weak = ui.visuals().weak_text_color();
         let abbrev = view.repo.abbrev_len;
         let since = &mut env.settings.since_ancestor;
         let ancestor_matters = view.ancestor_matters;
         let action = self.table.show_working_tree(
             ui,
-            c,
             "compare",
             Id::new(comparison),
-            listed.map(|(_, files, _)| files),
+            listed.map(|l| &l.files),
             tree,
             |ui| {
                 if ancestor_matters {
@@ -270,14 +251,14 @@ impl CompareWindow {
                 ui.label(RichText::new(note).size(12.0).color(weak));
             },
         );
-        if let (Some((file, pick)), Some(tree)) = (action.row, tree) {
+        if let (Some((file, pick)), Some(tree)) = (action.working_tree, tree) {
             let conflict = tree.conflict(&file.path);
             self.requests.push(match pick {
-                RowPick::MergeTool => FileRequest::MergeTool {
+                WorkingTreePick::MergeTool => FileRequest::MergeTool {
                     root: tree.root.clone(),
                     path: file.path.clone(),
                 },
-                RowPick::Answer(answer) => {
+                WorkingTreePick::Answer(answer) => {
                     let Some(conflict) = conflict else { return };
                     FileRequest::Resolve(Resolve {
                         conflict: conflict.clone(),
@@ -285,21 +266,20 @@ impl CompareWindow {
                         item: conflict.item(&tree.sides, answer),
                     })
                 }
-                RowPick::Terminal => {
+                WorkingTreePick::Terminal => {
                     FileRequest::Open(Opener::Terminal, file_folder(&tree.root, &file.path))
                 }
-                RowPick::FileSystem => {
+                WorkingTreePick::FileSystem => {
                     FileRequest::Open(Opener::FileManager, file_folder(&tree.root, &file.path))
                 }
             });
         }
-        // The right-hand side's version, as TortoiseGit's "Blame revisions" blames the newer.
         if let Some(f) = action.blame {
             let spec = BlameSpec {
                 rev: comparison.new,
                 path: f.path.clone(),
             };
-            self.blames.push((view.repo.clone(), spec));
+            self.blame_requests.push((view.repo.clone(), spec));
         }
         let Some(Some(base)) = base else { return };
         let open = action
@@ -314,8 +294,6 @@ impl CompareWindow {
     }
 }
 
-/// One side in the header, centred on `y` between `x.0` and `x.1`: the label, the commit's
-/// short hash, its ref badges and its subject; or "Working tree".
 fn side(
     ui: &Ui,
     view: &CompareView,
@@ -359,7 +337,12 @@ fn side(
     let Some(ix) = view.repo.lookup(&oid) else {
         return;
     };
-    for b in badges(&view.repo, &view.refs[ix.ix()], Some(ix), env.graph) {
+    for b in badges(
+        &view.repo,
+        &view.refs_by_commit[ix.ix()],
+        Some(ix),
+        env.graph,
+    ) {
         if x >= right {
             break;
         }
@@ -372,18 +355,12 @@ fn side(
         view.repo.commit(ix).subject.clone(),
         TextFormat::simple(FontId::proportional(13.5), text),
     );
-    job.wrap = TextWrapping {
-        max_width: right - x,
-        max_rows: 1,
-        break_anywhere: true,
-        overflow_character: Some('…'),
-    };
+    job.wrap = TextWrapping::truncate_at_width(right - x);
     let g = painter.layout_job(job);
     painter.galley(pos2(x, y - g.size().y / 2.0), g, text);
 }
 
 impl ParterreApp {
-    /// Acts on what the graph or the log window asked for.
     pub(super) fn compare_request(&mut self, request: CompareRequest) {
         match request {
             CompareRequest::Mark(oid) => {
@@ -404,7 +381,7 @@ impl ParterreApp {
         }
     }
 
-    /// A commit's name for messages and menus: its first shown ref, or its short hash.
+    /// Its first shown ref, or its short hash.
     pub(super) fn commit_label(&self, oid: Oid) -> String {
         let Some(repo) = &self.repo else {
             return oid.to_hex();
@@ -417,7 +394,7 @@ impl ParterreApp {
         }
     }
 
-    /// Opens the compare window on two commits, in the order they were picked.
+    /// In the order they were picked.
     pub(super) fn compare(&mut self, first: Oid, second: Oid) {
         let Some(repo) = self.repo.clone() else {
             return;
@@ -430,7 +407,6 @@ impl ParterreApp {
         self.open_compare(Comparison::of(&repo, a, b, since));
     }
 
-    /// Opens the compare window on `comparison`.
     fn open_compare(&mut self, comparison: Comparison) {
         let Some(repo) = self.repo.clone() else {
             return;
@@ -443,7 +419,7 @@ impl ParterreApp {
         }
     }
 
-    /// The compare window, while it is open. (Screenshot runs embed it in the main window.)
+    /// Screenshot runs embed it in the main window.
     pub(super) fn compare_window(&mut self, ctx: &egui::Context) {
         if !self.compare.is_open() {
             self.compare.title_theme = None;
@@ -465,39 +441,23 @@ impl ParterreApp {
         }
         ctx.show_viewport_immediate(id, builder, |ui, class| {
             super::commands::window_begin(ui);
-            let embedded = class == egui::ViewportClass::EmbeddedWindow;
-            if !embedded {
-                if self.compare.title_theme != self.window_theme {
-                    self.compare.title_theme = self.window_theme;
-                    if let Some(theme) = self.window_theme {
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
-                    }
-                }
-                // Reload and fetch, as in the main window.
-                let (close, size, (reload, fetch)) = ui.input_mut(|i| {
-                    (
-                        i.viewport().close_requested(),
-                        i.viewport().inner_rect.map(|r| r.size()),
-                        crate::keys::reload_and_fetch(i),
-                    )
-                });
-                if let Some(size) = size
-                    && size.x > 0.0
-                    && size.y > 0.0
-                {
-                    self.settings.compare_window.size = [size.x, size.y];
-                }
-                if reload {
+            if class != egui::ViewportClass::EmbeddedWindow {
+                let input = window_input(
+                    ui,
+                    &mut self.compare.title_theme,
+                    self.window_theme,
+                    &mut self.settings.compare_window.size,
+                );
+                if input.reload {
                     self.reload();
                 }
-                if fetch {
+                if input.fetch {
                     self.fetch(ui.ctx(), id);
                 }
                 // Keys go to the main window too when the window is embedded in it.
                 self.compare.handle_keys(ui);
                 text_size::read_input(ui, &mut self.settings.text_size, true);
-                if close {
+                if input.close {
                     self.compare.view = None;
                 }
             }
@@ -518,7 +478,7 @@ impl ParterreApp {
         for (repo, spec) in self.compare.diffs.take() {
             self.diffs.open(repo, spec, &self.settings.diff_window, ctx);
         }
-        for (repo, spec) in std::mem::take(&mut self.compare.blames) {
+        for (repo, spec) in std::mem::take(&mut self.compare.blame_requests) {
             self.open_blame(repo, spec, None, ctx);
         }
     }

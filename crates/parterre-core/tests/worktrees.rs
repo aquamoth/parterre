@@ -1,28 +1,11 @@
 mod common;
 
 use std::path::Path;
-use std::process::Command;
 
-use common::TestRepo;
+use common::{TestRepo, git_in};
 use parterre_core::git::load_repo;
 use parterre_core::revgraph::{self, GraphOptions};
 use parterre_core::{RefKind, Repo};
-
-/// Runs git in `dir`, as [`TestRepo::git`] does in the repository.
-fn git_in(dir: &Path, args: &[&str]) {
-    let out = Command::new(parterre_core::git::program())
-        .current_dir(dir)
-        .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .expect("run git");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 
 /// main: A - B, with `topic` (one commit past B) checked out in `wt-topic`, a detached
 /// worktree at A with a commit of its own (`detached-only`), and `gone` (one commit past B)

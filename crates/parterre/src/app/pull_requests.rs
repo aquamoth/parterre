@@ -1,22 +1,17 @@
-//! Open pull requests from GitHub, loaded on a worker thread while they are shown. Not in
-//! TortoiseGit.
-//!
-//! Whether `origin` is on GitHub is asked of git alone, when a repository is opened. Here,
-//! GitHub itself is asked only while pull requests are shown (the question before deleting a
-//! remote branch asks once more, shown or not: `app::remote`) and `gh` is signed in, and as t3code
-//! does: a repository's list is kept for a minute (five if it had none) and asked for again
-//! only after that, when the repository is opened again, reloaded (F5) or its refs change; a
-//! change while it is kept is loaded once it isn't. A push or a fetch that moves `origin`'s
-//! branches is also asked about once more a minute later, however fresh the list: the pull
-//! request is usually opened just after the push, and after the load the push started (#294).
-//! Only turning them on always asks: pressing F5 again and again asks no more often. After a failure the wait doubles
-//! from 20 s up to 15 min, and the last list stays shown. There is no polling: an idle window
-//! asks nothing.
+//! Whether `origin` is on GitHub is asked of git alone, when a repository is opened. GitHub
+//! itself is asked only while pull requests are shown and `gh` is signed in (and once more before
+//! deleting a remote branch: `app::remote`). A repository's list is kept for a minute (five if
+//! it had none) and asked for again only after that, when the repository is opened again,
+//! reloaded (F5) or its refs change; a change while it is kept is loaded once it isn't. A push or
+//! a fetch that moves `origin`'s branches is asked about once more a minute later, however fresh
+//! the list: the pull request is usually opened just after the push, and after the load the push
+//! started (#294). Only turning them on always asks. After a failure the wait doubles from 20 s
+//! up to 15 min, and the last list stays shown. There is no polling: an idle window asks nothing.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use eframe::egui;
@@ -25,70 +20,50 @@ use parterre_core::glyphs;
 use parterre_forge::github::{self, GithubRepo};
 use parterre_forge::{self as forge, ForgeError, PullRequests};
 
+use super::branches::{copy_button, received, worker};
 use crate::widgets;
 
 /// What a finished load brought, and whether the user asked for it ([`PullRequestLoader::ask`])
 /// rather than parterre loading by itself: only then is it worth telling them.
 #[derive(Debug)]
 pub enum Loaded {
-    /// A list of this many pull requests.
-    Found {
-        count: usize,
-        asked: bool,
-    },
-    Failed {
-        error: ForgeError,
-        asked: bool,
-    },
+    Found { count: usize, asked: bool },
+    Failed { error: ForgeError, asked: bool },
 }
 
 /// What is known about one repository's pull requests.
 #[derive(Debug)]
 struct Entry {
-    /// The last list loaded, kept when a later load fails.
-    list: Option<Arc<PullRequests>>,
-    /// When to ask GitHub again, at the earliest (turning them on aside).
-    next: Instant,
-    /// Failed loads in a row.
-    failures: u32,
-    /// Why the last load failed, if it did.
-    error: Option<String>,
-    /// The last load failed for want of a signed-in `gh`.
+    last_list: Option<Arc<PullRequests>>,
+    /// Turning them on asks earlier.
+    ask_again_at: Instant,
+    failures_in_a_row: u32,
+    last_error: Option<String>,
     needs_sign_in: bool,
 }
 
-/// A load running on a worker thread.
 #[derive(Debug)]
 struct Job {
-    /// The repository it is for.
     path: PathBuf,
-    /// Whether the user asked for it.
-    asked: bool,
+    user_asked: bool,
     rx: Receiver<Result<PullRequests, ForgeError>>,
 }
 
 #[derive(Debug, Default)]
 pub struct PullRequestLoader {
-    /// The repository shown.
-    path: Option<PathBuf>,
-    /// The GitHub repository its `origin` points at, if any.
+    shown_repo: Option<PathBuf>,
     origin: Option<GithubRepo>,
-    /// Every repository asked about in this run.
     cache: HashMap<PathBuf, Entry>,
-    /// The load running.
     job: Option<Job>,
-    /// Something happened after which a list that is no longer fresh is loaded again: the
-    /// repository was opened, or its refs changed. Kept until that load starts.
+    /// A list no longer fresh is loaded again: the repository was opened, or its refs changed.
+    /// Kept until that load starts.
     due: bool,
     /// When to ask once more, however fresh the list, since a push or a fetch moved `origin`'s
     /// branches ([`forge::RECHECK_AFTER_PUSH`]).
-    recheck: Option<Instant>,
-    /// Load whether or not the list is fresh: pull requests turned on.
-    force: bool,
-    /// The user asked for pull requests: say how it went.
-    asked: bool,
-    /// Pull requests to show instead of asking GitHub (`--pull-requests-from`), as JSON.
-    canned: Option<Arc<str>>,
+    recheck_at: Option<Instant>,
+    load_now: bool,
+    user_asked: bool,
+    canned_json: Option<Arc<str>>,
 }
 
 impl PullRequestLoader {
@@ -96,25 +71,23 @@ impl PullRequestLoader {
     /// ([`github::load_canned`]).
     pub fn canned(json: &str) -> PullRequestLoader {
         PullRequestLoader {
-            canned: Some(json.into()),
+            canned_json: Some(json.into()),
             ..PullRequestLoader::default()
         }
     }
 
-    /// The pull requests come from a file, not from GitHub.
     pub fn is_canned(&self) -> bool {
-        self.canned.is_some()
+        self.canned_json.is_some()
     }
 
-    /// Follows the repository shown (`None` for none).
     pub fn follow(&mut self, path: Option<&Path>) {
-        if self.path.as_deref() == path {
+        if self.shown_repo.as_deref() == path {
             return;
         }
-        self.path = path.map(Path::to_owned);
+        self.shown_repo = path.map(Path::to_owned);
         self.origin = path.and_then(|p| github::origin(&Git::new(p)));
         self.due = true;
-        self.recheck = None;
+        self.recheck_at = None;
     }
 
     /// The GitHub repository `origin` points at: pull requests can be shown only if there is
@@ -124,20 +97,18 @@ impl PullRequestLoader {
     }
 
     fn entry(&self) -> Option<&Entry> {
-        self.cache.get(self.path.as_ref()?)
+        self.cache.get(self.shown_repo.as_ref()?)
     }
 
-    /// The shown repository's last list.
     pub fn list(&self) -> Option<&Arc<PullRequests>> {
-        self.entry()?.list.as_ref()
+        self.entry()?.last_list.as_ref()
     }
 
-    /// Why the shown repository's last load failed, if it did.
     pub fn error(&self) -> Option<&str> {
-        self.entry()?.error.as_deref()
+        self.entry()?.last_error.as_deref()
     }
 
-    /// The shown repository's last load failed for want of a signed-in `gh`.
+    /// The last load failed for want of a signed-in `gh`.
     pub fn needs_sign_in(&self) -> bool {
         self.entry().is_some_and(|e| e.needs_sign_in)
     }
@@ -151,14 +122,14 @@ impl PullRequestLoader {
     pub fn refs_changed(&mut self, origin_moved: bool) {
         self.due = true;
         if origin_moved {
-            self.recheck = Some(Instant::now() + forge::RECHECK_AFTER_PUSH);
+            self.recheck_at = Some(Instant::now() + forge::RECHECK_AFTER_PUSH);
         }
     }
 
     /// The user turned pull requests on: load now, and say how it went.
     pub fn ask(&mut self) {
-        self.force = true;
-        self.asked = true;
+        self.load_now = true;
+        self.user_asked = true;
     }
 
     /// Starts a load if one is due and pull requests are `shown`; returns what a load of the
@@ -167,23 +138,23 @@ impl PullRequestLoader {
         if shown && self.origin.is_some() && self.job.is_none() {
             let now = Instant::now();
             let (next, failed) = match self.entry() {
-                Some(e) => (Some(e.next), e.failures > 0),
+                Some(e) => (Some(e.ask_again_at), e.failures_in_a_row > 0),
                 None => (None, false),
             };
             let stale = next.is_none_or(|next| now >= next);
             // The recheck doesn't cut the wait after a failure short.
-            let recheck_at = self.recheck.map(|at| match next {
+            let recheck_at = self.recheck_at.map(|at| match next {
                 Some(next) if failed => at.max(next),
                 _ => at,
             });
             let recheck = recheck_at.is_some_and(|at| now >= at);
-            if self.force || recheck || (self.due && stale) {
+            if self.load_now || recheck || (self.due && stale) {
                 self.load(ctx);
                 self.due = false;
-                self.force = false;
+                self.load_now = false;
                 // The load a push starts right away doesn't stand in for the recheck.
                 if recheck {
-                    self.recheck = None;
+                    self.recheck_at = None;
                 }
             } else if let Some(at) = [recheck_at, next.filter(|_| self.due)]
                 .into_iter()
@@ -194,73 +165,68 @@ impl PullRequestLoader {
                 ctx.request_repaint_after(at.saturating_duration_since(now));
             }
         }
-        let Job { path, asked, rx } = self.job.as_ref()?;
-        let asked = *asked;
-        let result = match rx.try_recv() {
-            Ok(result) => result,
-            Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => Err(ForgeError::Network(
+        let job = self.job.as_ref()?;
+        let stopped = || {
+            Err(ForgeError::Network(
                 "loading them stopped unexpectedly".into(),
-            )),
+            ))
         };
-        let path = path.clone();
-        self.job = None;
+        let result = received(&job.rx, stopped)?;
+        let Job {
+            path,
+            user_asked: asked,
+            ..
+        } = self.job.take()?;
         let now = Instant::now();
         let entry = self.cache.entry(path.clone()).or_insert(Entry {
-            list: None,
-            next: now,
-            failures: 0,
-            error: None,
+            last_list: None,
+            ask_again_at: now,
+            failures_in_a_row: 0,
+            last_error: None,
             needs_sign_in: false,
         });
         let loaded = match result {
             Ok(list) => {
                 let count = list.list.len();
-                entry.next = now + forge::fresh_for(count > 0);
-                entry.list = Some(Arc::new(list));
-                entry.failures = 0;
-                entry.error = None;
+                entry.ask_again_at = now + forge::fresh_for(count > 0);
+                entry.last_list = Some(Arc::new(list));
+                entry.failures_in_a_row = 0;
+                entry.last_error = None;
                 entry.needs_sign_in = false;
                 Loaded::Found { count, asked }
             }
             Err(e) => {
-                entry.failures += 1;
-                let wait = forge::retry_after(entry.failures).max(e.wait().unwrap_or_default());
-                entry.next = now + wait;
-                entry.error = Some(e.to_string());
+                entry.failures_in_a_row += 1;
+                let wait =
+                    forge::retry_after(entry.failures_in_a_row).max(e.wait().unwrap_or_default());
+                entry.ask_again_at = now + wait;
+                entry.last_error = Some(e.to_string());
                 entry.needs_sign_in = e.needs_sign_in();
                 Loaded::Failed { error: e, asked }
             }
         };
         // Another repository has been opened meanwhile: this one's result waits in the cache.
-        (self.path.as_ref() == Some(&path)).then_some(loaded)
+        (self.shown_repo.as_ref() == Some(&path)).then_some(loaded)
     }
 
     fn load(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.path.clone() else {
+        let Some(path) = self.shown_repo.clone() else {
             return;
         };
-        let (tx, rx) = std::sync::mpsc::channel();
         let git = Git::new(&path);
-        let ctx = ctx.clone();
-        let canned = self.canned.clone();
-        std::thread::spawn(move || {
-            let loaded = match canned {
-                Some(json) => github::load_canned(&git, &json),
-                None => github::load(&git),
-            };
-            let _ = tx.send(loaded);
-            ctx.request_repaint();
+        let canned = self.canned_json.clone();
+        let rx = worker(ctx, move || match canned {
+            Some(json) => github::load_canned(&git, &json),
+            None => github::load(&git),
         });
         self.job = Some(Job {
             path,
-            asked: std::mem::take(&mut self.asked),
+            user_asked: std::mem::take(&mut self.user_asked),
             rx,
         });
     }
 }
 
-/// What the user did with the dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialogAnswer {
     Open,
@@ -330,23 +296,9 @@ fn command_box(ui: &mut egui::Ui, command: &str) {
             ui.allocate_ui_with_layout(row, layout, |ui| {
                 ui.label(egui::RichText::new(command).monospace().size(14.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // A check mark for a moment after a click.
                     let id = egui::Id::new("copied").with(command);
-                    let now = ui.input(|i| i.time);
-                    let copied_at: Option<f64> = ui.data(|d| d.get_temp(id));
-                    let copied = copied_at.is_some_and(|at| now - at < 1.5);
-                    if copied {
-                        ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_millis(300));
-                    }
                     let done = super::log_window::colors(ui).added;
-                    if widgets::copy_button(ui, copied, done)
-                        .on_hover_text("Copy the command")
-                        .clicked()
-                    {
-                        ui.ctx().copy_text(command.to_owned());
-                        ui.data_mut(|d| d.insert_temp(id, now));
-                    }
+                    copy_button(ui, id, || command.to_owned(), "Copy the command", done);
                 });
             });
         });
@@ -412,7 +364,7 @@ mod tests {
     /// Lets the list's freshness run out.
     fn expire(loader: &mut PullRequestLoader) {
         for entry in loader.cache.values_mut() {
-            entry.next = Instant::now();
+            entry.ask_again_at = Instant::now();
         }
     }
 
@@ -447,7 +399,7 @@ mod tests {
         assert!(loader.update(true, &ctx).is_none());
         assert!(!loader.is_loading());
         // A minute later, though the empty list is kept for five.
-        loader.recheck = Some(Instant::now());
+        loader.recheck_at = Some(Instant::now());
         loader.update(true, &ctx);
         assert!(loader.is_loading(), "the push was not asked about again");
         finish(&mut loader, &ctx);
@@ -463,10 +415,10 @@ mod tests {
         let ctx = egui::Context::default();
         let mut loader = loaded(dir.path(), &ctx);
         for entry in loader.cache.values_mut() {
-            entry.failures = 3;
+            entry.failures_in_a_row = 3;
         }
         loader.refs_changed(true);
-        loader.recheck = Some(Instant::now());
+        loader.recheck_at = Some(Instant::now());
         loader.update(true, &ctx);
         assert!(!loader.is_loading());
         expire(&mut loader);

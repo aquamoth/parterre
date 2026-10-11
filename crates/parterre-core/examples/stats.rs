@@ -8,15 +8,16 @@ use std::time::Instant;
 use parterre_core::layout::{self, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking, Trunk};
 use parterre_core::revgraph::{self, GraphOptions, Simplification};
 
+/// The argument after `name`.
+fn option<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    let i = args.iter().position(|a| a == name)?;
+    args.get(i + 1).map(String::as_str)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let path = args.get(1).map(String::as_str).unwrap_or(".");
-    let hide_branches = args
-        .iter()
-        .position(|a| a == "--hide")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_default();
+    let hide_branches = option(&args, "--hide").unwrap_or_default();
     let t = Instant::now();
     let repo = parterre_core::git::load_repo(path.as_ref()).expect("load");
     eprintln!(
@@ -31,48 +32,36 @@ fn main() {
         let log = parterre_core::log::LogQuery::commit(head).run(&repo);
         eprintln!("log of HEAD: {} commits in {:?}", log.len(), t.elapsed());
     }
+    let build_graph = |simplification| {
+        let options = GraphOptions {
+            simplification,
+            hide_branches: hide_branches.to_owned(),
+            ..Default::default()
+        };
+        revgraph::build(&repo, &options)
+    };
 
-    if let Some(i) = args.iter().position(|a| a == "--dump-nodes") {
-        let mode = match args.get(i + 1).map(String::as_str) {
+    if args.iter().any(|a| a == "--dump-nodes") {
+        let mode = match option(&args, "--dump-nodes") {
             Some("branches") => Simplification::BranchesAndMerges,
             Some("forks") => Simplification::Forks,
             Some("all") => Simplification::AllCommits,
             _ => Simplification::Decorated,
         };
-        let g = revgraph::build(
-            &repo,
-            &GraphOptions {
-                simplification: mode,
-                hide_branches: hide_branches.clone(),
-                ..Default::default()
-            },
-        );
-        for n in &g.nodes {
+        for n in &build_graph(mode).nodes {
             println!("{}", repo.commit(n.commit).oid);
         }
         return;
     }
 
-    let trunk = match args
-        .iter()
-        .position(|a| a == "--trunk")
-        .and_then(|i| args.get(i + 1))
-        .map(String::as_str)
-    {
+    let trunk = match option(&args, "--trunk") {
         Some("alternating") => Trunk::Alternating,
         Some("leftmost") => Trunk::Leftmost,
         _ => Trunk::Centred,
     };
     for mode in Simplification::ALL {
         let t = Instant::now();
-        let g = revgraph::build(
-            &repo,
-            &GraphOptions {
-                simplification: mode,
-                hide_branches: hide_branches.clone(),
-                ..Default::default()
-            },
-        );
+        let g = build_graph(mode);
         let build = t.elapsed();
         let input = LayoutInput {
             sizes: g

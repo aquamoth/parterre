@@ -1,6 +1,3 @@
-//! Log window core against real repositories: the log query's order compared with
-//! `git log --date-order`, changed files, and git's hash length.
-
 mod common;
 
 use common::TestRepo;
@@ -18,24 +15,13 @@ fn hashes(repo: &Repo, list: &[CommitIx]) -> Vec<String> {
     list.iter().map(|&c| repo.commit(c).oid.to_hex()).collect()
 }
 
-/// `git log --date-order` with the given revisions, as full hashes.
-fn git_log(r: &TestRepo, revs: &[&str]) -> Vec<String> {
-    let mut args = vec!["log", "--date-order", "--format=%H"];
-    args.extend(revs);
-    r.git(&args)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
 fn subjects(repo: &Repo, list: &[CommitIx]) -> Vec<String> {
     list.iter()
         .map(|&c| repo.commit(c).subject.clone())
         .collect()
 }
 
-/// A small deterministic random generator (xorshift), so failures reproduce.
+/// Xorshift: deterministic, so that failures reproduce.
 struct Rng(u64);
 
 impl Rng {
@@ -95,7 +81,7 @@ fn order_matches_git_log_date_order() {
             let ours = LogQuery::commit(ix(&repo, tip)).run(&repo);
             assert_eq!(
                 hashes(&repo, &ours),
-                git_log(&r, &[tip]),
+                git_hashes(&r, &["--date-order", tip]),
                 "seed {seed}, tip {tip}"
             );
         }
@@ -116,13 +102,12 @@ fn ranges_match_git_log_date_order() {
                 repo.commit(q.exclude[0]).oid.to_hex(),
                 repo.commit(q.tips[0]).oid.to_hex(),
             );
-            let expected = git_log(&r, &[&format!("{from}..{to}")]);
+            let expected = git_hashes(&r, &["--date-order", &format!("{from}..{to}")]);
             assert_eq!(hashes(&repo, &q.run(&repo)), expected, "seed {seed}");
         }
     }
 }
 
-/// `git log` with `args`, as full hashes.
 fn git_hashes(r: &TestRepo, args: &[&str]) -> Vec<String> {
     let mut all = vec!["log", "--format=%H"];
     all.extend(args);
@@ -133,8 +118,6 @@ fn git_hashes(r: &TestRepo, args: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Every walk option, and pairs of them, on random histories: the same commits in the same
-/// order as git gives them, for single tips and for ranges.
 #[test]
 fn walk_options_match_git_log() {
     let topo = LogOptions::default();
@@ -217,8 +200,6 @@ fn walk_options_match_git_log() {
     }
 }
 
-/// Parents as the log shows them: the real ones where nothing is left out, the first alone
-/// with `first_parent`, and always listed below their child.
 #[test]
 fn listed_parents_are_the_walked_ones_and_come_later() {
     let (r, all) = random_history(23, 60);
@@ -294,7 +275,6 @@ fn branchings_only_keeps_forks_merges_refs_and_roots() {
     assert_eq!(parents, [vec!["B", "E"], vec!["B"], vec!["A"], vec![]]);
 }
 
-/// A range's lower end has parents outside the log.
 #[test]
 fn a_range_marks_history_outside_it() {
     let (r, [_, b, _, _, e]) = feature_branch();
@@ -335,7 +315,7 @@ fn two_nodes_swap_when_second_is_an_ancestor_of_first() {
     let (r, [a, _, _, _, e]) = feature_branch();
     let repo = r.load();
     // TortoiseGit would show `e..a`, which is empty.
-    assert!(git_log(&r, &[&format!("{e}..{a}")]).is_empty());
+    assert!(git_hashes(&r, &["--date-order", &format!("{e}..{a}")]).is_empty());
     let q = LogQuery::range(&repo, ix(&repo, &e), ix(&repo, &a));
     assert_eq!(q.tips, [ix(&repo, &e)]);
     assert_eq!(q.exclude, [ix(&repo, &a)]);

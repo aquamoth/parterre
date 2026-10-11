@@ -1,14 +1,5 @@
-//! Blame: which commit last changed each line of a file, as `git blame` finds it.
-//!
-//! A blame is of a file at a revision (a commit, or the working tree, whose changed lines
-//! belong to no commit yet). Git does the work
-//! ([`crate::git::Git::blame`], `git blame --line-porcelain`, through the file's textconv
-//! filter as a diff reads it); this module parses what it prints into lines and the
-//! [`Origin`]s they come from, and says where to go from a line: the change that brought it
-//! in ([`Origin::changes`]) and the blame of the version before ([`Origin::previous_blame`]),
-//! as TortoiseGitBlame does.
-
 use std::collections::HashMap;
+use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +7,6 @@ use crate::changed_files::FileStatus;
 use crate::file_diff::{FileDiffSpec, Rev, Version, decode, display};
 use crate::oid::Oid;
 
-/// What to blame: a file at a revision.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BlameSpec {
     pub rev: Rev,
@@ -24,21 +14,17 @@ pub struct BlameSpec {
 }
 
 impl BlameSpec {
-    /// True if the file is read from the working tree, and so can change after loading.
     pub fn reads_working_tree(&self) -> bool {
         self.rev == Rev::WorkingTree
     }
 }
 
-/// Whether lines moved or copied from elsewhere keep the commit that wrote them, rather than
-/// the one that moved them (`git blame -M`, `-C`). Off by default, as in TortoiseGit.
+/// Move and copy detection; off by default, as in TortoiseGit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Moves {
     #[default]
     Off,
-    /// Lines moved or copied within the file (`-M`).
     WithinFile,
-    /// Also lines moved or copied from other files the same commit changed (`-M -C`).
     AcrossFiles,
 }
 
@@ -53,7 +39,6 @@ impl Moves {
         }
     }
 
-    /// What the choice does, in plain words, for its tooltip.
     pub fn description(self) -> &'static str {
         match self {
             Moves::Off => {
@@ -80,62 +65,53 @@ impl Moves {
     }
 }
 
-/// How git blames.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct BlameOptions {
-    /// Changes in whitespace alone don't make a line new (`git blame -w`).
     pub ignore_whitespace: bool,
     pub moves: Moves,
 }
 
-/// Where a line comes from: a commit and the file's path in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Origin {
-    /// `None` for lines of the working tree that no commit has yet.
+    /// `None` for uncommitted lines.
     pub commit: Option<Oid>,
     pub path: String,
-    /// The file as it was before the commit, if git says (a new file has none, and neither
-    /// has a commit where the history stops).
+    /// `None` for a new file, or where the history stops.
     pub previous: Option<Version>,
     pub author: String,
     pub author_email: String,
-    /// Seconds since the epoch.
     pub author_time: i64,
     /// `+hhmm` or `-hhmm`.
     pub author_tz: String,
-    /// Seconds since the epoch. For lines no commit has yet, when git blamed them.
+    /// For uncommitted lines, when git blamed them.
     pub committer_time: i64,
-    /// The commit's subject.
     pub summary: String,
-    /// The history stops here: a shallow clone's oldest commit, or a graft. What was before
-    /// isn't known.
+    /// The history stops here: a shallow clone's oldest commit, or a graft.
     pub boundary: bool,
 }
 
 impl Origin {
-    /// The change that brought the line in: this origin's file against its previous version.
-    /// For uncommitted lines, the working tree against HEAD. `None` where the history stops
-    /// here, since what came before isn't known.
     pub fn changes(&self) -> Option<FileDiffSpec> {
         if self.boundary {
             return None;
         }
-        let rev = match self.commit {
-            Some(oid) => Rev::Commit(oid),
-            None => Rev::WorkingTree,
-        };
         let status = match &self.previous {
             None => FileStatus::Added,
             Some(v) if v.path != self.path => FileStatus::Renamed,
             Some(_) => FileStatus::Modified,
         };
         // Blamed files are regular text files; their exact modes don't change the diff.
-        const FILE: u32 = 0o100644;
+        const REGULAR_FILE_MODE: u32 = 0o100644;
+        let old_mode = if self.previous.is_some() {
+            REGULAR_FILE_MODE
+        } else {
+            0
+        };
         Some(FileDiffSpec {
-            modes: [if self.previous.is_some() { FILE } else { 0 }, FILE],
+            modes: [old_mode, REGULAR_FILE_MODE],
             old: self.previous.clone(),
             new: Some(Version {
-                rev,
+                rev: self.commit.map_or(Rev::WorkingTree, Rev::Commit),
                 path: self.path.clone(),
             }),
             status,
@@ -143,52 +119,48 @@ impl Origin {
         })
     }
 
-    /// The blame of the file as it was before this origin's commit, where the line was not
-    /// yet what it is ("Blame previous revision").
     pub fn previous_blame(&self) -> Option<BlameSpec> {
-        let v = self.previous.as_ref()?;
-        Some(BlameSpec {
+        self.previous.as_ref().map(|v| BlameSpec {
             rev: v.rev,
             path: v.path.clone(),
         })
     }
 
-    /// The author's date and time in the author's own time zone, `YYYY-MM-DD HH:MM`. (The
-    /// log shows commits in local time; this is for commits it doesn't know.)
+    /// `YYYY-MM-DD HH:MM` in the author's own zone, for commits whose local date the snapshot
+    /// lacks.
     pub fn author_date(&self) -> String {
         let tz = &self.author_tz;
         let sign = if tz.starts_with('-') { -1 } else { 1 };
         let digits = tz.trim_start_matches(['+', '-']);
-        let (h, m) = (
-            digits.get(..2).and_then(|s| s.parse::<i64>().ok()),
-            digits.get(2..4).and_then(|s| s.parse::<i64>().ok()),
-        );
-        let offset = sign * (h.unwrap_or(0) * 3600 + m.unwrap_or(0) * 60);
-        format_time(self.author_time + offset)
+        let number = |at: Range<usize>| {
+            digits
+                .get(at)
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0)
+        };
+        let (hours, minutes) = (number(0..2), number(2..4));
+        format_time(self.author_time + sign * (hours * 3600 + minutes * 60))
     }
 }
 
-/// One line of the blamed file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlameLine {
     /// Index into [`Blame::origins`].
     pub origin: usize,
-    /// The line's number (from 0) in the origin's version of the file.
+    /// 0-based, in the origin's version of the file.
     pub orig_line: u32,
-    /// The line as in the file, without its newline (a carriage return stays).
+    /// Without its newline; a carriage return stays.
     pub raw: String,
-    /// The line as shown: tabs expanded, no line ending.
+    /// As shown: tabs expanded, no line ending.
     pub text: String,
 }
 
-/// A blamed file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Blame {
     pub origins: Vec<Origin>,
     pub lines: Vec<BlameLine>,
-    /// Bytes that were not valid UTF-8, now shown as `\xNN`.
     pub invalid_bytes: usize,
-    /// Characters in the longest shown line.
+    /// In characters, tabs expanded.
     pub widest: usize,
 }
 
@@ -197,32 +169,24 @@ impl Blame {
     pub fn parse(out: &[u8]) -> Result<Blame, String> {
         let mut blame = Blame::default();
         let mut by_key: HashMap<(Option<Oid>, String, Option<Version>), usize> = HashMap::new();
-        // The entry being read: its header, then its fields up to the line's text.
+        // An entry is its header, its fields, then the line's text.
         let mut header: Option<(Option<Oid>, u32)> = None;
         let mut fields = Fields::default();
-        let mut rest = out;
-        while !rest.is_empty() {
-            let end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
-            let line = &rest[..end];
-            rest = rest.get(end + 1..).unwrap_or(&[]);
+        for line in out.split_inclusive(|&b| b == b'\n') {
+            let line = line.strip_suffix(b"\n").unwrap_or(line);
             if let Some(content) = line.strip_prefix(b"\t") {
                 let Some((commit, orig_line)) = header.take() else {
                     return Err("a line of the file before its commit".into());
                 };
-                let path = fields
-                    .filename
-                    .take()
-                    .ok_or("a line without its file name")?;
-                let key = (commit, path, fields.previous.take());
-                let origin = match by_key.get(&key) {
-                    Some(&i) => i,
-                    None => {
-                        let i = blame.origins.len();
-                        let f = std::mem::take(&mut fields);
-                        blame.origins.push(Origin {
-                            commit: key.0,
-                            path: key.1.clone(),
-                            previous: key.2.clone(),
+                let f = std::mem::take(&mut fields);
+                let path = f.filename.ok_or("a line without its file name")?;
+                let origins = &mut blame.origins;
+                let origin = *by_key.entry((commit, path, f.previous)).or_insert_with_key(
+                    |(commit, path, previous)| {
+                        origins.push(Origin {
+                            commit: *commit,
+                            path: path.clone(),
+                            previous: previous.clone(),
                             author: f.author,
                             author_email: f.author_email,
                             author_time: f.author_time,
@@ -231,13 +195,11 @@ impl Blame {
                             summary: f.summary,
                             boundary: f.boundary,
                         });
-                        by_key.insert(key, i);
-                        i
-                    }
-                };
-                fields = Fields::default();
-                let (raw, bad) = decode(content);
-                blame.invalid_bytes += bad;
+                        origins.len() - 1
+                    },
+                );
+                let (raw, invalid) = decode(content);
+                blame.invalid_bytes += invalid;
                 let (text, _) = display(&raw, &[]);
                 blame.widest = blame.widest.max(text.chars().count());
                 blame.lines.push(BlameLine {
@@ -284,7 +246,6 @@ impl Blame {
                     });
                 }
                 "filename" => fields.filename = Some(unquote(value)?),
-                // The committer's name and zone, and any fields git adds later.
                 _ => {}
             }
         }
@@ -294,9 +255,8 @@ impl Blame {
         Ok(blame)
     }
 
-    /// Each origin's age among the file's commits: 0 for the oldest, 1 for the newest, by
-    /// rank of author time (so that one ancient commit doesn't wash out the rest). Lines not
-    /// committed yet are the newest.
+    /// Each origin's age from 0 (oldest) to 1 (newest, and uncommitted lines), by rank of
+    /// author time, so that one ancient commit doesn't wash out the rest.
     pub fn ages(&self) -> Vec<f32> {
         let mut times: Vec<i64> = self
             .origins
@@ -319,12 +279,11 @@ impl Blame {
             .collect()
     }
 
-    /// True if line `i` starts a run of lines from one origin.
     pub fn starts_run(&self, i: usize) -> bool {
         i == 0 || self.lines[i].origin != self.lines[i - 1].origin
     }
 
-    /// How many commits the lines come from (uncommitted lines not counted).
+    /// Uncommitted lines don't count.
     pub fn commit_count(&self) -> usize {
         let mut commits: Vec<Oid> = self.origins.iter().filter_map(|o| o.commit).collect();
         commits.sort_unstable();
@@ -333,7 +292,6 @@ impl Blame {
     }
 }
 
-/// An entry's fields, as they come before its line.
 #[derive(Default)]
 struct Fields {
     author: String,
@@ -347,37 +305,36 @@ struct Fields {
     filename: Option<String>,
 }
 
-/// `<hash> <line in origin> <line in file> [<lines in group>]`, with lines from 1; `at` is
-/// how many lines were read, to check that they come in order.
-fn parse_header(line: &str, at: usize) -> Result<(Option<Oid>, u32), String> {
+/// `<hash> <orig line> <final line> [<group size>]`, lines from 1. The lines must come in
+/// order.
+fn parse_header(line: &str, lines_read: usize) -> Result<(Option<Oid>, u32), String> {
     let bad = || format!("blame entry {line:?}");
     let mut words = line.split(' ');
     let oid = words.next().and_then(Oid::from_hex).ok_or_else(bad)?;
-    let orig: u32 = words.next().and_then(|w| w.parse().ok()).ok_or_else(bad)?;
-    let fin: usize = words.next().and_then(|w| w.parse().ok()).ok_or_else(bad)?;
-    if fin != at + 1 || orig == 0 {
+    let orig_line: u32 = words.next().and_then(|w| w.parse().ok()).ok_or_else(bad)?;
+    let final_line: usize = words.next().and_then(|w| w.parse().ok()).ok_or_else(bad)?;
+    if final_line != lines_read + 1 || orig_line == 0 {
         return Err(bad());
     }
-    let commit = oid.as_bytes().iter().any(|&b| b != 0).then_some(oid);
-    Ok((commit, orig - 1))
+    let uncommitted = oid.as_bytes().iter().all(|&b| b == 0);
+    Ok(((!uncommitted).then_some(oid), orig_line - 1))
 }
 
-/// A path as git writes it: as is, or in double quotes with C escapes when it holds quotes,
-/// backslashes or control characters.
+/// Undoes git's C-style quoting of a path with special characters.
 fn unquote(s: &str) -> Result<String, String> {
     let Some(inner) = s.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
         return Ok(s.to_owned());
     };
     let bad = || format!("quoted path {s:?}");
     let mut bytes = Vec::with_capacity(inner.len());
-    let mut it = inner.bytes();
-    while let Some(b) = it.next() {
+    let mut quoted = inner.bytes();
+    while let Some(b) = quoted.next() {
         if b != b'\\' {
             bytes.push(b);
             continue;
         }
-        let e = it.next().ok_or_else(bad)?;
-        bytes.push(match e {
+        let escaped = quoted.next().ok_or_else(bad)?;
+        bytes.push(match escaped {
             b'a' => 7,
             b'b' => 8,
             b't' => b'\t',
@@ -385,11 +342,11 @@ fn unquote(s: &str) -> Result<String, String> {
             b'v' => 11,
             b'f' => 12,
             b'r' => b'\r',
-            b'"' | b'\\' => e,
+            b'"' | b'\\' => escaped,
             b'0'..=b'3' => {
-                let mut n = u32::from(e - b'0');
+                let mut n = u32::from(escaped - b'0');
                 for _ in 0..2 {
-                    let d = it.next().filter(u8::is_ascii_digit).ok_or_else(bad)?;
+                    let d = quoted.next().filter(u8::is_ascii_digit).ok_or_else(bad)?;
                     n = n * 8 + u32::from(d - b'0');
                 }
                 u8::try_from(n).map_err(|_| bad())?
@@ -400,7 +357,7 @@ fn unquote(s: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| bad())
 }
 
-/// Seconds since the epoch as `YYYY-MM-DD HH:MM` (UTC, or whatever zone they were moved to).
+/// `YYYY-MM-DD HH:MM` of seconds since the epoch, in UTC or the zone they were shifted to.
 fn format_time(t: i64) -> String {
     let (days, secs) = (t.div_euclid(86_400), t.rem_euclid(86_400));
     // Howard Hinnant's civil_from_days.
@@ -479,7 +436,6 @@ mod tests {
                 path: "a.txt".into()
             })
         );
-        // Tabs are expanded for showing, kept for copying; a carriage return is kept too.
         assert_eq!(blame.lines[1].text, "2   x");
         assert_eq!(blame.lines[1].raw, "2\tx");
         assert_eq!(blame.lines[3].raw, "four\r");
@@ -499,11 +455,9 @@ mod tests {
     fn a_line_leads_to_its_change_and_the_blame_before_it() {
         let blame = Blame::parse(sample().as_bytes()).unwrap();
         let [a, b, wt] = [0, 1, 2].map(|i| &blame.origins[i]);
-        // The first commit added the file.
         let added = a.changes().unwrap();
         assert_eq!((added.old, added.status), (None, FileStatus::Added));
         assert_eq!(a.previous_blame(), None);
-        // The second renamed it.
         let renamed = b.changes().unwrap();
         assert_eq!(renamed.status, FileStatus::Renamed);
         assert_eq!(renamed.old.unwrap().path, "a.txt");
@@ -514,7 +468,6 @@ mod tests {
                 path: "a.txt".into()
             })
         );
-        // Uncommitted lines: the working tree against the commit before.
         let wt = wt.changes().unwrap();
         assert_eq!(wt.new.unwrap().rev, Rev::WorkingTree);
         assert_eq!(wt.status, FileStatus::Modified);

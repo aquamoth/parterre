@@ -1,6 +1,3 @@
-//! Merging into the open worktree's branch, against real, disposable repositories: when it's
-//! offered, the merge methods, the message (checked against what `git merge` itself writes),
-//! and every way it can stop, refuse or keep changes aside.
 mod common;
 
 use common::TestRepo;
@@ -45,12 +42,10 @@ fn offered(r: &TestRepo, theirs: &str) -> Option<String> {
     merge::offered(&repo, &catalog, rev(r, theirs)).map(str::to_owned)
 }
 
-/// The merge `p` would run with git's message, by `method`, without stashing.
 fn plain(p: &Preview, target: &str, method: Method) -> merge::Merge {
     p.merge(target.into(), method, false, &p.message.clone())
 }
 
-/// `main` with a commit of its own, and `up` with one, from a shared base: they diverged.
 fn diverged() -> TestRepo {
     let mut r = TestRepo::new();
     r.write("base", b"base\n");
@@ -65,7 +60,6 @@ fn diverged() -> TestRepo {
     r
 }
 
-/// `up` two commits ahead of `main`: a fast-forward would do.
 fn behind() -> TestRepo {
     let mut r = TestRepo::new();
     r.write("base", b"base\n");
@@ -84,9 +78,7 @@ fn behind() -> TestRepo {
 fn it_is_offered_only_when_there_is_something_to_merge() {
     let mut r = diverged();
     assert_eq!(offered(&r, "up").as_deref(), Some("main"));
-    // Already in main: nothing to do.
     assert_eq!(offered(&r, "main~1"), None);
-    // The open worktree's own branch.
     assert_eq!(offered(&r, "main"), None);
     // Only behind: a fast-forward is a merge too.
     r.git(&["branch", "ahead", "main"]);
@@ -104,7 +96,7 @@ fn it_is_offered_only_when_there_is_something_to_merge() {
 fn a_fast_forward_moves_the_branch_up() {
     let r = behind();
     let p = preview(&r, "up");
-    assert!(p.fast_forward);
+    assert!(p.can_fast_forward);
     assert_eq!(p.default_method(), Method::FastForward);
     assert_eq!(p.unavailable(Method::FastForward, "up"), None);
     let merge = plain(&p, "up", Method::FastForward);
@@ -135,7 +127,7 @@ fn a_merge_commit_where_a_fast_forward_would_do() {
 fn diverged_branches_cant_fast_forward() {
     let r = diverged();
     let p = preview(&r, "up");
-    assert!(!p.fast_forward);
+    assert!(!p.can_fast_forward);
     assert_eq!(p.default_method(), Method::MergeCommit);
     assert_eq!(
         p.unavailable(Method::FastForward, "up").as_deref(),
@@ -164,7 +156,6 @@ fn merge_ff_false_picks_a_merge_commit() {
     assert_eq!(preview(&r, "up").default_method(), Method::FastForward);
 }
 
-/// What `git merge --no-ff <target>` writes on its own, undone afterwards.
 fn gits_message(r: &TestRepo, target: &str) -> String {
     let head = r.git(&["rev-parse", "HEAD"]);
     r.git(&["merge", "-q", "--no-ff", "--no-edit", target]);
@@ -193,7 +184,7 @@ fn the_message_is_the_one_git_would_write() {
     // With merge.log, git adds the commits merged, without fmt-merge-msg's comment lines.
     r.git(&["config", "merge.log", "true"]);
     let p = preview(&r, "up");
-    assert!(p.log);
+    assert!(p.message_has_log);
     assert_eq!(p.message, gits_message(&r, "up"));
     assert!(p.message.contains("* up:"), "{}", p.message);
     assert!(!p.message.contains('#'), "{}", p.message);
@@ -215,7 +206,7 @@ fn the_message_is_what_the_user_wrote() {
     );
     // A fast-forward makes no commit.
     assert_eq!(
-        behind_preview().blocked(Method::FastForward, false, "", "up"),
+        preview(&behind(), "up").blocked(Method::FastForward, false, "", "up"),
         None
     );
     let message = "Bring in up\n\n#123 and its fix";
@@ -224,10 +215,6 @@ fn the_message_is_what_the_user_wrote() {
         p.merge("up".into(), Method::MergeCommit, false, message),
     ));
     assert_eq!(r.git(&["log", "-1", "--format=%B"]), message);
-}
-
-fn behind_preview() -> Preview {
-    preview(&behind(), "up")
 }
 
 #[test]
@@ -282,7 +269,6 @@ fn a_conflict_stops_it_and_leaves_the_worktree_stuck() {
     let msg = std::fs::read_to_string(r.path().join(".git/MERGE_MSG")).unwrap();
     assert!(msg.starts_with("Merge branch 'up'"), "{msg}");
 
-    // Nothing more is offered there, and a second merge is refused.
     assert_eq!(offered(&r, "up"), None);
     let refused = Preview::load(r.path(), rev(&r, "up"), "up")
         .unwrap_err()
@@ -409,8 +395,7 @@ fn a_stopped_merge_keeps_the_stashed_changes_aside() {
         "{}",
         attention.message
     );
-    // Git holds them until the merge is committed or aborted. (Not aborted here: the helpers'
-    // git doesn't read the system config that parterre's does, see CLAUDE.md.)
+    // Not aborted here: the helpers' git doesn't read the system config parterre's does.
     assert_eq!(r.git(&["show", "MERGE_AUTOSTASH:other"]), "my edit");
     assert_eq!(common::read_text(&r.path().join("other")), "other\n");
 }

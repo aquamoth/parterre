@@ -1,16 +1,11 @@
-//! Colours for the syntax spans of `parterre_highlight` (#209), and the sections a
-//! line's text is laid out in when its syntax colours and its changed words (background)
-//! are combined.
-
-use eframe::egui::text::TextFormat;
-use eframe::egui::{Color32, FontId, Stroke};
+use eframe::egui::text::{LayoutJob, TextFormat};
+use eframe::egui::{Color32, FontId, Stroke, Visuals};
 use parterre_core::file_diff::display_map;
 use parterre_highlight::{Kind, Spans};
 use std::ops::Range;
 
-/// The colour of a kind of span, or `None` for the plain text colour. VS Code's Light+ and
-/// Dark+ themes, as decided in #208.
-pub fn color(kind: Kind, dark: bool) -> Option<Color32> {
+/// VS Code's Light+ and Dark+ colours (#208).
+fn color(kind: Kind, dark: bool) -> Option<Color32> {
     let rgb = if dark {
         match kind {
             Kind::Comment => (106, 153, 85),
@@ -45,16 +40,15 @@ pub fn color(kind: Kind, dark: bool) -> Option<Color32> {
     Some(Color32::from_rgb(rgb.0, rgb.1, rgb.2))
 }
 
-/// How a piece of a line is drawn: its kind's colour (or `plain`), emphasis in italics,
-/// links underlined, over `background`.
-pub fn text_format(
+fn text_format(
     kind: Option<Kind>,
     font: FontId,
-    dark: bool,
-    plain: Color32,
+    visuals: &Visuals,
     background: Color32,
 ) -> TextFormat {
-    let color = kind.and_then(|k| color(k, dark)).unwrap_or(plain);
+    let color = kind
+        .and_then(|k| color(k, visuals.dark_mode))
+        .unwrap_or_else(|| visuals.text_color());
     TextFormat {
         font_id: font,
         color,
@@ -69,11 +63,32 @@ pub fn text_format(
     }
 }
 
-/// The spans of a line moved from byte offsets of its `raw` form to byte offsets of its
-/// display text (tabs expanded, no ending), as `file_diff::display` moves the changed
-/// words; one that lands empty (a lone carriage return) is dropped. Once per line when a
-/// file is loaded, not when it is drawn.
-pub fn moved(raw: &str, spans: &[(Range<usize>, Kind)]) -> Spans {
+/// A line's `text` in the colours of its syntax `spans`, its changed `words` over
+/// `word_background`.
+pub fn layout_job(
+    text: &str,
+    words: &[Range<usize>],
+    spans: &[(Range<usize>, Kind)],
+    font: &FontId,
+    visuals: &Visuals,
+    word_background: Color32,
+) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    for (piece, kind, in_word) in sections(text, words, spans) {
+        let background = if in_word {
+            word_background
+        } else {
+            Color32::TRANSPARENT
+        };
+        let format = text_format(kind, font.clone(), visuals, background);
+        job.append(&text[piece], 0.0, format);
+    }
+    job
+}
+
+/// The spans of the `raw` line moved onto its display text, as
+/// [`parterre_core::file_diff::display`] moves changed words.
+pub fn display_spans(raw: &str, spans: &[(Range<usize>, Kind)]) -> Spans {
     if spans.is_empty() {
         return Vec::new();
     }
@@ -88,10 +103,9 @@ pub fn moved(raw: &str, spans: &[(Range<usize>, Kind)]) -> Spans {
         .collect()
 }
 
-/// `text` cut where either its syntax (`spans`) or its changed `words` change, both byte
-/// ranges of `text` in order and not overlapping: each piece with its kind, and whether it
-/// is inside a changed word. One pass over the boundaries.
-pub fn sections(
+/// `text` cut wherever its syntax `spans` or its changed `words` (byte ranges, each in order
+/// and not overlapping) start or end: each piece with its kind, and whether it is in a word.
+fn sections(
     text: &str,
     words: &[Range<usize>],
     spans: &[(Range<usize>, Kind)],
@@ -104,24 +118,24 @@ pub fn sections(
     cuts.retain(|&c| c <= text.len());
     cuts.sort_unstable();
     cuts.dedup();
-    let (mut si, mut wi) = (0, 0);
+    let (mut next_span, mut next_word) = (0, 0);
     cuts.windows(2)
         .map(|w| {
             let piece = w[0]..w[1];
-            while si < spans.len() && spans[si].0.end <= piece.start {
-                si += 1;
+            while next_span < spans.len() && spans[next_span].0.end <= piece.start {
+                next_span += 1;
             }
             let kind = spans
-                .get(si)
+                .get(next_span)
                 .filter(|(r, _)| r.start <= piece.start && piece.end <= r.end)
                 .map(|(_, k)| *k);
-            while wi < words.len() && words[wi].end <= piece.start {
-                wi += 1;
+            while next_word < words.len() && words[next_word].end <= piece.start {
+                next_word += 1;
             }
-            let changed = words
-                .get(wi)
+            let in_word = words
+                .get(next_word)
                 .is_some_and(|r| r.start <= piece.start && piece.end <= r.end);
-            (piece, kind, changed)
+            (piece, kind, in_word)
         })
         .collect()
 }
@@ -149,7 +163,6 @@ mod tests {
 
     #[test]
     fn sections_follow_many_spans_in_one_pass() {
-        // A long line of many tokens: every piece lands on its own span.
         let text = "a ".repeat(5000);
         let spans: Vec<_> = (0..5000)
             .map(|i| (2 * i..2 * i + 1, Kind::Variable))
@@ -169,7 +182,7 @@ mod tests {
         let raw = "\tif x";
         let (text, _) = display_map(raw);
         let spans = vec![(1..3, Kind::Keyword)];
-        let moved = moved(raw, &spans);
+        let moved = display_spans(raw, &spans);
         assert_eq!(&text[moved[0].0.clone()], "if");
     }
 
@@ -181,6 +194,6 @@ mod tests {
             (0..2, Kind::Keyword),
             (2..3, Kind::Comment),
         ];
-        assert_eq!(moved(raw, &spans), vec![(0..2, Kind::Keyword)]);
+        assert_eq!(display_spans(raw, &spans), vec![(0..2, Kind::Keyword)]);
     }
 }

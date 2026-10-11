@@ -1,6 +1,5 @@
-//! The settings window: pages in a sidebar, rows of a label and a control. It neither dims
-//! nor blocks the app, and every change applies at once, so the graph behind shows what a
-//! setting does.
+//! The settings window neither dims nor blocks the app, and every change applies at once, so
+//! the graph behind shows what a setting does.
 
 use std::path::{Path, PathBuf};
 
@@ -10,8 +9,11 @@ use parterre_core::layout::{Direction, LayoutOptions, Ranking, Trunk};
 use rfd::AsyncFileDialog;
 
 use super::log_window::layout_picker;
-use super::toolbar::{HIDE_TIP, REF_FILTER_TIP, REMEMBER_TIP};
-use super::{ParterreApp, Picked, privacy};
+use super::toolbar::{
+    CURRENT_BRANCH_ONLY_TIP, FIRST_PARENT_ONLY_TIP, HIDE_BRANCHES_TIP, PULL_REQUESTS_TIP,
+    REF_FILTER_TIP, REMEMBER_MOVES_TIP, WORKTREES_TIP,
+};
+use super::{ParterreApp, PickFor, privacy};
 use crate::dialogs;
 use crate::settings::{Arrows, EdgeStyle, Look, RepoSettings, Settings};
 use crate::settings_file::{self, Imported};
@@ -44,8 +46,7 @@ impl SettingsPage {
         SettingsPage::Manage,
     ];
 
-    /// The page named `name` (its label, in any case, without spaces), for the screenshot
-    /// automation.
+    /// By its label without spaces, in any case.
     pub fn named(name: &str) -> Option<SettingsPage> {
         SettingsPage::ALL
             .into_iter()
@@ -66,7 +67,8 @@ impl SettingsPage {
     }
 }
 
-const SIDEBAR: f32 = 150.0;
+const SIDEBAR_WIDTH: f32 = 150.0;
+const PAGE_MIN_WIDTH: f32 = 440.0;
 
 const THEME_TIP: &str = "Follow system switches along with the desktop's light or dark mode.";
 const TEXT_SIZE_TIP: &str = "The size of the text, buttons and menus in every window. The graph \
@@ -100,9 +102,10 @@ const NO_UPDATES_TIP: &str = "Not in this build: its package manager updates par
 const NO_POSTHOG_TIP: &str = "Not in this build: it sends nothing.";
 const INSTALL_ID_TIP: &str = "Sent with the usage statistics, never with a crash report. Quote \
     it to have its data deleted.";
-/// The "What parterre sends" page (#260).
-const WHAT_PARTERRE_SENDS: &str = crate::about::PRIVACY;
-const PAGE: f32 = 440.0;
+
+fn settings_viewport() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("settings")
+}
 
 impl ParterreApp {
     pub(super) fn open_settings(&mut self, page: SettingsPage) {
@@ -110,8 +113,6 @@ impl ParterreApp {
         self.show_settings = true;
     }
 
-    /// A window of its own, which can be moved anywhere, beside parterre's window too.
-    /// (Screenshot runs embed it in the main window instead.)
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
             self.settings_window_theme = None;
@@ -119,8 +120,7 @@ impl ParterreApp {
             self.settings_window_size = None;
             return;
         }
-        // As the user left it last time, no larger than the screen: the page scrolls.
-        let least = vec2(SIDEBAR + PAGE + 56.0, 320.0);
+        let least = vec2(SIDEBAR_WIDTH + PAGE_MIN_WIDTH + 56.0, 320.0);
         let size = *self.settings_window_size.get_or_insert_with(|| {
             let [w, h] = self.settings.settings_window.size;
             let screen = ctx.input(|i| i.viewport().monitor_size);
@@ -133,23 +133,19 @@ impl ParterreApp {
             .with_icon(self.window_icon.clone())
             .with_inner_size(size)
             .with_min_inner_size(least)
-            // A dialog: nothing to minimize or maximize. winit 0.30 does this on Windows and
-            // macOS only; on Linux (X11 and Wayland) it ignores the buttons, and only a window
-            // fixed in size has no maximize. The page takes the window's width, so maximized it
-            // is just wide.
+            // winit 0.30 drops these buttons on Windows and macOS only. Maximized on Linux, the
+            // page just widens.
             .with_minimize_button(false)
             .with_maximize_button(false);
-        let id = egui::ViewportId::from_hash_of("settings");
+        let id = settings_viewport();
         crate::usage::screen(ctx, id.0, crate::usage::Screen::Settings);
-        // A new window is created after this frame and painted in the next; don't wait for
-        // input to bring that about.
+        // A new window is created after this frame: paint it without waiting for input.
         if self.settings_window_theme.is_none() && !ctx.embed_viewports() {
             ctx.request_repaint();
         }
         ctx.show_viewport_immediate(id, builder, |ui, class| {
             super::commands::window_begin(ui);
             if class != egui::ViewportClass::EmbeddedWindow {
-                // Its own title bar, too, in parterre's theme.
                 if self.settings_window_theme != self.window_theme {
                     self.settings_window_theme = self.window_theme;
                     if let Some(theme) = self.window_theme {
@@ -157,7 +153,7 @@ impl ParterreApp {
                             .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
                     }
                 }
-                // Its size in points: it grows and shrinks with the text size.
+                // Its size is kept in points: it grows and shrinks with the text size.
                 let text_size = ui.ctx().zoom_factor();
                 if self
                     .settings_window_text_size
@@ -182,7 +178,7 @@ impl ParterreApp {
                 if ui.input_mut(|i| crate::keys::fetch().consume(i)) {
                     self.fetch(ui.ctx(), id);
                 }
-                // Embedded, it is in the main window, which reads the text size input.
+                // Embedded, the main window reads the text size input.
                 text_size::read_input(ui, &mut self.settings.text_size, true);
             }
             egui::CentralPanel::default()
@@ -194,8 +190,7 @@ impl ParterreApp {
     fn settings_contents(&mut self, ui: &mut Ui) {
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
-                ui.set_width(SIDEBAR);
-                // The chosen page in grey, as in menus, rather than the selection blue.
+                ui.set_width(SIDEBAR_WIDTH);
                 let t = widgets::tones(ui);
                 let text = ui.visuals().text_color();
                 let selection = &mut ui.visuals_mut().selection;
@@ -207,8 +202,8 @@ impl ParterreApp {
                     }
                     let selected = self.settings_page == page;
                     let text = RichText::new(page.label());
-                    let item =
-                        egui::Button::selectable(selected, text).min_size(vec2(SIDEBAR, 30.0));
+                    let item = egui::Button::selectable(selected, text)
+                        .min_size(vec2(SIDEBAR_WIDTH, 30.0));
                     if ui.add(item).clicked() {
                         self.settings_page = page;
                     }
@@ -216,9 +211,9 @@ impl ParterreApp {
             });
             ui.separator();
             ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                // (The scroll area would take the row's horizontal layout.)
+                // Else the page would take the row's horizontal layout.
                 ui.vertical(|ui| {
-                    ui.set_width(ui.available_width().max(PAGE));
+                    ui.set_width(ui.available_width().max(PAGE_MIN_WIDTH));
                     self.settings_page_ui(ui);
                 });
             });
@@ -338,14 +333,10 @@ impl ParterreApp {
                 );
                 rows.switch(
                     "Pull requests",
-                    super::toolbar::PULL_REQUESTS_TIP,
+                    PULL_REQUESTS_TIP,
                     &mut s.graph.show_pull_requests,
                 );
-                rows.switch(
-                    "Worktrees",
-                    super::toolbar::WORKTREES_TIP,
-                    &mut s.graph.show_worktrees,
-                );
+                rows.switch("Worktrees", WORKTREES_TIP, &mut s.graph.show_worktrees);
                 let tags = s.graph.show_tags;
                 rows.row(
                     "Tags make nodes",
@@ -369,7 +360,7 @@ impl ParterreApp {
             SettingsPage::Dragging => {
                 let mut remember = s.remember_moves;
                 group(ui, |rows| {
-                    rows.switch("Remember moved nodes", REMEMBER_TIP, &mut remember);
+                    rows.switch("Remember moved nodes", REMEMBER_MOVES_TIP, &mut remember);
                     rows.switch(
                         "Keep nodes from overlapping",
                         "In Adapt mode, push overlapping nodes apart.",
@@ -380,7 +371,6 @@ impl ParterreApp {
             }
             SettingsPage::Privacy => {
                 group(ui, |rows| {
-                    // Without `send`, and on Snap and Flatpak, there is nothing to turn on.
                     let available = parterre_telemetry::has_update_check();
                     let tip = if available {
                         UPDATES_TIP
@@ -388,7 +378,7 @@ impl ParterreApp {
                         NO_UPDATES_TIP
                     };
                     rows.row("Check for updates", tip, |ui| {
-                        locked_switch(ui, &mut s.check_for_updates, available);
+                        switch_or_greyed_off(ui, &mut s.check_for_updates, available);
                     });
                 });
                 ui.add_space(14.0);
@@ -493,12 +483,12 @@ impl ParterreApp {
         group(ui, |rows| {
             rows.row("Settings", EXPORT_TIP, |ui| {
                 if widgets::text_button(ui, "Export…").clicked() {
-                    self.settings_file = Some(Picked::ExportSettings);
+                    self.settings_file_requested = Some(PickFor::ExportSettings);
                 }
             });
             rows.row("Settings file", IMPORT_TIP, |ui| {
                 if widgets::text_button(ui, "Import…").clicked() {
-                    self.settings_file = Some(Picked::ImportSettings);
+                    self.settings_file_requested = Some(PickFor::ImportSettings);
                 }
             });
         });
@@ -522,7 +512,6 @@ impl ParterreApp {
         });
     }
 
-    /// Keeps the settings of the repository shown with the others'.
     pub(super) fn keep_repo_settings(&mut self) {
         if let Some(repo) = &self.repo {
             let key = RepoSettings::key(repo);
@@ -531,17 +520,17 @@ impl ParterreApp {
         }
     }
 
-    /// The file dialog for exporting or importing settings.
-    pub(super) fn settings_dialog(&self, what: Picked, frame: &eframe::Frame) -> AsyncFileDialog {
-        let repo = self
-            .repo
-            .as_deref()
-            .map(|r| RepoSettings::name(&RepoSettings::key(r)));
+    fn repo_settings_name(&self) -> Option<String> {
+        let repo = self.repo.as_deref()?;
+        Some(RepoSettings::name(&RepoSettings::key(repo)))
+    }
+
+    pub(super) fn settings_dialog(&self, what: PickFor, frame: &eframe::Frame) -> AsyncFileDialog {
         let (title, name) = match what {
-            Picked::ImportSettings => ("Import settings", String::new()),
+            PickFor::ImportSettings => ("Import settings", String::new()),
             _ => (
                 "Export settings",
-                match repo {
+                match self.repo_settings_name() {
                     Some(repo) => format!("parterre-{repo}.json"),
                     None => "parterre-settings.json".into(),
                 },
@@ -562,7 +551,6 @@ impl ParterreApp {
 
     pub(super) fn export_settings(&mut self, mut path: PathBuf) {
         crate::usage::action(crate::usage::Action::ExportSettings);
-        // A name typed without the extension gets it added.
         if path.extension().is_none() {
             path.set_extension("json");
         }
@@ -574,7 +562,6 @@ impl ParterreApp {
         });
     }
 
-    /// Reads a settings file, and asks what of it to import.
     pub(super) fn import_settings(&mut self, path: &Path) {
         self.settings_dir = path.parent().map(Path::to_owned);
         let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -584,9 +571,9 @@ impl ParterreApp {
         match imported {
             Ok(imported) => {
                 self.settings_note = None;
-                self.import = Some(Import {
-                    settings: imported.settings.is_some(),
-                    filters: imported.repository.is_some() && self.repo.is_some(),
+                self.settings_import = Some(Import {
+                    include_settings: imported.settings.is_some(),
+                    include_filters: imported.repository.is_some() && self.repo.is_some(),
                     file: name.into_owned(),
                     imported,
                 });
@@ -595,25 +582,21 @@ impl ParterreApp {
         }
     }
 
-    /// Asks what of a settings file to import, over the settings window.
     pub(super) fn import_settings_dialog(&mut self, ctx: &egui::Context) {
-        let repo = self
-            .repo
-            .as_deref()
-            .map(|r| RepoSettings::name(&RepoSettings::key(r)));
-        let Some(import) = &mut self.import else {
+        let repo = self.repo_settings_name();
+        let Some(import) = &mut self.settings_import else {
             return;
         };
         let shown = dialogs::Dialog::new("import-settings", "Import settings")
             .screen(crate::usage::Screen::ImportSettings)
             .width(380.0)
             .modal()
-            .opener(egui::ViewportId::from_hash_of("settings"))
+            .opener(settings_viewport())
             .show(ctx, |ui| {
                 ui.weak(format!("From {}", import.file));
                 ui.add_space(8.0);
                 if import.imported.settings.is_some() {
-                    ui.checkbox(&mut import.settings, "Settings")
+                    ui.checkbox(&mut import.include_settings, "Settings")
                         .on_hover_text(IMPORT_SETTINGS_TIP);
                 }
                 if import.imported.repository.is_some() {
@@ -622,7 +605,7 @@ impl ParterreApp {
                         None => "Filters".to_owned(),
                     };
                     ui.add_enabled_ui(repo.is_some(), |ui| {
-                        ui.checkbox(&mut import.filters, label)
+                        ui.checkbox(&mut import.include_filters, label)
                             .on_hover_text(IMPORT_FILTERS_TIP)
                             .on_disabled_hover_text("Open a repository to import its filters.");
                     });
@@ -639,17 +622,17 @@ impl ParterreApp {
                 }
                 ui.add_space(12.0);
                 ui.separator();
-                let chosen = import.settings || import.filters;
+                let chosen = import.include_settings || import.include_filters;
                 dialogs::actions(ui, "Import", chosen, false, false)
             });
         match shown.inner {
             dialogs::Answer::Primary => {
-                if let Some(import) = self.import.take() {
+                if let Some(import) = self.settings_import.take() {
                     self.apply_import(import);
                 }
             }
-            dialogs::Answer::Cancel => self.import = None,
-            dialogs::Answer::Open if shown.should_close() => self.import = None,
+            dialogs::Answer::Cancel => self.settings_import = None,
+            dialogs::Answer::Open if shown.should_close() => self.settings_import = None,
             dialogs::Answer::Open => {}
         }
     }
@@ -657,7 +640,7 @@ impl ParterreApp {
     fn apply_import(&mut self, import: Import) {
         crate::usage::action(crate::usage::Action::ImportSettings);
         let mut parts = Vec::new();
-        if import.settings
+        if import.include_settings
             && let Some(mut settings) = import.imported.settings
         {
             settings.sanitize();
@@ -667,18 +650,17 @@ impl ParterreApp {
             self.set_remember_moves(remember);
             parts.push("settings".to_owned());
         }
-        if import.filters
-            && let (Some(repo_settings), Some(repo)) = (import.imported.repository, &self.repo)
+        if import.include_filters
+            && let (Some(repo_settings), Some(name)) =
+                (import.imported.repository, self.repo_settings_name())
         {
             repo_settings.apply(&mut self.settings.graph);
-            let name = RepoSettings::name(&RepoSettings::key(repo));
             parts.push(format!("the filters of {name}"));
         }
         let note = format!("Imported {} from {}", parts.join(" and "), import.file);
         self.settings_note = Some((note, false));
     }
 
-    /// Asks before setting every setting back to its default, over the settings window.
     pub(super) fn reset_settings_dialog(&mut self, ctx: &egui::Context) {
         if !self.confirm_reset_settings {
             return;
@@ -688,7 +670,7 @@ impl ParterreApp {
             .icon(glyphs::RESET, true)
             .width(380.0)
             .modal()
-            .opener(egui::ViewportId::from_hash_of("settings"))
+            .opener(settings_viewport())
             .show(ctx, |ui| {
                 ui.label(
                     "Every setting goes back to its default, in every repository. Recent \
@@ -717,21 +699,20 @@ impl ParterreApp {
     }
 }
 
-/// A settings file read, and what of it to import.
 #[derive(Debug)]
 pub(super) struct Import {
     file: String,
     imported: Imported,
-    settings: bool,
-    filters: bool,
+    include_settings: bool,
+    include_filters: bool,
 }
 
 impl Import {
-    /// What is left out of the parts chosen.
+    /// What the file has that is left out of the parts chosen.
     fn skipped(&self) -> Vec<&str> {
         let chosen = |name: &&String| {
-            (self.settings && name.starts_with("settings."))
-                || (self.filters && name.starts_with("repository."))
+            (self.include_settings && name.starts_with("settings."))
+                || (self.include_filters && name.starts_with("repository."))
         };
         self.imported
             .skipped
@@ -747,32 +728,30 @@ fn filters(ui: &mut Ui, s: &mut Settings) {
     group(ui, |rows| {
         rows.switch(
             "Current branch only",
-            "Only HEAD's history.",
+            CURRENT_BRANCH_ONLY_TIP,
             &mut g.current_branch_only,
         );
         rows.switch(
             "First parent only",
-            "Follow only first parents: merged side branches without refs disappear.",
+            FIRST_PARENT_ONLY_TIP,
             &mut g.first_parent_only,
         );
         rows.row("Branch filter", REF_FILTER_TIP, |ui| {
             text_field(ui, &mut g.ref_filter, "e.g. main, release");
         });
-        rows.row("Hide branches", HIDE_TIP, |ui| {
+        rows.row("Hide branches", HIDE_BRANCHES_TIP, |ui| {
             text_field(ui, &mut g.hide_branches, "e.g. pipeline/*, release/*");
         });
     });
 }
 
-/// A switch for `on`, shown off and greyed out unless `available`.
-fn locked_switch(ui: &mut Ui, on: &mut bool, available: bool) {
+fn switch_or_greyed_off(ui: &mut Ui, on: &mut bool, available: bool) {
     let mut off = false;
     let on = if available { on } else { &mut off };
     ui.add_enabled_ui(available, |ui| widgets::switch(ui, on));
 }
 
-/// Settings › Privacy's *Sent to PostHog* (#227): the two switches, the install ID with
-/// *Copy*, and the "What parterre sends" page. Returns why that page didn't open.
+/// Returns why the "What parterre sends" page didn't open.
 fn privacy_page(ui: &mut Ui, telemetry: &mut privacy::Telemetry) -> Option<String> {
     title(ui, "Sent to PostHog");
     let in_build = parterre_telemetry::has_usage_statistics();
@@ -781,7 +760,7 @@ fn privacy_page(ui: &mut Ui, telemetry: &mut privacy::Telemetry) -> Option<Strin
     let tip = |text| if in_build { text } else { NO_POSTHOG_TIP };
     group(ui, |rows| {
         let answer = telemetry.privacy.answer.as_mut();
-        // Without an answer (DO_NOT_TRACK has given it, or a build without `send`), off.
+        // Shown off without an answer: DO_NOT_TRACK is set, or the build can't send.
         let (mut usage, mut crashes) = (false, false);
         let (usage, crashes, id, available) = match answer {
             Some(a) if in_build && !dnt => (
@@ -797,19 +776,18 @@ fn privacy_page(ui: &mut Ui, telemetry: &mut privacy::Telemetry) -> Option<Strin
                 false,
             ),
         };
-        rows.row(privacy::USAGE, tip(privacy::USAGE_TEXT), |ui| {
-            locked_switch(ui, usage, available);
+        rows.row(privacy::USAGE_LABEL, tip(privacy::USAGE_TEXT), |ui| {
+            switch_or_greyed_off(ui, usage, available);
         });
         let changed = available && *crashes != at_start;
-        rows.row(privacy::CRASHES, tip(privacy::CRASHES_TEXT), |ui| {
-            locked_switch(ui, crashes, available);
+        rows.row(privacy::CRASHES_LABEL, tip(privacy::CRASHES_TEXT), |ui| {
+            switch_or_greyed_off(ui, crashes, available);
             if changed {
                 ui.label(RichText::new("from the next start").weak());
             }
         });
         if let Some(id) = id.filter(|_| in_build) {
             rows.row("Install ID", INSTALL_ID_TIP, |ui| {
-                // "Copied" for a moment after a click.
                 let copied_id = egui::Id::new("copied-install-id");
                 let now = ui.input(|i| i.time);
                 let at: Option<f64> = ui.data(|d| d.get_temp(copied_id));
@@ -837,9 +815,9 @@ fn privacy_page(ui: &mut Ui, telemetry: &mut privacy::Telemetry) -> Option<Strin
     let link = ui
         .add(link)
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(WHAT_PARTERRE_SENDS);
+        .on_hover_text(crate::about::PRIVACY);
     if link.clicked() {
-        return crate::browser::open(WHAT_PARTERRE_SENDS).err();
+        return crate::browser::open(crate::about::PRIVACY).err();
     }
     None
 }
@@ -850,24 +828,21 @@ fn title(ui: &mut Ui, text: &str) {
     ui.add_space(6.0);
 }
 
-/// Rows of a [`group`].
 struct Rows<'a> {
     ui: &'a mut Ui,
-    count: usize,
+    row_count: usize,
 }
 
 impl Rows<'_> {
-    /// `label` on the left, explained by `tip` on hover if it isn't empty, and `control` on
-    /// the right.
     fn row(&mut self, label: &str, tip: &str, control: impl FnOnce(&mut Ui)) {
-        if self.count > 0 {
+        if self.row_count > 0 {
             let rect = self.ui.available_rect_before_wrap();
             let stroke = self.ui.visuals().widgets.noninteractive.bg_stroke;
             self.ui
                 .painter()
                 .hline(rect.x_range(), rect.top(), Stroke::new(1.0, stroke.color));
         }
-        self.count += 1;
+        self.row_count += 1;
         self.ui.horizontal(|ui| {
             ui.set_min_height(42.0);
             ui.add_space(12.0);
@@ -901,7 +876,6 @@ impl Rows<'_> {
     }
 }
 
-/// Rows on a rounded background.
 fn group(ui: &mut Ui, add_rows: impl FnOnce(&mut Rows)) {
     let t = widgets::tones(ui);
     let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
@@ -912,7 +886,7 @@ fn group(ui: &mut Ui, add_rows: impl FnOnce(&mut Rows)) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 0.0;
-            add_rows(&mut Rows { ui, count: 0 });
+            add_rows(&mut Rows { ui, row_count: 0 });
         });
 }
 
@@ -950,7 +924,7 @@ fn branch_colours(ui: &mut Ui, rules: &mut Vec<BranchColor>) {
         group(ui, |rows| {
             for (i, rule) in rules.iter_mut().enumerate() {
                 rows.row("", "", |ui| {
-                    // Right to left.
+                    // Laid out right to left.
                     if widgets::mini_button(ui, parterre_core::glyphs::CLOSE)
                         .on_hover_text("Remove")
                         .clicked()

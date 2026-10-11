@@ -1,18 +1,5 @@
-//! What parterre asks and sends over the network, behind one small interface, so that the
-//! services behind it can be swapped by replacing this crate (#175, #225):
-//! - the update check (#226, #258): GitHub's releases API, asked at start and then once a day,
-//!   and nothing of parterre's own sent with it;
-//! - the usage statistics (#261): installs, updates and launches, sent to PostHog with the
-//!   install ID while the user leaves them ticked, through [`Usage`], in sessions (#262);
-//! - feature events (#264): which windows, dialogs, menus and actions are used, through
-//!   [`record`], with the settings [`register`]ed, sent while [`Usage`] is and in its sessions;
-//! - the crash reports (#263): panics, sent to PostHog the moment they happen, without the
-//!   install ID, the session or the registered settings, once the user has ticked them
-//!   ([`start_crash_reports`]).
-//!
-//! The requests sit behind the `send` feature. Without it nothing is asked or sent: there is no
-//! update check ([`UpdateCheck::start`] gives `None`), no usage statistics ([`Usage::start`]
-//! gives `None`) and no crash reports.
+//! Everything parterre asks or sends over the network, so that a service is swapped by
+//! replacing this crate (#225). Without the `send` feature nothing is asked or sent.
 
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -26,7 +13,7 @@ mod feature;
 mod github;
 #[cfg(feature = "send")]
 mod posthog;
-// Without `send` there is no usage statistics, so no session is started.
+// No session is started without `send`.
 #[cfg_attr(not(feature = "send"), allow(dead_code))]
 mod session;
 mod update;
@@ -40,52 +27,39 @@ pub use feature::{
 };
 pub use update::{CARGO_INSTALL, Download, Release, Update, Version, newer};
 pub use usage::{
-    Build, Choices, Lifecycle, app_version, asks, do_not_track, has_usage_statistics, launch,
-    may_check_for_updates, new_install_id, sends,
+    Build, Choices, Lifecycle, app_version, asks_first_run_prompt, do_not_track,
+    has_usage_statistics, launch, may_check_for_updates, new_install_id, sends_usage_statistics,
 };
 
-/// The longest closing waits for the usage statistics to be sent.
-pub const CLOSE: Duration = Duration::from_secs(2);
+pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// What every event of a launch says besides its own name.
 #[derive(Clone, Debug)]
 pub struct Context {
-    /// The install ID: the `distinct_id`.
     pub install_id: String,
-    /// This build's version (`0.6.0 (a1b2c3d)`).
+    /// As `--version` prints it: `0.6.0 (a1b2c3d)`.
     pub version: String,
-    /// The screen's size in points (logical pixels), if known.
+    /// In points.
     pub screen: Option<[f32; 2]>,
-    /// The version of the git parterre runs, asked on the sending thread.
+    /// Called on the sending thread, so that the start doesn't wait for git.
     pub git_version: fn() -> Option<String>,
 }
 
-/// Usage statistics on their way to PostHog, from start until the window closes ([`close`]) or
-/// the user unticks them (drop it).
-///
-/// Every event carries the session it is part of, as `$session_id`, the features [`record`]ed
-/// included. One starts with the usage statistics, and a new one after 30 minutes without
-/// activity (the user's [`input`], or an event such as a feature recorded), 24 hours after the
-/// last one started, and when the user [`opened`] another repository.
-///
-/// [`close`]: Usage::close
-/// [`input`]: Usage::input
-/// [`opened`]: Usage::opened
+/// Usage statistics on their way to PostHog, until [`close`](Usage::close)d, or dropped when
+/// the user unticks them.
 #[derive(Debug)]
 pub struct Usage {
     #[cfg(feature = "send")]
     sender: posthog::Sender,
-    /// Shared with the features' sink, as recording one is activity too.
+    /// Shared with the features' sink: recording one is activity too.
     session: Arc<Mutex<session::Session>>,
 }
 
 impl Usage {
-    /// Starts sending usage statistics, with `events` at once ([`launch`] for a launch, none
-    /// when ticked again), if the user's `choices` allow it ([`sends`]): `None` while the
-    /// first-run prompt is unanswered (`choices` `None`), when usage statistics are unticked,
-    /// `DO_NOT_TRACK` is set, and in debug builds and builds without `send`.
-    ///
-    /// While it is, the features [`record`]ed are sent too.
+    /// Starts sending, with `events` at once, if [`sends_usage_statistics`] allows; from then on
+    /// the features [`record`]ed are sent too.
     pub fn start(
         choices: Option<Choices>,
         context: Context,
@@ -98,7 +72,6 @@ impl Usage {
         Usage::start_with(Build::THIS, do_not_track(), host, choices, context, events)
     }
 
-    /// [`Usage::start`] for `build`, sending to `host`.
     fn start_with(
         build: Build,
         do_not_track: bool,
@@ -107,7 +80,7 @@ impl Usage {
         context: Context,
         events: Vec<Lifecycle>,
     ) -> Option<Usage> {
-        if !sends(build, choices, do_not_track) {
+        if !sends_usage_statistics(build, choices, do_not_track) {
             return None;
         }
         #[cfg(feature = "send")]
@@ -126,47 +99,42 @@ impl Usage {
         }
     }
 
-    /// The window closes: `Application Backgrounded`, and what is queued is sent, waiting at
-    /// most [`CLOSE`].
+    /// Sends `Application Backgrounded` and what is queued, waiting at most [`CLOSE_TIMEOUT`].
     pub fn close(self) {
         feature::sink(None);
         let session = lock(&self.session).active(SystemTime::now());
         #[cfg(feature = "send")]
-        self.sender.close(session, CLOSE);
+        self.sender.close(session, CLOSE_TIMEOUT);
         #[cfg(not(feature = "send"))]
         let _ = session;
     }
 
-    /// The user gave input: a key, the pointer or the wheel, in any of parterre's windows.
-    /// Cheap: call it for every frame that has some.
+    /// The user gave input in any of parterre's windows. Cheap: call it for every frame that has
+    /// some.
     pub fn input(&mut self) {
         lock(&self.session).active(SystemTime::now());
     }
 
-    /// The user opened `repository`, named by a folder all its worktrees share: a new session
-    /// if it is another than the one opened last. The folder is never sent.
+    /// `repository` is a folder all its worktrees share. It is never sent.
     pub fn opened(&mut self, repository: &Path) {
         lock(&self.session).opened(repository, SystemTime::now());
     }
 }
 
 impl Drop for Usage {
-    /// Features recorded from now on go nowhere.
     fn drop(&mut self) {
         feature::sink(None);
     }
 }
 
-/// The session, even if a thread panicked while holding it: it is valid at every step.
+/// Ignores poisoning: the session is valid at every step.
 fn lock(session: &Mutex<session::Session>) -> MutexGuard<'_, session::Session> {
     session.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Where the features [`record`]ed go while usage statistics are sent: each is activity in
-/// `session` at `now`, as any event is, and is handed to `send` with the session's ID. Never
-/// waits but for the session's lock, held only while the session rule runs.
-// Without `send` there is no usage statistics, so no sink.
-#[cfg_attr(not(feature = "send"), allow(dead_code))]
+/// Where the features [`record`]ed go: each is activity in `session` at `now`, and is handed to
+/// `send` with the session's ID. Waits only for the session's lock.
+#[cfg(any(feature = "send", test))]
 fn feature_sink(
     session: Arc<Mutex<session::Session>>,
     send: impl Fn(Feature, String) + Send + 'static,
@@ -178,12 +146,9 @@ fn feature_sink(
     }
 }
 
-/// Sends every panic from now on as a crash report, if the user's `choices` allow it
-/// ([`sends_crash_reports`]): not while the first-run prompt is unanswered (`choices` `None`),
-/// when crash reports are unticked, `DO_NOT_TRACK` is set, nor in debug builds and builds
-/// without `send`. Decided once: unticking them later takes effect at the next start. The panic
-/// hook already installed is still called after a panic is sent. `version` is this build's
-/// (`0.6.0 (a1b2c3d)`); `git_version` is asked on a thread of its own. True if turned on.
+/// Sends every panic from now on as a crash report, if [`sends_crash_reports`] allows. Decided
+/// once: unticking them takes effect at the next start. The panic hook already installed still
+/// runs, after a panic is sent. Returns whether they were turned on.
 pub fn start_crash_reports(
     choices: Option<Choices>,
     version: &str,
@@ -201,15 +166,7 @@ pub fn start_crash_reports(
     }
 }
 
-/// How long the update check waits before asking again.
-pub const INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// The Rust target this was built for, which names the release files.
-const TARGET: &str = env!("PARTERRE_TARGET");
-
 impl Channel {
-    /// This copy's channel: Snap or Flatpak when running in parterre's own, else the one its
-    /// packaging job stamped into it, else `cargo install`.
     pub fn current() -> Channel {
         static CURRENT: OnceLock<Channel> = OnceLock::new();
         *CURRENT.get_or_init(|| {
@@ -219,9 +176,8 @@ impl Channel {
         })
     }
 
-    /// The channel of a build stamped `stamp`, given the environment `var`. Snap and Flatpak
-    /// set the name of the app they run, and leak it to what is started from a terminal there,
-    /// so only parterre's own counts.
+    /// Snap and Flatpak set the name of the app they run, and leak it to what is started from a
+    /// terminal there, so only parterre's own counts.
     fn of(stamp: Option<&str>, var: impl Fn(&str) -> Option<String>) -> Channel {
         if var("SNAP_NAME").as_deref() == Some("parterre") {
             Channel::Snap
@@ -233,49 +189,42 @@ impl Channel {
     }
 }
 
-impl Update {
-    /// Release `tag` (`v0.6.0`, or `0.6.0`) for this copy's channel, as the update check would
-    /// offer it. `None` on Snap and Flatpak.
-    pub fn to(tag: &str) -> Option<Update> {
-        Update::of(tag, Channel::current(), TARGET)
-    }
-}
-
-/// Whether this copy has an update check: built with `send`, and not on Snap or Flatpak, whose
-/// stores update parterre.
+/// Built with `send`, and not on Snap or Flatpak, whose stores update parterre.
 pub fn has_update_check() -> bool {
     cfg!(feature = "send") && !matches!(Channel::current(), Channel::Snap | Channel::Flatpak)
 }
 
-/// Asks GitHub whether a newer release is out, at once and then every [`INTERVAL`], on a
-/// thread of its own until dropped. Failures are silent: it asks again next time.
+/// Asks GitHub whether a newer release is out, at once and then every
+/// [`UPDATE_CHECK_INTERVAL`], on a thread of its own until dropped. Failures are silent: it asks
+/// again next time.
 #[derive(Debug)]
 pub struct UpdateCheck {
     found: Receiver<Update>,
     newer: Option<Update>,
-    /// Dropping it stops the thread.
-    _stop: Sender<()>,
+    _stops_thread_on_drop: Sender<()>,
 }
 
 impl UpdateCheck {
-    /// Starts checking for releases newer than `current`, this build's version
-    /// (`0.6.0 (a1b2c3d)`). `found` is called on the checking thread when one turns up. `None`
-    /// where there is no update check ([`has_update_check`]): nothing is asked then.
+    /// `current` is this build's version: `0.6.0 (a1b2c3d)`. `found` is called on the checking
+    /// thread when a newer release turns up. `None`, asking nothing, without
+    /// [`has_update_check`].
     pub fn start(current: &str, found: impl Fn() + Send + 'static) -> Option<UpdateCheck> {
-        let current = Version::parse(current).filter(|_| has_update_check())?;
+        if !has_update_check() {
+            return None;
+        }
+        let current = Version::parse(current)?;
         let (stop, stopped) = mpsc::channel();
         let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
-            ask(&current, &stopped, &send, &found);
+            check_for_updates(&current, &stopped, &send, &found);
         });
         Some(UpdateCheck {
             found: receive,
             newer: None,
-            _stop: stop,
+            _stops_thread_on_drop: stop,
         })
     }
 
-    /// The newer release found last, if any.
     pub fn newer(&mut self) -> Option<&Update> {
         if let Some(update) = self.found.try_iter().last() {
             self.newer = Some(update);
@@ -285,7 +234,12 @@ impl UpdateCheck {
 }
 
 #[cfg(feature = "send")]
-fn ask(current: &Version, stopped: &Receiver<()>, send: &Sender<Update>, found: &dyn Fn()) {
+fn check_for_updates(
+    current: &Version,
+    stopped: &Receiver<()>,
+    send: &Sender<Update>,
+    found: &dyn Fn(),
+) {
     use std::sync::mpsc::RecvTimeoutError;
     loop {
         let releases = github::releases(current.is_prerelease()).unwrap_or_default();
@@ -296,7 +250,7 @@ fn ask(current: &Version, stopped: &Receiver<()>, send: &Sender<Update>, found: 
             found();
         }
         if !matches!(
-            stopped.recv_timeout(INTERVAL),
+            stopped.recv_timeout(UPDATE_CHECK_INTERVAL),
             Err(RecvTimeoutError::Timeout)
         ) {
             return;
@@ -306,7 +260,7 @@ fn ask(current: &Version, stopped: &Receiver<()>, send: &Sender<Update>, found: 
 
 /// Never started: [`has_update_check`] is false without `send`.
 #[cfg(not(feature = "send"))]
-fn ask(_: &Version, _: &Receiver<()>, _: &Sender<Update>, _: &dyn Fn()) {}
+fn check_for_updates(_: &Version, _: &Receiver<()>, _: &Sender<Update>, _: &dyn Fn()) {}
 
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,5 @@
-//! The graph column of the log window: lanes beside the commit list, as TortoiseGit's log
-//! draws them, showing how the listed commits go together.
+//! The log window's graph column: lanes beside the commit list, as TortoiseGit's log draws
+//! them.
 //!
 //! The rows are walked top to bottom keeping the lanes, each waiting for the commit it leads
 //! to. A commit takes the leftmost lane waiting for it, or the first free one if none is (a
@@ -7,53 +7,46 @@
 //! for it or opens a new one. Lanes keep their column while they pass rows by, so their lines
 //! stay straight, and a lane that is freed stays free until a new line needs one.
 //!
-//! Decided with the prototype on the branch `prototype/log-graph` (variant A, "TortoiseGit").
-//!
-//! [`LogGraph::from_parents`] draws any other list of rows the same way, such as the blame
-//! window's history pane ([`crate::file_history`]).
-//!
-//! Memory stays small for long logs: [`LogGraph`] keeps only the lanes at every
-//! [`CHECKPOINT`]th row and works out the rows asked for from the nearest one.
+//! So that memory stays small for long logs, [`LogGraph`] keeps only the lanes at every
+//! [`ROWS_PER_CHECKPOINT`]th row and works out the rows asked for from the nearest one.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::log::LogList;
 use crate::repo::CommitIx;
 
-/// Rows between two saved states of the lanes.
-const CHECKPOINT: usize = 64;
+const ROWS_PER_CHECKPOINT: usize = 64;
 
-/// What a lane is doing at the top of a row.
+/// At the top of a row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lane {
     Free,
-    /// Waiting for the commit of this row.
+    /// For the commit of this row.
     Waits(u32),
-    /// Held for the row's first parent while its other parents find lanes.
+    /// For the row's first parent while its other parents find lanes.
     Held,
 }
 
-/// The lanes of a log.
 #[derive(Clone, Debug, Default)]
 pub struct LogGraph {
-    /// For every row, the rows of its parents as the log shows them, first parent first.
+    /// The rows of every row's parents, first parent first.
     parents: Vec<Vec<u32>>,
-    /// For every row, whether some of its history is outside the log.
+    /// Whether some of every row's history is outside the log.
     outside: Vec<bool>,
-    /// The lanes at the top of row `k * CHECKPOINT`.
+    /// The lanes at the top of row `k * ROWS_PER_CHECKPOINT`.
     checkpoints: Vec<Vec<Lane>>,
     /// The number of lanes the widest row uses.
     pub lanes: usize,
 }
 
-/// One row of the graph column.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GraphRow {
     /// The lane of the row's commit.
     pub lane: usize,
-    /// The commit has more than one parent in the log.
+    /// More than one parent in the log.
     pub merge: bool,
-    /// Some of the commit's history is outside the log: draw a line that leads out of it.
+    /// Some of the commit's history is outside the log: a line leads out of it.
     pub outside: bool,
     /// The lines in the row's upper half, from the top edge to the middle.
     pub upper: Vec<GraphLine>,
@@ -69,16 +62,13 @@ pub struct GraphLine {
 }
 
 impl LogGraph {
-    /// The lanes of `list`, one row per listed commit.
     pub fn new(list: &LogList) -> LogGraph {
-        let row_of = |commits: &[CommitIx]| {
-            let mut rows = std::collections::HashMap::with_capacity(commits.len());
-            for (i, &c) in commits.iter().enumerate() {
-                rows.insert(c, i as u32);
-            }
-            rows
-        };
-        let rows = row_of(&list.commits);
+        let rows: HashMap<CommitIx, u32> = list
+            .commits
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (c, i as u32))
+            .collect();
         let parents: Vec<Vec<u32>> = list
             .parents
             .iter()
@@ -87,9 +77,9 @@ impl LogGraph {
         LogGraph::from_parents(parents, list.outside.clone())
     }
 
-    /// The lanes of any list of rows, given for every row the rows of its parents (first
-    /// parent first, each below the row) and whether some of its history is outside the list.
-    /// A row with no parents and no row above leading to it stands alone.
+    /// The lanes of any list of rows, such as the blame window's history pane, given for every
+    /// row the rows of its parents (first parent first, each below the row) and whether some of
+    /// its history is outside the list.
     pub fn from_parents(parents: Vec<Vec<u32>>, outside: Vec<bool>) -> LogGraph {
         debug_assert_eq!(parents.len(), outside.len());
         let mut graph = LogGraph {
@@ -100,7 +90,7 @@ impl LogGraph {
         };
         let mut lanes = Vec::new();
         for row in 0..graph.parents.len() {
-            if row % CHECKPOINT == 0 {
+            if row.is_multiple_of(ROWS_PER_CHECKPOINT) {
                 graph.checkpoints.push(lanes.clone());
             }
             let lane = graph.step(&mut lanes, row, None);
@@ -109,7 +99,6 @@ impl LogGraph {
         graph
     }
 
-    /// The number of rows.
     pub fn len(&self) -> usize {
         self.parents.len()
     }
@@ -118,15 +107,16 @@ impl LogGraph {
         self.parents.is_empty()
     }
 
-    /// The rows in `range` (clamped to the log).
+    /// The rows in `range`, clamped to the log.
     pub fn rows(&self, range: Range<usize>) -> Vec<GraphRow> {
         let end = range.end.min(self.len());
         let start = range.start.min(end);
-        let Some(saved) = self.checkpoints.get(start / CHECKPOINT) else {
+        let checkpoint = start / ROWS_PER_CHECKPOINT;
+        let Some(saved) = self.checkpoints.get(checkpoint) else {
             return Vec::new();
         };
         let mut lanes = saved.clone();
-        for row in start / CHECKPOINT * CHECKPOINT..start {
+        for row in checkpoint * ROWS_PER_CHECKPOINT..start {
             self.step(&mut lanes, row, None);
         }
         (start..end)
@@ -142,15 +132,11 @@ impl LogGraph {
     /// Returns the row's lane.
     fn step(&self, lanes: &mut Vec<Lane>, row: usize, out: Option<&mut GraphRow>) -> usize {
         let me = Lane::Waits(row as u32);
-        let top = lanes.clone();
-        let lane = top
-            .iter()
-            .position(|&l| l == me)
-            .or_else(|| lanes.iter().position(|&l| l == Lane::Free))
-            .unwrap_or(lanes.len());
-        if lane == lanes.len() {
-            lanes.push(Lane::Free);
-        }
+        let top = out.is_some().then(|| lanes.clone());
+        let lane = match lanes.iter().position(|&l| l == me) {
+            Some(lane) => lane,
+            None => free_lane(lanes),
+        };
         for l in lanes.iter_mut().filter(|l| **l == me) {
             *l = Lane::Free;
         }
@@ -165,13 +151,7 @@ impl LogGraph {
                 lanes[lane] = waits;
                 lane
             } else {
-                let k = lanes
-                    .iter()
-                    .position(|&l| l == Lane::Free)
-                    .unwrap_or(lanes.len());
-                if k == lanes.len() {
-                    lanes.push(Lane::Free);
-                }
+                let k = free_lane(lanes);
                 lanes[k] = waits;
                 k
             };
@@ -183,7 +163,7 @@ impl LogGraph {
         while lanes.last() == Some(&Lane::Free) {
             lanes.pop();
         }
-        if let Some(out) = out {
+        if let (Some(out), Some(top)) = (out, top) {
             out.lane = lane;
             out.merge = parents.len() > 1;
             out.outside = self.outside[row];
@@ -203,11 +183,20 @@ impl LogGraph {
     }
 }
 
+/// The first free lane, made if there is none.
+fn free_lane(lanes: &mut Vec<Lane>) -> usize {
+    if let Some(k) = lanes.iter().position(|&l| l == Lane::Free) {
+        return k;
+    }
+    lanes.push(Lane::Free);
+    lanes.len() - 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A log of `parents` (rows of each row's parents), nothing outside it.
+    /// Nothing is outside the log.
     fn graph(parents: &[&[u32]]) -> LogGraph {
         let commits: Vec<CommitIx> = (0..parents.len() as u32).map(CommitIx).collect();
         let list = LogList {

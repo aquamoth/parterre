@@ -1,14 +1,8 @@
-//! Wildcard patterns for branch names, such as `pipeline/*` or `feature/*`, used to hide
-//! branches and to colour them.
-//!
-//! TortoiseGit has neither: its filter dialog takes explicit ref lists, and it colours by ref
-//! kind only (see `docs/research/tortoisegit-revision-graph.md`, sections 3 and 5).
-
 use std::str::Chars;
 
 use crate::repo::RefKind;
 
-/// A list of wildcard patterns, written separated by commas or spaces, e.g.
+/// Wildcard patterns for branch names, written separated by commas or spaces:
 /// `pipeline/*, release/*`. Only branches match; tags, stash and other refs never do.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BranchPatterns {
@@ -30,9 +24,8 @@ impl BranchPatterns {
         self.patterns.is_empty()
     }
 
-    /// True if a pattern matches the branch with display name `name`. A remote-tracking
-    /// branch matches with or without its remote: `origin/release/1.0` matches both
-    /// `release/*` and `origin/release/*`.
+    /// `name` is the display name. A remote-tracking branch matches with or without its
+    /// remote: `origin/release/1.0` matches both `release/*` and `origin/release/*`.
     pub fn matches(&self, kind: RefKind, name: &str) -> bool {
         let without_remote = match kind {
             RefKind::LocalBranch => None,
@@ -45,8 +38,8 @@ impl BranchPatterns {
     }
 }
 
-/// True if `pattern` matches all of `text`. `*` matches any run of characters, slashes
-/// included, and `?` any one character. ASCII letters match regardless of case.
+/// Against all of `text`. `*` matches any run of characters, slashes included, and `?` any one
+/// character. ASCII letters match regardless of case.
 pub fn wildcard_match(pattern: &str, text: &str) -> bool {
     let (mut p, mut t) = (pattern.chars(), text.chars());
     // The rest of the pattern after the latest `*`, and the text from where it would continue

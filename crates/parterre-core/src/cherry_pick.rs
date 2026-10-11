@@ -1,10 +1,6 @@
-//! Cherry-picking commits onto the open worktree's branch: either those chosen in the log,
-//! which need not be adjacent, or, from the graph, every commit of a node the branch lacks.
-//! They go on oldest first, as if applied one at a time, with a plain `git cherry-pick` of an
-//! explicit list: merges, and commits whose change is already there, are left out, since git
-//! would stop on them. Git has no autostash for it, so *Stash changes* stashes around it. A
-//! cherry-pick that stops on conflicts leaves the worktree with an operation in progress,
-//! finished with git for now.
+//! The commits go to a plain `git cherry-pick` as an explicit list, leaving out merges and
+//! commits whose change is already there, which git would stop on. Git has no autostash for
+//! it, so *Stash changes* stashes around it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -12,70 +8,66 @@ use std::path::Path;
 use crate::branches::{Attention, Catalog, Error, Report, Stuck, run};
 use crate::git::Git;
 use crate::log::is_ancestor;
+use crate::merge::{
+    FINISH_OR_ABORT, dirty, kept_stash, last_output, refuse_if_moved, refuse_if_stuck, stash_count,
+    stopped,
+};
 use crate::{Oid, Repo};
 use parterre_util::CancelTree;
 
-/// The message of the stash entry *Stash changes* makes.
-pub const STASH_MESSAGE: &str = "parterre: before cherry-pick";
+const STASH_MESSAGE: &str = "parterre: before cherry-pick";
 
-/// What to cherry-pick.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Picks {
-    /// Every commit of this one the branch lacks, as a rebase would replay them; the graph's.
+    /// Every commit of this one the branch lacks.
     Lacking(Oid),
-    /// These commits, newest first as the log lists them; the log's selection.
+    /// Newest first, as the log lists them.
     Chosen(Vec<Oid>),
 }
 
-/// A cherry-pick the user agreed to. It runs only while the branch is still where it was.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CherryPick {
     pub branch: String,
-    /// Where the branch was.
     pub head: Oid,
-    /// The commits, in the order they go on: the oldest first.
+    /// Oldest first.
     pub commits: Vec<Oid>,
-    /// What the menus named the commits by: a branch, a short hash, or how many.
     pub name: String,
-    /// `-x`: add a "(cherry picked from commit …)" line to each message.
     pub record_origin: bool,
-    /// Stash the uncommitted changes first, and put them back afterwards.
     pub stash: bool,
 }
 
-/// The cherry-pick's own command.
 pub fn command(pick: &CherryPick) -> Vec<String> {
     let mut args = vec!["cherry-pick".to_owned()];
     if pick.record_origin {
         args.push("-x".into());
     }
-    args.extend(pick.commits.iter().map(|c| c.to_hex()));
+    args.extend(pick.commits.iter().map(Oid::to_hex));
     args
 }
 
-/// The commands a cherry-pick runs, in order: with *Stash changes*, the stash around it.
 pub fn commands(pick: &CherryPick) -> Vec<Vec<String>> {
-    let words = |w: &[&str]| w.iter().map(|w| (*w).to_owned()).collect::<Vec<String>>();
     if pick.stash {
-        vec![
-            words(&["stash", "push", "-m", STASH_MESSAGE]),
-            command(pick),
-            words(&["stash", "pop"]),
-        ]
+        vec![stash_push(), command(pick), stash_pop()]
     } else {
         vec![command(pick)]
     }
 }
 
-/// The branch the graph's *Cherry-pick* would put `commit`'s commits on, when there's one to
-/// put them on: the open worktree's branch, when `commit` has commits it lacks. Offered while
-/// the open worktree is stuck too, to be greyed out.
+fn stash_push() -> Vec<String> {
+    ["stash", "push", "-m", STASH_MESSAGE]
+        .map(str::to_owned)
+        .to_vec()
+}
+
+fn stash_pop() -> Vec<String> {
+    ["stash", "pop"].map(str::to_owned).to_vec()
+}
+
+/// Offered while the open worktree is stuck too, to be greyed out.
 pub fn offered<'a>(repo: &Repo, catalog: &'a Catalog, commit: Oid) -> Option<&'a str> {
     offered_chosen(repo, catalog, &[commit])
 }
 
-/// The branch the log's *Cherry-pick* would put `commits` on: the open worktree's branch, when
-/// one of them isn't on it yet.
 pub fn offered_chosen<'a>(repo: &Repo, catalog: &'a Catalog, commits: &[Oid]) -> Option<&'a str> {
     if !catalog.has_working_tree {
         return None;
@@ -89,14 +81,11 @@ pub fn offered_chosen<'a>(repo: &Repo, catalog: &'a Catalog, commits: &[Oid]) ->
         .then_some(branch)
 }
 
-/// Why a listed commit is left out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Skipped {
-    /// The branch has it already.
     OnBranch,
-    /// Its change is already on the branch.
+    /// The same change, by patch id.
     AlreadyThere,
-    /// A merge, which `git cherry-pick` takes only with `-m`.
     Merge,
 }
 
@@ -110,54 +99,44 @@ impl Skipped {
     }
 }
 
-/// What a cherry-pick would do, for its confirmation.
 #[derive(Clone, Debug)]
 pub struct Preview {
     pub branch: String,
     pub head: Oid,
-    /// The commits listed, newest first as the log lists them; they go on from the bottom up.
+    /// Newest first, as the log lists them.
     pub listed: Vec<Oid>,
     skipped: HashMap<Oid, Skipped>,
     dropped: HashSet<Oid>,
-    /// What the graph's menu named the commits by, if it was the graph's.
+    /// What the graph's menu named the commits by.
     pub name: Option<String>,
-    /// Uncommitted changes to tracked files.
     pub dirty: bool,
 }
 
 impl Preview {
-    /// The cherry-pick of `picks` onto the open worktree's branch; `name` is what the graph's
-    /// menu named them by.
     pub fn load(path: &Path, picks: &Picks, name: Option<String>) -> Result<Preview, Error> {
         let catalog = Catalog::load(path)?;
-        if let Some(stuck) = catalog.stuck() {
-            return Err(Error::Invalid(format!("{}.", stuck.reason())));
-        }
+        refuse_if_stuck(&catalog)?;
         let (Some(branch), Some(head)) = (catalog.current.clone(), catalog.head) else {
             return Err(Error::Invalid(
                 "There's no branch checked out to cherry-pick onto.".into(),
             ));
         };
         let git = Git::new(&catalog.root);
-        let h = head.to_hex();
         let oids = |out: &str| -> Vec<Oid> { out.lines().filter_map(Oid::from_hex).collect() };
-        let hexes = |commits: &[Oid]| -> String {
-            commits
-                .iter()
-                .map(|c| format!("{}\n", c.to_hex()))
-                .collect()
-        };
         let listed = match picks {
-            Picks::Lacking(x) => {
-                oids(&git.run(&["rev-list", "--topo-order", &x.to_hex(), &format!("^{h}")])?)
-            }
+            Picks::Lacking(tip) => oids(&git.run(&[
+                "rev-list",
+                "--topo-order",
+                &tip.to_hex(),
+                &format!("^{head}"),
+            ])?),
             Picks::Chosen(commits) => commits.clone(),
         };
         let mut skipped = HashMap::new();
         // On the branch: not among what the listed commits reach and it doesn't.
         let not_on_branch: HashSet<Oid> = oids(&git.run_with_input(
             &["rev-list", "--stdin"],
-            format!("{}^{h}\n", hexes(&listed)),
+            format!("{}^{head}\n", hex_lines(&listed)),
         )?)
         .into_iter()
         .collect();
@@ -168,7 +147,7 @@ impl Preview {
         }
         let parents = git.run_with_input(
             &["rev-list", "--no-walk=unsorted", "--parents", "--stdin"],
-            hexes(&listed),
+            hex_lines(&listed),
         )?;
         for line in parents.lines() {
             let mut words = line.split(' ');
@@ -193,25 +172,20 @@ impl Preview {
             skipped,
             dropped: HashSet::new(),
             name,
-            dirty: !git
-                .run(&["status", "--porcelain", "--untracked-files=no"])?
-                .trim()
-                .is_empty(),
+            dirty: dirty(&catalog.root)?,
         })
     }
 
-    /// Why `commit` is left out, if it is.
     pub fn skipped(&self, commit: Oid) -> Option<Skipped> {
         self.skipped.get(&commit).copied()
     }
 
-    /// Whether `commit` is picked: `None` when it's left out anyway.
+    /// `None` when it's left out anyway.
     pub fn picked(&self, commit: Oid) -> Option<bool> {
         (self.listed.contains(&commit) && self.skipped(commit).is_none())
             .then(|| !self.dropped.contains(&commit))
     }
 
-    /// Picks `commit`, or drops it, if it isn't left out anyway.
     pub fn set_picked(&mut self, commit: Oid, picked: bool) {
         if self.picked(commit).is_none() {
             return;
@@ -223,7 +197,7 @@ impl Preview {
         }
     }
 
-    /// The commits picked, in the order they go on: the oldest first.
+    /// Oldest first.
     pub fn commits(&self) -> Vec<Oid> {
         self.listed
             .iter()
@@ -233,19 +207,17 @@ impl Preview {
             .collect()
     }
 
-    /// Why the cherry-pick can't start.
     pub fn blocked(&self) -> Option<&'static str> {
         self.commits()
             .is_empty()
             .then_some("Pick at least one commit.")
     }
 
-    /// The cherry-pick, with `-x` or not, and the changes stashed or not.
     pub fn cherry_pick(&self, record_origin: bool, stash: bool) -> CherryPick {
         let commits = self.commits();
         let name = match (&self.name, commits.as_slice()) {
             (Some(name), _) => name.clone(),
-            (None, [one]) => one.to_hex()[..7].to_owned(),
+            (None, [one]) => one.short(7),
             (None, many) => format!("{} commits", many.len()),
         };
         CherryPick {
@@ -257,6 +229,10 @@ impl Preview {
             stash: stash && self.dirty,
         }
     }
+}
+
+fn hex_lines(commits: &[Oid]) -> String {
+    commits.iter().map(|c| format!("{c}\n")).collect()
 }
 
 /// Which of `commits` make a change the branch at `head` already has, by git's patch ids:
@@ -279,15 +255,11 @@ fn already_there(git: &Git, head: Oid, commits: &[Oid]) -> Result<Vec<Oid>, Erro
         all.extend_from_slice(args);
         git.run_with_input(&all, input)
     };
-    let theirs: String = commits
-        .iter()
-        .map(|c| format!("{}\n", c.to_hex()))
-        .collect();
-    let mut ours = format!("{}\n", head.to_hex());
+    let mut ours = format!("{head}\n");
     for c in commits {
-        ours.push_str(&format!("^{}\n", c.to_hex()));
+        ours.push_str(&format!("^{c}\n"));
     }
-    let mut text = patches(&["--no-walk=unsorted"], theirs)?;
+    let mut text = patches(&["--no-walk=unsorted"], hex_lines(commits))?;
     let branch = patches(&[], ours)?;
     if branch.trim().is_empty() {
         return Ok(Vec::new());
@@ -320,50 +292,34 @@ fn already_there(git: &Git, head: Oid, commits: &[Oid]) -> Result<Vec<Oid>, Erro
         .collect())
 }
 
-fn stash_count(git: &Git) -> usize {
-    git.run(&["stash", "list"])
-        .map(|out| out.lines().count())
-        .unwrap_or(0)
-}
-
-/// Runs the cherry-pick if the branch is still where it was. A stop on conflicts, or changes
-/// the stash couldn't put back, come back as [`Report::attention`].
 pub(crate) fn execute(
     catalog: &Catalog,
     pick: &CherryPick,
     cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<(), Error> {
-    if catalog.current.as_deref() != Some(pick.branch.as_str()) || catalog.head != Some(pick.head) {
-        return Err(Error::Invalid(format!(
-            "Branch {} moved, or is no longer checked out here. Reload and try again.",
-            pick.branch
-        )));
-    }
-    if let Some(stuck) = catalog.stuck() {
-        return Err(Error::Invalid(format!("{}.", stuck.reason())));
-    }
+    refuse_if_moved(catalog, &pick.branch, pick.head)?;
+    refuse_if_stuck(catalog)?;
     if pick.commits.is_empty() {
         return Err(Error::Invalid("There's nothing to cherry-pick.".into()));
     }
     let git = Git::new(&catalog.root);
-    let mut steps = commands(pick).into_iter();
     // Only a stash entry made here is put back: with nothing to stash, git makes none.
     let stashed = if pick.stash {
         let before = stash_count(&git);
-        if !run(&git, steps.next().unwrap(), cancel, report)? {
-            return Err(Error::Failed(report.steps.last().unwrap().output.clone()));
+        if !run(&git, stash_push(), cancel, report)? {
+            return Err(Error::Failed(last_output(report)));
         }
         stash_count(&git) > before
     } else {
         false
     };
-    let ok = run(&git, steps.next().unwrap(), cancel, report)?;
-    let picked = report.steps.last().unwrap().output.clone();
+    let ok = run(&git, command(pick), cancel, report)?;
+    let pick_output = last_output(report);
     let after = Catalog::load(&catalog.root)?;
     if let Some(Stuck::InProgress(_)) = after.stuck() {
         let n = after.conflicted.len();
-        let mut message = "Finish or abort it with git, or go to another worktree.".to_owned();
+        let mut message = FINISH_OR_ABORT.to_owned();
         if stashed {
             message.push_str(
                 " Your changes are kept in stash@{0}: put them back with git stash pop once \
@@ -374,46 +330,26 @@ pub(crate) fn execute(
             title: if n == 0 {
                 "Cherry-pick stopped".into()
             } else {
-                format!("Cherry-pick stopped on conflicts in {}", plural(n, "file"))
+                stopped("Cherry-pick", n)
             },
             message,
         });
         return Ok(());
     }
-    let popped = if stashed {
-        run(&git, steps.next().unwrap(), cancel, report)?
-    } else {
-        true
-    };
+    let popped = !stashed || run(&git, stash_pop(), cancel, report)?;
     if !ok {
         return Err(Error::Failed(if popped {
-            picked
+            pick_output
         } else {
-            format!("{picked}\nYour changes are kept in a stash entry: git stash pop.")
+            format!("{pick_output}\nYour changes are kept in a stash entry: git stash pop.")
         }));
     }
     if !popped {
-        // Git applied what it could, with conflict markers, and kept the stash entry too.
         let after = Catalog::load(&catalog.root)?;
-        let message = match after.conflicted.len() {
-            0 => "Git couldn't put your changes back, and kept them in a stash entry. \
-                  Recover them with git stash pop."
-                .to_owned(),
-            n => format!(
-                "Putting your changes back conflicted in {}. Resolve {} with git; your \
-                 changes are also kept in a stash entry until you drop it.",
-                plural(n, "file"),
-                if n == 1 { "it" } else { "them" }
-            ),
-        };
-        report.attention = Some(Attention {
-            title: format!("Cherry-picked {} onto {}", pick.name, pick.branch),
-            message,
-        });
+        report.attention = Some(kept_stash(
+            format!("Cherry-picked {} onto {}", pick.name, pick.branch),
+            after.conflicted.len(),
+        ));
     }
     Ok(())
-}
-
-fn plural(n: usize, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
 }

@@ -1,21 +1,17 @@
-//! Controls of the toolbar, its popovers and the settings window, drawn to match the menus
-//! (`menu.rs`): icon buttons, segmented buttons and switches. The icons are
-//! [`parterre_core::glyphs`].
+use std::sync::Arc;
 
 use eframe::egui::{
-    self, Color32, CornerRadius, Id, Painter, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui,
-    Vec2, vec2,
+    self, Color32, CornerRadius, Galley, Id, Painter, Rect, Response, Sense, Shape, Stroke,
+    StrokeKind, Ui, Vec2, vec2,
 };
 use parterre_core::glyphs::{self, Glyph, Part};
 
-/// Size of an icon in a button.
-pub const ICON: f32 = 18.0;
-/// Side of an icon button.
-pub const BUTTON: f32 = 30.0;
+const ICON_SIZE: f32 = 18.0;
+pub const BUTTON_SIZE: f32 = 30.0;
 
 /// Colours beyond egui's visuals.
 pub struct Tones {
-    /// Background and icon of a toggle that is on.
+    /// Background and foreground of a toggle that is on.
     pub on_bg: Color32,
     pub on_fg: Color32,
     pub hover: Color32,
@@ -34,7 +30,6 @@ pub fn tones(ui: &Ui) -> Tones {
     tones_of(ui.visuals().dark_mode)
 }
 
-/// [`tones`] of the dark or the light theme.
 pub fn tones_of(dark: bool) -> Tones {
     if dark {
         Tones {
@@ -67,19 +62,14 @@ pub fn tones_of(dark: bool) -> Tones {
 
 /// Paints `glyph` scaled into `rect`.
 pub fn paint_glyph(painter: &Painter, rect: Rect, glyph: Glyph, color: Color32) {
-    paint_glyph_weighted(painter, rect, glyph, color, 1.0);
-}
-
-/// [`paint_glyph`] with lines `weight` times as thick.
-fn paint_glyph_weighted(painter: &Painter, rect: Rect, glyph: Glyph, color: Color32, weight: f32) {
+    const CURVE_TOLERANCE: f32 = 0.2;
     let scale = rect.width() / glyphs::SIZE;
     let at = |p: [f32; 2]| rect.min + vec2(p[0], p[1]) * scale;
-    let stroke = Stroke::new(glyphs::STROKE * scale * weight, color);
+    let stroke = Stroke::new(glyphs::STROKE * scale, color);
     for part in glyph {
         match *part {
             Part::Path(d) => {
-                // Within a fifth of a pixel of the true curve.
-                for line in glyphs::flatten(d, 0.2 / scale).unwrap_or_default() {
+                for line in glyphs::flatten(d, CURVE_TOLERANCE / scale).unwrap_or_default() {
                     let points: Vec<_> = line.points.into_iter().map(at).collect();
                     painter.add(if line.closed {
                         Shape::closed_line(points, stroke)
@@ -133,7 +123,7 @@ fn paint_background(ui: &Ui, rect: Rect, response: &Response, on: bool, open: bo
     ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
 }
 
-fn icon_color(ui: &Ui, on: bool) -> Color32 {
+fn foreground(ui: &Ui, on: bool) -> Color32 {
     if !ui.is_enabled() {
         ui.visuals().weak_text_color()
     } else if on {
@@ -169,17 +159,16 @@ pub fn paint_ribbon(painter: &Painter, rect: Rect, fill: Color32, outline: Strok
     painter.add(egui::Shape::line(outline_points, outline));
 }
 
-/// A square button showing `glyph`, tinted while `on`.
+/// Tinted while `on`.
 pub fn icon_button(ui: &mut Ui, glyph: Glyph, on: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(BUTTON), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(BUTTON_SIZE), Sense::click());
     paint_background(ui, rect, &response, on, false);
-    let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
-    paint_glyph(ui.painter(), icon, glyph, icon_color(ui, on));
+    let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON_SIZE));
+    paint_glyph(ui.painter(), icon, glyph, foreground(ui, on));
     response
 }
 
-/// The diff and blame windows' syntax colour toggle (#209): the palette, tinted while code
-/// is coloured by its language. One setting for both windows.
+/// The diff and blame windows' toggle of syntax colouring.
 pub fn syntax_button(ui: &mut Ui, on: &mut bool) {
     let (title, body) = if *on {
         (
@@ -200,12 +189,11 @@ pub fn mini_button(ui: &mut Ui, glyph: Glyph) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
     paint_background(ui, rect, &response, false, false);
     let icon = Rect::from_center_size(rect.center(), Vec2::splat(14.0));
-    paint_glyph(ui.painter(), icon, glyph, icon_color(ui, false));
+    paint_glyph(ui.painter(), icon, glyph, foreground(ui, false));
     response
 }
 
-/// A small copy button, which shows a check mark in `done` for a moment after a click
-/// (`copied`). The caller's tooltip says what gets copied.
+/// Shows a check mark in `done` instead of its icon while `copied`.
 pub fn copy_button(ui: &mut Ui, copied: bool, done: Color32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
     paint_background(ui, rect, &response, false, false);
@@ -219,19 +207,17 @@ pub fn copy_button(ui: &mut Ui, copied: bool, done: Color32) -> Response {
     response
 }
 
-/// A text button on a light fill, e.g. "Reset" in the zoom popover.
-pub fn text_button(ui: &mut Ui, text: &str) -> Response {
-    let color = if ui.is_enabled() {
-        ui.visuals().text_color()
-    } else {
-        ui.visuals().weak_text_color()
-    };
-    let galley = ui.painter().layout_no_wrap(
-        text.to_owned(),
-        egui::TextStyle::Button.resolve(ui.style()),
-        color,
-    );
-    let size = vec2(galley.size().x + 24.0, 28.0);
+fn button_galley(ui: &Ui, text: &str, color: Color32) -> Arc<Galley> {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    ui.painter().layout_no_wrap(text.to_owned(), font, color)
+}
+
+const TEXT_BUTTON_HEIGHT: f32 = 28.0;
+const TEXT_BUTTON_PADDING: f32 = 12.0;
+
+/// A button for text on a light fill, `width` wide.
+fn text_button_frame(ui: &mut Ui, width: f32) -> (Rect, Response) {
+    let size = vec2(width + 2.0 * TEXT_BUTTON_PADDING, TEXT_BUTTON_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let t = tones(ui);
     let fill = if response.is_pointer_button_down_on() || response.hovered() {
@@ -240,6 +226,14 @@ pub fn text_button(ui: &mut Ui, text: &str) -> Response {
         t.seg_bg
     };
     ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
+    (rect, response)
+}
+
+/// A text button on a light fill, e.g. "Reset" in the zoom popover.
+pub fn text_button(ui: &mut Ui, text: &str) -> Response {
+    let color = foreground(ui, false);
+    let galley = button_galley(ui, text, color);
+    let (rect, response) = text_button_frame(ui, galley.size().x);
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, color);
     response
@@ -247,45 +241,29 @@ pub fn text_button(ui: &mut Ui, text: &str) -> Response {
 
 /// A [`text_button`] with `glyph` in `color` before the text.
 pub fn icon_text_button(ui: &mut Ui, glyph: Glyph, color: Color32, text: &str) -> Response {
-    let (text_color, color) = if ui.is_enabled() {
-        (ui.visuals().text_color(), color)
-    } else {
-        let weak = ui.visuals().weak_text_color();
-        (weak, weak)
-    };
-    let galley = ui.painter().layout_no_wrap(
-        text.to_owned(),
-        egui::TextStyle::Button.resolve(ui.style()),
-        text_color,
+    const GLYPH_SIZE: f32 = 16.0;
+    const GLYPH_GAP: f32 = 6.0;
+    let text_color = foreground(ui, false);
+    let color = if ui.is_enabled() { color } else { text_color };
+    let galley = button_galley(ui, text, text_color);
+    let (rect, response) = text_button_frame(ui, GLYPH_SIZE + GLYPH_GAP + galley.size().x);
+    let left = rect.left() + TEXT_BUTTON_PADDING;
+    let icon = Rect::from_min_size(
+        egui::pos2(left, rect.center().y - GLYPH_SIZE / 2.0),
+        Vec2::splat(GLYPH_SIZE),
     );
-    let icon = 16.0;
-    let size = vec2(galley.size().x + icon + 6.0 + 24.0, 28.0);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let t = tones(ui);
-    let fill = if response.is_pointer_button_down_on() || response.hovered() {
-        t.press
-    } else {
-        t.seg_bg
-    };
-    ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
-    let left = rect.left() + 12.0;
-    let icon_rect = Rect::from_min_size(
-        egui::pos2(left, rect.center().y - icon / 2.0),
-        Vec2::splat(icon),
+    paint_glyph(ui.painter(), icon, glyph, color);
+    let at = egui::pos2(
+        left + GLYPH_SIZE + GLYPH_GAP,
+        rect.center().y - galley.size().y / 2.0,
     );
-    paint_glyph(ui.painter(), icon_rect, glyph, color);
-    let at = egui::pos2(left + icon + 6.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(at, galley, text_color);
     response
 }
 
-/// A dialog's main button: white text on the accent colour, at least `min_width` wide.
+/// White text on the accent colour, at least `min_width` wide.
 pub fn primary_button(ui: &mut Ui, text: &str, min_width: f32) -> Response {
-    let galley = ui.painter().layout_no_wrap(
-        text.to_owned(),
-        egui::TextStyle::Button.resolve(ui.style()),
-        Color32::WHITE,
-    );
+    let galley = button_galley(ui, text, Color32::WHITE);
     let size = vec2((galley.size().x + 32.0).max(min_width), 30.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let accent = tones(ui).accent;
@@ -307,15 +285,18 @@ pub fn primary_button(ui: &mut Ui, text: &str, min_width: f32) -> Response {
 /// pressed while it is open. `glyph` of `None` makes it a narrow chevron.
 pub fn popover_button(ui: &mut Ui, id: Id, glyph: Option<Glyph>, on: bool) -> Response {
     let size = if glyph.is_some() {
-        Vec2::splat(BUTTON)
+        Vec2::splat(BUTTON_SIZE)
     } else {
-        vec2(20.0, BUTTON)
+        vec2(20.0, BUTTON_SIZE)
     };
-    let (rect, response) = popover_button_area(ui, id, size, on);
-    let color = icon_color(ui, on);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let response = ui.interact(rect, id, Sense::click());
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+    paint_background(ui, rect, &response, on, open);
+    let color = foreground(ui, on);
     match glyph {
         Some(glyph) => {
-            let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
+            let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON_SIZE));
             paint_glyph(ui.painter(), icon, glyph, color);
         }
         None => {
@@ -331,15 +312,6 @@ pub fn popover_button(ui: &mut Ui, id: Id, glyph: Option<Glyph>, on: bool) -> Re
     response
 }
 
-/// The room and background of a [`popover_button`].
-fn popover_button_area(ui: &mut Ui, id: Id, size: Vec2, on: bool) -> (Rect, Response) {
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    let response = ui.interact(rect, id, Sense::click());
-    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
-    paint_background(ui, rect, &response, on, open);
-    (rect, response)
-}
-
 /// Icon segments of which one is selected, e.g. the drag modes. `tip` adds each segment's
 /// tooltip. Returns the value of the segment clicked, if any.
 pub fn segmented<T: PartialEq + Copy>(
@@ -348,12 +320,12 @@ pub fn segmented<T: PartialEq + Copy>(
     items: &[(T, Glyph)],
     tip: impl Fn(T, Response) -> Response,
 ) -> Option<T> {
-    let widths = vec![BUTTON; items.len()];
+    let widths = vec![BUTTON_SIZE; items.len()];
     segments(ui, &widths, |ui, i, rect, response| {
         let (value, glyph) = items[i];
         paint_segment(ui, rect, &response, value == current);
-        let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
-        paint_glyph(ui.painter(), icon, glyph, icon_color(ui, false));
+        let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON_SIZE));
+        paint_glyph(ui.painter(), icon, glyph, foreground(ui, false));
         tip(value, response).clicked().then_some(value)
     })
 }
@@ -364,9 +336,9 @@ pub fn text_segmented<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, items: 
     let font = egui::TextStyle::Button.resolve(ui.style());
     let galleys: Vec<_> = items
         .iter()
-        .map(|(_, text)| {
+        .map(|&(_, text)| {
             ui.painter()
-                .layout_no_wrap(text.to_string(), font.clone(), color)
+                .layout_no_wrap(text.to_owned(), font.clone(), color)
         })
         .collect();
     let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + 18.0).collect();
@@ -391,23 +363,23 @@ fn segments<T>(
     widths: &[f32],
     mut segment: impl FnMut(&mut Ui, usize, Rect, Response) -> Option<T>,
 ) -> Option<T> {
-    const PAD: f32 = 2.0;
-    let total = widths.iter().sum::<f32>() + PAD * (widths.len() + 1) as f32;
-    let (group, response) = ui.allocate_exact_size(vec2(total, BUTTON), Sense::hover());
+    const INSET: f32 = 2.0;
+    let total = widths.iter().sum::<f32>() + INSET * (widths.len() + 1) as f32;
+    let (group, response) = ui.allocate_exact_size(vec2(total, BUTTON_SIZE), Sense::hover());
     ui.painter()
         .rect_filled(group, CornerRadius::same(9), tones(ui).seg_bg);
-    let mut x = group.left() + PAD;
+    let mut x = group.left() + INSET;
     let mut chosen = None;
     for (i, &w) in widths.iter().enumerate() {
         let rect = Rect::from_min_size(
-            egui::pos2(x, group.top() + PAD),
-            vec2(w, BUTTON - 2.0 * PAD),
+            egui::pos2(x, group.top() + INSET),
+            vec2(w, BUTTON_SIZE - 2.0 * INSET),
         );
         let r = ui.interact(rect, response.id.with(i), Sense::click());
         if let Some(value) = segment(ui, i, rect, r) {
             chosen = Some(value);
         }
-        x += w + PAD;
+        x += w + INSET;
     }
     chosen
 }
@@ -430,7 +402,6 @@ fn paint_segment(ui: &Ui, rect: Rect, response: &Response, selected: bool) {
     }
 }
 
-/// An on/off switch.
 pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     let (rect, mut response) = ui.allocate_exact_size(vec2(36.0, 20.0), Sense::click());
     if response.clicked() {
@@ -439,8 +410,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     }
     let t = tones(ui);
     let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
-    let off_fill = t.seg_bg;
-    let fill = lerp_color(off_fill, t.accent, how_on);
+    let fill = t.seg_bg.lerp_to_gamma(t.accent, how_on);
     let fill = if ui.is_enabled() {
         fill
     } else {
@@ -461,16 +431,6 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     painter.circle_filled(knob + vec2(0.0, 0.5), 8.0, Color32::from_black_alpha(60));
     painter.circle_filled(knob, 8.0, Color32::WHITE);
     response
-}
-
-fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
-    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgba_premultiplied(
-        mix(a.r(), b.r()),
-        mix(a.g(), b.g()),
-        mix(a.b(), b.b()),
-        mix(a.a(), b.a()),
-    )
 }
 
 /// A single-line text field in a rounded frame that shows on any background.
@@ -503,16 +463,7 @@ pub fn folder_field(
     const BROWSE: &str = "Browse…";
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        let button = ui
-            .painter()
-            .layout_no_wrap(
-                BROWSE.to_owned(),
-                egui::TextStyle::Button.resolve(ui.style()),
-                Color32::WHITE,
-            )
-            .size()
-            .x
-            + 24.0;
+        let button = button_galley(ui, BROWSE, Color32::WHITE).size().x + 2.0 * TEXT_BUTTON_PADDING;
         // The field's frame line adds a point on each side.
         let field = text_field(ui, text, hint, ui.available_width() - button - 4.0 - 2.0);
         let browse = ui
@@ -528,11 +479,10 @@ pub fn folder_field(
 pub struct Find<'a> {
     pub id: Id,
     pub width: f32,
-    /// Shown while the field is empty.
     pub hint: &'a str,
     /// While there is a query: how many places it was found at, e.g. "3 of 12".
     pub count: &'a str,
-    /// The shortcuts the tooltips of the previous, next and clear buttons name.
+    /// The shortcuts of the previous, next and clear buttons, for their tooltips.
     pub keys: &'a [String; 3],
     /// Take the focus in this frame; `select` also selects the query, so typing replaces it.
     pub focus: bool,
@@ -540,20 +490,18 @@ pub struct Find<'a> {
 }
 
 /// What was done in a find field this frame.
+#[derive(Default)]
 pub struct Found {
-    /// The query was edited.
     pub changed: bool,
-    /// Enter or the button asked for the next place; Shift+Enter or the button for the
-    /// previous one.
+    /// By Enter or the button; `previous` by Shift+Enter or the button.
     pub next: bool,
     pub previous: bool,
-    /// The clear button was clicked.
     pub cleared: bool,
 }
 
-/// A find field for `query`: a magnifier, the query (a hint and Ctrl+F or ⌘F while empty, if there
-/// is room), and while there is one, the count and buttons for the previous and next place and
-/// for clearing. Enter keeps the focus. A paste leaves out the line break it ends with.
+/// A find field for `query`: the query (a hint and the find shortcut while empty, if there is
+/// room), and while there is one, the count and buttons for the previous and next place and for
+/// clearing. Enter keeps the focus.
 pub fn find_field(ui: &mut Ui, find: &Find, query: &mut String) -> Found {
     let focused = ui.memory(|m| m.has_focus(find.id));
     let t = tones(ui);
@@ -562,12 +510,7 @@ pub fn find_field(ui: &mut Ui, find: &Find, query: &mut String) -> Found {
     } else {
         Stroke::new(1.0, t.field_line)
     };
-    let mut found = Found {
-        changed: false,
-        next: false,
-        previous: false,
-        cleared: false,
-    };
+    let mut found = Found::default();
     egui::Frame::new()
         .fill(t.field)
         .stroke(stroke)
@@ -597,10 +540,10 @@ pub fn find_field(ui: &mut Ui, find: &Find, query: &mut String) -> Found {
                 });
             }
             let searching = !query.is_empty();
-            let hint = find.width > 220.0;
+            let has_room_for_shortcut = find.width > 220.0;
             let tail = if searching {
                 128.0
-            } else if hint {
+            } else if has_room_for_shortcut {
                 52.0
             } else {
                 0.0
@@ -636,7 +579,7 @@ pub fn find_field(ui: &mut Ui, find: &Find, query: &mut String) -> Found {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if !searching {
-                    if !hint {
+                    if !has_room_for_shortcut {
                         return;
                     }
                     egui::Frame::new()

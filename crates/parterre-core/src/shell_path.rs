@@ -1,11 +1,9 @@
-//! The `PATH` the programs parterre starts get (#326).
-//!
 //! Started from the Dock, Finder or Spotlight, a macOS app has launchd's `PATH`,
 //! `/usr/bin:/bin:/usr/sbin:/sbin`, not the one the user's shell sets up, so `gh`, git hooks,
-//! merge tools and a newer `git` from Homebrew and the like would not be found. Then, as VS Code
-//! and Zed do, the user's shell is asked for its `PATH` once, as a login and interactive shell
-//! so that it reads what a terminal's does, and git and `gh` get that. Started from a terminal,
-//! or on another system, parterre's own `PATH` is passed on as it is.
+//! merge tools and a newer `git` from Homebrew and the like would not be found (#326). Then, as
+//! VS Code and Zed do, the user's shell is asked for its `PATH` once, as a login and interactive
+//! shell so that it reads what a terminal's does. Started from a terminal, or on another
+//! system, parterre's own `PATH` is passed on as it is.
 
 // Only macOS asks a shell; asking is tested on every Unix.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -19,15 +17,15 @@ use std::sync::OnceLock;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
-/// How long the shell may take: a profile that hangs leaves launchd's `PATH`.
+/// A profile that hangs leaves launchd's `PATH`.
 #[cfg(unix)]
 const TIMEOUT: Duration = Duration::from_secs(5);
 /// Printed around the `PATH`, so that whatever the profile prints is left out.
 #[cfg(unix)]
 const MARKER: &str = "_PARTERRE_PATH_";
 
-/// Asks the shell on a thread of its own, if parterre was started outside a terminal, so that
-/// the answer is in by the time the first command needs it.
+/// Asks the shell on a thread of its own, so that its answer is in by the time the first
+/// command needs it.
 pub fn start() {
     #[cfg(target_os = "macos")]
     if started_by_launchd() {
@@ -35,8 +33,8 @@ pub fn start() {
     }
 }
 
-/// Gives `cmd` the shell's `PATH`, if parterre was started outside a terminal: waits for the
-/// shell's answer, unless it is in. A program named without a folder is looked for in it too.
+/// Gives `cmd` the shell's `PATH`, waiting for its answer unless it is in. A program named
+/// without a folder is looked for in that `PATH` too.
 pub fn apply(cmd: &mut Command) -> &mut Command {
     if let Some(path) = shell_path() {
         cmd.env("PATH", path);
@@ -44,7 +42,7 @@ pub fn apply(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// The `PATH` that programs parterre starts get: the shell's, or else parterre's own.
+/// The shell's, or else parterre's own.
 pub fn path() -> Option<OsString> {
     shell_path().cloned().or_else(|| std::env::var_os("PATH"))
 }
@@ -69,14 +67,12 @@ fn shell_path() -> Option<&'static OsString> {
     None
 }
 
-/// From the Dock, Finder, Spotlight or `open`.
+/// Started from the Dock, Finder, Spotlight or `open`.
 #[cfg(target_os = "macos")]
 fn started_by_launchd() -> bool {
     std::os::unix::process::parent_id() == 1
 }
 
-/// The `PATH` that `shell`, run as a login and interactive shell, has; `None` if it fails or
-/// takes longer than `timeout`.
 #[cfg(unix)]
 fn ask(mut shell: Command, timeout: Duration) -> Option<OsString> {
     use std::io::Read;
@@ -111,7 +107,6 @@ fn ask(mut shell: Command, timeout: Duration) -> Option<OsString> {
     path.filter(|path| !path.is_empty()).map(OsString::from_vec)
 }
 
-/// What `out` holds between the two markers, without the line breaks around it.
 #[cfg(unix)]
 fn between_markers(out: &[u8]) -> Option<&[u8]> {
     let marker = MARKER.as_bytes();
@@ -121,8 +116,7 @@ fn between_markers(out: &[u8]) -> Option<&[u8]> {
     Some(rest[..find(rest)?].trim_ascii())
 }
 
-/// Waits for the shell, which has answered or run out of time, on a thread of its own, and
-/// kills it if it is still there at `deadline`.
+/// Kills the shell if it is still there at `deadline`.
 #[cfg(unix)]
 fn reap(mut child: Child, deadline: Instant) {
     std::thread::spawn(move || {

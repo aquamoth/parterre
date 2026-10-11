@@ -1,18 +1,12 @@
-//! Crash reports (#263): whether panics are sent to PostHog, and the home folder scrubbed from
-//! what is sent. No network here, so all of it is tested without one; the sending is in
-//! `posthog.rs`.
-
 use crate::{Build, Choices};
 
-/// Whether panics are sent as crash reports: a release build with `send`, the first-run prompt
-/// answered (`choices`) with crash reports ticked, and `DO_NOT_TRACK` not set. Usage statistics
-/// don't matter: crash reports are a switch of their own (#225).
+/// `choices` is `None` while the first-run prompt is unanswered.
 pub fn sends_crash_reports(build: Build, choices: Option<Choices>, do_not_track: bool) -> bool {
     build.send && !build.debug && !do_not_track && choices.is_some_and(|c| c.crash_reports)
 }
 
-/// The user's home folders as paths name them: the home folder, and where it really is when a
-/// symbolic link leads there. In a snap, the real one, not the snap's own.
+/// The home folder, and where it really is if a symbolic link leads there. In a snap, the real
+/// one, not the snap's own.
 #[cfg_attr(not(feature = "send"), allow(dead_code))]
 pub(crate) fn homes() -> Vec<String> {
     let home = std::env::var_os("SNAP_REAL_HOME")
@@ -35,10 +29,10 @@ pub(crate) fn homes() -> Vec<String> {
     homes
 }
 
-/// `text` with every path into one of the `homes` (or the home folder itself) starting with
-/// `~` instead: `/home/x/repo` becomes `~/repo`. Separators may be either slash, or doubled as
-/// in a debug-printed Windows path (`C:\\Users\\x`), and letters may differ in case, as they
-/// may on Windows and macOS. `/home/xavier` is not in `/home/x`.
+/// `text` with each of the `homes` starting a path replaced by `~`: `/home/x/repo` becomes
+/// `~/repo`. Separators may be either slash, or doubled as in a debug-printed Windows path
+/// (`C:\\Users\\x`), and letters may differ in case, as they may on Windows and macOS.
+/// `/home/xavier` is not in `/home/x`.
 #[cfg_attr(not(feature = "send"), allow(dead_code))]
 pub(crate) fn scrub(text: &str, homes: &[String]) -> String {
     let homes: Vec<Home> = homes.iter().filter_map(|h| Home::parse(h)).collect();
@@ -46,9 +40,9 @@ pub(crate) fn scrub(text: &str, homes: &[String]) -> String {
     let mut previous = None;
     let mut rest = text;
     while let Some(c) = rest.chars().next() {
-        let at_start = !previous.is_some_and(is_name);
+        let at_start = !previous.is_some_and(is_name_char);
         let found = at_start
-            .then(|| homes.iter().filter_map(|h| h.prefix_of(rest)).max())
+            .then(|| homes.iter().filter_map(|h| h.prefix_len(rest)).max())
             .flatten();
         if let Some(length) = found {
             scrubbed.push('~');
@@ -63,7 +57,6 @@ pub(crate) fn scrub(text: &str, homes: &[String]) -> String {
     scrubbed
 }
 
-/// A home folder, as the folder names along its path.
 struct Home<'a> {
     /// It starts at a separator: `/home/x`, or `\\server\share\x`.
     rooted: bool,
@@ -81,9 +74,8 @@ impl<'a> Home<'a> {
         })
     }
 
-    /// How long the home folder is at the start of `text`, if it's there, ending where the
-    /// folder's name ends.
-    fn prefix_of(&self, text: &str) -> Option<usize> {
+    /// How long the home folder is at the start of `text`, if it is there.
+    fn prefix_len(&self, text: &str) -> Option<usize> {
         let mut rest = text;
         for (i, name) in self.names.iter().enumerate() {
             if i > 0 || self.rooted {
@@ -99,7 +91,7 @@ impl<'a> Home<'a> {
             }
             rest = &rest[name.len()..];
         }
-        if rest.chars().next().is_some_and(is_name) {
+        if rest.chars().next().is_some_and(is_name_char) {
             return None;
         }
         Some(text.len() - rest.len())
@@ -110,9 +102,8 @@ fn is_separator(c: char) -> bool {
     c == '/' || c == '\\'
 }
 
-/// A character that can go on a folder's name, so that a match ending before it would end in
-/// the middle of one.
-fn is_name(c: char) -> bool {
+/// A match ending before one would end in the middle of a folder's name.
+fn is_name_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '-' | '_' | '.')
 }
 

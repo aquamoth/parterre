@@ -1,23 +1,20 @@
-//! Whether a release is newer than this build, and where this build's channel gets it. No
-//! network here, so all of it is tested without one.
-
 use std::cmp::Ordering;
 
 use crate::Channel;
 
-/// Where the releases are.
-const REPOSITORY: &str = "https://github.com/aquamoth/parterre";
+const REPOSITORY_URL: &str = "https://github.com/aquamoth/parterre";
 
-/// What *Download* copies on the cargo channel.
+/// The Rust target triple the release files are named after.
+const TARGET: &str = env!("PARTERRE_TARGET");
+
 pub const CARGO_INSTALL: &str = "cargo install --locked parterre";
 
 /// A version as parterre's tags and its `--version` write it: `v0.6.0`, `0.6.0-rc1`,
 /// `0.6.0 (a1b2c3d)` or `0.6.1-dev.3+a1b2c3d.dirty`. The commit and build metadata are left
-/// out; they don't order versions.
+/// out: they don't order versions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Version {
     numbers: [u64; 3],
-    /// The pre-release's dot-separated identifiers: none for a release.
     pre: Vec<String>,
 }
 
@@ -30,27 +27,23 @@ impl Version {
             Some((numbers, pre)) => (numbers, Some(pre)),
             None => (text, None),
         };
-        let mut parts = numbers.split('.').map(|n| {
-            n.bytes()
-                .all(|b| b.is_ascii_digit())
-                .then(|| n.parse().ok())
-                .flatten()
-        });
+        let mut parts = numbers
+            .split('.')
+            .map(|n| is_digits(n).then(|| n.parse().ok()).flatten());
         let numbers = [parts.next()??, parts.next()??, parts.next()??];
         if parts.next().is_some() {
             return None;
         }
         let pre: Vec<String> =
             pre.map_or_else(Vec::new, |p| p.split('.').map(str::to_owned).collect());
-        let identifier = |id: &String| {
+        let is_identifier = |id: &String| {
             !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
         };
         pre.iter()
-            .all(identifier)
+            .all(is_identifier)
             .then_some(Version { numbers, pre })
     }
 
-    /// A release candidate, or a dev build: it hears of pre-releases too.
     pub fn is_prerelease(&self) -> bool {
         !self.pre.is_empty()
     }
@@ -96,35 +89,30 @@ impl PartialOrd for Version {
 
 /// Numbers before words, as in semver; words by their runs of letters and of digits.
 fn identifier_order(a: &str, b: &str) -> Ordering {
-    let number = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
-    match (number(a), number(b)) {
+    match (is_digits(a), is_digits(b)) {
         (true, true) => runs_order(a, b),
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
-        (false, false) => {
-            let (mut a, mut b) = (runs(a), runs(b));
-            loop {
-                match (a.next(), b.next()) {
-                    (Some(x), Some(y)) => match runs_order(x, y) {
-                        Ordering::Equal => {}
-                        o => return o,
-                    },
-                    (x, y) => return x.is_some().cmp(&y.is_some()),
-                }
-            }
-        }
+        (false, false) => runs(a)
+            .zip(runs(b))
+            .map(|(x, y)| runs_order(x, y))
+            .find(|o| o.is_ne())
+            .unwrap_or_else(|| runs(a).count().cmp(&runs(b).count())),
     }
 }
 
-/// Two runs: digits by their value, anything else by its bytes.
+/// Digits by their value, however many, and anything else by its bytes.
 fn runs_order(a: &str, b: &str) -> Ordering {
-    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
-    if digits(a) && digits(b) {
+    if is_digits(a) && is_digits(b) {
         let (a, b) = (a.trim_start_matches('0'), b.trim_start_matches('0'));
         a.len().cmp(&b.len()).then_with(|| a.cmp(b))
     } else {
         a.cmp(b)
     }
+}
+
+fn is_digits(s: &str) -> bool {
+    s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// `rc10` as `rc`, `10`.
@@ -142,18 +130,15 @@ fn runs(s: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// A published release, as GitHub lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Release {
-    /// `v0.6.0`.
     pub tag: String,
     pub prerelease: bool,
 }
 
-/// The release among `releases` that a build of version `current` hears of, if it is newer
-/// than `current`: the newest release for a release build, and the newest of any kind for a
-/// release candidate or a dev build, so that it hears of the next candidate and the final.
-/// Tags that aren't versions are passed over.
+/// The newest of `releases`, if newer than `current`: of any kind for a release candidate or a
+/// dev build, so that it hears of the next candidate and the final, else releases only. Tags
+/// that aren't versions are passed over.
 pub fn newer<'a>(current: &Version, releases: &'a [Release]) -> Option<&'a Release> {
     releases
         .iter()
@@ -165,32 +150,34 @@ pub fn newer<'a>(current: &Version, releases: &'a [Release]) -> Option<&'a Relea
         .map(|(_, r)| r)
 }
 
-/// A newer release, and what *Download* does for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Update {
-    /// `0.6.0`.
+    /// Without the `v`: `0.6.0`.
     pub version: String,
     pub download: Download,
 }
 
-/// What *Download* does.
+/// What the *Download* button does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Download {
-    /// Open this file of the release in the browser.
+    /// Opens this release file's URL in the browser.
     Open(String),
-    /// Copy this command to the clipboard.
+    /// Copies this command to the clipboard.
     Copy(&'static str),
 }
 
 impl Update {
-    /// Release `tag` (`v0.6.0`, or `0.6.0`) for `channel` on `target`, the Rust target triple
-    /// the release files are named after. `None` on Snap and Flatpak, whose stores update
-    /// parterre, and for a tag that isn't a version.
-    /// The release's page on GitHub, with its release notes.
-    pub fn notes(&self) -> String {
-        format!("{REPOSITORY}/releases/tag/v{}", self.version)
+    /// Release `tag` (`v0.6.0`, or `0.6.0`) for this copy's channel.
+    pub fn to(tag: &str) -> Option<Update> {
+        Update::of(tag, Channel::current(), TARGET)
     }
 
+    pub fn notes(&self) -> String {
+        format!("{REPOSITORY_URL}/releases/tag/v{}", self.version)
+    }
+
+    /// `None` on Snap and Flatpak, whose stores update parterre, and for a tag that isn't a
+    /// version.
     pub fn of(tag: &str, channel: Channel, target: &str) -> Option<Update> {
         let version = Version::parse(tag)?.to_string();
         let arch = target.split('-').next().unwrap_or(target);
@@ -216,7 +203,7 @@ impl Update {
             }
             Channel::Snap | Channel::Flatpak => return None,
         };
-        let url = format!("{REPOSITORY}/releases/download/v{version}/{file}");
+        let url = format!("{REPOSITORY_URL}/releases/download/v{version}/{file}");
         Some(Update {
             version,
             download: Download::Open(url),

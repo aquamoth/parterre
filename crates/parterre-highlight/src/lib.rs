@@ -1,17 +1,6 @@
-//! Syntax colour for the diff and blame windows (#209), in a crate of its own so that the
-//! engine's dependencies live here alone (#214).
-//!
-//! Behind the `syntax` feature, tree-sitter parses a whole version of a file and hands back
-//! language-neutral spans: what each piece of a line is ([`Kind`]), never a colour. The app
-//! maps a kind to a colour of its palette. A whole file at a time, so that block comments,
-//! strings and fenced code that span lines keep their state wherever a window starts
-//! showing them. Without the feature, [`language_of`] knows no language and nothing is
-//! coloured.
-//!
-//! One grammar crate per language, each compiling its parser (C) in its build script. The
-//! grammars' own `highlights.scm` queries name what they find (`keyword`, `string.escape`,
-//! `text.title`, …), each in its own dialect; [`engine::NAMES`] maps those names onto the
-//! dozen kinds here.
+//! Tree-sitter parses a whole file, so that block comments, strings and fenced code that span
+//! lines keep their state wherever a window starts showing them. The spans say what a piece of
+//! text is ([`Kind`]), never its colour, which is the app's to choose (#209).
 
 use parterre_util::{Cancel, Poll};
 use serde::{Deserialize, Serialize};
@@ -21,33 +10,23 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// What a span of text is, for colouring. Deliberately coarse: a dozen kinds that every
-/// grammar's captures map onto.
+/// Coarse, so that every grammar's captures map onto it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Kind {
     Comment,
-    /// A string literal, quotes included.
     String,
-    /// An escape sequence inside a string.
     Escape,
     Keyword,
-    /// A type, class, interface, namespace or module name.
     Type,
-    /// A function, method or macro, defined or called.
     Function,
     Number,
-    /// `true`, `null`, `self`, an enum member, a defined constant.
     Constant,
     Operator,
     Punctuation,
     Variable,
-    /// A field, property or key (JSON, YAML, TOML, CSS).
     Property,
-    /// An attribute name in HTML and XML, an attribute in Rust and C#.
     Attribute,
-    /// An HTML, XML or JSX tag name.
     Tag,
-    /// Markdown: a heading, emphasis, strong emphasis, inline or block code, a link.
     Heading,
     Emphasis,
     Strong,
@@ -55,12 +34,9 @@ pub enum Kind {
     Link,
 }
 
-/// A line's coloured spans: byte ranges of the line (without its ending), in order, not
-/// overlapping. Where a grammar is nested in another (Rust in a Markdown fence, JavaScript
-/// in HTML), the innermost grammar's kind wins.
+/// A line's spans: byte ranges of the line without its ending, in order, not overlapping.
 pub type Spans = Vec<(Range<usize>, Kind)>;
 
-/// A language with a grammar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Language {
     Bash,
@@ -89,7 +65,7 @@ pub enum Language {
 }
 
 impl Language {
-    pub const ALL: [Language; 23] = [
+    const ALL: [Language; 23] = [
         Language::Bash,
         Language::C,
         Language::Cpp,
@@ -115,8 +91,8 @@ impl Language {
         Language::Yaml,
     ];
 
-    /// The name the child process and the injection queries know a language by.
-    pub fn id(self) -> &'static str {
+    /// The name the child process and the grammar's queries know the language by.
+    fn id(self) -> &'static str {
         match self {
             Language::Bash => "bash",
             Language::C => "c",
@@ -144,50 +120,20 @@ impl Language {
         }
     }
 
-    pub fn from_id(id: &str) -> Option<Language> {
+    fn from_id(id: &str) -> Option<Language> {
         Language::ALL.into_iter().find(|l| l.id() == id)
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Language::Bash => "Shell",
-            Language::C => "C",
-            Language::Cpp => "C++",
-            Language::CSharp => "C#",
-            Language::Css => "CSS",
-            Language::Dockerfile => "Dockerfile",
-            Language::Go => "Go",
-            Language::Html => "HTML",
-            Language::Java => "Java",
-            Language::JavaScript => "JavaScript",
-            Language::Jsx => "JSX",
-            Language::Json => "JSON",
-            Language::Makefile => "Makefile",
-            Language::Markdown => "Markdown",
-            Language::Proto => "Protocol Buffers",
-            Language::Python => "Python",
-            Language::Rust => "Rust",
-            Language::Sql => "SQL",
-            Language::Toml => "TOML",
-            Language::TypeScript => "TypeScript",
-            Language::Tsx => "TSX",
-            Language::Xml => "XML",
-            Language::Yaml => "YAML",
-        }
     }
 }
 
-/// Files above this size are left plain: parsing is fast, but the tree of a huge generated
-/// file costs hundreds of megabytes, and nobody reads one for its colours.
-pub const MAX_BYTES: usize = 4 * 1024 * 1024;
+/// Larger files are left plain: the tree of a huge generated file costs hundreds of megabytes.
+const MAX_BYTES: usize = 4 * 1024 * 1024;
 
-/// Highlighting a file takes at most this long; then its child process is killed and the
-/// file stays plain. Error recovery in a grammar can go super-linear on odd input.
+/// Error recovery in a grammar can go super-linear on odd input.
 pub const BUDGET: Duration = Duration::from_secs(10);
 
-/// The language of a file, from its path: by file name first (`Dockerfile`, `Makefile`,
-/// `Cargo.lock`), then by extension. `None` for a file the engine can't colour, or when the
-/// `syntax` feature is off.
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// By file name first, then by extension. `None` for every file without the `syntax` feature.
 pub fn language_of(path: &str) -> Option<Language> {
     if !cfg!(feature = "syntax") {
         return None;
@@ -243,11 +189,8 @@ fn by_extension(ext: &str) -> Option<Language> {
     })
 }
 
-/// Highlights a whole file (`text`, line endings included) as `language`: the spans of each
-/// line, in order. Byte ranges are of the line without its ending, so a span that runs over
-/// several lines (a block comment) is cut into one piece per line. Empty for a file over
-/// [`MAX_BYTES`], or one whose grammar failed to load.
-pub fn highlight(language: Language, text: &str) -> Vec<Spans> {
+/// Each line's spans; empty for a file over [`MAX_BYTES`], or whose grammar failed to load.
+fn highlight(language: Language, text: &str) -> Vec<Spans> {
     #[cfg(feature = "syntax")]
     {
         engine::highlight(language, text)
@@ -259,13 +202,11 @@ pub fn highlight(language: Language, text: &str) -> Vec<Spans> {
     }
 }
 
-/// Where highlighting runs. The grammars are C, and one of them aborting on a file it can't
-/// take (deeply nested YAML or Markdown overrun their scanners' state buffer today, and the
-/// runtime's assertion then aborts the process) or parsing for minutes must not take the
-/// window with it. So the app runs them in a child process: itself, as
-/// `parterre --highlight LANG`, the text on stdin and the spans on stdout, killed when the
-/// window closes or [`BUDGET`] runs out. In this process is for that child, and for tests;
-/// off is for an app that doesn't know its own program.
+/// The grammars are C, and one aborting on a file it can't take (deeply nested YAML or Markdown
+/// overrun their scanners' state buffer, and the runtime's assertion aborts) or parsing for
+/// minutes must not take the window with it. So the app runs them in a child process: itself,
+/// as `parterre --highlight LANG`, killed when the window closes or [`BUDGET`] runs out.
+/// `InProcess` is for that child and for tests; `Off` for an app that can't find its program.
 #[derive(Clone, Debug, Default)]
 pub enum Engine {
     #[default]
@@ -275,8 +216,7 @@ pub enum Engine {
 }
 
 impl Engine {
-    /// [`highlight`], run as the engine says. Empty when the child failed, was killed, or
-    /// `cancel` stopped it.
+    /// Empty when the child failed or was killed.
     pub fn highlight(&self, language: Language, text: &str, cancel: &Cancel) -> Vec<Spans> {
         match self {
             Engine::InProcess => highlight(language, text),
@@ -286,10 +226,8 @@ impl Engine {
     }
 }
 
-/// Runs `exe --highlight LANG` on `text`, killing it once `cancel` says so or `budget` is
-/// spent. `None` when the child could not be run, failed, or was killed. The child is held
-/// by `cancel` while it runs, as git's commands are, so cancelling kills it at once, and a
-/// window's drop (the app's exit too) leaves none behind.
+/// `None` when the child could not run, failed, or was killed. `cancel` holds the child, so
+/// cancelling kills it at once, and a window's drop (the app's exit too) leaves none behind.
 pub fn in_child(
     exe: &Path,
     language: Language,
@@ -324,19 +262,18 @@ pub fn in_child(
         s.spawn(move || {
             let _ = stdin.write_all(text.as_bytes());
         });
-        let watchdog = s.spawn(move || watch(cancel, start, budget));
+        let watchdog = s.spawn(move || exits_ok_within(cancel, start, budget));
         let read = stdout.read_to_end(&mut out).is_ok();
         read && watchdog.join().unwrap_or(false)
     });
     if !finished {
         return None;
     }
-    decode(&out)
+    from_wire(&out)
 }
 
-/// Waits for the child `cancel` holds, killing it once over budget; `cancel` itself kills
-/// it when cancelled. True if it exited well.
-fn watch(cancel: &Cancel, start: Instant, budget: Duration) -> bool {
+/// Waits for the child `cancel` holds, and kills it once over budget.
+fn exits_ok_within(cancel: &Cancel, start: Instant, budget: Duration) -> bool {
     loop {
         match cancel.poll() {
             // Killed by `cancel()`, or unreadable and killed.
@@ -348,13 +285,12 @@ fn watch(cancel: &Cancel, start: Instant, budget: Duration) -> bool {
                 return false;
             }
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(CHILD_POLL_INTERVAL);
     }
 }
 
-/// The child's side of [`Engine::Child`]: highlights stdin as the language `id` names and
-/// writes the spans to stdout. The exit code: 0, or 2 for an unknown language or unreadable
-/// input.
+/// The child's side of [`Engine::Child`]: highlights stdin and writes the spans to stdout.
+/// Returns the exit code: 2 for an unknown language or unreadable input.
 pub fn serve(id: &str) -> u8 {
     let Some(language) = Language::from_id(id) else {
         return 2;
@@ -365,27 +301,26 @@ pub fn serve(id: &str) -> u8 {
     }
     let spans = highlight(language, &text);
     let out = std::io::stdout().lock();
-    if serde_json::to_writer(out, &compact(&spans)).is_err() {
+    if serde_json::to_writer(out, &to_wire(&spans)).is_err() {
         return 2;
     }
     0
 }
 
-/// The spans as the child writes them: a line's `(start, end, kind)` triples.
-type Compact = Vec<Vec<(usize, usize, Kind)>>;
+/// Triples, shorter in JSON than `Range`'s `{"start":…,"end":…}`.
+type WireSpans = Vec<Vec<(usize, usize, Kind)>>;
 
-fn compact(spans: &[Spans]) -> Compact {
+fn to_wire(spans: &[Spans]) -> WireSpans {
     spans
         .iter()
         .map(|line| line.iter().map(|(r, k)| (r.start, r.end, *k)).collect())
         .collect()
 }
 
-fn decode(bytes: &[u8]) -> Option<Vec<Spans>> {
-    let compact: Compact = serde_json::from_slice(bytes).ok()?;
+fn from_wire(bytes: &[u8]) -> Option<Vec<Spans>> {
+    let wire: WireSpans = serde_json::from_slice(bytes).ok()?;
     Some(
-        compact
-            .into_iter()
+        wire.into_iter()
             .map(|line| line.into_iter().map(|(a, b, k)| (a..b, k)).collect())
             .collect(),
     )
@@ -394,18 +329,17 @@ fn decode(bytes: &[u8]) -> Option<Vec<Spans>> {
 #[cfg(feature = "syntax")]
 mod engine {
     use super::{Kind, Language, MAX_BYTES, Spans};
+    use std::ops::Range;
     use std::sync::OnceLock;
     use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
-    /// The Protocol Buffers highlight query, which its crate doesn't export.
+    /// Its crate doesn't export it.
     const PROTO_HIGHLIGHTS: &str = include_str!("proto_highlights.scm");
 
-    /// The capture names recognised, and what each means. `configure` maps a grammar's
-    /// capture to the longest recognised dotted prefix, so `keyword.operator` counts as
-    /// `keyword`, `function.call` as `function` and `string.special.key` as itself. Every
-    /// grammar is configured with this same list, as the highlighter requires for the
-    /// indices to agree where one grammar is injected into another.
-    pub(super) const NAMES: &[(&str, Kind)] = &[
+    /// The highlighter maps a capture to its longest dotted prefix here: `keyword.operator`
+    /// counts as `keyword`, `string.special.key` as itself. Every grammar gets this same list,
+    /// so that the indices agree where one grammar is injected into another.
+    const NAMES: &[(&str, Kind)] = &[
         ("attribute", Kind::Attribute),
         ("boolean", Kind::Constant),
         // CSS at-rules, captured by their own names.
@@ -465,8 +399,7 @@ mod engine {
         ("variable.member", Kind::Property),
     ];
 
-    /// What the recognised names mean when `language` is the file's: a grammar's capture
-    /// can mean something else than the shared name says.
+    /// What [`NAMES`] mean in a file of `language`, whose grammar can mean something else.
     fn kinds(language: Language) -> Vec<Kind> {
         NAMES
             .iter()
@@ -483,33 +416,42 @@ mod engine {
             .collect()
     }
 
-    /// A grammar: a language, or one that only ever runs inside another.
     #[derive(Clone, Copy)]
     enum Grammar {
         Lang(Language),
         MarkdownInline,
     }
 
-    const GRAMMARS: usize = Language::ALL.len() + 1;
+    impl Grammar {
+        const COUNT: usize = Language::ALL.len() + 1;
 
-    fn slot(g: Grammar) -> usize {
-        match g {
-            Grammar::Lang(l) => l as usize,
-            Grammar::MarkdownInline => Language::ALL.len(),
+        fn index(self) -> usize {
+            match self {
+                Grammar::Lang(l) => l as usize,
+                Grammar::MarkdownInline => Language::ALL.len(),
+            }
+        }
+
+        fn name(self) -> &'static str {
+            match self {
+                Grammar::Lang(l) => l.id(),
+                Grammar::MarkdownInline => "markdown_inline",
+            }
         }
     }
 
-    static LOADED: [OnceLock<Option<HighlightConfiguration>>; GRAMMARS] =
-        [const { OnceLock::new() }; GRAMMARS];
+    static COMPILED: [OnceLock<Option<HighlightConfiguration>>; Grammar::COUNT] =
+        [const { OnceLock::new() }; Grammar::COUNT];
 
-    /// A grammar with its queries compiled, once; `None` if they failed to compile.
-    fn loaded(g: Grammar) -> Option<&'static HighlightConfiguration> {
-        LOADED[slot(g)].get_or_init(|| load(g)).as_ref()
+    fn compiled(g: Grammar) -> Option<&'static HighlightConfiguration> {
+        COMPILED[g.index()].get_or_init(|| compile(g)).as_ref()
     }
 
-    fn load(g: Grammar) -> Option<HighlightConfiguration> {
-        let (language, name, highlights, injections) = queries(g);
-        let (highlights, injections) = (tidy(&highlights), tidy(&injections));
+    fn compile(g: Grammar) -> Option<HighlightConfiguration> {
+        let name = g.name();
+        let (language, highlights, injections) = queries(g);
+        let highlights = without_spell_captures(&highlights);
+        let injections = without_spell_captures(&injections);
         let mut config = HighlightConfiguration::new(language, name, &highlights, &injections, "")
             .inspect_err(|e| {
                 debug_assert!(false, "the {name} highlight query doesn't compile: {e}");
@@ -519,24 +461,20 @@ mod engine {
         Some(config)
     }
 
-    /// A query without the captures meant for an editor's spell checker: where several
-    /// captures sit on one node, the highlighter takes the last, and an unrecognised one
-    /// would leave the node plain.
-    fn tidy(query: &str) -> String {
+    /// The highlighter takes a node's last capture, and an unrecognised one leaves it plain.
+    fn without_spell_captures(query: &str) -> String {
         query.replace(" @spell", "").replace(" @nospell", "")
     }
 
-    /// Each grammar's language, its name for injections, its highlight query and its
-    /// injection query. A grammar that extends another (C++, TypeScript, JSX) gets the base
-    /// grammar's query first and its own after, since the later pattern wins where both
-    /// match a node, as the grammars' own `tree-sitter.json` lists them.
-    fn queries(g: Grammar) -> (tree_sitter::Language, &'static str, String, String) {
+    /// The language, highlight query and injection query. A grammar that extends another (C++,
+    /// TypeScript, JSX) gets the base grammar's query first, since the later pattern wins where
+    /// both match a node, as the grammars' own `tree-sitter.json` lists them.
+    fn queries(g: Grammar) -> (tree_sitter::Language, String, String) {
         use Language::*;
         let l = match g {
             Grammar::MarkdownInline => {
                 return (
                     tree_sitter_md::INLINE_LANGUAGE.into(),
-                    "markdown_inline",
                     tree_sitter_md::HIGHLIGHT_QUERY_INLINE.into(),
                     tree_sitter_md::INJECTION_QUERY_INLINE.into(),
                 );
@@ -546,67 +484,56 @@ mod engine {
         match l {
             Bash => (
                 tree_sitter_bash::LANGUAGE.into(),
-                "bash",
                 tree_sitter_bash::HIGHLIGHT_QUERY.into(),
                 String::new(),
             ),
             C => (
                 tree_sitter_c::LANGUAGE.into(),
-                "c",
                 tree_sitter_c::HIGHLIGHT_QUERY.into(),
                 String::new(),
             ),
             Cpp => (
                 tree_sitter_cpp::LANGUAGE.into(),
-                "cpp",
                 [tree_sitter_c::HIGHLIGHT_QUERY, tree_sitter_cpp::HIGHLIGHT_QUERY].concat(),
                 String::new(),
             ),
             CSharp => (
                 tree_sitter_c_sharp::LANGUAGE.into(),
-                "c_sharp",
                 tree_sitter_c_sharp::HIGHLIGHTS_QUERY.into(),
                 String::new(),
             ),
             Css => (
                 tree_sitter_css::LANGUAGE.into(),
-                "css",
                 tree_sitter_css::HIGHLIGHTS_QUERY.into(),
                 String::new(),
             ),
             Dockerfile => (
                 tree_sitter_containerfile::LANGUAGE.into(),
-                "dockerfile",
                 tree_sitter_containerfile::HIGHLIGHTS_QUERY.into(),
                 tree_sitter_containerfile::INJECTIONS_QUERY.into(),
             ),
             Go => (
                 tree_sitter_go::LANGUAGE.into(),
-                "go",
                 tree_sitter_go::HIGHLIGHTS_QUERY.into(),
                 String::new(),
             ),
             Html => (
                 tree_sitter_html::LANGUAGE.into(),
-                "html",
                 tree_sitter_html::HIGHLIGHTS_QUERY.into(),
                 tree_sitter_html::INJECTIONS_QUERY.into(),
             ),
             Java => (
                 tree_sitter_java::LANGUAGE.into(),
-                "java",
                 tree_sitter_java::HIGHLIGHTS_QUERY.into(),
                 String::new(),
             ),
             JavaScript => (
                 tree_sitter_javascript::LANGUAGE.into(),
-                "javascript",
                 tree_sitter_javascript::HIGHLIGHT_QUERY.into(),
                 String::new(),
             ),
             Jsx => (
                 tree_sitter_javascript::LANGUAGE.into(),
-                "jsx",
                 [
                     tree_sitter_javascript::HIGHLIGHT_QUERY,
                     tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
@@ -618,7 +545,6 @@ mod engine {
             // wins" keys would be strings; naming them again last keeps them keys.
             Json => (
                 tree_sitter_json::LANGUAGE.into(),
-                "json",
                 [
                     tree_sitter_json::HIGHLIGHTS_QUERY,
                     "\n(pair key: (_) @string.special.key)\n",
@@ -628,7 +554,6 @@ mod engine {
             ),
             Makefile => (
                 tree_sitter_make::LANGUAGE.into(),
-                "make",
                 tree_sitter_make::HIGHLIGHTS_QUERY.into(),
                 String::new(),
             ),
@@ -638,7 +563,6 @@ mod engine {
             // inside, and what they leave stays plain, as in an editor.
             Markdown => (
                 tree_sitter_md::LANGUAGE.into(),
-                "markdown",
                 tree_sitter_md::HIGHLIGHT_QUERY_BLOCK
                     .replace("  (fenced_code_block)\n] @text.literal", "] @text.literal"),
                 tree_sitter_md::INJECTION_QUERY_BLOCK
@@ -653,37 +577,31 @@ mod engine {
             ),
             Proto => (
                 tree_sitter_proto::LANGUAGE.into(),
-                "proto",
                 PROTO_HIGHLIGHTS.into(),
                 String::new(),
             ),
             Python => (
                 tree_sitter_python::LANGUAGE.into(),
-                "python",
                 tree_sitter_python::HIGHLIGHTS_QUERY.into(),
                 String::new(),
             ),
             Rust => (
                 tree_sitter_rust::LANGUAGE.into(),
-                "rust",
                 tree_sitter_rust::HIGHLIGHTS_QUERY.into(),
                 tree_sitter_rust::INJECTIONS_QUERY.into(),
             ),
             Sql => (
                 tree_sitter_sequel::LANGUAGE.into(),
-                "sql",
                 tree_sitter_sequel::HIGHLIGHTS_QUERY.into(),
                 String::new(),
             ),
             Toml => (
                 tree_sitter_toml_ng::LANGUAGE.into(),
-                "toml",
                 tree_sitter_toml_ng::HIGHLIGHTS_QUERY.into(),
                 String::new(),
             ),
             TypeScript => (
                 tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                "typescript",
                 [
                     tree_sitter_javascript::HIGHLIGHT_QUERY,
                     tree_sitter_typescript::HIGHLIGHTS_QUERY,
@@ -693,7 +611,6 @@ mod engine {
             ),
             Tsx => (
                 tree_sitter_typescript::LANGUAGE_TSX.into(),
-                "tsx",
                 [
                     tree_sitter_javascript::HIGHLIGHT_QUERY,
                     tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
@@ -704,13 +621,11 @@ mod engine {
             ),
             Xml => (
                 tree_sitter_xml::LANGUAGE_XML.into(),
-                "xml",
                 tree_sitter_xml::XML_HIGHLIGHT_QUERY.into(),
                 String::new(),
             ),
             Yaml => (
                 tree_sitter_yaml::LANGUAGE.into(),
-                "yaml",
                 tree_sitter_yaml::HIGHLIGHTS_QUERY.into(),
                 String::new(),
             ),
@@ -718,16 +633,12 @@ mod engine {
     }
 
     /// The grammar a query injects by name: Markdown's inline grammar, a fence's language
-    /// (`rust`, `ts`, `sh`, …), HTML's `javascript` and `css`, a Dockerfile's `bash`. For
-    /// whatever lifetime the highlighter wants; the grammars live for the program.
-    fn injection<'a>(name: &str) -> Option<&'a HighlightConfiguration> {
-        injected(name)
-    }
-
-    fn injected(name: &str) -> Option<&'static HighlightConfiguration> {
+    /// (`rust`, `ts`, `sh`, …), HTML's `javascript` and `css`, a Dockerfile's `bash`. Generic
+    /// over `'a` for the highlighter's callback; the grammars live for the program.
+    fn injected<'a>(name: &str) -> Option<&'a HighlightConfiguration> {
         use Language::*;
         let language = match name.to_ascii_lowercase().as_str() {
-            "markdown_inline" => return loaded(Grammar::MarkdownInline),
+            "markdown_inline" => return compiled(Grammar::MarkdownInline),
             "bash" | "sh" | "shell" | "zsh" => Bash,
             "c" => C,
             "cpp" | "c++" | "cxx" => Cpp,
@@ -753,40 +664,23 @@ mod engine {
             "yaml" | "yml" => Yaml,
             _ => return None,
         };
-        loaded(Grammar::Lang(language))
+        compiled(Grammar::Lang(language))
     }
 
-    pub fn highlight(language: Language, text: &str) -> Vec<Spans> {
+    /// A span over several lines is cut into one per line.
+    pub(super) fn highlight(language: Language, text: &str) -> Vec<Spans> {
         if text.len() > MAX_BYTES {
             return Vec::new();
         }
-        let Some(config) = loaded(Grammar::Lang(language)) else {
+        let Some(config) = compiled(Grammar::Lang(language)) else {
             return Vec::new();
         };
         let kinds = kinds(language);
-        // Where each line starts, and where its content ends (before `\n` or `\r\n`).
-        let mut starts = vec![0];
-        let mut ends = Vec::new();
-        let bytes = text.as_bytes();
-        for (i, b) in bytes.iter().enumerate() {
-            if *b == b'\n' {
-                let end = if i > 0 && bytes[i - 1] == b'\r' {
-                    i - 1
-                } else {
-                    i
-                };
-                ends.push(end);
-                starts.push(i + 1);
-            }
-        }
-        if *starts.last().unwrap() < text.len() {
-            ends.push(text.len());
-        } else {
-            starts.pop();
-        }
-        let mut lines: Vec<Spans> = vec![Vec::new(); starts.len()];
+        let line_contents = line_contents(text);
+        let mut lines: Vec<Spans> = vec![Vec::new(); line_contents.len()];
         let mut highlighter = Highlighter::new();
-        let Ok(events) = highlighter.highlight(config, bytes, None, None, injection) else {
+        let Ok(events) = highlighter.highlight(config, text.as_bytes(), None, None, injected)
+        else {
             return lines;
         };
         // The innermost highlight colours the text: a string's escape over the string, a
@@ -801,21 +695,37 @@ mod engine {
                 }
                 HighlightEvent::Source { start, end } => {
                     let Some(&kind) = stack.last() else { continue };
-                    let mut i = starts.partition_point(|&s| s <= start).saturating_sub(1);
-                    let mut at = start;
-                    while at < end && i < starts.len() {
-                        let (base, content_end) = (starts[i], ends[i]);
-                        let stop = end.min(content_end);
-                        if at < stop {
-                            lines[i].push((at - base..stop - base, kind));
+                    let first = line_contents
+                        .partition_point(|line| line.start <= start)
+                        .saturating_sub(1);
+                    for (spans, line) in lines.iter_mut().zip(&line_contents).skip(first) {
+                        if line.start >= end {
+                            break;
                         }
-                        i += 1;
-                        at = starts.get(i).copied().unwrap_or(end);
+                        let (from, to) = (start.max(line.start), end.min(line.end));
+                        if from < to {
+                            spans.push((from - line.start..to - line.start, kind));
+                        }
                     }
                 }
             }
         }
         lines
+    }
+
+    /// Each line's bytes in `text`, without the line ending.
+    fn line_contents(text: &str) -> Vec<Range<usize>> {
+        let mut start = 0;
+        text.split_inclusive('\n')
+            .map(|line| {
+                let content = line
+                    .strip_suffix('\n')
+                    .map_or(line, |l| l.strip_suffix('\r').unwrap_or(l));
+                let range = start..start + content.len();
+                start += line.len();
+                range
+            })
+            .collect()
     }
 }
 
@@ -823,7 +733,6 @@ mod engine {
 mod tests {
     use super::*;
 
-    /// Every coloured piece of `text`, with its kind, in order.
     fn kinds_of(language: Language, text: &str) -> Vec<(std::string::String, Kind)> {
         let lines = highlight(language, text);
         let mut out = Vec::new();
@@ -1185,9 +1094,9 @@ mod tests {
     #[test]
     fn the_wire_format_round_trips() {
         let spans = highlight(Language::Rust, "fn main() {}\n// c\n");
-        let bytes = serde_json::to_vec(&compact(&spans)).unwrap();
-        assert_eq!(decode(&bytes), Some(spans));
-        assert_eq!(decode(b"nonsense"), None);
+        let bytes = serde_json::to_vec(&to_wire(&spans)).unwrap();
+        assert_eq!(from_wire(&bytes), Some(spans));
+        assert_eq!(from_wire(b"nonsense"), None);
     }
 
     #[test]

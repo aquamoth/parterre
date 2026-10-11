@@ -1,25 +1,21 @@
-//! Reverting a commit on the open worktree's branch, from a log row's menu: the dialog, with the
-//! commit, the message git words for the revert, and stashing uncommitted changes first. Then,
-//! when parterre stashed them, the question whether to put them back.
-
 use std::sync::Arc;
 
 use eframe::egui::{self, Id, RichText, Ui, ViewportId, vec2};
+use parterre_core::Repo;
 use parterre_core::branches::{Stashed, command_text};
 use parterre_core::revert::{self, Preview};
-use parterre_core::{Oid, Repo};
 
-use super::branches::caution;
-use crate::dialogs;
+use super::branches::{Asked, answer_of, caution, commit_line};
+use crate::{dialogs, widgets};
 
-/// The message field's id, to tell whether Enter is typed into it.
+/// To tell whether Enter is typed into it.
 fn message_id() -> Id {
     Id::new("revert-message")
 }
 
-/// The message's rows as the dialog opens, and the fewest it shrinks to.
 const MESSAGE_ROWS: usize = 4;
 const MIN_MESSAGE_ROWS: usize = 2;
+const MAX_REFUSED_FILES_HEIGHT: f32 = 120.0;
 
 /// The message field's height for `rows` lines, with its margins.
 fn message_height(ui: &Ui, rows: usize) -> f32 {
@@ -51,28 +47,15 @@ fn message_box(ui: &mut Ui, message: &mut String, height: Option<f32>) -> ((), f
     }
 }
 
-/// The most the refused files take before they scroll: the message keeps the room.
-const MAX_REFUSED: f32 = 120.0;
-
 #[derive(Debug)]
 pub struct RevertDialog {
-    pub preview: Preview,
+    preview: Preview,
     repo: Arc<Repo>,
-    pub message: String,
-    pub stash: bool,
-    /// The files git would refuse to revert over are listed.
-    show_files: bool,
-    /// The window it was asked from.
+    message: String,
+    stash: bool,
+    show_refused_files: bool,
     pub opener: ViewportId,
     fresh: bool,
-}
-
-/// What the dialog asks for in a frame.
-#[derive(Debug, Default)]
-pub struct Asked {
-    pub answer: Option<dialogs::Answer>,
-    /// The commit's hash was clicked: show it in the log.
-    pub log: Option<Oid>,
 }
 
 impl RevertDialog {
@@ -82,7 +65,7 @@ impl RevertDialog {
             stash: preview.stashable(),
             preview,
             repo,
-            show_files: false,
+            show_refused_files: false,
             opener,
             fresh: true,
         }
@@ -92,9 +75,8 @@ impl RevertDialog {
         self.preview.revert(self.stash, &self.message)
     }
 
-    /// `busy` while another Git operation runs.
     pub fn show(&mut self, ctx: &egui::Context, busy: bool) -> Asked {
-        let mut asked = Asked::default();
+        let mut show_in_log = None;
         let p = &self.preview;
         let short = p.commit.short(self.repo.abbrev_len.max(7));
         let title = format!("Revert {short} in {}", p.name());
@@ -106,10 +88,8 @@ impl RevertDialog {
             .resizable()
             .show(ctx, |ui| {
                 let p = &self.preview;
-                if let Some(ix) = self.repo.lookup(&p.commit)
-                    && dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len)
-                {
-                    asked.log = Some(p.commit);
+                if commit_line(ui, &self.repo, p.commit) {
+                    show_in_log = Some(p.commit);
                 }
                 ui.label("Message");
                 let message = &mut self.message;
@@ -125,18 +105,23 @@ impl RevertDialog {
                 .response
                 .on_disabled_hover_text("There are no uncommitted changes");
                 let stash = self.stash && p.stashable();
-                if let Some(refusal) = p.refusal(stash) {
+                let refusal = p.refusal(stash);
+                if let Some(refusal) = &refusal {
                     ui.horizontal_wrapped(|ui| {
                         ui.colored_label(ui.visuals().error_fg_color, refusal);
-                        let label = if self.show_files { "Hide" } else { "Show" };
+                        let label = if self.show_refused_files {
+                            "Hide"
+                        } else {
+                            "Show"
+                        };
                         if ui.link(label).clicked() {
-                            self.show_files = !self.show_files;
+                            self.show_refused_files = !self.show_refused_files;
                         }
                     });
-                    if self.show_files {
+                    if self.show_refused_files {
                         egui::ScrollArea::vertical()
                             .id_salt("revert-refused")
-                            .max_height(MAX_REFUSED)
+                            .max_height(MAX_REFUSED_FILES_HEIGHT)
                             .show(ui, |ui| {
                                 for file in p.refused(stash) {
                                     ui.label(RichText::new(file).monospace().small());
@@ -148,19 +133,18 @@ impl RevertDialog {
                         ui.label(caution_text);
                     });
                 }
-                if let Some(why) = p.blocked(stash, &self.message)
-                    && p.refusal(stash).is_none()
+                let blocked = p.blocked(stash, &self.message);
+                if let Some(why) = &blocked
+                    && refusal.is_none()
                 {
                     ui.colored_label(ui.visuals().error_fg_color, why);
                 }
-                let revert = self.revert();
-                let commands: Vec<String> = revert::commands(&revert)
+                let commands: Vec<String> = revert::commands(&self.revert())
                     .iter()
                     .map(|c| command_text(c))
                     .collect();
                 dialogs::command_box(ui, &commands);
-                let stash = self.stash && self.preview.stashable();
-                let enabled = self.preview.blocked(stash, &self.message).is_none() && !busy;
+                let enabled = blocked.is_none() && !busy;
                 let answer = dialogs::actions(ui, "Revert", enabled, false, false);
                 // Enter runs it, but in the message it's a new line.
                 let typing = ui.memory(|m| m.has_focus(message_id()));
@@ -172,12 +156,10 @@ impl RevertDialog {
                 }
             });
         self.fresh = false;
-        asked.answer = Some(if shown.should_close() {
-            dialogs::Answer::Cancel
-        } else {
-            shown.inner
-        });
-        asked
+        Asked {
+            answer: answer_of(shown),
+            show_in_log,
+        }
     }
 }
 
@@ -214,7 +196,7 @@ impl RestoreDialog {
                 });
                 let pop = ["stash", "pop", &self.stash.name].map(str::to_owned);
                 dialogs::command_box(ui, &[command_text(&pop)]);
-                let answer = keep_stashed(ui, !busy);
+                let answer = restore_or_keep(ui, !busy);
                 let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if answer == dialogs::Answer::Open && enter && !busy {
                     dialogs::Answer::Primary
@@ -223,31 +205,25 @@ impl RestoreDialog {
                 }
             });
         self.fresh = false;
-        if shown.should_close() {
-            dialogs::Answer::Cancel
-        } else {
-            shown.inner
-        }
+        answer_of(shown)
     }
 }
 
 /// *Restore* and *Keep stashed*, as [`dialogs::actions`] lays them out.
-fn keep_stashed(ui: &mut egui::Ui, enabled: bool) -> dialogs::Answer {
+fn restore_or_keep(ui: &mut Ui, enabled: bool) -> dialogs::Answer {
     let mut answer = dialogs::Answer::Open;
-    let size = egui::vec2(ui.available_width(), 34.0);
+    let size = vec2(ui.available_width(), 34.0);
     ui.allocate_ui_with_layout(
         size,
         egui::Layout::right_to_left(egui::Align::Center),
         |ui| {
             let restore = ui
-                .add_enabled_ui(enabled, |ui| {
-                    crate::widgets::primary_button(ui, "Restore", 90.0)
-                })
+                .add_enabled_ui(enabled, |ui| widgets::primary_button(ui, "Restore", 90.0))
                 .inner;
             if restore.clicked() {
                 answer = dialogs::Answer::Primary;
             }
-            let keep = crate::widgets::text_button(ui, "Keep stashed");
+            let keep = widgets::text_button(ui, "Keep stashed");
             if keep.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 answer = dialogs::Answer::Cancel;
             }
@@ -256,8 +232,6 @@ fn keep_stashed(ui: &mut egui::Ui, enabled: bool) -> dialogs::Answer {
     answer
 }
 
-/// The dialogs and the menu item, driven frame by frame in a headless context against real,
-/// disposable repositories: clicked by the text on screen, as a person would.
 #[cfg(test)]
 mod tests {
     use std::path::Path;

@@ -1,8 +1,6 @@
-//! Git object ids (SHA-1 or SHA-256), stored inline so they are `Copy`.
-
 use std::fmt;
 
-/// A git object id. Supports both SHA-1 (20 bytes) and SHA-256 (32 bytes) repositories.
+/// SHA-1 or SHA-256, stored inline so that it is `Copy`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Oid {
     bytes: [u8; 32],
@@ -10,15 +8,15 @@ pub struct Oid {
 }
 
 impl Oid {
-    /// Parses a full-length hex object id (40 or 64 hex digits).
+    /// Full length only: 40 or 64 hex digits.
     pub fn from_hex(hex: &str) -> Option<Oid> {
         let hex = hex.as_bytes();
         if hex.len() != 40 && hex.len() != 64 {
             return None;
         }
         let mut bytes = [0u8; 32];
-        for (i, [hi, lo]) in hex.as_chunks::<2>().0.iter().enumerate() {
-            bytes[i] = (nibble(*hi)? << 4) | nibble(*lo)?;
+        for (byte, [hi, lo]) in bytes.iter_mut().zip(hex.as_chunks::<2>().0) {
+            *byte = (nibble(*hi)? << 4) | nibble(*lo)?;
         }
         Some(Oid {
             bytes,
@@ -27,23 +25,24 @@ impl Oid {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len as usize]
+        &self.bytes[..usize::from(self.len)]
     }
 
-    /// Full lowercase hex representation.
     pub fn to_hex(&self) -> String {
         self.short(usize::MAX)
     }
 
-    /// The first `digits` hex digits (clamped to the full length).
+    /// At most the full length.
     pub fn short(&self, digits: usize) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut s = String::with_capacity(self.len as usize * 2);
-        for b in self.as_bytes() {
-            s.push(HEX[(b >> 4) as usize] as char);
-            s.push(HEX[(b & 0xf) as usize] as char);
-        }
-        s.truncate(digits.min(s.len()));
+        let mut s = String::with_capacity(digits.min(self.as_bytes().len() * 2));
+        s.extend(
+            self.as_bytes()
+                .iter()
+                .flat_map(|b| [HEX[usize::from(b >> 4)], HEX[usize::from(b & 0xf)]])
+                .take(digits)
+                .map(char::from),
+        );
         s
     }
 }

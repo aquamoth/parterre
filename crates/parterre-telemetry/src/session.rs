@@ -1,11 +1,8 @@
-//! Sessions in PostHog's sense (#262): the `$session_id` every usage event carries, as PostHog's
-//! own SDKs keep it. Server SDKs such as `posthog-rs` set none, so parterre does. No clock and no
-//! network here: the caller says what time it is, so every rule is tested without either.
-//!
-//! A session starts with the usage statistics and lasts while the user is active: any input,
-//! or any event sent. A new one starts
-//! - on activity after [`IDLE`] without any (PostHog's rule),
-//! - on activity [`LONGEST`] after it started (PostHog's longest session), and
+//! Sessions in PostHog's sense (#262): server SDKs such as `posthog-rs` set no `$session_id`,
+//! so parterre does, as PostHog's own SDKs keep it. A session lasts while the user is active:
+//! any input or event. A new one starts
+//! - on activity after [`IDLE_TIMEOUT`] without any (PostHog's rule),
+//! - on activity [`MAX_LENGTH`] after it started (PostHog's longest session), and
 //! - when the user opens another repository than the one opened last.
 //!
 //! PostHog takes a custom session ID only if it is a UUIDv7 whose time is at or before the
@@ -18,63 +15,56 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use uuid::{NoContext, Timestamp, Uuid};
 
-/// How long without activity ends a session: PostHog's 30 minutes.
-pub(crate) const IDLE: Duration = Duration::from_secs(30 * 60);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-/// How long a session lasts at most: PostHog's 24 hours.
-pub(crate) const LONGEST: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_LENGTH: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// The session the usage statistics are in, and what decides when the next one starts.
 #[derive(Debug)]
 pub(crate) struct Session {
-    /// `$session_id`: a UUIDv7 of the time it started.
     id: Uuid,
     started: SystemTime,
-    /// The last input or event.
-    active: SystemTime,
-    /// The repository the user opened last, in this session or one before it. Never sent.
-    repository: Option<PathBuf>,
+    last_active: SystemTime,
+    last_repository: Option<PathBuf>,
 }
 
 impl Session {
-    /// A session starting at `now`.
     pub(crate) fn new(now: SystemTime) -> Session {
         Session {
             id: id_at(now),
             started: now,
-            active: now,
-            repository: None,
+            last_active: now,
+            last_repository: None,
         }
     }
 
-    /// The session's ID, as `$session_id`.
     pub(crate) fn id(&self) -> String {
         self.id.to_string()
     }
 
-    /// Input or an event at `now`: a new session after [`IDLE`] without either, [`LONGEST`]
-    /// after this one started, or with the clock turned back before its start. Returns the ID
-    /// the activity belongs to.
+    /// Input or an event at `now`. Returns the ID of the session it is in.
     pub(crate) fn active(&mut self, now: SystemTime) -> String {
-        let idle = now.duration_since(self.active).unwrap_or_default();
+        let idle = now.duration_since(self.last_active).unwrap_or_default();
         let age = now.duration_since(self.started);
-        if idle > IDLE || age.is_err() || age.is_ok_and(|age| age >= LONGEST) {
+        if idle > IDLE_TIMEOUT || age.is_err() || age.is_ok_and(|age| age >= MAX_LENGTH) {
             self.restart(now);
         }
-        self.active = now;
+        self.last_active = now;
         self.id()
     }
 
-    /// The user opened `repository` at `now`: a new session if another one was opened before,
-    /// else activity. The first one opened is the session's own, whether at launch or later.
+    /// The first repository opened is the session's own, whether at launch or later.
     pub(crate) fn opened(&mut self, repository: &Path, now: SystemTime) {
-        if self.repository.as_deref().is_some_and(|r| r != repository) {
+        if self
+            .last_repository
+            .as_deref()
+            .is_some_and(|r| r != repository)
+        {
             self.restart(now);
-            self.active = now;
+            self.last_active = now;
         } else {
             self.active(now);
         }
-        self.repository = Some(repository.to_owned());
+        self.last_repository = Some(repository.to_owned());
     }
 
     fn restart(&mut self, now: SystemTime) {
@@ -83,7 +73,6 @@ impl Session {
     }
 }
 
-/// A new UUIDv7 of time `now`.
 fn id_at(now: SystemTime) -> Uuid {
     let since = now.duration_since(UNIX_EPOCH).unwrap_or_default();
     Uuid::new_v7(Timestamp::from_unix(
@@ -97,7 +86,6 @@ fn id_at(now: SystemTime) -> Uuid {
 mod tests {
     use super::*;
 
-    /// The fake clock: `minutes` after a fixed start.
     fn at(minutes: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(1_790_000_000) + Duration::from_secs(minutes * 60)
     }

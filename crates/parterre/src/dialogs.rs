@@ -1,9 +1,6 @@
-//! Shared native dialogs: windows of their own, theme, keyboard-safe action rows and command
-//! previews. Tools provide their own fields, validation and Git decisions.
-//!
-//! A dialog is a window beside parterre's others, moved by its title bar. A modeless one leaves
-//! them alone. A modal one locks them all, whichever window opened it, until it is answered:
-//! [`ModalLock`] drops their input, so a click or a close there brings the dialog forward.
+//! A dialog is a window beside parterre's others, moved by its title bar. A modal one locks them
+//! all, whichever window opened it, until it is answered: [`ModalLock`] drops their input, so a
+//! click or a close there brings the dialog forward.
 //!
 //! A dialog is as big as its content. A resizable one opens that big, up to most of the screen,
 //! and then the user sizes it: one part of it, such as a list or the [`fields`], takes what the
@@ -11,26 +8,33 @@
 //! the user sizes it otherwise.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use eframe::egui::{self, Align, Color32, Id, Layout, Pos2, RichText, Ui, Vec2, ViewportId, vec2};
 use parterre_core::{Commit, glyphs::Glyph};
 
 use crate::{menu, widgets};
 
-/// Space around a dialog's content.
 pub const MARGIN: f32 = 20.0;
 
-/// The height a dialog's content is measured in: as tall as it wants.
-const UNBOUNDED: f32 = 100_000.0;
+const DEFAULT_WIDTH: f32 = 470.0;
 
-/// How long, in seconds, a resizable dialog keeps the size it opened in, against a compositor
-/// handing it back another.
-const KEEP_OPENING_SIZE: f64 = 1.0;
+/// Content laid out this high is as tall as it wants.
+const UNBOUNDED_HEIGHT: f32 = 100_000.0;
 
-/// The narrowest a resizable dialog's content gets.
-const MIN_WIDTH: f32 = 420.0;
+/// How long a resizable dialog keeps the size it opened in, against a compositor handing it
+/// back another. After that, its size is the user's.
+const KEEP_OPENING_SIZE_SECS: f64 = 1.0;
 
-/// What dialog windows share with parterre's others: the icon and the title bar's theme.
+const MIN_RESIZABLE_WIDTH: f32 = 420.0;
+
+const MIN_FIELDS_HEIGHT: f32 = 70.0;
+
+/// The share of the screen's height a dialog grows to before its content scrolls.
+const MAX_SCREEN_SHARE: f32 = 0.85;
+
+const COMMAND_FONT_SIZE: f32 = 11.5;
+
 #[derive(Clone, Debug)]
 pub struct Look {
     pub icon: Arc<egui::IconData>,
@@ -46,46 +50,47 @@ pub fn set_look(ctx: &egui::Context, look: Look) {
     ctx.data_mut(|d| d.insert_temp(look_id(), look));
 }
 
-/// The least height of a resizable dialog's [`fields`]: they scroll below it.
-const MIN_FIELDS: f32 = 70.0;
-
 /// One dialog window, kept from frame to frame while it is shown.
 #[derive(Clone, Copy, Debug, Default)]
 struct Window {
-    /// Measured in the frame before; `None` until the content was laid out once. A resizable
-    /// one's is the size its window was last told to be.
+    /// `None` until the content was laid out once. A resizable one's is the size its window was
+    /// last told to be.
     size: Option<Vec2>,
-    /// Where it opened, over the window that opened it. Left alone after: the user moves it.
+    /// Over the window that opened it; the user moves it after.
     position: Option<Pos2>,
     theme: Option<egui::SystemTheme>,
-    /// The size its window was last told to be and keep; `None` before it exists.
-    hinted: Option<Vec2>,
-    /// When its size was last asked for again, after the window didn't take it.
-    resized: f64,
-    /// The main window's frame it was last shown in.
-    frame: u64,
-    /// When a resizable one's window was told its size: the user sizes it from a moment later.
-    opened: f64,
-    /// A resizable one's size as the user left it, once they could size it.
-    user: Option<Vec2>,
-    /// A resizable one is as tall as its content wants (or most of the screen), as it opened,
-    /// until the user sizes it otherwise.
-    fit: bool,
-    /// A resizable one's height as tall as its content wants, in the frame before.
-    natural: Option<f32>,
-    /// The least size a resizable one's window was told.
-    least: Option<Vec2>,
-    /// What a resizable one's width is remembered by.
-    remembered: Option<Id>,
+    /// `None` before the window exists.
+    hinted_size: Option<Vec2>,
+    size_reasked_at: f64,
+    last_root_frame: u64,
+    /// When a resizable one's window was last given its size: the user sizes it from a moment
+    /// later.
+    size_given_at: f64,
+    user_size: Option<Vec2>,
+    /// A resizable one's height follows its content until the user sizes it otherwise.
+    fits_content: bool,
+    /// In the frame before.
+    natural_height: Option<f32>,
+    min_size_told: Option<Vec2>,
+    width_key: Option<Id>,
 }
 
-/// A resizable dialog's size as laid out in its window: the least the window can be, and the
-/// height the content wants. `settled` once laid out with what the frame before learned.
+/// A resizable dialog's content as laid out in its window. `settled` once laid out with what
+/// the frame before learned.
 #[derive(Clone, Copy, Debug)]
 struct Fit {
-    least: Vec2,
-    natural: f32,
+    min_size: Vec2,
+    natural_height: f32,
     settled: bool,
+}
+
+impl Fit {
+    fn wanted_height(&self, max_height: f32) -> f32 {
+        self.natural_height
+            .min(max_height)
+            .max(self.min_size.y)
+            .round()
+    }
 }
 
 /// The dialog whose content is being laid out, for [`growing`] and [`fields`].
@@ -93,8 +98,7 @@ struct Fit {
 struct Current {
     id: Id,
     resizable: bool,
-    /// Its growing part is being laid out.
-    growing: bool,
+    in_growing_part: bool,
 }
 
 fn current_id() -> Id {
@@ -104,20 +108,21 @@ fn current_id() -> Id {
 /// What a resizable dialog's growing part learned, kept from frame to frame.
 #[derive(Clone, Copy, Debug, Default)]
 struct Growth {
-    /// The height of the content after it.
-    rest: Option<f32>,
-    /// Its height as tall as it wants.
-    natural: Option<f32>,
+    height_after: Option<f32>,
+    natural_height: Option<f32>,
 }
 
 /// The growing part as laid out this frame.
 #[derive(Clone, Copy, Debug, Default)]
-struct Part {
-    /// Where it ends.
-    end: f32,
+struct GrowingPart {
+    bottom: f32,
     height: f32,
-    min: f32,
-    natural: f32,
+    min_height: f32,
+    natural_height: f32,
+}
+
+fn min_window_width(content_width: f32) -> f32 {
+    MIN_RESIZABLE_WIDTH.min(content_width + 2.0 * MARGIN)
 }
 
 #[derive(Debug)]
@@ -128,13 +133,11 @@ pub struct Dialog<'a> {
     icon: Option<Glyph>,
     danger: bool,
     modal: bool,
-    /// Closes only through its own buttons: no close button on its window.
     undismissable: bool,
     opener: ViewportId,
     raise: bool,
     resizable: bool,
-    remember: Option<Id>,
-    /// What the usage statistics call it, if they count it (#264).
+    width_key: Option<Id>,
     screen: Option<crate::usage::Screen>,
 }
 
@@ -146,7 +149,7 @@ pub struct Shown<R> {
 }
 
 impl<R> Shown<R> {
-    /// The window was closed from its title bar.
+    /// Closed from its title bar.
     pub fn should_close(&self) -> bool {
         self.close
     }
@@ -157,7 +160,7 @@ impl<'a> Dialog<'a> {
         Self {
             id: Id::new(id),
             title,
-            width: 470.0,
+            width: DEFAULT_WIDTH,
             icon: None,
             danger: false,
             modal: false,
@@ -165,12 +168,12 @@ impl<'a> Dialog<'a> {
             opener: ViewportId::ROOT,
             raise: false,
             resizable: false,
-            remember: None,
+            width_key: None,
             screen: None,
         }
     }
 
-    /// Counted in the usage statistics as `screen` each time it opens (#264).
+    /// Counted in the usage statistics each time it opens.
     pub fn screen(mut self, screen: crate::usage::Screen) -> Self {
         self.screen = Some(screen);
         self
@@ -185,19 +188,18 @@ impl<'a> Dialog<'a> {
         self.danger = danger;
         self
     }
-    /// Locks parterre's other windows while it is shown.
     pub fn modal(mut self) -> Self {
         self.modal = true;
         self
     }
-    /// Closes only through its own buttons: its window has no close button where the platform
-    /// lets parterre leave it out (winit 0.30: Windows and macOS), and the caller ignores
-    /// [`Shown::should_close`]. Esc does nothing unless the caller makes it.
+    /// Closes only through its own buttons: its window has no close button where winit can
+    /// leave it out (Windows and macOS), and the caller ignores [`Shown::should_close`]. Esc
+    /// does nothing unless the caller makes it.
     pub fn undismissable(mut self) -> Self {
         self.undismissable = true;
         self
     }
-    /// The window it opens over, where the platform lets parterre place windows (not Wayland).
+    /// Where the platform lets parterre place windows (not Wayland).
     pub fn opener(mut self, opener: ViewportId) -> Self {
         self.opener = opener;
         self
@@ -212,7 +214,7 @@ impl<'a> Dialog<'a> {
     /// A resizable one's width is remembered by `key` rather than by its id, e.g. one width
     /// with a pane and another without. A new key while it is open sizes it anew.
     pub fn remember_as(mut self, key: impl std::hash::Hash + std::fmt::Debug) -> Self {
-        self.remember = Some(Id::new(key));
+        self.width_key = Some(Id::new(key));
         self
     }
     /// Brings it forward, e.g. when asked for again while it is open.
@@ -225,9 +227,8 @@ impl<'a> Dialog<'a> {
         ViewportId::from_hash_of(("dialog", self.id))
     }
 
-    /// Where a resizable one's window width is kept, across runs.
-    fn width_id(&self) -> Id {
-        Id::new("dialog-width").with(self.remember.unwrap_or(self.id))
+    fn persisted_width_id(&self) -> Id {
+        Id::new("dialog-width").with(self.width_key.unwrap_or(self.id))
     }
 
     /// Shows the dialog in its own window, sized to its content. Call every frame while it is
@@ -242,17 +243,18 @@ impl<'a> Dialog<'a> {
         let mut window = ctx
             .data(|d| d.get_temp::<Window>(key))
             // Not shown in the frame before: its window is gone, a new one opens.
-            .filter(|w| w.frame + 1 >= frame)
+            .filter(|w| w.last_root_frame + 1 >= frame)
             .unwrap_or_default();
-        window.frame = frame;
+        window.last_root_frame = frame;
         let look: Option<Look> = ctx.data(|d| d.get_temp(look_id()));
         let opener = ctx.input(|i| i.raw.viewports.get(&self.opener).cloned());
         let monitor = opener
             .as_ref()
             .and_then(|o| o.monitor_size)
             .unwrap_or(vec2(1280.0, 800.0));
+        let max_height = (monitor.y * MAX_SCREEN_SHARE).round();
         let remembered: Option<f32> = if self.resizable {
-            ctx.data_mut(|d| d.get_persisted(self.width_id()))
+            ctx.data_mut(|d| d.get_persisted(self.persisted_width_id()))
         } else {
             None
         };
@@ -260,22 +262,24 @@ impl<'a> Dialog<'a> {
             .map_or(self.width, |w| w - 2.0 * MARGIN)
             .min(monitor.x - 72.0)
             .max(200.0);
-        // Remembered by another key now: sized anew, as it opens.
-        let rekeyed = self.resizable && window.remembered.is_some_and(|k| k != self.width_id());
+        let rekeyed = self.resizable
+            && window
+                .width_key
+                .is_some_and(|k| k != self.persisted_width_id());
         if rekeyed || window.size.is_none() {
             window.size = None;
-            window.user = None;
-            window.least = None;
-            window.fit = true;
+            window.user_size = None;
+            window.min_size_told = None;
+            window.fits_content = true;
         }
-        window.remembered = Some(self.width_id());
+        window.width_key = Some(self.persisted_width_id());
         let mut style = (*ctx.global_style()).clone();
         menu::popover_style(&mut style);
         // A new window opens in its size and place, rather than moving and growing in view.
         let size = *window.size.get_or_insert_with(|| {
             let size = self.measure(ctx, opener.as_ref(), width, &style, &mut content);
             if self.resizable {
-                vec2(size.x, size.y.min((monitor.y * 0.85).round()))
+                vec2(size.x, size.y.min(max_height))
             } else {
                 size
             }
@@ -296,16 +300,16 @@ impl<'a> Dialog<'a> {
         if self.undismissable {
             builder = builder.with_close_button(false);
         }
-        // Same size always. On Wayland that is told to the window once it exists (below):
-        // told here, winit would set the hints before its title bar exists and leave the bar
-        // out of them; the compositor then holds the window to the hints, with the bar outside
-        // its frame (above the screen, at the top) and the content cut short by its height.
-        // Embedded in a screenshot, a window that size is cut short by its title bar.
-        let min = vec2(MIN_WIDTH.min(width + 2.0 * MARGIN), 200.0);
+        // Same size always. On Wayland that is told to the window once it exists (in
+        // `tend_window`): told here, winit would set the hints before its title bar exists and
+        // leave the bar out of them; the compositor then holds the window to the hints, with the
+        // bar outside its frame and the content cut short by its height. Embedded in a
+        // screenshot, a window that size is cut short by its title bar.
+        let min = vec2(min_window_width(width), 200.0);
         if self.resizable {
             // Its content raises the height as it learns what it needs (see `growing`). On
-            // Wayland, the least size too is told once the window exists, as below.
-            // Embedded in a screenshot, it is the size it was told and its window fits it.
+            // Wayland, the least size too is told once the window exists. Embedded in a
+            // screenshot, it is the size it was told and its window fits it.
             builder = builder.with_resizable(!ctx.embed_viewports());
             if !wayland() {
                 builder = builder.with_min_inner_size(min);
@@ -329,80 +333,12 @@ impl<'a> Dialog<'a> {
                 ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
             }
         }
+        let theme = look.as_ref().and_then(|l| l.theme);
         let (inner, close, measured) =
             ctx.show_viewport_immediate(viewport, builder, |ui, class| {
                 let embedded = class == egui::ViewportClass::EmbeddedWindow;
-                let mut close = false;
-                if !embedded {
-                    let theme = look.as_ref().and_then(|l| l.theme);
-                    if window.theme != theme {
-                        window.theme = theme;
-                        if let Some(theme) = theme {
-                            ui.ctx()
-                                .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
-                        }
-                    }
-                    close = ui.input(|i| i.viewport().close_requested());
-                    // Once the window exists (its title bar with it): its size, and to keep
-                    // it. Asked for again whenever the content changes size.
-                    let now = ui.input(|i| i.time);
-                    if rekeyed {
-                        window.opened = now;
-                    }
-                    if self.resizable && window.hinted.is_none() {
-                        if wayland() {
-                            for command in [
-                                egui::ViewportCommand::InnerSize(size),
-                                egui::ViewportCommand::MinInnerSize(min),
-                            ] {
-                                ui.ctx().send_viewport_cmd(command);
-                            }
-                        }
-                        window.hinted = Some(size);
-                        window.resized = now;
-                        window.opened = now;
-                    } else if !self.resizable && wayland() && window.hinted != Some(size) {
-                        window.hinted = Some(size);
-                        window.resized = now;
-                        for command in [
-                            egui::ViewportCommand::InnerSize(size),
-                            egui::ViewportCommand::MinInnerSize(size),
-                            egui::ViewportCommand::MaxInnerSize(size),
-                        ] {
-                            ui.ctx().send_viewport_cmd(command);
-                        }
-                    }
-                    // A Wayland compositor may hand a window back the size it last knew (on
-                    // focus, or from a configure sent before its title bar was in its frame),
-                    // and winit takes it. Ask again until the window has it. A resizable one is
-                    // handed back a size without its title bar just after it opens (GNOME):
-                    // its size is kept for a moment, and after that it is the user's.
-                    let off = ui.ctx().content_rect().size() - size;
-                    let keep = !self.resizable || now - window.opened < KEEP_OPENING_SIZE;
-                    if self.resizable && keep {
-                        ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_millis(50));
-                    }
-                    if off.abs().max_elem() > 1.0 && keep {
-                        if now - window.resized > 0.03 {
-                            window.resized = now;
-                            ui.ctx()
-                                .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-                        }
-                        ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_millis(40));
-                    }
-                    if self.modal {
-                        if ModalLock::shown(ui.ctx(), viewport) == Some(true) {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
-                        }
-                        // Answered, it is gone in the next frame, which unlocks the others: run
-                        // that frame now, or the next input there is still dropped.
-                        if close || ui.input(|i| !i.events.is_empty()) {
-                            ui.ctx().request_repaint_of(ViewportId::ROOT);
-                        }
-                    }
-                }
+                let close =
+                    !embedded && self.tend_window(ui.ctx(), &mut window, theme, size, min, rekeyed);
                 // A resizable one fills the window the user sized.
                 let width = if self.resizable && !embedded {
                     ui.ctx().content_rect().width() - 2.0 * MARGIN
@@ -415,12 +351,11 @@ impl<'a> Dialog<'a> {
                     (true, true) => Some(size.y - 2.0 * MARGIN),
                 };
                 let (inner, measured, fit) = self.body(ui, width, fill, &style, &mut content);
-                let cap = (monitor.y * 0.85).round();
                 match fit {
-                    Some(fit) if !embedded => self.follow(ui.ctx(), &mut window, fit, cap),
+                    Some(fit) if !embedded => self.follow(ui.ctx(), &mut window, fit, max_height),
                     // Embedded, no one sizes it: it is as tall as its content wants.
                     Some(fit) if fit.settled => {
-                        let wanted = fit.natural.min(cap).max(fit.least.y).round();
+                        let wanted = fit.wanted_height(max_height);
                         if (size.y - wanted).abs() > 1.0 {
                             window.size = Some(vec2(size.x, wanted));
                             ui.ctx().request_repaint();
@@ -437,43 +372,120 @@ impl<'a> Dialog<'a> {
         Shown { inner, close }
     }
 
+    /// What a dialog in a window of its own needs each frame: the title bar's theme, its size
+    /// against what the platform does to it, and a modal one's lock. Returns whether it was
+    /// closed from its title bar.
+    fn tend_window(
+        &self,
+        ctx: &egui::Context,
+        window: &mut Window,
+        theme: Option<egui::SystemTheme>,
+        size: Vec2,
+        min: Vec2,
+        rekeyed: bool,
+    ) -> bool {
+        if window.theme != theme {
+            window.theme = theme;
+            if let Some(theme) = theme {
+                ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
+            }
+        }
+        let close = ctx.input(|i| i.viewport().close_requested());
+        // Once the window exists (its title bar with it): its size, and to keep it. Asked for
+        // again whenever the content changes size.
+        let now = ctx.input(|i| i.time);
+        if rekeyed {
+            window.size_given_at = now;
+        }
+        if self.resizable && window.hinted_size.is_none() {
+            if wayland() {
+                for command in [
+                    egui::ViewportCommand::InnerSize(size),
+                    egui::ViewportCommand::MinInnerSize(min),
+                ] {
+                    ctx.send_viewport_cmd(command);
+                }
+            }
+            window.hinted_size = Some(size);
+            window.size_reasked_at = now;
+            window.size_given_at = now;
+        } else if !self.resizable && wayland() && window.hinted_size != Some(size) {
+            window.hinted_size = Some(size);
+            window.size_reasked_at = now;
+            for command in [
+                egui::ViewportCommand::InnerSize(size),
+                egui::ViewportCommand::MinInnerSize(size),
+                egui::ViewportCommand::MaxInnerSize(size),
+            ] {
+                ctx.send_viewport_cmd(command);
+            }
+        }
+        // A Wayland compositor may hand a window back the size it last knew (on focus, or from
+        // a configure sent before its title bar was in its frame), and winit takes it: ask again
+        // until the window has it. A resizable one is handed back a size without its title bar
+        // just after it opens (GNOME): its size is kept for a moment, and after that it is the
+        // user's.
+        let off = ctx.content_rect().size() - size;
+        let keep = !self.resizable || now - window.size_given_at < KEEP_OPENING_SIZE_SECS;
+        if self.resizable && keep {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        if off.abs().max_elem() > 1.0 && keep {
+            if now - window.size_reasked_at > 0.03 {
+                window.size_reasked_at = now;
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            }
+            ctx.request_repaint_after(Duration::from_millis(40));
+        }
+        if self.modal {
+            if ModalLock::note_shown(ctx, self.viewport()) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            // Answered, it is gone in the next frame, which unlocks the others: run that frame
+            // now, or the next input there is still dropped.
+            if close || ctx.input(|i| !i.events.is_empty()) {
+                ctx.request_repaint_of(ViewportId::ROOT);
+            }
+        }
+        close
+    }
+
     /// A resizable one's window, once the user can size it: the size they give it is theirs,
     /// and its width is remembered. Its height follows the content while it fits the content,
     /// and grows when the content does (more shown) and doesn't fit.
-    fn follow(&self, ctx: &egui::Context, window: &mut Window, fit: Fit, cap: f32) {
-        if fit.settled && window.least != Some(fit.least) {
-            window.least = Some(fit.least);
-            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(fit.least));
+    fn follow(&self, ctx: &egui::Context, window: &mut Window, fit: Fit, max_height: f32) {
+        if fit.settled && window.min_size_told != Some(fit.min_size) {
+            window.min_size_told = Some(fit.min_size);
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(fit.min_size));
         }
         let now = ctx.input(|i| i.time);
-        let natural = window.natural.replace(fit.natural);
+        let natural_before = window.natural_height.replace(fit.natural_height);
         let actual = ctx.content_rect().size();
         let told = window.size.unwrap_or(actual);
-        let wanted = fit.natural.min(cap).max(fit.least.y).round();
-        // Just told a size, the window may not have it yet: that is no user's.
-        let keep = now - window.opened < KEEP_OPENING_SIZE;
+        let wanted = fit.wanted_height(max_height);
+        // Just given a size, the window may not have it yet: that is no user's.
+        let keep = now - window.size_given_at < KEEP_OPENING_SIZE_SECS;
         if keep {
-            window.user = None;
+            window.user_size = None;
         } else {
-            let before = window.user.unwrap_or(told);
+            let before = window.user_size.unwrap_or(told);
             if (actual - before).abs().max_elem() > 1.0 {
-                // Sized by the user.
                 if (actual.x - before.x).abs() > 1.0 {
-                    ctx.data_mut(|d| d.insert_persisted(self.width_id(), actual.x));
+                    ctx.data_mut(|d| d.insert_persisted(self.persisted_width_id(), actual.x));
                 }
-                window.user = Some(actual);
-                window.fit = (actual.y - wanted).abs() <= 1.0;
+                window.user_size = Some(actual);
+                window.fits_content = (actual.y - wanted).abs() <= 1.0;
                 return;
             }
         }
         let size = if keep { told } else { actual };
-        let grew = natural.is_some_and(|n| fit.natural > n + 0.5) && size.y < wanted;
-        if fit.settled && (window.fit || grew) && (size.y - wanted).abs() > 1.0 {
+        let grew = natural_before.is_some_and(|n| fit.natural_height > n + 0.5) && size.y < wanted;
+        if fit.settled && (window.fits_content || grew) && (size.y - wanted).abs() > 1.0 {
             // Told through the builder's size, in the next frame.
             window.size = Some(vec2(size.x, wanted));
-            window.user = None;
-            window.opened = now;
-            window.fit = true;
+            window.user_size = None;
+            window.size_given_at = now;
+            window.fits_content = true;
         }
     }
 
@@ -506,7 +518,7 @@ impl<'a> Dialog<'a> {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 Pos2::ZERO,
-                vec2(width + 2.0 * MARGIN, UNBOUNDED),
+                vec2(width + 2.0 * MARGIN, UNBOUNDED_HEIGHT),
             )),
             viewports: std::iter::once((ViewportId::ROOT, info)).collect(),
             ..Default::default()
@@ -544,8 +556,7 @@ impl<'a> Dialog<'a> {
             .frame(frame)
             .show(ui, |ui| {
                 ui.set_style(style.clone());
-                // A resizable one fills its window, the `fill` high.
-                let height = fill.unwrap_or(UNBOUNDED);
+                let height = fill.unwrap_or(UNBOUNDED_HEIGHT);
                 let room = egui::Rect::from_min_size(ui.max_rect().min, vec2(width, height));
                 let builder = egui::UiBuilder::new()
                     .max_rect(room)
@@ -553,11 +564,11 @@ impl<'a> Dialog<'a> {
                 let current = Current {
                     id: self.id,
                     resizable: self.resizable,
-                    growing: false,
+                    in_growing_part: false,
                 };
                 ui.data_mut(|d| {
                     d.insert_temp(current_id(), current);
-                    d.remove_temp::<Part>(self.id.with("part"));
+                    d.remove_temp::<GrowingPart>(self.id.with("part"));
                 });
                 let shown = ui.scope_builder(builder, |ui| {
                     ui.set_width(width);
@@ -579,35 +590,34 @@ impl<'a> Dialog<'a> {
     /// A resizable one's fit in its window, from its content as laid out, with its growing
     /// part's height, if it has one, learned for the next frame.
     fn fit(&self, ui: &Ui, content: &egui::Response, width: f32) -> Fit {
-        let part: Option<Part> = ui.data_mut(|d| d.remove_temp(self.id.with("part")));
+        let part: Option<GrowingPart> = ui.data_mut(|d| d.remove_temp(self.id.with("part")));
         let height = content.rect.height();
-        let (least, natural, settled) = match part {
+        let (min_height, natural_height, settled) = match part {
             Some(part) => {
-                let rest = (content.rect.bottom() - part.end).max(0.0);
+                let height_after = (content.rect.bottom() - part.bottom).max(0.0);
                 let key = self.id.with("growth");
                 let mut growth: Growth = ui.data(|d| d.get_temp(key)).unwrap_or_default();
-                let settled = growth.rest.is_some_and(|r| (r - rest).abs() <= 0.5);
-                growth.rest = Some(rest);
-                growth.natural = Some(part.natural);
+                let settled = growth
+                    .height_after
+                    .is_some_and(|h| (h - height_after).abs() <= 0.5);
+                growth.height_after = Some(height_after);
+                growth.natural_height = Some(part.natural_height);
                 ui.data_mut(|d| d.insert_temp(key, growth));
                 if !settled {
                     // Laid out with the old figure: again, with this one.
                     ui.ctx().request_repaint();
                 }
                 (
-                    height - (part.height - part.min),
-                    height - (part.height - part.natural),
+                    height - (part.height - part.min_height),
+                    height - (part.height - part.natural_height),
                     settled,
                 )
             }
             None => (height, height, true),
         };
         Fit {
-            least: vec2(
-                MIN_WIDTH.min(width + 2.0 * MARGIN),
-                (least + 2.0 * MARGIN).round(),
-            ),
-            natural: (natural + 2.0 * MARGIN).round(),
+            min_size: vec2(min_window_width(width), (min_height + 2.0 * MARGIN).round()),
+            natural_height: (natural_height + 2.0 * MARGIN).round(),
             settled,
         }
     }
@@ -643,7 +653,7 @@ impl<'a> Dialog<'a> {
     }
 }
 
-/// Whether the windows are Wayland ones: winit picks Wayland over X11 when this is set.
+/// winit picks Wayland over X11 when this is set.
 fn wayland() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
@@ -654,28 +664,26 @@ fn wayland() -> bool {
 /// [`ModalLock::filter`] too, as eframe decides to close it before plugins see its input.
 #[derive(Debug, Default)]
 pub struct ModalLock {
-    /// The modal dialog's window, shown in the main window's last frame.
+    /// Shown in the main window's last frame.
     modal: Option<ViewportId>,
-    /// Shown in the main window's current frame.
-    seen: Option<ViewportId>,
+    shown_this_frame: Option<ViewportId>,
     /// Someone clicked or closed a locked window.
-    raise: bool,
+    raise_modal: bool,
 }
 
 impl ModalLock {
-    /// Whether a modal dialog locks the other windows now.
     pub fn locked(ctx: &egui::Context) -> bool {
         ctx.with_plugin(|lock: &mut ModalLock| lock.modal.is_some())
             .unwrap_or(false)
     }
 
-    /// Notes the modal dialog shown this frame. Returns whether to bring it forward, or `None`
-    /// without the plugin (in tests).
-    fn shown(ctx: &egui::Context, viewport: ViewportId) -> Option<bool> {
+    /// Notes the modal dialog shown this frame. Returns whether to bring it forward.
+    fn note_shown(ctx: &egui::Context, viewport: ViewportId) -> bool {
         ctx.with_plugin(|lock: &mut ModalLock| {
-            lock.seen = Some(viewport);
-            std::mem::take(&mut lock.raise)
+            lock.shown_this_frame = Some(viewport);
+            std::mem::take(&mut lock.raise_modal)
         })
+        .unwrap_or(false)
     }
 
     /// Drops a locked window's input. Its key and button releases and modifier changes stay, so
@@ -714,7 +722,7 @@ impl ModalLock {
         input.hovered_files.clear();
         input.dropped_files.clear();
         if raise {
-            self.raise = true;
+            self.raise_modal = true;
             ctx.request_repaint_of(modal);
         }
     }
@@ -733,46 +741,59 @@ impl egui::Plugin for ModalLock {
     /// a modal dialog is still shown.
     fn on_end_pass(&mut self, ui: &mut Ui) {
         if ui.ctx().viewport_id() == ViewportId::ROOT {
-            self.modal = self.seen.take();
+            self.modal = self.shown_this_frame.take();
         }
     }
 }
 
 /// A resizable dialog's growing part, such as a list, laid out by `part`. In its window, it is
 /// given the height to fill: what the window has left once the rest of the content (as laid out
-/// the frame before) is in, but at least `min`, or all of its own height when that is less.
-/// Otherwise, while the dialog is measured or in a dialog of fixed size, it is given `None`, to
-/// be as tall as it wants. `part` returns that height of its own either way. One per dialog.
-pub fn growing<R>(ui: &mut Ui, min: f32, part: impl FnOnce(&mut Ui, Option<f32>) -> (R, f32)) -> R {
+/// the frame before) is in, but at least `min_height`, or all of its own height when that is
+/// less. Otherwise, while the dialog is measured or in a dialog of fixed size, it is given
+/// `None`, to be as tall as it wants. `part` returns that height of its own either way. One per
+/// dialog.
+pub fn growing<R>(
+    ui: &mut Ui,
+    min_height: f32,
+    part: impl FnOnce(&mut Ui, Option<f32>) -> (R, f32),
+) -> R {
     let current: Option<Current> = ui.data(|d| d.get_temp(current_id()));
     let room = ui.max_rect().bottom() - ui.cursor().top();
     // Not inside another, nor laid out unseen for a widget's size.
-    let grows = |c: &Current| c.resizable && !c.growing;
+    let grows = |c: &Current| c.resizable && !c.in_growing_part;
     let Some(current) = current.filter(grows).filter(|_| !ui.is_sizing_pass()) else {
         return part(ui, None).0;
     };
     let inside = Current {
-        growing: true,
+        in_growing_part: true,
         ..current
     };
     ui.data_mut(|d| d.insert_temp(current_id(), inside));
     let growth: Growth = ui
         .data(|d| d.get_temp(current.id.with("growth")))
         .unwrap_or_default();
-    let min = growth.natural.map_or(min, |n| min.min(n));
+    let min_height = growth
+        .natural_height
+        .map_or(min_height, |n| min_height.min(n));
     // Measured, it is as tall as it wants, and what follows it is learned for the window.
-    let height = (room < UNBOUNDED / 2.0).then(|| (room - growth.rest.unwrap_or(0.0)).max(min));
-    let (inner, natural) = part(ui, height);
+    let height = (room < UNBOUNDED_HEIGHT / 2.0)
+        .then(|| (room - growth.height_after.unwrap_or(0.0)).max(min_height));
+    let (inner, natural_height) = part(ui, height);
     ui.data_mut(|d| d.insert_temp(current_id(), current));
-    let laid = Part {
-        // Its end: the cursor is past the space after it.
-        end: ui.cursor().top() - ui.spacing().item_spacing.y,
-        height: height.unwrap_or(natural),
-        min,
-        natural,
+    let laid_out = GrowingPart {
+        // The cursor is past the space after it.
+        bottom: ui.cursor().top() - ui.spacing().item_spacing.y,
+        height: height.unwrap_or(natural_height),
+        min_height,
+        natural_height,
     };
-    ui.data_mut(|d| d.insert_temp(current.id.with("part"), laid));
+    ui.data_mut(|d| d.insert_temp(current.id.with("part"), laid_out));
     inner
+}
+
+fn screen_height(ui: &Ui) -> f32 {
+    ui.input(|i| i.viewport().monitor_size)
+        .map_or(800.0, |s| s.y)
 }
 
 /// The dialog's fields, scrolling once the window would be taller than most of the screen.
@@ -781,54 +802,34 @@ pub fn growing<R>(ui: &mut Ui, min: f32, part: impl FnOnce(&mut Ui, Option<f32>)
 pub fn fields<R>(ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> R {
     let current: Option<Current> = ui.data(|d| d.get_temp(current_id()));
     if current.is_some_and(|c| c.resizable) {
-        return growing(ui, MIN_FIELDS, |ui, height| {
-            ui.scope(|ui| {
-                let inside = visible_scroll_bars(ui);
-                let area = egui::ScrollArea::vertical().id_salt("dialog-fields");
-                let area = match height {
-                    Some(h) => area
-                        .min_scrolled_height(h)
-                        .max_height(h)
-                        .auto_shrink([false, false]),
-                    // No taller than the window can open (most of the screen); embedded in a
-                    // screenshot, it isn't filled.
-                    None => {
-                        let used = ui.cursor().top() - ui.min_rect().top();
-                        let screen = ui
-                            .input(|i| i.viewport().monitor_size)
-                            .map_or(800.0, |s| s.y);
-                        area.max_height((screen * 0.85 - used).max(MIN_FIELDS))
-                            .auto_shrink([false, true])
-                    }
-                };
-                let shown = area.show(ui, |ui| {
-                    *ui.visuals_mut() = inside;
-                    content(ui)
-                });
-                (shown.inner, shown.content_size.y)
-            })
-            .inner
+        return growing(ui, MIN_FIELDS_HEIGHT, |ui, height| {
+            let area = egui::ScrollArea::vertical().id_salt("dialog-fields");
+            let area = match height {
+                Some(h) => area
+                    .min_scrolled_height(h)
+                    .max_height(h)
+                    .auto_shrink([false, false]),
+                // No taller than the window can open; embedded in a screenshot, it isn't
+                // filled.
+                None => {
+                    let used = ui.cursor().top() - ui.min_rect().top();
+                    let max_height = screen_height(ui) * MAX_SCREEN_SHARE - used;
+                    area.max_height(max_height.max(MIN_FIELDS_HEIGHT))
+                        .auto_shrink([false, true])
+                }
+            };
+            let shown = scroll_with_visible_bars(ui, area, content);
+            (shown.inner, shown.content_size.y)
         });
     }
     let used = ui.cursor().top() - ui.min_rect().top();
     // The window grows with its content up to most of the screen; the fields scroll after that.
-    let screen = ui
-        .input(|i| i.viewport().monitor_size)
-        .map_or(800.0, |s| s.y);
-    let remaining = (screen * 0.85).min(630.0) - 2.0 * MARGIN - used - 165.0;
-    ui.scope(|ui| {
-        let inside = visible_scroll_bars(ui);
-        egui::ScrollArea::vertical()
-            .id_salt("dialog-fields")
-            .max_height(remaining.clamp(70.0, 560.0))
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                *ui.visuals_mut() = inside;
-                content(ui)
-            })
-            .inner
-    })
-    .inner
+    let remaining = (screen_height(ui) * MAX_SCREEN_SHARE).min(630.0) - 2.0 * MARGIN - used - 165.0;
+    let area = egui::ScrollArea::vertical()
+        .id_salt("dialog-fields")
+        .max_height(remaining.clamp(MIN_FIELDS_HEIGHT, 560.0))
+        .auto_shrink([false, true]);
+    scroll_with_visible_bars(ui, area, content).inner
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -894,8 +895,8 @@ pub fn actions(
 
 pub fn command_box(ui: &mut Ui, commands: &[String]) {
     ui.separator();
-    let id = egui::Id::new("git-command-expanded");
-    let mut shown = ui.data_mut(|d| *d.get_persisted_mut_or(id, false));
+    let expanded_id = egui::Id::new("git-command-expanded");
+    let mut expanded = ui.data_mut(|d| *d.get_persisted_mut_or(expanded_id, false));
     // The heading as tall as its text, close to the box.
     let row = ui.spacing().interact_size.y;
     ui.spacing_mut().interact_size.y = 16.0;
@@ -903,7 +904,7 @@ pub fn command_box(ui: &mut Ui, commands: &[String]) {
         .horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(12.0), egui::Sense::hover());
-            let glyph = if shown {
+            let glyph = if expanded {
                 parterre_core::glyphs::CHEVRON_DOWN
             } else {
                 parterre_core::glyphs::CHEVRON_RIGHT
@@ -922,10 +923,10 @@ pub fn command_box(ui: &mut Ui, commands: &[String]) {
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     ui.spacing_mut().interact_size.y = row;
     if head.clicked() {
-        shown = !shown;
-        ui.data_mut(|d| d.insert_persisted(id, shown));
+        expanded = !expanded;
+        ui.data_mut(|d| d.insert_persisted(expanded_id, expanded));
     }
-    if !shown {
+    if !expanded {
         return;
     }
     ui.add_space(-4.0);
@@ -942,14 +943,17 @@ pub fn command_box(ui: &mut Ui, commands: &[String]) {
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            // Two lines high at least, so the dialog keeps its shape; empty while there's no
-            // command.
-            // A line as the commands are drawn: one row of their font.
             let line = ui
                 .painter()
-                .layout_no_wrap("git".into(), egui::FontId::monospace(11.5), Color32::WHITE)
+                .layout_no_wrap(
+                    "git".into(),
+                    egui::FontId::monospace(COMMAND_FONT_SIZE),
+                    Color32::WHITE,
+                )
                 .size()
                 .y;
+            // Two lines high at least, so the dialog keeps its shape; empty while there's no
+            // command.
             ui.set_min_height(2.0 * line + 4.0);
             if commands.is_empty() {
                 return;
@@ -957,23 +961,20 @@ pub fn command_box(ui: &mut Ui, commands: &[String]) {
             ui.horizontal_top(|ui| {
                 let w = ui.available_width() - 28.0;
                 // Its own column: the row it's in would lay the lines side by side.
-                // Three lines at most; more scroll, with a bar that shows it.
                 ui.vertical(|ui| {
                     ui.set_width(w);
-                    let inside = visible_scroll_bars(ui);
                     // egui keeps a scrolling area 64 points high at least: three lines are less.
-                    let three = 3.0 * line + 4.0;
-                    egui::ScrollArea::vertical()
+                    let three_lines = 3.0 * line + 4.0;
+                    let area = egui::ScrollArea::vertical()
                         .id_salt("command-lines")
-                        .max_height(three)
-                        .min_scrolled_height(three)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            *ui.visuals_mut() = inside;
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.add_space(4.0);
-                            wrapped_commands(ui, commands, w - 16.0);
-                        });
+                        .max_height(three_lines)
+                        .min_scrolled_height(three_lines)
+                        .auto_shrink([false, true]);
+                    scroll_with_visible_bars(ui, area, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.add_space(4.0);
+                        wrapped_commands(ui, commands, w - 16.0);
+                    });
                 });
                 // A check mark for a moment after a click.
                 let copied_id = egui::Id::new("copied-command").with(&text);
@@ -981,8 +982,7 @@ pub fn command_box(ui: &mut Ui, commands: &[String]) {
                 let at: Option<f64> = ui.data(|d| d.get_temp(copied_id));
                 let copied = at.is_some_and(|at| now - at < 1.5);
                 if copied {
-                    ui.ctx()
-                        .request_repaint_after(std::time::Duration::from_millis(300));
+                    ui.ctx().request_repaint_after(Duration::from_millis(300));
                 }
                 let done = Color32::from_rgb(0x2e, 0xa0, 0x43);
                 if widgets::copy_button(ui, copied, done)
@@ -996,87 +996,100 @@ pub fn command_box(ui: &mut Ui, commands: &[String]) {
         });
 }
 
-/// Scroll bars that show there's more: a solid bar with a gray track the whole height of the
-/// area and a darker handle, instead of egui's track in the dialog's own colour (white on
-/// white) and a handle only on hover. Returns the visuals to put back inside the area, so its
-/// content looks as it would outside.
-fn visible_scroll_bars(ui: &mut Ui) -> egui::Visuals {
-    let inside = ui.visuals().clone();
-    let t = widgets::tones(ui);
-    ui.spacing_mut().scroll = egui::style::ScrollStyle {
-        bar_width: 8.0,
-        ..egui::style::ScrollStyle::solid()
-    };
-    let weak = inside.weak_text_color();
-    let v = ui.visuals_mut();
-    v.extreme_bg_color = t.seg_bg;
-    v.widgets.inactive.bg_fill = weak.gamma_multiply(0.6);
-    v.widgets.hovered.bg_fill = weak;
-    v.widgets.active.bg_fill = inside.text_color();
-    inside
+/// Shows `area` with scroll bars that show there's more: a solid bar with a gray track the
+/// whole height of the area and a darker handle, instead of egui's track in the dialog's own
+/// colour (white on white) and a handle only on hover. Its content looks as it would outside.
+fn scroll_with_visible_bars<R>(
+    ui: &mut Ui,
+    area: egui::ScrollArea,
+    content: impl FnOnce(&mut Ui) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    ui.scope(|ui| {
+        let inside = ui.visuals().clone();
+        let t = widgets::tones(ui);
+        ui.spacing_mut().scroll = egui::style::ScrollStyle {
+            bar_width: 8.0,
+            ..egui::style::ScrollStyle::solid()
+        };
+        let weak = inside.weak_text_color();
+        let v = ui.visuals_mut();
+        v.extreme_bg_color = t.seg_bg;
+        v.widgets.inactive.bg_fill = weak.gamma_multiply(0.6);
+        v.widgets.hovered.bg_fill = weak;
+        v.widgets.active.bg_fill = inside.text_color();
+        area.show(ui, |ui| {
+            *ui.visuals_mut() = inside;
+            content(ui)
+        })
+    })
+    .inner
 }
 
-/// A return arrow, where a command is broken.
-const RETURN: Glyph = &[
+const LINE_BREAK_ARROW: Glyph = &[
     parterre_core::glyphs::Part::Path("M19 5v9H6"),
     parterre_core::glyphs::Part::Path("M10 10l-4 4 4 4"),
 ];
 
-/// Each command broken where the room ends, not at its spaces, with a return arrow at each
-/// break; space between the commands, so each can be told apart.
+/// Each command broken where the room ends, not at its spaces, with an arrow at each break;
+/// space between the commands, so each can be told apart.
 fn wrapped_commands(ui: &mut Ui, commands: &[String], width: f32) {
-    const MARK: f32 = 13.0;
-    let font = egui::FontId::monospace(11.5);
-    let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
-    let per_line = (((width - MARK) / char_w).floor() as usize).max(10);
+    const ARROW_WIDTH: f32 = 13.0;
+    let font = egui::FontId::monospace(COMMAND_FONT_SIZE);
+    let char_width = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+    let chars_per_line = (((width - ARROW_WIDTH) / char_width).floor() as usize).max(10);
     let color = ui.visuals().text_color();
     let weak = ui.visuals().weak_text_color();
-    for (k, command) in commands.iter().enumerate() {
-        if k > 0 {
+    for (i, command) in commands.iter().enumerate() {
+        if i > 0 {
             ui.add_space(10.0);
         }
         // One block of text, a row per line, so the lines sit exactly a font's height apart
         // (three of them fill the box).
         let chars: Vec<char> = command.chars().collect();
-        let lines: Vec<String> = chars.chunks(per_line).map(|l| l.iter().collect()).collect();
+        let lines: Vec<String> = chars
+            .chunks(chars_per_line)
+            .map(|l| l.iter().collect())
+            .collect();
         let galley = ui
             .painter()
             .layout_no_wrap(lines.join("\n"), font.clone(), color);
-        let size = egui::vec2(galley.size().x + MARK + 2.0, galley.size().y);
+        let size = egui::vec2(galley.size().x + ARROW_WIDTH + 2.0, galley.size().y);
         let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-        let rows = galley.rows.len();
-        for (i, row) in galley.rows.iter().enumerate() {
-            if i + 1 < rows {
-                let r = row.rect().translate(rect.min.to_vec2());
-                let at = egui::pos2(r.right() + 2.0 + MARK / 2.0, r.center().y);
-                let mark = egui::Rect::from_center_size(at, egui::Vec2::splat(11.0));
-                widgets::paint_glyph(ui.painter(), mark, RETURN, weak);
-            }
+        let broken_rows = galley.rows.len().saturating_sub(1);
+        for row in &galley.rows[..broken_rows] {
+            let r = row.rect().translate(rect.min.to_vec2());
+            let at = egui::pos2(r.right() + 2.0 + ARROW_WIDTH / 2.0, r.center().y);
+            let arrow = egui::Rect::from_center_size(at, egui::Vec2::splat(11.0));
+            widgets::paint_glyph(ui.painter(), arrow, LINE_BREAK_ARROW, weak);
         }
         ui.painter().galley(rect.min, galley, color);
     }
 }
 
-/// One subtitle row, matching a log commit. Returns true when its hash was clicked.
-pub fn commit_line(ui: &mut Ui, c: &Commit, abbrev: usize) -> bool {
+/// One subtitle row, matching a log commit. Returns whether its hash was clicked.
+pub fn commit_line(ui: &mut Ui, commit: &Commit, abbrev: usize) -> bool {
+    const TEXT_SIZE: f32 = 12.0;
     let mut clicked = false;
-    const SIZE: f32 = 12.0;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.spacing_mut().interact_size.y = 0.0;
         let weak = ui.visuals().weak_text_color();
         let bar = || {
             RichText::new("|")
-                .size(SIZE)
+                .size(TEXT_SIZE)
                 .color(weak.gamma_multiply(0.6))
         };
-        ui.label(RichText::new("at").weak().size(SIZE));
+        ui.label(RichText::new("at").weak().size(TEXT_SIZE));
         clicked = ui
-            .link(RichText::new(c.oid.short(abbrev)).monospace().size(SIZE))
+            .link(
+                RichText::new(commit.oid.short(abbrev))
+                    .monospace()
+                    .size(TEXT_SIZE),
+            )
             .on_hover_text("Show in the log")
             .clicked();
         ui.label(bar());
-        let font = egui::FontId::proportional(SIZE);
+        let font = egui::FontId::proportional(TEXT_SIZE);
         let width = |s: &str| {
             ui.painter()
                 .layout_no_wrap(s.to_owned(), font.clone(), weak)
@@ -1084,8 +1097,8 @@ pub fn commit_line(ui: &mut Ui, c: &Commit, abbrev: usize) -> bool {
                 .x
         };
         let right = width("|") * 2.0
-            + width(&c.author_name)
-            + width(&c.author_date)
+            + width(&commit.author_name)
+            + width(&commit.author_date)
             + ui.spacing().item_spacing.x * 5.0;
         let room = (ui.available_width() - right).max(25.0);
         let height = ui.fonts_mut(|f| f.row_height(&font));
@@ -1093,14 +1106,14 @@ pub fn commit_line(ui: &mut Ui, c: &Commit, abbrev: usize) -> bool {
             vec2(room, height),
             Layout::left_to_right(Align::Center),
             |ui| {
-                ui.add(egui::Label::new(RichText::new(&c.subject).size(SIZE)).truncate())
-                    .on_hover_text(&c.subject);
+                ui.add(egui::Label::new(RichText::new(&commit.subject).size(TEXT_SIZE)).truncate())
+                    .on_hover_text(&commit.subject);
             },
         );
         ui.label(bar());
-        ui.label(RichText::new(&c.author_name).weak().size(SIZE));
+        ui.label(RichText::new(&commit.author_name).weak().size(TEXT_SIZE));
         ui.label(bar());
-        ui.label(RichText::new(&c.author_date).weak().size(SIZE));
+        ui.label(RichText::new(&commit.author_date).weak().size(TEXT_SIZE));
     });
     clicked
 }
@@ -1268,7 +1281,7 @@ mod tests {
         lock.lock(&ctx, &mut own);
         assert_eq!(own.events, events, "the dialog keeps its input");
         assert!(own.viewport().close_requested());
-        assert!(!lock.raise);
+        assert!(!lock.raise_modal);
 
         let mut main = input(ViewportId::ROOT, events, true);
         lock.lock(&ctx, &mut main);
@@ -1282,7 +1295,7 @@ mod tests {
             "only releases stay, and the pointer leaves"
         );
         assert!(!main.viewport().close_requested(), "the main window stays");
-        assert!(lock.raise, "the click brings the dialog forward");
+        assert!(lock.raise_modal, "the click brings the dialog forward");
     }
 
     #[test]
@@ -1300,7 +1313,7 @@ mod tests {
     #[derive(Default)]
     struct Windows {
         size: Option<Vec2>,
-        least: Vec2,
+        min_size: Vec2,
         time: f64,
         builder: Option<egui::ViewportBuilder>,
     }
@@ -1310,11 +1323,11 @@ mod tests {
             for command in commands {
                 match command {
                     egui::ViewportCommand::InnerSize(size) => self.size = Some(size),
-                    egui::ViewportCommand::MinInnerSize(least) => self.least = least,
+                    egui::ViewportCommand::MinInnerSize(min) => self.min_size = min,
                     _ => {}
                 }
             }
-            self.size = self.size.map(|s| s.max(self.least));
+            self.size = self.size.map(|s| s.max(self.min_size));
         }
     }
 
@@ -1425,29 +1438,32 @@ mod tests {
         windows.borrow().size.unwrap_or_default()
     }
 
-    /// More than a second: past the moment a dialog keeps the size it opened in.
-    const SETTLE: usize = 90;
+    /// Past [`KEEP_OPENING_SIZE_SECS`] at 60 frames a second.
+    const SETTLE_FRAMES: usize = 90;
 
     #[test]
     fn a_resizable_dialog_opens_as_tall_as_its_content_up_to_most_of_the_screen() {
         let windows = Default::default();
         let ctx = windowed(&windows);
-        let short = frames(&ctx, &windows, Some(3), SETTLE);
+        let short = frames(&ctx, &windows, Some(3), SETTLE_FRAMES);
         assert_eq!(short.x, 400.0 + 2.0 * MARGIN);
         assert!(short.y < 300.0, "{short:?}");
         frames(&ctx, &windows, None, 2);
-        let long = frames(&ctx, &windows, Some(200), SETTLE);
+        let long = frames(&ctx, &windows, Some(200), SETTLE_FRAMES);
         assert_eq!(long.y, (MONITOR.y * 0.85).round(), "{long:?}");
         // The fields scroll down to their least; the buttons stay.
-        let least = windows.borrow().least;
-        assert!(least.y < short.y + MIN_FIELDS, "{least:?} {short:?}");
+        let min_size = windows.borrow().min_size;
+        assert!(
+            min_size.y < short.y + MIN_FIELDS_HEIGHT,
+            "{min_size:?} {short:?}"
+        );
     }
 
     #[test]
     fn the_width_the_user_gives_it_is_remembered() {
         let windows = Default::default();
         let ctx = windowed(&windows);
-        let opened = frames(&ctx, &windows, Some(3), SETTLE);
+        let opened = frames(&ctx, &windows, Some(3), SETTLE_FRAMES);
         windows.borrow_mut().size = Some(vec2(700.0, opened.y + 100.0));
         let sized = frames(&ctx, &windows, Some(3), 5);
         assert_eq!(
@@ -1456,7 +1472,7 @@ mod tests {
             "the user's size stays"
         );
         frames(&ctx, &windows, None, 2);
-        let again = frames(&ctx, &windows, Some(3), SETTLE);
+        let again = frames(&ctx, &windows, Some(3), SETTLE_FRAMES);
         assert_eq!(
             again,
             vec2(700.0, opened.y),
@@ -1468,10 +1484,10 @@ mod tests {
     fn its_height_follows_its_content_until_the_user_sizes_it() {
         let windows = Default::default();
         let ctx = windowed(&windows);
-        let three = frames(&ctx, &windows, Some(3), SETTLE);
+        let three = frames(&ctx, &windows, Some(3), SETTLE_FRAMES);
         let six = frames(&ctx, &windows, Some(6), 10);
         assert!(six.y > three.y, "grows with its content: {three:?} {six:?}");
-        let back = frames(&ctx, &windows, Some(3), SETTLE);
+        let back = frames(&ctx, &windows, Some(3), SETTLE_FRAMES);
         assert_eq!(back, three, "and shrinks with it");
         // Taller than its content, by the user: it keeps that, and grows only when the
         // content needs more.

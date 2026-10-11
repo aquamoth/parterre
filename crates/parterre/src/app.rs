@@ -1,17 +1,15 @@
-//! The eframe application: menus, toolbar, canvas interaction and status bar.
-
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
 
 use eframe::egui::{
     self, Color32, FontId, Key, PointerButton, Pos2, Rect, RichText, Sense, Ui, Vec2, vec2,
 };
 use parterre_core::git::CommitDetails;
 use parterre_core::layout::{Direction, LayoutOptions};
-use parterre_core::physics::DragModel;
-use parterre_core::revgraph::{GraphOptions, RevEdge};
-use std::sync::Arc;
-
+use parterre_core::physics::{DragModel, RestPlace};
 use parterre_core::recent::Recent;
+use parterre_core::revgraph::{GraphOptions, RevEdge};
 use parterre_core::{Oid, Repo};
 
 mod about;
@@ -46,7 +44,8 @@ mod tool_harness;
 mod toolbar;
 mod updates;
 
-pub use toolbar::{popup_id, toolbar_button_id};
+use toolbar::popup_id;
+pub use toolbar::toolbar_button_id;
 
 use settings_window::SettingsPage;
 
@@ -70,34 +69,24 @@ use crate::theme::{Palette, ThemeChoice};
 use crate::usage;
 use crate::view::View;
 use compare_window::CompareRequest;
-use parterre_core::physics::RestPlace;
 
-/// What a file dialog is picking for.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Picked {
+pub(crate) enum PickFor {
     Folder,
     Export(Format),
     ExportSettings,
     ImportSettings,
 }
 
+/// Positions in world units.
 #[derive(Clone, Copy, Debug)]
 enum Drag {
-    /// Dragging nodes; `grab` is the pointer's offset from the grabbed node's centre (world
-    /// units).
-    Node {
-        grab: Vec2,
-    },
+    Node { grab_offset: Vec2 },
     Pan,
-    /// Selecting the nodes in the rectangle between `start` and `end` (world coordinates).
-    Select {
-        start: Pos2,
-        end: Pos2,
-    },
+    Select { start: Pos2, end: Pos2 },
 }
 
-/// Selected nodes, in the order they were selected. The last one is the current node, whose
-/// details the status bar shows.
+/// In the order selected: the last is the current node.
 #[derive(Clone, Debug, Default)]
 struct Selection {
     nodes: Vec<usize>,
@@ -116,21 +105,19 @@ impl Selection {
         self.nodes.len()
     }
 
-    /// Selects `node` alone, or nothing.
     fn set(&mut self, node: Option<usize>) {
         self.nodes.clear();
         self.nodes.extend(node);
     }
 
-    /// Adds `node`, making it the current node.
     fn add(&mut self, node: usize) {
         self.nodes.retain(|&n| n != node);
         self.nodes.push(node);
     }
 
-    /// Adds `nodes` that are not selected yet, keeping the current node current.
+    /// Keeps the current node current.
     fn extend(&mut self, nodes: impl IntoIterator<Item = usize>) {
-        let mut seen: std::collections::HashSet<usize> = self.nodes.iter().copied().collect();
+        let mut seen: HashSet<usize> = self.nodes.iter().copied().collect();
         let current = self.nodes.pop();
         self.nodes.extend(
             nodes
@@ -148,52 +135,48 @@ impl Selection {
         }
     }
 
-    /// Per node of a scene with `count` nodes: selected.
-    fn mask(&self, count: usize) -> Vec<bool> {
-        let mut mask = vec![false; count];
+    fn mask(&self, node_count: usize) -> Vec<bool> {
+        let mut mask = vec![false; node_count];
         for &n in &self.nodes {
-            if n < count {
+            if n < node_count {
                 mask[n] = true;
             }
         }
         mask
     }
-}
 
-/// The nodes dragged along with `anchor`: the selection it belongs to, or `anchor` alone.
-fn dragged_with(selection: &Selection, anchor: usize) -> Vec<usize> {
-    if selection.contains(anchor) {
-        selection.nodes.clone()
-    } else {
-        vec![anchor]
+    /// The selection if it holds `node`, else `node` alone.
+    fn group_of(&self, node: usize) -> Vec<usize> {
+        if self.contains(node) {
+            self.nodes.clone()
+        } else {
+            vec![node]
+        }
     }
 }
 
-/// Full commit messages, notes and committers for tooltips and the log (and for each blame
-/// window's history pane, which has its own), fetched from git on a worker thread when first
-/// needed. A failure is kept as its message.
+/// Commit details, fetched from git on a worker thread when first asked for.
 #[derive(Debug, Default)]
 struct Details {
     /// `None` while loading.
-    cache: std::collections::HashMap<parterre_core::Oid, Option<Result<CommitDetails, String>>>,
-    rx: Option<std::sync::mpsc::Receiver<(parterre_core::Oid, Result<CommitDetails, String>)>>,
-    tx: Option<std::sync::mpsc::Sender<parterre_core::Oid>>,
-    /// The folder the worker asks git in.
-    path: Option<std::path::PathBuf>,
+    cache: HashMap<Oid, Option<Result<CommitDetails, String>>>,
+    rx: Option<mpsc::Receiver<(Oid, Result<CommitDetails, String>)>>,
+    tx: Option<mpsc::Sender<Oid>>,
+    repo_path: Option<PathBuf>,
 }
 
 impl Details {
-    /// The details of `oid` if already loaded; otherwise requests them. Asked from another
-    /// folder (another worktree went to, perhaps since deleted), it starts afresh.
+    /// `None` while loading. Asked about another folder, such as another worktree, it starts
+    /// afresh.
     fn get(
         &mut self,
-        repo_path: &std::path::Path,
-        oid: parterre_core::Oid,
+        repo_path: &Path,
+        oid: Oid,
         ctx: &egui::Context,
     ) -> Option<&Result<CommitDetails, String>> {
-        if self.path.as_deref() != Some(repo_path) {
+        if self.repo_path.as_deref() != Some(repo_path) {
             *self = Details {
-                path: Some(repo_path.to_owned()),
+                repo_path: Some(repo_path.to_owned()),
                 ..Details::default()
             };
         }
@@ -203,8 +186,8 @@ impl Details {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.cache.entry(oid) {
             slot.insert(None);
             let tx = self.tx.get_or_insert_with(|| {
-                let (req_tx, req_rx) = std::sync::mpsc::channel::<parterre_core::Oid>();
-                let (res_tx, res_rx) = std::sync::mpsc::channel();
+                let (req_tx, req_rx) = mpsc::channel::<Oid>();
+                let (res_tx, res_rx) = mpsc::channel();
                 let git = parterre_core::git::Git::new(repo_path);
                 let ctx = ctx.clone();
                 std::thread::spawn(move || {
@@ -224,13 +207,7 @@ impl Details {
         self.cache.get(&oid).and_then(Option::as_ref)
     }
 
-    /// The full message of `oid` (or why it could not be read) if already loaded.
-    fn message(
-        &mut self,
-        repo_path: &std::path::Path,
-        oid: parterre_core::Oid,
-        ctx: &egui::Context,
-    ) -> Option<String> {
+    fn message(&mut self, repo_path: &Path, oid: Oid, ctx: &egui::Context) -> Option<String> {
         self.get(repo_path, oid, ctx).map(|d| match d {
             Ok(d) => d.message.clone(),
             Err(e) => format!("({e})"),
@@ -238,171 +215,122 @@ impl Details {
     }
 }
 
-/// A layout running on a worker thread.
 #[derive(Debug)]
 struct LayoutJob {
-    rx: std::sync::mpsc::Receiver<Scene>,
-    /// The options it was laid out with.
-    key: (GraphOptions, LayoutOptions),
-    /// Commit near the view centre and its screen position, to keep the view steady.
-    anchor: Option<(Oid, Pos2)>,
+    rx: mpsc::Receiver<Scene>,
+    options: (GraphOptions, LayoutOptions),
+    view_anchor: Option<(Oid, Pos2)>,
     selected_commits: Vec<Oid>,
-    /// Child and parent commit of the selected edge.
+    /// Child and parent.
     selected_edge: Option<(Oid, Oid)>,
 }
 
-/// Where a node rests, by commit, carried over a relayout (see
-/// [`parterre_core::physics::RestPlace`]).
+/// A [`RestPlace`] by commit, carried over a relayout.
 #[derive(Clone, Debug, PartialEq)]
 struct CarriedPlace {
     offset: (f32, f32),
     by_hand: bool,
-    /// The first parent's commit, and how far from it the node rests.
+    /// The first parent's commit, and the offset from it.
     beside: Option<(String, (f32, f32))>,
 }
 
-type Carried = std::collections::HashMap<String, CarriedPlace>;
+type Carried = HashMap<String, CarriedPlace>;
 
 #[derive(Debug, Default)]
 struct Search {
     query: String,
     hits: Vec<usize>,
-    current: Option<usize>,
+    current_hit: Option<usize>,
     request_focus: bool,
 }
 
-/// Said in the status bar when the stored settings couldn't be read.
-const CORRUPT_SETTINGS: &str = "The saved settings were corrupt: defaults restored";
+const CORRUPT_SETTINGS_STATUS: &str = "The saved settings were corrupt: defaults restored";
 
 pub struct ParterreApp {
-    /// The most recently loaded snapshot, used for new layouts. The scene on screen keeps its
-    /// own snapshot until a new layout replaces it. `None` until a repository is opened.
+    /// The latest snapshot, for new layouts. The scene on screen keeps its own until a new
+    /// layout replaces it.
     repo: Option<Arc<Repo>>,
     branches: branches::Tool,
-    /// Repositories opened before, newest first.
     recent: Recent,
-    /// Show the folder picker at the end of this frame.
-    pick_folder: bool,
-    /// The file dialog that is open, if any.
-    file_dialog: Option<Pending<Picked>>,
-    /// The window title last set.
-    title: String,
+    folder_picker_requested: bool,
+    file_dialog: Option<Pending<PickFor>>,
+    title_shown: String,
     settings: Settings,
-    /// Every repository's settings as last kept. The repository shown has its own in
-    /// `settings`, which are kept here when another is shown and when saving.
+    /// Every repository's settings. The shown one's live in `settings` until kept here.
     stored: Stored,
-    /// False for automated runs, so they don't overwrite the user's settings.
     persist: bool,
     scene: Option<Scene>,
-    /// Options of the most recently requested layout.
-    requested: Option<(GraphOptions, LayoutOptions)>,
-    /// Options the scene on screen was laid out with.
-    scene_key: Option<(GraphOptions, LayoutOptions)>,
+    requested_options: Option<(GraphOptions, LayoutOptions)>,
+    scene_options: Option<(GraphOptions, LayoutOptions)>,
     job: Option<LayoutJob>,
     view: View,
-    /// The view at the start of the frame, before any panning or zooming.
-    view_before: View,
+    view_at_frame_start: View,
     needs_initial_view: bool,
     canvas: Rect,
-    /// The pointer is over the graph (or its overview map), where Ctrl+wheel is the graph's.
+    /// Over the graph or its overview map, where Ctrl+wheel zooms the graph, not the text.
     graph_hovered: bool,
     hovered: Option<usize>,
     hovered_edge: Option<usize>,
     selection: Selection,
-    /// Edge kept highlighted after a click, independent of the selected nodes.
     selected_edge: Option<usize>,
-    /// Nodes that would move if the hovered node were dragged in Subtree mode, cached for
-    /// the roots they were computed from.
-    preview: Option<(Vec<usize>, Vec<usize>)>,
+    /// Roots, and the nodes a Subtree drag of them would move.
+    subtree_preview: Option<(Vec<usize>, Vec<usize>)>,
     context_node: Option<usize>,
-    /// Commits to select once the scene has been rebuilt (after a reload).
-    pending_select: Vec<Oid>,
+    select_after_layout: Vec<Oid>,
     drag: Option<Drag>,
     search: Search,
+    /// The message, and whether it is an error.
     status: Option<(String, bool)>,
     show_shortcuts: bool,
     show_legend: bool,
     show_settings: bool,
     settings_page: SettingsPage,
     about: about::About,
-    /// Show the save dialog for exporting in this format at the end of this frame.
-    export: Option<Format>,
-    /// The folder exported to last, where the save dialog starts next time.
+    export_requested: Option<Format>,
     export_dir: Option<PathBuf>,
-    /// Show the file dialog for exporting or importing settings at the end of this frame.
-    settings_file: Option<Picked>,
-    /// The folder settings were last exported to or imported from.
+    settings_file_requested: Option<PickFor>,
     settings_dir: Option<PathBuf>,
-    /// What came of the last export or import of settings, and whether it failed.
+    /// The message, and whether it is an error.
     settings_note: Option<(String, bool)>,
-    /// A settings file read, while asking what of it to import.
-    import: Option<settings_window::Import>,
-    /// Ask before resetting every setting.
+    settings_import: Option<settings_window::Import>,
     confirm_reset_settings: bool,
     details: Details,
-    /// The log window (Show log), and what it keeps while closed.
     log: log_window::LogWindow,
-    /// Raise the log window in the next frame (Show log while it is open).
     focus_log: bool,
-    /// The open diff windows, one file diff each.
     diffs: diff_window::DiffWindows,
-    /// The open blame windows, one file each.
     blames: blame_window::BlameWindows,
-    /// The compare window (Compare revisions and the like).
     compare: compare_window::CompareWindow,
-    /// Raise the compare window in the next frame.
     focus_compare: bool,
-    /// Opening conflicted files in the merge tool.
     merge_tools: merge_tool::MergeTools,
-    /// The commit marked for comparison, and its name when it was marked (or last reloaded).
+    /// The commit marked for comparison, and its label.
     marked: Option<(Oid, String)>,
-    /// Dragged nodes of every repository, kept when `remember_moves` is on.
     moves: RememberedMoves,
-    /// Reloads when the refs change, if `settings.auto_reload` is on.
     watcher: Option<auto_reload::Watcher>,
-    /// The repository named at start, still loading while the window came up (#309).
     opening: Option<Opening>,
-    /// On Windows, the window cloaked until a frame at its final size is painted (#309).
     reveal: Option<Reveal>,
-    /// A reload the user asked for (F5), loading on a worker thread: the repository's path,
-    /// and what came of it.
-    reloading: Option<(PathBuf, std::sync::mpsc::Receiver<Result<Repo, String>>)>,
-    /// Open pull requests from GitHub, while they are shown.
+    reloading: Option<(PathBuf, mpsc::Receiver<Result<Repo, String>>)>,
     pull_requests: pull_requests::PullRequestLoader,
-    /// Whether pull requests were turned on in the last frame, to see the user turn them on.
-    pull_requests_setting: bool,
-    /// Why pull requests the user asked for couldn't be loaded, shown in a dialog.
+    pull_requests_were_on: bool,
     pull_requests_error: Option<parterre_forge::ForgeError>,
-    /// Asks GitHub whether a newer release is out, while `settings.check_for_updates` is on.
     update_check: Option<parterre_telemetry::UpdateCheck>,
-    /// The newest release the new-release dialog has told of (#345).
     release_told: Option<String>,
-    /// The new-release dialog, while it is open.
     release_dialog: Option<parterre_telemetry::Update>,
-    /// What is sent to PostHog, and the first-run prompt (#261).
     telemetry: privacy::Telemetry,
     system_theme: SystemTheme,
-    /// The theme last given to the window (its title bar), if any.
+    /// The theme last sent to the window, for its title bar.
     window_theme: Option<egui::SystemTheme>,
-    /// The same for the settings window, while it is open.
     settings_window_theme: Option<egui::SystemTheme>,
-    /// The text size the settings window was last shown at, while it is open.
     settings_window_text_size: Option<f32>,
-    /// The size the settings window opened in, while it is open.
     settings_window_size: Option<Vec2>,
     window_icon: Arc<egui::IconData>,
-    /// What is typed into the zoom level, while it has the focus.
+    /// Typed into the zoom level while it has the focus.
     zoom_text: String,
     automation: Automation,
-    /// Caps the frame rate where vsync is off (Wayland, see `frame_pacing`).
     frame_limiter: Option<FrameLimiter>,
-    /// The system's menu bar (macOS).
     #[cfg(target_os = "macos")]
     native_menu: menu_bar::macos::NativeMenu,
-    /// *Install Command Line Tool…* running (macOS).
     #[cfg(target_os = "macos")]
-    cli_install: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
-    /// The input method's indicator, only while a text field has the keyboard (macOS, #342).
+    cli_install: Option<mpsc::Receiver<Result<String, String>>>,
     #[cfg(target_os = "macos")]
     input_method: crate::macos::InputMethod,
 }
@@ -426,7 +354,7 @@ impl ParterreApp {
         reveal: Option<Reveal>,
     ) -> ParterreApp {
         crate::startup::mark("window created");
-        let persist = !automation.is_active();
+        let persist = !automation.is_scripted();
         let storage = cc.storage.filter(|_| persist);
         let (mut settings, stored, corrupt) = settings_file::load(storage);
         // eframe starts from nothing when its whole file is corrupt.
@@ -438,63 +366,50 @@ impl ParterreApp {
         overrides(&mut settings);
         settings.sanitize();
         cc.egui_ctx.set_zoom_factor(settings.text_size);
-        let moves: RememberedMoves = cc
-            .storage
-            .filter(|_| persist)
-            .map(load_moves)
-            .unwrap_or_default();
-        let mut recent: Recent = cc
-            .storage
-            .filter(|_| persist)
+        let moves: RememberedMoves = storage.map(load_moves).unwrap_or_default();
+        let mut recent: Recent = storage
             .and_then(|s| eframe::get_value(s, RECENT_KEY))
             .unwrap_or_default();
         if let Some(repo) = &repo {
             recent.add(&repo.path);
         }
-        let privacy = cc
-            .storage
-            .filter(|_| persist)
-            .map(Privacy::load)
-            .unwrap_or_default();
-        let mut telemetry = privacy::Telemetry::new(privacy, automation.is_active());
+        let privacy = storage.map(Privacy::load).unwrap_or_default();
+        let mut telemetry = privacy::Telemetry::new(privacy, automation.is_scripted());
         if let Some(repo) = &repo {
             telemetry.opened(repo);
         }
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        // One screenshot shows everything: the settings in the main window. So does a
-        // recording.
+        // Screenshots and recordings show one window: the others go in it.
         cc.egui_ctx
-            .set_embed_viewports(automation.is_active() || automation.record.is_some());
-        if automation.is_active() {
+            .set_embed_viewports(automation.is_scripted() || automation.record.is_some());
+        if automation.is_scripted() {
             cc.egui_ctx
                 .add_plugin(crate::automation::TextCollector(automation.texts.clone()));
         }
-        // Before the lock: a click on a locked window is the user's input too.
+        // Before the lock, which drops input: a click on a locked window is user input too.
         cc.egui_ctx.add_plugin(privacy::UserInput::default());
         cc.egui_ctx.add_plugin(crate::dialogs::ModalLock::default());
-        // Automated runs are short and show one window (viewports are embedded), so they neither
-        // freeze nor need their frame rate capped: they run as fast as they can.
-        let frame_limiter = (!vsync && !automation.is_active()).then(FrameLimiter::default);
-        // Pull requests on at startup (the default) were not turned on by the user: whatever
-        // comes of loading them, nothing is said.
-        let pull_requests_setting = settings.graph.show_pull_requests;
+        // Scripted runs show one window and are short: they may run as fast as they can.
+        let frame_limiter = (!vsync && !automation.is_scripted()).then(FrameLimiter::default);
+        // On at startup, they weren't turned on by the user: loading them says nothing.
+        let pull_requests_were_on = settings.graph.show_pull_requests;
         ParterreApp {
-            title: opening
+            title_shown: opening
                 .as_ref()
                 .map_or_else(|| window_title(repo.as_ref()), Opening::title),
             repo: repo.map(Arc::new),
             recent,
-            pick_folder: false,
+            folder_picker_requested: false,
             file_dialog: None,
             settings,
             stored,
             persist,
             scene: None,
-            requested: None,
-            scene_key: None,
+            requested_options: None,
+            scene_options: None,
             job: None,
             view: View::default(),
-            view_before: View::default(),
+            view_at_frame_start: View::default(),
             needs_initial_view: true,
             canvas: Rect::NOTHING,
             graph_hovered: false,
@@ -502,25 +417,27 @@ impl ParterreApp {
             hovered_edge: None,
             selection: Selection::default(),
             selected_edge: None,
-            preview: None,
+            subtree_preview: None,
             branches: {
-                let mut tool =
-                    branches::Tool::with_canned_pull_requests(automation.pull_requests.as_deref());
-                tool.canned_repositories = automation.github_repositories.as_deref().map(Arc::from);
+                let mut tool = branches::Tool::with_canned_pull_requests(
+                    automation.canned_pull_requests.as_deref(),
+                );
+                tool.canned_repositories = automation
+                    .canned_github_repositories
+                    .as_deref()
+                    .map(Arc::from);
                 tool.read_clipboard = persist;
-                tool.clone_parent = cc
-                    .storage
-                    .filter(|_| persist)
+                tool.clone_parent = storage
                     .and_then(|s| eframe::get_value(s, CLONE_PARENT_KEY))
                     .flatten();
                 tool
             },
             context_node: None,
-            pending_select: Vec::new(),
+            select_after_layout: Vec::new(),
             drag: None,
             search: Search::default(),
             status: corrupt
-                .then(|| (CORRUPT_SETTINGS.to_owned(), true))
+                .then(|| (CORRUPT_SETTINGS_STATUS.to_owned(), true))
                 .or_else(|| opening.as_ref().and_then(Opening::status)),
             opening,
             reveal,
@@ -529,12 +446,12 @@ impl ParterreApp {
             show_settings: false,
             settings_page: SettingsPage::default(),
             about: about::About::default(),
-            export: None,
+            export_requested: None,
             export_dir: None,
-            settings_file: None,
+            settings_file_requested: None,
             settings_dir: None,
             settings_note: None,
-            import: None,
+            settings_import: None,
             confirm_reset_settings: false,
             details: Details::default(),
             log: log_window::LogWindow::default(),
@@ -548,17 +465,14 @@ impl ParterreApp {
             moves,
             watcher: None,
             reloading: None,
-            pull_requests: match &automation.pull_requests {
+            pull_requests: match &automation.canned_pull_requests {
                 Some(json) => pull_requests::PullRequestLoader::canned(json),
                 None => pull_requests::PullRequestLoader::default(),
             },
-            pull_requests_setting,
+            pull_requests_were_on,
             pull_requests_error: None,
             update_check: None,
-            release_told: cc
-                .storage
-                .filter(|_| persist)
-                .and_then(|s| eframe::get_value(s, updates::TOLD_KEY)),
+            release_told: storage.and_then(|s| eframe::get_value(s, updates::RELEASE_TOLD_KEY)),
             release_dialog: None,
             telemetry,
             system_theme: SystemTheme::watch(&cc.egui_ctx),
@@ -579,13 +493,12 @@ impl ParterreApp {
         }
     }
 
-    /// Starts a new layout when the graph or layout options changed, and installs finished
-    /// layouts. Layout runs on a worker thread; the previous scene stays visible meanwhile.
+    /// Lays out on a worker thread while the previous scene stays on screen.
     fn ensure_scene(&mut self, ctx: &egui::Context) {
         let Some(repo) = &self.repo else { return };
-        let key = (self.settings.graph.clone(), self.settings.layout.clone());
-        if self.requested.as_ref() != Some(&key) {
-            self.requested = Some(key.clone());
+        let options = (self.settings.graph.clone(), self.settings.layout.clone());
+        if self.requested_options.as_ref() != Some(&options) {
+            self.requested_options = Some(options.clone());
             let font = FontId::monospace(FONT_SIZE);
             let text_height = ctx.fonts_mut(|f| f.row_height(&font));
             let input = ctx.fonts_mut(|f| {
@@ -597,18 +510,18 @@ impl ParterreApp {
                 let pull_requests = self.pull_requests.list().map(|p| &**p);
                 Scene::prepare(repo, &self.settings, pull_requests, &mut width, text_height)
             });
-            let (tx, rx) = std::sync::mpsc::channel();
+            let (tx, rx) = mpsc::channel();
             let repaint = ctx.clone();
             std::thread::spawn(move || {
                 // The receiver is gone if a newer layout superseded this one.
                 let _ = tx.send(input.lay_out());
                 repaint.request_repaint();
             });
-            let pending = std::mem::take(&mut self.pending_select);
+            let pending = std::mem::take(&mut self.select_after_layout);
             self.job = Some(LayoutJob {
                 rx,
-                key,
-                anchor: self.view_anchor(),
+                options,
+                view_anchor: self.view_anchor(),
                 selected_commits: if pending.is_empty() {
                     self.selected_commits()
                 } else {
@@ -624,21 +537,17 @@ impl ParterreApp {
         };
         let job = self.job.take().expect("job exists");
         // Moved nodes go along to a newer snapshot of the same graph, and to any relayout if
-        // they are to be remembered: as they rest now, after any drop during the layout.
-        let same = self.scene_key.as_ref() == Some(&job.key);
-        let carried = if self.settings.remember_moves || same {
+        // they are remembered: as they rest now, after any drop during the layout.
+        let same_options = self.scene_options.as_ref() == Some(&job.options);
+        let carried = if self.settings.remember_moves || same_options {
             self.carried_places()
         } else {
             None
         };
         crate::startup::mark("graph shown");
         self.scene = Some(scene);
-        self.scene_key = Some(job.key);
-        self.hovered = None;
-        self.hovered_edge = None;
-        self.context_node = None;
-        self.drag = None;
-        self.preview = None;
+        self.scene_options = Some(job.options);
+        self.forget_pointer_state();
         let selected: Vec<usize> = job
             .selected_commits
             .iter()
@@ -649,7 +558,7 @@ impl ParterreApp {
         self.selected_edge = job.selected_edge.and_then(|(c, p)| self.edge_for(&c, &p));
         self.update_search();
         self.restore_moves(carried);
-        if let (Some((oid, screen)), Some(scene)) = (job.anchor, &self.scene)
+        if let (Some((oid, screen)), Some(scene)) = (job.view_anchor, &self.scene)
             && let Some(node) = self.node_for(&oid)
             && self.canvas.is_positive()
         {
@@ -659,7 +568,14 @@ impl ParterreApp {
         }
     }
 
-    /// The edge between the nodes shown for these commits, if there is one.
+    fn forget_pointer_state(&mut self) {
+        self.hovered = None;
+        self.hovered_edge = None;
+        self.context_node = None;
+        self.drag = None;
+        self.subtree_preview = None;
+    }
+
     fn edge_for(&self, child: &Oid, parent: &Oid) -> Option<usize> {
         let (child, parent) = (self.node_for(child)?, self.node_for(parent)?);
         let edges = &self.scene.as_ref()?.graph.edges;
@@ -668,8 +584,7 @@ impl ParterreApp {
             .position(|e| e.child as usize == child && e.parent as usize == parent)
     }
 
-    /// The node that shows commit `oid` in the current scene: the commit itself, or the node
-    /// it is collapsed into.
+    /// The commit's own node, or the one it is collapsed into.
     fn node_for(&self, oid: &Oid) -> Option<usize> {
         let scene = self.scene.as_ref()?;
         let commit = scene.repo.lookup(oid)?;
@@ -680,8 +595,7 @@ impl ParterreApp {
         Some(self.repo.as_ref()?.path.display().to_string())
     }
 
-    /// Puts the nodes carried over from the scene before back where they were in a freshly
-    /// laid-out scene, and the remembered ones that scene didn't show.
+    /// Puts the carried nodes back, and the remembered ones the scene before didn't show.
     fn restore_moves(&mut self, carried: Option<Carried>) {
         let remembered = || {
             let moves = self.moves.get(&self.repo_key()?)?;
@@ -722,7 +636,7 @@ impl ParterreApp {
                 Some(RestPlace {
                     node: node_of(hex)?,
                     offset: point(place.offset),
-                    moved: place.by_hand,
+                    by_hand: place.by_hand,
                     beside: place
                         .beside
                         .as_ref()
@@ -733,18 +647,13 @@ impl ParterreApp {
         scene.net.restore(saved, &self.settings.net);
     }
 
-    /// Where the current scene's nodes rest, by commit (see
-    /// [`parterre_core::physics::Net::rest_places`]).
     fn carried_places(&self) -> Option<Carried> {
         let scene = self.scene.as_ref()?;
-        let hex = |node: usize| {
-            let commit = scene.graph.nodes[node].commit;
-            scene.repo.commit(commit).oid.to_hex()
-        };
+        let hex = |node: usize| node_oid(scene, node).to_hex();
         let places = scene.net.rest_places().map(|p| {
             let place = CarriedPlace {
                 offset: (p.offset.x, p.offset.y),
-                by_hand: p.moved,
+                by_hand: p.by_hand,
                 beside: p.beside.map(|(parent, d)| (hex(parent), (d.x, d.y))),
             };
             (hex(p.node), place)
@@ -752,9 +661,8 @@ impl ParterreApp {
         Some(places.collect())
     }
 
-    /// Where the current scene's moved nodes rest, by commit, as remembered (see
-    /// [`parterre_core::physics::Net::rest_places`]).
-    fn rest_offsets(&self) -> Option<std::collections::HashMap<String, (f32, f32, bool)>> {
+    /// As [`RememberedMoves`] keeps them.
+    fn rest_offsets(&self) -> Option<HashMap<String, (f32, f32, bool)>> {
         let places = self.carried_places()?;
         let offsets = places
             .into_iter()
@@ -763,15 +671,18 @@ impl ParterreApp {
         Some(offsets)
     }
 
-    /// Records where the current scene's nodes rest, for this repository.
     fn record_moves(&mut self) {
-        if !self.settings.remember_moves {
-            return;
+        if self.settings.remember_moves {
+            let offsets = self.rest_offsets();
+            self.remember_offsets(offsets);
         }
-        let Some(offsets) = self.rest_offsets() else {
+    }
+
+    /// For the repository shown.
+    fn remember_offsets(&mut self, offsets: Option<HashMap<String, (f32, f32, bool)>>) {
+        let (Some(offsets), Some(key)) = (offsets, self.repo_key()) else {
             return;
         };
-        let Some(key) = self.repo_key() else { return };
         if offsets.is_empty() {
             self.moves.remove(&key);
         } else {
@@ -779,12 +690,7 @@ impl ParterreApp {
         }
     }
 
-    pub fn is_laying_out(&self) -> bool {
-        self.job.is_some()
-    }
-
-    /// A commit near the middle of the view, with its screen position, for keeping the view
-    /// stable across rebuilds.
+    /// The current node or the one nearest the view's centre, and where it is on screen.
     fn view_anchor(&self) -> Option<(Oid, Pos2)> {
         let scene = self.scene.as_ref()?;
         if !self.canvas.is_positive() {
@@ -798,24 +704,18 @@ impl ParterreApp {
                 da.total_cmp(&db)
             })
         })?;
-        let oid = scene.repo.commit(scene.graph.nodes[node].commit).oid;
         Some((
-            oid,
+            node_oid(scene, node),
             self.view.to_screen(self.canvas, scene.node_center(node)),
         ))
     }
 
     fn selected_commit(&self) -> Option<Oid> {
         let scene = self.scene.as_ref()?;
-        Some(
-            scene
-                .repo
-                .commit(scene.graph.nodes[self.selection.current()?].commit)
-                .oid,
-        )
+        Some(node_oid(scene, self.selection.current()?))
     }
 
-    /// Commits of the selected nodes, the current node last.
+    /// The current node's commit last.
     fn selected_commits(&self) -> Vec<Oid> {
         let Some(scene) = &self.scene else {
             return Vec::new();
@@ -823,25 +723,18 @@ impl ParterreApp {
         self.selection
             .nodes
             .iter()
-            .map(|&n| scene.repo.commit(scene.graph.nodes[n].commit).oid)
+            .map(|&n| node_oid(scene, n))
             .collect()
     }
 
-    /// Child and parent commit of the selected edge.
+    /// Child and parent.
     fn selected_edge_commits(&self) -> Option<(Oid, Oid)> {
         let scene = self.scene.as_ref()?;
         let edge = scene.graph.edges[self.selected_edge?];
-        let oid = |node: u32| {
-            scene
-                .repo
-                .commit(scene.graph.nodes[node as usize].commit)
-                .oid
-        };
+        let oid = |node: u32| node_oid(scene, node as usize);
         Some((oid(edge.child), oid(edge.parent)))
     }
 
-    /// The save dialog for exporting the whole graph in `format`, as TortoiseGit's "Save graph
-    /// as" does; `None` if there is nothing to export yet.
     fn export_dialog(
         &mut self,
         format: Format,
@@ -858,19 +751,17 @@ impl ParterreApp {
             .set_parent(frame)
             .add_filter(format!("{kind} image"), &[ext])
             .set_file_name(format!("{}.{ext}", repo.display_name()));
-        // Start where the last export went, or next to the repository.
         if let Some(dir) = self.export_dir.as_deref().or_else(|| repo.path.parent()) {
             dialog = dialog.set_directory(dir);
         }
         Some(dialog)
     }
 
-    /// Writes the whole graph to `path` in `format`. PNG is drawn at the current zoom, as in
-    /// TortoiseGit, and with the display's pixels per point, so it looks as on screen.
+    /// Bitmaps are drawn at the current zoom, as in TortoiseGit, and with the display's pixels
+    /// per point, so the graph looks as on screen.
     fn export(&mut self, format: Format, mut path: PathBuf, ctx: &egui::Context) {
         usage::action(usage::Action::Export);
         let Some(scene) = &self.scene else { return };
-        // A name typed without the extension, or with another one, gets it added.
         if path.extension().is_none() || Format::from_path(&path) != Some(format) {
             let mut name = path.file_name().unwrap_or_default().to_owned();
             name.push(format!(".{}", format.extension()));
@@ -881,33 +772,24 @@ impl ParterreApp {
             Format::Svg => 1.0,
             Format::Png | Format::WebP => self.view.zoom,
         };
-        let palette = Palette::new(
-            ctx.global_style().visuals.dark_mode,
-            &self.settings.branch_colors,
-        );
-        // The graph's size on screen leaves the text size out.
+        let palette = self.palette(ctx);
+        // Not the text size's zoomed pixels per point: the graph's size leaves it out.
         let ppp = ctx.native_pixels_per_point().unwrap_or(1.0);
         self.status = Some(
-            match export::write(&path, scene, &self.settings, &palette, zoom, ppp) {
+            match export::write(&path, format, scene, &self.settings, &palette, zoom, ppp) {
                 Ok(what) => (format!("Saved {} ({what})", path.display()), false),
                 Err(e) => (format!("Could not save {}: {e}", path.display()), true),
             },
         );
     }
 
-    /// Opens the repository containing `dir` in place of the one shown. On failure the one
-    /// shown stays, and the status bar says why.
     fn open_folder(&mut self, dir: &Path) {
         usage::action(usage::Action::OpenRepository);
         match parterre_core::git::load_repo(dir) {
-            Ok(repo) => {
-                self.recent.add(&repo.path);
-                self.telemetry.opened(&repo);
-                self.show_repo(Some(repo));
-            }
+            Ok(repo) => self.show_opened(repo),
             Err(e) => {
                 // A recent folder that is gone, or no longer a repository, leaves the list. One
-                // git won't open now, such as a bare repository it refuses, stays.
+                // git refuses for now, such as a bare repository, stays.
                 if matches!(e, parterre_core::git::GitError::NotARepository(_)) {
                     self.recent.remove(dir);
                 }
@@ -921,8 +803,13 @@ impl ParterreApp {
         self.show_repo(None);
     }
 
-    /// Replaces the repository shown, and forgets everything about the old one but its
-    /// settings, which the new one's replace.
+    fn show_opened(&mut self, repo: Repo) {
+        self.recent.add(&repo.path);
+        self.telemetry.opened(&repo);
+        self.show_repo(Some(repo));
+    }
+
+    /// Forgets everything about the repository shown but its settings.
     fn show_repo(&mut self, repo: Option<Repo>) {
         self.keep_repo_settings();
         let repo_settings = repo
@@ -931,24 +818,18 @@ impl ParterreApp {
         repo_settings.apply(&mut self.settings.graph);
         self.repo = repo.map(Arc::new);
         self.scene = None;
-        self.requested = None;
+        self.requested_options = None;
         self.job = None;
         self.needs_initial_view = true;
-        self.hovered = None;
-        self.hovered_edge = None;
+        self.forget_pointer_state();
         self.selection = Selection::default();
         self.selected_edge = None;
-        self.preview = None;
-        self.context_node = None;
-        self.pending_select.clear();
-        self.drag = None;
+        self.select_after_layout.clear();
         self.search.hits.clear();
-        self.search.current = None;
+        self.search.current_hit = None;
         self.status = None;
-        self.export = None;
-        // Its worker thread asks the old repository's git; dropping it ends the thread.
+        self.export_requested = None;
         self.details = Details::default();
-        // The log and the diffs show the old repository's history.
         self.log.close();
         self.diffs.close_all();
         self.blames.close_all();
@@ -956,12 +837,10 @@ impl ParterreApp {
         self.marked = None;
     }
 
-    /// The folder picker for opening a repository.
     fn folder_dialog(&self, frame: &eframe::Frame) -> rfd::AsyncFileDialog {
         let mut dialog = rfd::AsyncFileDialog::new()
             .set_title("Open a git repository")
             .set_parent(frame);
-        // Start next to the repository shown, or the one opened last.
         let near = self
             .repo
             .as_ref()
@@ -979,11 +858,11 @@ impl ParterreApp {
         dialog
     }
 
-    /// Opens a requested file dialog, and acts on the answer of the one that was open. Only
-    /// one is open at a time; requests made meanwhile are dropped.
+    /// One is open at a time: requests made meanwhile are dropped.
     fn file_dialogs(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
-        let (folder, export) = (std::mem::take(&mut self.pick_folder), self.export.take());
-        let settings_file = self.settings_file.take();
+        let folder = std::mem::take(&mut self.folder_picker_requested);
+        let export = self.export_requested.take();
+        let settings_file = self.settings_file_requested.take();
         if let Some(pending) = &self.file_dialog {
             let Some(answer) = pending.answer() else {
                 return;
@@ -991,33 +870,31 @@ impl ParterreApp {
             let what = pending.what;
             self.file_dialog = None;
             match (what, answer) {
-                (Picked::Folder, Some(dir)) => self.open_folder(&dir),
-                (Picked::Export(format), Some(path)) => self.export(format, path, ctx),
-                (Picked::ExportSettings, Some(path)) => self.export_settings(path),
-                (Picked::ImportSettings, Some(path)) => self.import_settings(&path),
+                (PickFor::Folder, Some(dir)) => self.open_folder(&dir),
+                (PickFor::Export(format), Some(path)) => self.export(format, path, ctx),
+                (PickFor::ExportSettings, Some(path)) => self.export_settings(path),
+                (PickFor::ImportSettings, Some(path)) => self.import_settings(&path),
                 (_, None) => {}
             }
             return;
         }
         if folder {
             let dialog = self.folder_dialog(frame).pick_folder();
-            self.file_dialog = Some(Pending::start(Picked::Folder, dialog, ctx));
+            self.file_dialog = Some(Pending::start(PickFor::Folder, dialog, ctx));
         } else if let Some(format) = export
             && let Some(dialog) = self.export_dialog(format, frame)
         {
-            let what = Picked::Export(format);
+            let what = PickFor::Export(format);
             self.file_dialog = Some(Pending::start(what, dialog.save_file(), ctx));
         } else if let Some(what) = settings_file {
             let dialog = self.settings_dialog(what, frame);
             self.file_dialog = Some(match what {
-                Picked::ImportSettings => Pending::start(what, dialog.pick_file(), ctx),
+                PickFor::ImportSettings => Pending::start(what, dialog.pick_file(), ctx),
                 _ => Pending::start(what, dialog.save_file(), ctx),
             });
         }
     }
 
-    /// What is on its way to the graph area, while nothing is there yet: the repository
-    /// named at start, still loading, or the one shown, not laid out yet.
     fn opening_name(&self) -> Option<String> {
         self.opening
             .as_ref()
@@ -1025,13 +902,12 @@ impl ParterreApp {
             .or_else(|| self.repo.as_ref().map(|repo| repo.display_name()))
     }
 
-    /// Shows the repository that started loading before the window, once it is in (#309).
     fn finish_opening(&mut self, ctx: &egui::Context) {
         let Some(opening) = &self.opening else {
             return;
         };
         let Some(result) = opening.poll() else {
-            // Nothing else may happen in the window meanwhile, so it looks again by itself.
+            // Nothing else may wake the window meanwhile.
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
             return;
         };
@@ -1045,12 +921,10 @@ impl ParterreApp {
                 let corrupt = self
                     .status
                     .as_ref()
-                    .is_some_and(|(message, _)| message == CORRUPT_SETTINGS);
-                self.recent.add(&repo.path);
-                self.telemetry.opened(&repo);
-                self.show_repo(Some(repo));
+                    .is_some_and(|(message, _)| message == CORRUPT_SETTINGS_STATUS);
+                self.show_opened(repo);
                 if corrupt {
-                    self.status = Some((CORRUPT_SETTINGS.to_owned(), true));
+                    self.status = Some((CORRUPT_SETTINGS_STATUS.to_owned(), true));
                 }
             }
             Err(e) if opening.named => {
@@ -1069,18 +943,19 @@ impl ParterreApp {
         };
         self.branches.look_at_once();
         match parterre_core::git::load_repo(&path) {
-            Ok(repo) => {
-                self.install_reloaded(repo, "Reloaded");
-                // Anything the watcher has loaded meanwhile may be older than this.
-                self.watcher = None;
-            }
+            Ok(repo) => self.show_reloaded(repo),
             Err(e) => self.status = Some((format!("Reload failed: {e}"), true)),
         }
     }
 
-    /// F5, or Reload in the menu: loads the repository again on a worker thread, while the
-    /// window goes on responding ([`App::finish_reload`]). Pressed again meanwhile, the load
-    /// running will do. Pull requests are asked for only if the list is no longer fresh.
+    fn show_reloaded(&mut self, repo: Repo) {
+        self.install_reloaded(repo, "Reloaded");
+        // Anything the watcher has loaded meanwhile may be older than this.
+        self.watcher = None;
+    }
+
+    /// On a worker thread, finished by [`Self::finish_reload`]. Asked again meanwhile, the load
+    /// running will do.
     fn reload_by_hand(&mut self, ctx: &egui::Context) {
         let Some(path) = self.repo.as_ref().map(|r| r.path.clone()) else {
             return;
@@ -1089,7 +964,7 @@ impl ParterreApp {
             return;
         }
         usage::action(usage::Action::Reload);
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         let (dir, ctx) = (path.clone(), ctx.clone());
         std::thread::spawn(move || {
             let _ = tx.send(parterre_core::git::load_repo(&dir).map_err(|e| e.to_string()));
@@ -1098,7 +973,6 @@ impl ParterreApp {
         self.reloading = Some((path, rx));
     }
 
-    /// Why a fetch can't start now, if it can't.
     fn fetch_blocked(&self) -> Option<&'static str> {
         match &self.repo {
             None => Some("Open a repository first"),
@@ -1106,8 +980,6 @@ impl ParterreApp {
         }
     }
 
-    /// Ctrl+F5, the toolbar's button or the menu: fetches every remote, from the window
-    /// `opener`, once nothing else runs.
     fn fetch(&mut self, ctx: &egui::Context, opener: egui::ViewportId) {
         if self.fetch_blocked().is_none() {
             let request = branches::Request::Run(parterre_core::branches::Action::Fetch);
@@ -1115,8 +987,6 @@ impl ParterreApp {
         }
     }
 
-    /// Shows what the user's reload loaded, once no drag is going on, and says so in a
-    /// notification: a graph that hasn't changed looks the same.
     fn finish_reload(&mut self, ctx: &egui::Context) {
         if self.drag.is_some() {
             return;
@@ -1124,12 +994,8 @@ impl ParterreApp {
         let Some((path, rx)) = &self.reloading else {
             return;
         };
-        let result = match rx.try_recv() {
-            Ok(result) => result,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Err("it stopped unexpectedly".to_owned())
-            }
+        let Some(result) = try_result(rx, "it stopped unexpectedly") else {
+            return;
         };
         let path = path.clone();
         self.reloading = None;
@@ -1139,19 +1005,17 @@ impl ParterreApp {
         }
         match result {
             Ok(repo) => {
-                // F5: the banner shows at once if the worktree is stuck.
                 self.branches.look_at_once();
-                self.install_reloaded(repo, "Reloaded");
-                // Anything the watcher has loaded meanwhile may be older than this.
-                self.watcher = None;
+                self.show_reloaded(repo);
+                // A graph that hasn't changed looks the same: say it was reloaded.
                 self.branches.inform(ctx, path, "Reloaded");
             }
             Err(e) => self.status = Some((format!("Reload failed: {e}"), true)),
         }
     }
 
-    /// Automation: opens what a script's `open` step names (see `docs/automation.md`). `Ok(false)`
-    /// while it can't be opened yet: the dialogs of the branch tool wait for its information.
+    /// A script's `open` step (`docs/automation.md`). `Ok(false)` while the branch tool's
+    /// dialogs wait for its information.
     fn open_named(&mut self, ctx: &egui::Context, what: &str) -> Result<bool, String> {
         match what {
             "filter" | "zoom" | "drag" => egui::Popup::open_id(ctx, popup_id(what)),
@@ -1177,12 +1041,10 @@ impl ParterreApp {
                     self.open_settings(page);
                     return Ok(true);
                 }
-                // A menu of the menu bar, by its title: `menu:file`.
                 if kind == "menu" {
                     egui::Popup::open_id(ctx, menu_bar::bar::popup_id(arg));
                     return Ok(true);
                 }
-                // As if the file had been picked in the file dialog.
                 if kind == "export-settings" || kind == "import-settings" {
                     self.open_settings(SettingsPage::Manage);
                     if kind == "export-settings" {
@@ -1196,11 +1058,7 @@ impl ParterreApp {
                     };
                 }
                 let repo = self.repo.clone().ok_or("no repository is open")?;
-                let oid = |name: &str| {
-                    repo.resolve(name)
-                        .map(|c| repo.commit(c).oid)
-                        .ok_or_else(|| format!("no commit named {name}"))
-                };
+                let oid = |name: &str| resolve_oid(&repo, name);
                 match kind {
                     "log" => {
                         let commits = arg
@@ -1224,15 +1082,7 @@ impl ParterreApp {
         Ok(true)
     }
 
-    /// Automation: opens the branch or worktree form (`create-branch:REF`, `add-worktree:REF`),
-    /// asks to delete worktrees (`delete-worktree:FOLDER`, by name, or several: `A,B`), or opens the reset
-    /// dialog (`reset:REF`, or `reset:REF:MODE`), the rebase's (`rebase:REF`), the merge
-    /// dialog (`merge:REF`), the cherry-pick's (`cherry-pick:REF`, the commits of REF the
-    /// current branch lacks) or the revert's (`revert:REF`), once the branch information is in.
-    /// Also runs a fetch (`fetch`), a pull of the current branch (`pull`) or a push
-    /// (`push:BRANCH`, to the first remote, or `push:BRANCH:REMOTE`), and opens the upstream
-    /// dialog (`set-upstream:BRANCH`) or the question before deleting remote branches
-    /// (`delete-remote-branch:REMOTE/BRANCH`, or several: `A,B`).
+    /// The `open` steps of `docs/automation.md` that ask the branch tool.
     fn open_branch_dialog(
         &mut self,
         ctx: &egui::Context,
@@ -1243,11 +1093,7 @@ impl ParterreApp {
         let Some(catalog) = self.branches.catalog.clone() else {
             return Ok(false);
         };
-        let oid = |name: &str| {
-            repo.resolve(name)
-                .map(|c| repo.commit(c).oid)
-                .ok_or_else(|| format!("no commit named {name}"))
-        };
+        let oid = |name: &str| resolve_oid(repo, name);
         let request = match kind {
             "delete-worktree" => {
                 let paths = name
@@ -1379,9 +1225,7 @@ impl ParterreApp {
         Ok(true)
     }
 
-    /// Makes another worktree of the same repository the open one. It's the same history, so
-    /// the layout, the view, moved nodes and the other windows stay; only HEAD and what hangs on
-    /// the open worktree change.
+    /// The same history: the layout, the view, moved nodes and the other windows stay.
     fn go_to_worktree(&mut self, path: &Path) {
         usage::action(usage::Action::GoToWorktree);
         match parterre_core::git::load_repo(path) {
@@ -1389,21 +1233,11 @@ impl ParterreApp {
                 self.record_moves();
                 let offsets = self.rest_offsets();
                 self.recent.add(&repo.path);
-                let name = repo
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| repo.path.display().to_string());
+                let name = repo.display_name();
                 self.install_reloaded(repo, &format!("Went to worktree {name}"));
-                // Moved nodes are remembered by folder; they go along.
-                if self.settings.remember_moves
-                    && let (Some(key), Some(offsets)) = (self.repo_key(), offsets)
-                {
-                    if offsets.is_empty() {
-                        self.moves.remove(&key);
-                    } else {
-                        self.moves.insert(key, offsets);
-                    }
+                // Moved nodes are remembered by folder: they go along.
+                if self.settings.remember_moves {
+                    self.remember_offsets(offsets);
                 }
                 // The watcher follows the open worktree's own git folder.
                 self.watcher = None;
@@ -1414,11 +1248,9 @@ impl ParterreApp {
         }
     }
 
-    /// Shows a newer snapshot of the same repository. The scene on screen keeps its own
-    /// snapshot until the new layout replaces it; the selection and moved nodes are carried
-    /// over by commit id.
+    /// A newer snapshot of the same repository.
     fn install_reloaded(&mut self, repo: Repo, status: &str) {
-        self.pending_select = self.selected_commits();
+        self.select_after_layout = self.selected_commits();
         let origin_moved = self
             .repo
             .as_ref()
@@ -1431,22 +1263,17 @@ impl ParterreApp {
         if let Some((oid, _)) = self.marked {
             self.marked = Some((oid, self.commit_label(oid)));
         }
-        self.requested = None;
+        self.requested_options = None;
         self.status = Some((status.into(), false));
     }
 
-    /// Starts or stops watching the repository shown, and shows what the watcher loaded once
-    /// no drag is going on.
     fn auto_reload(&mut self, ctx: &egui::Context) {
-        let path = match &self.repo {
-            Some(repo) if self.settings.auto_reload => repo.path.clone(),
-            _ => {
-                self.watcher = None;
-                return;
-            }
+        let Some(shown) = self.repo.as_ref().filter(|_| self.settings.auto_reload) else {
+            self.watcher = None;
+            return;
         };
-        if self.watcher.as_ref().is_none_or(|w| w.path() != path) {
-            self.watcher = Some(auto_reload::Watcher::start(&path, ctx));
+        if self.watcher.as_ref().is_none_or(|w| w.path() != shown.path) {
+            self.watcher = Some(auto_reload::Watcher::start(&shown.path, ctx));
         }
         if self.drag.is_some() {
             return;
@@ -1454,27 +1281,21 @@ impl ParterreApp {
         let Some(repo) = self.watcher.as_ref().and_then(auto_reload::Watcher::take) else {
             return;
         };
-        if !self
-            .repo
-            .as_ref()
-            .is_some_and(|shown| shown.same_refs(&repo))
-        {
+        if !shown.same_refs(&repo) {
             self.install_reloaded(repo, "Reloaded: the refs changed");
         }
     }
 
-    /// Loads the open pull requests while they are shown, and shows them once they are in.
     fn update_pull_requests(&mut self, ctx: &egui::Context) {
         let loader = &mut self.pull_requests;
         loader.follow(self.repo.as_ref().map(|r| r.path.as_path()));
-        // Turned on in the settings or the menu (the toolbar asks by itself). On by default
-        // they are loaded without a word, whatever comes of it.
-        let setting = self.settings.graph.show_pull_requests;
-        if setting && !self.pull_requests_setting {
+        // Turned on in the settings or the menu: the toolbar asks by itself.
+        let on = self.settings.graph.show_pull_requests;
+        if on && !self.pull_requests_were_on {
             loader.ask();
         }
-        self.pull_requests_setting = setting;
-        let wanted = setting && loader.origin().is_some();
+        self.pull_requests_were_on = on;
+        let wanted = on && loader.origin().is_some();
         match loader.update(wanted, ctx) {
             Some(pull_requests::Loaded::Found { count, asked }) => {
                 // Those whose head isn't here (another fork's, or pushed since the last fetch)
@@ -1486,16 +1307,14 @@ impl ParterreApp {
                 if asked {
                     self.status = Some((pull_requests::loaded_status(count, here), false));
                 }
-                // Lay out again, with them.
-                self.requested = None;
+                self.requested_options = None;
             }
-            // A file of pull requests given for a screenshot: a mistake in it fails the run.
+            // Canned for a screenshot: a mistake in the file fails the run.
             Some(pull_requests::Loaded::Failed { error, .. }) if loader.is_canned() => {
                 eprintln!("parterre: {error}");
                 crate::automation::fail();
             }
-            // Only the user's own request gets an answer: loads parterre makes by itself fail
-            // quietly, and the button's tooltip says why.
+            // Loads parterre makes by itself fail quietly: the button's tooltip says why.
             Some(pull_requests::Loaded::Failed { error, asked: true }) => {
                 self.pull_requests_error = Some(error);
             }
@@ -1503,15 +1322,12 @@ impl ParterreApp {
         }
     }
 
-    /// Pull requests are on, `origin` is on GitHub, and `gh` isn't known to be missing or
-    /// signed out: what the toolbar shows as on.
     pub(super) fn pull_requests_active(&self) -> bool {
         self.settings.graph.show_pull_requests
             && self.pull_requests.origin().is_some()
             && !self.pull_requests.needs_sign_in()
     }
 
-    /// Turns pull requests off if they are active, else on, asking GitHub now.
     pub(super) fn toggle_pull_requests(&mut self) {
         if self.pull_requests_active() {
             self.settings.graph.show_pull_requests = false;
@@ -1521,7 +1337,6 @@ impl ParterreApp {
         }
     }
 
-    /// Why pull requests the user asked for couldn't be loaded, and what to do about it.
     fn pull_requests_dialog(&mut self, ctx: &egui::Context) {
         let Some(error) = &self.pull_requests_error else {
             return;
@@ -1530,7 +1345,7 @@ impl ParterreApp {
             pull_requests::DialogAnswer::Open => {}
             pull_requests::DialogAnswer::Close => self.pull_requests_error = None,
             pull_requests::DialogAnswer::Install => {
-                if let Err(e) = crate::browser::open(GH_INSTALL) {
+                if let Err(e) = crate::browser::open(GH_INSTALL_URL) {
                     self.status = Some((e, true));
                 }
             }
@@ -1539,38 +1354,46 @@ impl ParterreApp {
 
     fn update_search(&mut self) {
         self.search.hits.clear();
-        self.search.current = None;
-        let q = self.search.query.trim().to_lowercase();
+        self.search.current_hit = None;
+        let query = self.search.query.trim().to_lowercase();
         let Some(scene) = &self.scene else { return };
-        if q.is_empty() {
+        if query.is_empty() {
             return;
         }
         for (i, node) in scene.graph.nodes.iter().enumerate() {
             let commit = scene.repo.commit(node.commit);
-            let matches = commit.oid.to_hex().starts_with(&q)
+            let matches = commit.oid.to_hex().starts_with(&query)
                 || node
                     .refs
                     .iter()
-                    .any(|&r| scene.repo.refs[r].name.to_lowercase().contains(&q))
-                || commit.subject.to_lowercase().contains(&q)
-                || commit.author_name.to_lowercase().contains(&q);
+                    .any(|&r| scene.repo.refs[r].name.to_lowercase().contains(&query))
+                || commit.subject.to_lowercase().contains(&query)
+                || commit.author_name.to_lowercase().contains(&query);
             if matches {
                 self.search.hits.push(i);
             }
         }
     }
 
-    fn goto_search_hit(&mut self, forward: bool) {
+    fn find_next(&mut self) {
+        self.go_to_search_hit(true);
+    }
+
+    fn find_previous(&mut self) {
+        self.go_to_search_hit(false);
+    }
+
+    fn go_to_search_hit(&mut self, forward: bool) {
         let n = self.search.hits.len();
         if n == 0 {
             return;
         }
-        let next = match self.search.current {
+        let next = match self.search.current_hit {
             None => 0,
             Some(c) if forward => (c + 1) % n,
             Some(c) => (c + n - 1) % n,
         };
-        self.search.current = Some(next);
+        self.search.current_hit = Some(next);
         let node = self.search.hits[next];
         self.selection.set(Some(node));
         self.center_on(node);
@@ -1584,23 +1407,31 @@ impl ParterreApp {
     }
 
     fn go_to_head(&mut self) {
-        if let Some(head) = self.scene.as_ref().and_then(Scene::head_node) {
-            self.view.zoom = self.view.zoom.max(0.6);
-            // TortoiseGit scrolls HEAD to the top of the window after loading.
-            let (world, fraction) = {
-                let scene = self.scene.as_ref().unwrap();
-                let fraction = match self.settings.layout.direction {
-                    Direction::NewestTop => vec2(0.5, 0.12),
-                    Direction::NewestBottom => vec2(0.5, 0.88),
-                    Direction::NewestLeft => vec2(0.12, 0.5),
-                    Direction::NewestRight => vec2(0.88, 0.5),
-                };
-                (scene.node_center(head), fraction)
-            };
-            self.view.show_at(self.canvas, world, fraction);
-        } else {
+        usage::action(usage::Action::GoToHead);
+        self.scroll_to_head();
+    }
+
+    fn scroll_to_head(&mut self) {
+        let Some((scene, head)) = self.scene.as_ref().and_then(|s| Some((s, s.head_node()?)))
+        else {
             self.fit();
-        }
+            return;
+        };
+        self.view.zoom = self.view.zoom.max(HEAD_MIN_ZOOM);
+        // As TortoiseGit scrolls HEAD to the top of the window after loading.
+        let fraction = match self.settings.layout.direction {
+            Direction::NewestTop => vec2(0.5, 0.12),
+            Direction::NewestBottom => vec2(0.5, 0.88),
+            Direction::NewestLeft => vec2(0.12, 0.5),
+            Direction::NewestRight => vec2(0.88, 0.5),
+        };
+        self.view
+            .show_at(self.canvas, scene.node_center(head), fraction);
+    }
+
+    fn zoom_to_fit(&mut self) {
+        usage::action(usage::Action::Fit);
+        self.fit();
     }
 
     fn fit(&mut self) {
@@ -1609,8 +1440,7 @@ impl ParterreApp {
         }
     }
 
-    /// Changes the arrangement of the nodes (reset, undo, …) and remembers the result. Not
-    /// while nodes are being dragged.
+    /// Remembers the result. Not while nodes are being dragged.
     fn rearrange(&mut self, change: impl FnOnce(&mut parterre_core::physics::Net)) {
         if matches!(self.drag, Some(Drag::Node { .. })) {
             return;
@@ -1644,7 +1474,6 @@ impl ParterreApp {
         self.rearrange(|net| net.return_to_layout(nodes));
     }
 
-    /// Selects the nodes growing out of `roots` (see [`DragModel::Subtree`]).
     fn select_subtree(&mut self, roots: &[usize]) {
         if let Some(scene) = &self.scene {
             self.selection.extend(scene.graph.subtree(roots));
@@ -1656,7 +1485,7 @@ impl ParterreApp {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        // Before the text fields, which do nothing with them.
+        // Even while a text field has the keyboard.
         let (reload, fetch) = ctx.input_mut(keys::reload_and_fetch);
         if reload {
             self.reload_by_hand(ctx);
@@ -1672,17 +1501,17 @@ impl ParterreApp {
         }
         let pressed = |s: keys::Shortcut| ctx.input_mut(|i| s.consume(i));
         if pressed(keys::OPEN) {
-            self.pick_folder = true;
+            self.folder_picker_requested = true;
         }
         if pressed(keys::CLOSE) {
             self.close_folder();
         }
         // The Shift-variants first: egui takes ⌘G for ⇧⌘G too.
         if pressed(keys::find_previous()) {
-            self.goto_search_hit(false);
+            self.find_previous();
         }
         if pressed(keys::find_next()) {
-            self.goto_search_hit(true);
+            self.find_next();
         }
         if pressed(keys::FIND) {
             self.search.request_focus = true;
@@ -1710,32 +1539,28 @@ impl ParterreApp {
             }
         }
         if pressed(keys::ZOOM_IN) || pressed(keys::ZOOM_IN_UNSHIFTED) {
-            self.zoom_by(1.0 / 0.8);
+            self.zoom_in();
         }
         if pressed(keys::ZOOM_OUT) {
-            self.zoom_by(0.8);
+            self.zoom_out();
         }
         if pressed(keys::ACTUAL_SIZE) {
-            self.zoom_by(1.0 / self.view.zoom);
+            self.zoom_to_actual_size();
         }
-        // One node gives its log, two the range between them; three or more nothing.
         if pressed(keys::SHOW_LOG) {
-            let nodes = self.selection.nodes.clone();
-            self.show_log(&nodes);
+            self.show_log_of_selection();
         }
         if pressed(keys::ZOOM_TO_FIT) {
-            usage::action(usage::Action::Fit);
-            self.fit();
+            self.zoom_to_fit();
         }
         if pressed(keys::GO_TO_HEAD) {
-            usage::action(usage::Action::GoToHead);
             self.go_to_head();
         }
         if pressed(keys::Shortcut::plain(Key::Escape)) {
             self.selection.set(None);
             self.selected_edge = None;
         }
-        let step = 60.0;
+        let step = ARROW_KEY_PAN;
         let page = self.canvas.height() * 0.8;
         let pan = [
             (Key::ArrowLeft, vec2(step, 0.0)),
@@ -1759,9 +1584,14 @@ impl ParterreApp {
         }
     }
 
+    fn show_log_of_selection(&mut self) {
+        let nodes = self.selection.nodes.clone();
+        self.show_log(&nodes);
+    }
+
     fn status_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            if self.is_laying_out() {
+            if self.job.is_some() {
                 ui.spinner();
                 ui.label("Laying out…");
                 ui.separator();
@@ -1814,30 +1644,17 @@ impl ParterreApp {
                         scene.node_count(),
                         scene.graph.visible_commits,
                     ));
-                    if let Some((msg, error)) = &self.status {
+                    if let Some((message, error)) = &self.status {
                         ui.separator();
-                        let color = if *error {
-                            Color32::RED
-                        } else {
-                            ui.visuals().weak_text_color()
-                        };
-                        ui.colored_label(color, msg);
+                        status_label(ui, message, *error);
                     }
                 });
-            } else if let Some((msg, error)) = &self.status {
-                // No repository open: only the message, such as why one could not be opened.
-                let color = if *error {
-                    Color32::RED
-                } else {
-                    ui.visuals().weak_text_color()
-                };
-                ui.colored_label(color, msg);
+            } else if let Some((message, error)) = &self.status {
+                status_label(ui, message, *error);
             }
         });
     }
 
-    /// In place of the graph while no repository is open: what to do, centred, with the
-    /// recent folders as a shortcut.
     fn welcome(&mut self, ui: &mut Ui) {
         // Centred by last frame's height; the first frame is measured, then drawn again.
         let id = egui::Id::new("welcome-height");
@@ -1856,22 +1673,22 @@ impl ParterreApp {
                     .color(ui.visuals().weak_text_color()),
             );
             ui.add_space(16.0);
-            let button = vec2(140.0, 30.0);
-            let width = 2.0 * button.x + ui.spacing().item_spacing.x;
-            ui.allocate_ui(vec2(width, button.y), |ui| {
+            let button_size = vec2(140.0, 30.0);
+            let width = 2.0 * button_size.x + ui.spacing().item_spacing.x;
+            ui.allocate_ui(vec2(width, button_size.y), |ui| {
                 ui.horizontal(|ui| {
                     if ui
-                        .add(egui::Button::new("Open folder…").min_size(button))
+                        .add(egui::Button::new("Open folder…").min_size(button_size))
                         .on_hover_text(format!(
                             "Any folder inside the repository ({})",
                             keys::OPEN.label()
                         ))
                         .clicked()
                     {
-                        self.pick_folder = true;
+                        self.folder_picker_requested = true;
                     }
                     if ui
-                        .add(egui::Button::new("Clone repository…").min_size(button))
+                        .add(egui::Button::new("Clone repository…").min_size(button_size))
                         .on_hover_text("From GitHub, Azure DevOps or any URL git takes")
                         .clicked()
                     {
@@ -1880,16 +1697,16 @@ impl ParterreApp {
                     }
                 });
             });
-            if let Some((msg, true)) = &self.status {
+            if let Some((message, true)) = &self.status {
                 ui.add_space(10.0);
-                ui.colored_label(Color32::RED, msg);
+                status_label(ui, message, true);
             }
             if !self.recent.is_empty() {
                 ui.add_space(24.0);
                 ui.label(RichText::new("Recent").color(ui.visuals().weak_text_color()));
                 ui.add_space(2.0);
                 let (link, weak) = (ui.visuals().hyperlink_color, ui.visuals().weak_text_color());
-                for path in self.recent.iter().take(WELCOME_RECENT) {
+                for path in self.recent.iter().take(WELCOME_RECENT_COUNT) {
                     let (name, place) = name_and_place(path);
                     let mut text = egui::text::LayoutJob::default();
                     let font = egui::TextStyle::Body.resolve(ui.style());
@@ -1925,16 +1742,15 @@ impl ParterreApp {
         self.graph_hovered = ui.rect_contains_pointer(canvas);
         if self.needs_initial_view && canvas.is_positive() && self.scene.is_some() {
             self.needs_initial_view = false;
-            if self.automation.fit {
+            if self.automation.start_fitted {
                 self.fit();
             } else {
                 self.view.zoom = 1.0;
-                self.go_to_head();
+                self.scroll_to_head();
             }
         }
         let Some(scene) = &mut self.scene else { return };
 
-        // Hover.
         let pointer = response.hover_pos();
         self.hovered = pointer.and_then(|p| scene.node_at(self.view.to_world(canvas, p)));
         let hovered_pull_request = match (pointer, self.drag) {
@@ -1956,8 +1772,6 @@ impl ParterreApp {
             _ => None,
         };
 
-        // Dragging: nodes (with their selection) follow the pointer, the background pans, and
-        // Shift- or Ctrl-dragging the background selects.
         let modifiers = ui.input(|i| i.modifiers);
         let extend = modifiers.shift || modifiers.command;
         if response.drag_started() {
@@ -1975,11 +1789,11 @@ impl ParterreApp {
                         }
                     }
                     let model = self.settings.net.model;
-                    let nodes = dragged_with(&self.selection, n);
+                    let nodes = self.selection.group_of(n);
                     let carried = scene.carried_nodes(&nodes, model);
-                    scene.net.grab(n, &nodes, &carried, model.adapts());
+                    scene.net.grab(n, &nodes, &carried, model);
                     Some(Drag::Node {
-                        grab: world - scene.node_center(n),
+                        grab_offset: world - scene.node_center(n),
                     })
                 }
                 None if extend && !middle => Some(Drag::Select {
@@ -1994,9 +1808,9 @@ impl ParterreApp {
                 .interact_pointer_pos()
                 .map(|p| self.view.to_world(canvas, p));
             match &mut self.drag {
-                Some(Drag::Node { grab }) => {
+                Some(Drag::Node { grab_offset }) => {
                     if let Some(p) = pointer {
-                        scene.net.drag_to(to_point(p - *grab));
+                        scene.net.drag_to(to_point(p - *grab_offset));
                     }
                 }
                 Some(Drag::Select { end, .. }) => *end = pointer.unwrap_or(*end),
@@ -2025,9 +1839,8 @@ impl ParterreApp {
         }
 
         let mut action = None;
-        // Clicks: select a node; Ctrl toggles it, Shift adds it. A plain click on a pull
-        // request's number also opens it, once for a double-click.
         if response.clicked() {
+            // Once for a double-click.
             if let Some(i) = hovered_pull_request
                 && !extend
                 && !response.double_clicked()
@@ -2043,8 +1856,6 @@ impl ParterreApp {
                 None if extend => {}
                 None => self.selection.set(None),
             }
-            // Clicking an edge keeps it highlighted; clicking it again, or anything else, lets
-            // go of it.
             self.selected_edge = match (self.hovered, self.hovered_edge) {
                 (None, Some(e)) if self.selected_edge != Some(e) => Some(e),
                 _ => None,
@@ -2058,7 +1869,6 @@ impl ParterreApp {
                 self.selection.set(Some(n));
             }
         }
-        // Double-clicking a node opens its log and selects it alone; the background fits.
         if response.double_clicked() {
             match self.hovered {
                 Some(n) => {
@@ -2071,7 +1881,6 @@ impl ParterreApp {
             }
         }
 
-        // Wheel: scroll; Ctrl+wheel or pinch: zoom around the pointer.
         if response.hovered() {
             let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
             if zoom != 1.0 {
@@ -2081,13 +1890,11 @@ impl ParterreApp {
                 self.view.pan_screen(scroll);
             }
         }
-        // However the view was panned or zoomed this frame (keys, toolbar, pointer), keep the
-        // graph in sight, before drawing it: drawn beyond the limit and pulled back on the
-        // next frame, it would jitter.
+        // However the view moved this frame, before drawing: drawn beyond the limit and pulled
+        // back on the next frame, the graph would jitter.
         self.view
-            .keep_in_sight(canvas, scene.bounds(), self.view_before);
+            .keep_in_sight(canvas, scene.bounds(), self.view_at_frame_start);
 
-        // Physics.
         let dt = self
             .automation
             .fixed_dt()
@@ -2097,38 +1904,41 @@ impl ParterreApp {
         }
 
         let palette = palette_for(ui, &self.settings);
-        let count = scene.node_count();
-        let mut hits = vec![false; count];
+        let node_count = scene.node_count();
+        let mut hits = vec![false; node_count];
         for &h in &self.search.hits {
             hits[h] = true;
         }
-        let mut selected = self.selection.mask(count);
+        let mut selected = self.selection.mask(node_count);
         if let Some(band) = band {
             for node in scene.nodes_in(band) {
                 selected[node] = true;
             }
         }
-        // In Subtree mode, show what a drag would move.
-        let mut preview = vec![false; count];
+        let mut preview = vec![false; node_count];
         match (self.hovered, self.drag, self.settings.net.model) {
             (Some(n), None, DragModel::Subtree) => {
                 // As a drag would: Shift or Ctrl adds the node to the selection.
-                let mut roots = dragged_with(&self.selection, n);
+                let mut roots = self.selection.group_of(n);
                 if extend && !self.selection.contains(n) {
                     roots = self.selection.nodes.clone();
                     roots.push(n);
                 }
-                if self.preview.as_ref().is_none_or(|(r, _)| *r != roots) {
+                if self
+                    .subtree_preview
+                    .as_ref()
+                    .is_none_or(|(r, _)| *r != roots)
+                {
                     let nodes = scene.carried_nodes(&roots, DragModel::Subtree);
-                    self.preview = Some((roots, nodes));
+                    self.subtree_preview = Some((roots, nodes));
                 }
-                if let Some((_, nodes)) = &self.preview {
+                if let Some((_, nodes)) = &self.subtree_preview {
                     for &node in nodes {
                         preview[node] = true;
                     }
                 }
             }
-            _ => self.preview = None,
+            _ => self.subtree_preview = None,
         }
         let marked = self.marked.as_ref().and_then(|(oid, _)| {
             let commit = scene.repo.lookup(oid)?;
@@ -2143,7 +1953,7 @@ impl ParterreApp {
             preview,
             selected_edge: self.selected_edge,
             search_hits: hits,
-            upstreams: self.settings.graph.show_upstreams,
+            show_upstreams: self.settings.graph.show_upstreams,
             rebasing: rebasing_marks(&scene.repo, self.branches.catalog.as_deref()),
             merging: merging_marks(&scene.repo, self.branches.catalog.as_deref()),
         };
@@ -2178,126 +1988,24 @@ impl ParterreApp {
             );
         }
 
-        // Tooltip for the hovered pull request, or node.
         if let Some(i) = hovered_pull_request {
-            let pr = &scene.pull_requests[i];
-            response.clone().on_hover_ui_at_pointer(|ui| {
-                ui.label(RichText::new(format!("#{} {}", pr.number, pr.title)).strong());
-                // The author is missing if their account was deleted.
-                let draft = pr.draft.then(|| "Draft".to_owned());
-                let author = (!pr.author.is_empty()).then(|| format!("by {}", pr.author));
-                let about: Vec<String> = draft.into_iter().chain(author).collect();
-                if !about.is_empty() {
-                    ui.label(about.join(" · "));
-                }
-                ui.label(
-                    RichText::new(format!("{} into {}", pr.head_label(), pr.base_branch))
-                        .monospace(),
-                );
-                ui.add_space(4.0);
-                ui.label(RichText::new("Click to open it on GitHub").weak());
-            });
+            let pull_request = &scene.pull_requests[i];
+            response
+                .clone()
+                .on_hover_ui_at_pointer(|ui| pull_request_tooltip(ui, pull_request));
         } else if let (Some(node), None) = (self.hovered, self.drag) {
-            let n = &scene.graph.nodes[node];
-            let commit = scene.repo.commit(n.commit);
-            // The node's first edge: its first-parent one, else (where the forks mode hangs a
-            // branch off its latest merge of its base) the one holding its own commits.
-            let hidden = scene
-                .graph
-                .edges
-                .iter()
-                .find(|e| e.child as usize == node)
-                .map_or(0, |e| e.hidden);
-            let refs: Vec<&str> = n
-                .refs
-                .iter()
-                .map(|&r| scene.repo.refs[r].full_name.as_str())
-                .collect();
-            let worktrees: Vec<String> = scene
-                .worktrees_on(node)
-                .into_iter()
-                .map(|k| {
-                    let w = &scene.repo.worktrees[k];
-                    let state = if w.missing {
-                        " (the folder is gone)"
-                    } else if w.locked {
-                        " (locked)"
-                    } else {
-                        ""
-                    };
-                    format!("Worktree {}{state}", w.path.display())
-                })
-                .collect();
             let details = &mut self.details;
-            let repo_path = &scene.repo.path;
-            let ctx = ui.ctx().clone();
-            response.clone().on_hover_ui_at_pointer(|ui| {
-                ui.monospace(commit.oid.to_hex());
-                ui.label(format!(
-                    "{} <{}>  {}",
-                    commit.author_name, commit.author_email, commit.author_date
-                ));
-                ui.add_space(4.0);
-                ui.label(RichText::new(&commit.subject).strong());
-                match details.message(repo_path, commit.oid, &ctx) {
-                    Some(message) => {
-                        let body = message.split_once('\n').map_or("", |(_, b)| b.trim());
-                        if !body.is_empty() {
-                            // TortoiseGit truncates at 8000 characters.
-                            let body: String = body.lines().take(40).collect::<Vec<_>>().join("\n");
-                            ui.label(body.chars().take(4000).collect::<String>());
-                        }
-                    }
-                    None => {
-                        ui.spinner();
-                    }
-                }
-                if !refs.is_empty() {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(refs.join("\n")).weak());
-                }
-                if !worktrees.is_empty() {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(worktrees.join("\n")).weak());
-                }
-                if hidden > 0 {
-                    ui.label(RichText::new(format!("{hidden} commits collapsed below")).weak());
-                }
-            });
+            response
+                .clone()
+                .on_hover_ui_at_pointer(|ui| node_tooltip(ui, scene, node, details));
+        }
+        if let (Some(edge), None) = (self.hovered_edge, self.drag) {
+            response
+                .clone()
+                .on_hover_ui_at_pointer(|ui| edge_tooltip(ui, scene, edge));
         }
 
-        // Tooltip for the hovered edge: the commits collapsed into it.
-        if let (Some(e), None) = (self.hovered_edge, self.drag) {
-            let edge = scene.graph.edges[e];
-            let collapsed = scene.graph.collapsed(e);
-            let hidden = &collapsed[..collapsed.len().min(12)];
-            response.clone().on_hover_ui_at_pointer(|ui| {
-                ui.label(edge_summary(scene, edge));
-                if edge.hidden == 0 {
-                    ui.label(RichText::new("direct parent").weak());
-                    return;
-                }
-                ui.label(RichText::new(format!("{} commits collapsed:", edge.hidden)).strong());
-                for c in hidden {
-                    let commit = scene.repo.commit(*c);
-                    ui.horizontal(|ui| {
-                        ui.monospace(commit.oid.short(scene.repo.abbrev_len));
-                        ui.label(&commit.subject);
-                    });
-                }
-                if (edge.hidden as usize) > hidden.len() {
-                    ui.label(
-                        RichText::new(format!(
-                            "… and {} more",
-                            edge.hidden as usize - hidden.len()
-                        ))
-                        .weak(),
-                    );
-                }
-            });
-        }
-
-        // Context menu: built only while open, as it asks the Git menu.
+        // Built only while open: it asks the Git menu.
         let popup = egui::Popup::context_menu(&response);
         let open = response.secondary_clicked()
             || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
@@ -2337,7 +2045,7 @@ impl ParterreApp {
 
     fn overview(&mut self, ui: &mut Ui, canvas: Rect) {
         let Some(scene) = &self.scene else { return };
-        // TortoiseGit: max(100, w/4) x max(200, h/4) in the bottom-right corner.
+        // As TortoiseGit's.
         let size = vec2(
             (canvas.width() / 4.0).max(100.0),
             (canvas.height() / 4.0).max(200.0),
@@ -2367,10 +2075,7 @@ impl ParterreApp {
         if !self.show_legend {
             return;
         }
-        let palette = Palette::new(
-            ctx.global_style().visuals.dark_mode,
-            &self.settings.branch_colors,
-        );
+        let palette = self.palette(ctx);
         let mut open_colours = false;
         let rules = &self.settings.branch_colors;
         let shown = crate::dialogs::Dialog::new("legend", "Legend")
@@ -2378,7 +2083,7 @@ impl ParterreApp {
             .width(520.0)
             .resizable()
             .show(ctx, |ui| {
-                crate::dialogs::fields(ui, |ui| legend(ui, &palette, rules, &mut open_colours));
+                open_colours = crate::dialogs::fields(ui, |ui| legend(ui, &palette, rules));
                 ui.separator();
                 crate::dialogs::actions(ui, "", false, false, false)
             });
@@ -2409,27 +2114,133 @@ impl ParterreApp {
     }
 }
 
-/// The legend's rows: what each colour and mark in the graph stands for. Sets `open_colours`
-/// when the branch colours are asked for.
-fn legend(
-    ui: &mut Ui,
-    palette: &Palette,
-    rules: &[crate::theme::BranchColor],
-    open_colours: &mut bool,
-) {
-    let swatch = |ui: &mut Ui, fill: Color32, text: &str, what: &str| {
+fn pull_request_tooltip(ui: &mut Ui, pull_request: &parterre_forge::PullRequest) {
+    let pr = pull_request;
+    ui.label(RichText::new(format!("#{} {}", pr.number, pr.title)).strong());
+    // The author is missing if their account was deleted.
+    let draft = pr.draft.then(|| "Draft".to_owned());
+    let author = (!pr.author.is_empty()).then(|| format!("by {}", pr.author));
+    let about: Vec<String> = draft.into_iter().chain(author).collect();
+    if !about.is_empty() {
+        ui.label(about.join(" · "));
+    }
+    ui.label(RichText::new(format!("{} into {}", pr.head_label(), pr.base_branch)).monospace());
+    ui.add_space(4.0);
+    ui.label(RichText::new("Click to open it on GitHub").weak());
+}
+
+fn node_tooltip(ui: &mut Ui, scene: &Scene, node: usize, details: &mut Details) {
+    let n = &scene.graph.nodes[node];
+    let commit = scene.repo.commit(n.commit);
+    ui.monospace(commit.oid.to_hex());
+    ui.label(format!(
+        "{} <{}>  {}",
+        commit.author_name, commit.author_email, commit.author_date
+    ));
+    ui.add_space(4.0);
+    ui.label(RichText::new(&commit.subject).strong());
+    match details.message(&scene.repo.path, commit.oid, ui.ctx()) {
+        Some(message) => {
+            let body = message.split_once('\n').map_or("", |(_, b)| b.trim());
+            if !body.is_empty() {
+                let body = body
+                    .lines()
+                    .take(TOOLTIP_BODY_MAX_LINES)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ui.label(
+                    body.chars()
+                        .take(TOOLTIP_BODY_MAX_CHARS)
+                        .collect::<String>(),
+                );
+            }
+        }
+        None => {
+            ui.spinner();
+        }
+    }
+    let refs: Vec<&str> = n
+        .refs
+        .iter()
+        .map(|&r| scene.repo.refs[r].full_name.as_str())
+        .collect();
+    if !refs.is_empty() {
+        ui.add_space(4.0);
+        ui.label(RichText::new(refs.join("\n")).weak());
+    }
+    let worktrees: Vec<String> = scene
+        .worktrees_on(node)
+        .into_iter()
+        .map(|k| {
+            let w = &scene.repo.worktrees[k];
+            let state = if w.missing {
+                " (the folder is gone)"
+            } else if w.locked {
+                " (locked)"
+            } else {
+                ""
+            };
+            format!("Worktree {}{state}", w.path.display())
+        })
+        .collect();
+    if !worktrees.is_empty() {
+        ui.add_space(4.0);
+        ui.label(RichText::new(worktrees.join("\n")).weak());
+    }
+    // The node's first edge: its first-parent one, or where the forks mode hangs a branch off
+    // its latest merge of its base, the one holding its own commits.
+    let hidden = scene
+        .graph
+        .edges
+        .iter()
+        .find(|e| e.child as usize == node)
+        .map_or(0, |e| e.hidden);
+    if hidden > 0 {
+        ui.label(RichText::new(format!("{hidden} commits collapsed below")).weak());
+    }
+}
+
+fn edge_tooltip(ui: &mut Ui, scene: &Scene, edge_index: usize) {
+    let edge = scene.graph.edges[edge_index];
+    ui.label(edge_summary(scene, edge));
+    if edge.hidden == 0 {
+        ui.label(RichText::new("direct parent").weak());
+        return;
+    }
+    ui.label(RichText::new(format!("{} commits collapsed:", edge.hidden)).strong());
+    let collapsed = scene.graph.collapsed(edge_index);
+    let listed = &collapsed[..collapsed.len().min(EDGE_TOOLTIP_MAX_COMMITS)];
+    for &c in listed {
+        let commit = scene.repo.commit(c);
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
+            ui.monospace(commit.oid.short(scene.repo.abbrev_len));
+            ui.label(&commit.subject);
+        });
+    }
+    let unlisted = (edge.hidden as usize).saturating_sub(listed.len());
+    if unlisted > 0 {
+        ui.label(RichText::new(format!("… and {unlisted} more")).weak());
+    }
+}
+
+/// Returns whether *Branch colours…* was clicked.
+fn legend(ui: &mut Ui, palette: &Palette, rules: &[crate::theme::BranchColor]) -> bool {
+    let label_swatch = |ui: &mut Ui, fill: Color32, text_color: Color32, text: &str, what: &str| {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(LEGEND_SWATCH_SIZE, Sense::hover());
             ui.painter().rect_filled(rect, 4.0, fill);
             ui.painter().text(
                 rect.left_center() + vec2(8.0, 0.0),
                 egui::Align2::LEFT_CENTER,
                 text,
                 FontId::monospace(12.0),
-                crate::theme::text_on(fill),
+                text_color,
             );
             ui.label(what);
         });
+    };
+    let swatch = |ui: &mut Ui, fill: Color32, text: &str, what: &str| {
+        label_swatch(ui, fill, crate::theme::text_on(fill), text, what);
     };
     swatch(
         ui,
@@ -2455,7 +2266,7 @@ fn legend(
         (palette.draft_pull_request, "Draft pull request"),
     ] {
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(LEGEND_SWATCH_SIZE, Sense::hover());
             let text = crate::theme::text_on(fill);
             ui.painter().rect_filled(rect, 4.0, fill);
             // As in the graph: the number right-aligned, after the glyph.
@@ -2477,7 +2288,6 @@ fn legend(
             ui.label(what);
         });
     }
-    // Every worktree in the worktree colour; a detached one differs by its italics alone.
     for (fill, name, italics, glyph, what) in [
         (
             palette.worktree,
@@ -2502,10 +2312,9 @@ fn legend(
         ),
     ] {
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(LEGEND_SWATCH_SIZE, Sense::hover());
             let text = crate::theme::text_on(fill);
             ui.painter().rect_filled(rect, 4.0, fill);
-            // As in the graph: the name after the glyph.
             let icon =
                 Rect::from_center_size(rect.left_center() + vec2(14.0, 0.0), Vec2::splat(12.0));
             crate::widgets::paint_glyph(ui.painter(), icon, glyph, text);
@@ -2522,24 +2331,17 @@ fn legend(
             ui.label(what);
         });
     }
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
-        ui.painter().rect_filled(rect, 4.0, palette.plain_fill);
-        ui.painter().text(
-            rect.left_center() + vec2(8.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            "1a2b3c4d",
-            FontId::monospace(12.0),
-            palette.plain_text,
-        );
-        ui.label("Commit without refs (branch point or merge)");
-    });
+    label_swatch(
+        ui,
+        palette.plain_fill,
+        palette.plain_text,
+        "1a2b3c4d",
+        "Commit without refs (branch point or merge)",
+    );
     for rule in rules {
         swatch(ui, rule.color, &rule.patterns, "Branches matching");
     }
-    if ui.link("Branch colours…").clicked() {
-        *open_colours = true;
-    }
+    let open_colours = ui.link("Branch colours…").clicked();
     ui.add_space(6.0);
     ui.add(
         egui::Label::new(
@@ -2549,17 +2351,15 @@ fn legend(
         )
         .wrap(),
     );
+    open_colours
 }
 
-/// The keys and mouse actions of the main window, in two columns.
 fn shortcuts(ui: &mut Ui) {
-    let keys_width = 220.0;
     let rows = shortcut_rows();
     egui::Grid::new("shortcuts")
         .striped(true)
         .num_columns(2)
-        .min_col_width(keys_width)
-        // Rows as close as in a table, not a dialog's fields.
+        .min_col_width(220.0)
         .spacing(vec2(12.0, 6.0))
         .show(ui, |ui| {
             for (keys, what) in rows {
@@ -2570,7 +2370,6 @@ fn shortcuts(ui: &mut Ui) {
         });
 }
 
-/// The rows of [`shortcuts`], with this platform's keys.
 fn shortcut_rows() -> Vec<(String, &'static str)> {
     use keys::{with_command, with_shift};
     let either = |a: keys::Shortcut, b: keys::Shortcut| format!("{} / {}", a.label(), b.label());
@@ -2676,22 +2475,19 @@ fn shortcut_rows() -> Vec<(String, &'static str)> {
     ]
 }
 
-/// The repository named at start, loading on a thread of its own while the window comes up
-/// (#309).
+/// The repository named at start, loading while the window comes up.
 pub struct Opening {
     path: PathBuf,
-    /// Whether the user named the folder. Without a name the current directory is tried, and
-    /// nothing is said when it isn't a repository.
+    /// Else the current directory is tried, and failing is no error.
     named: bool,
-    rx: std::sync::mpsc::Receiver<Result<Repo, String>>,
+    rx: mpsc::Receiver<Result<Repo, String>>,
 }
 
 impl Opening {
-    /// Starts loading `path`, or the current directory if there is none.
     pub fn start(path: Option<PathBuf>) -> Opening {
         let named = path.is_some();
         let path = path.unwrap_or_else(|| PathBuf::from("."));
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         let dir = path.clone();
         std::thread::spawn(move || {
             let loaded = parterre_core::git::load_repo(&dir).map_err(|e| e.to_string());
@@ -2701,8 +2497,7 @@ impl Opening {
         Opening { path, named, rx }
     }
 
-    /// Waits for the load: the repository, none when the unnamed current directory isn't one,
-    /// or why the named folder didn't open.
+    /// `None` when the unnamed current directory isn't a repository.
     pub fn wait(self) -> Result<Option<Repo>, String> {
         match self.rx.recv() {
             Ok(Ok(repo)) => Ok(Some(repo)),
@@ -2712,41 +2507,37 @@ impl Opening {
         }
     }
 
-    /// What came of the load, if it is done.
     fn poll(&self) -> Option<Result<Repo, String>> {
-        match self.rx.try_recv() {
-            Ok(result) => Some(result),
-            Err(std::sync::mpsc::TryRecvError::Empty) => None,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Some(Err("loading stopped unexpectedly".into()))
-            }
-        }
+        try_result(&self.rx, "loading stopped unexpectedly")
     }
 
-    /// What the window says meanwhile.
     fn status(&self) -> Option<(String, bool)> {
         self.named
             .then(|| (format!("Opening {}…", self.path.display()), false))
     }
 
-    /// The window's title meanwhile: the one the repository will have, so it doesn't change
-    /// when the repository is in.
+    /// The one the repository will have, so that it doesn't change when the repository is in.
     pub fn title(&self) -> String {
-        if self.named {
-            format!("{} – Revision Graph", name_and_place(&self.path).0)
-        } else {
-            window_title(None)
+        match self.name() {
+            Some(name) => graph_window_title(&name),
+            None => window_title(None),
         }
     }
 
-    /// The folder's name, when the user named it.
     fn name(&self) -> Option<String> {
         self.named.then(|| name_and_place(&self.path).0)
     }
 }
 
-/// In place of the graph while `name` is being opened or laid out: a word, centred, and
-/// nothing to click.
+/// `None` while `rx` waits; `gone` if its sender is gone without sending.
+fn try_result<T>(rx: &mpsc::Receiver<Result<T, String>>, gone: &str) -> Option<Result<T, String>> {
+    match rx.try_recv() {
+        Ok(result) => Some(result),
+        Err(mpsc::TryRecvError::Empty) => None,
+        Err(mpsc::TryRecvError::Disconnected) => Some(Err(gone.to_owned())),
+    }
+}
+
 fn opening_panel(ui: &mut Ui, name: &str) {
     ui.add_space((ui.available_height() / 2.0 - 10.0).max(0.0));
     ui.vertical_centered(|ui| {
@@ -2754,13 +2545,15 @@ fn opening_panel(ui: &mut Ui, name: &str) {
     });
 }
 
-/// "Apps – Revision Graph", as the log is "main – Log" (#339), or "parterre" while no
-/// repository is open.
 pub fn window_title(repo: Option<&Repo>) -> String {
     match repo {
-        Some(repo) => format!("{} – Revision Graph", repo.display_name()),
+        Some(repo) => graph_window_title(&repo.display_name()),
         None => "parterre".to_owned(),
     }
+}
+
+fn graph_window_title(repo_name: &str) -> String {
+    format!("{repo_name} – Revision Graph")
 }
 
 /// A repository's folder name, and the folder it is in: `("Apps", "C:\src")`.
@@ -2775,8 +2568,7 @@ pub fn name_and_place(path: &Path) -> (String, String) {
     (name, place)
 }
 
-/// Which way an edge leads, e.g. "From main to its merged parent feature/x". (The default
-/// fonts have no arrow glyph.)
+/// "From main to its merged parent feature/x": the default fonts have no arrow.
 fn edge_summary(scene: &Scene, edge: RevEdge) -> String {
     format!(
         "From {} to its {}parent {}",
@@ -2786,7 +2578,7 @@ fn edge_summary(scene: &Scene, edge: RevEdge) -> String {
     )
 }
 
-/// A node's first ref, or its short hash if it has none.
+/// Its first ref, or its short hash.
 fn node_name(scene: &Scene, node: u32) -> String {
     let node = &scene.graph.nodes[node as usize];
     match node.refs.first() {
@@ -2799,13 +2591,32 @@ fn node_name(scene: &Scene, node: u32) -> String {
     }
 }
 
+fn node_oid(scene: &Scene, node: usize) -> Oid {
+    scene.repo.commit(scene.graph.nodes[node].commit).oid
+}
+
+fn resolve_oid(repo: &Repo, name: &str) -> Result<Oid, String> {
+    repo.resolve(name)
+        .map(|c| repo.commit(c).oid)
+        .ok_or_else(|| format!("no commit named {name}"))
+}
+
+fn status_label(ui: &mut Ui, message: &str, error: bool) {
+    let color = if error {
+        Color32::RED
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    ui.colored_label(color, message);
+}
+
 impl ParterreApp {
-    /// Sets the theme of egui and of the window's title bar.
+    /// Of egui and of the window's title bar.
     fn apply_theme(&mut self, ctx: &egui::Context) {
         use egui::{SystemTheme as Window, Theme, ThemePreference as Egui};
         let (egui_theme, window_theme) = match self.settings.theme {
-            // Where winit can't tell the system theme, egui would pick dark (and the title bar
-            // would stay as it started).
+            // Where winit can't tell the system theme, egui would pick dark, and the title bar
+            // would stay as it started.
             ThemeChoice::System => match self.system_theme.get() {
                 Some(Theme::Light) => (Egui::Light, Window::Light),
                 Some(Theme::Dark) => (Egui::Dark, Window::Dark),
@@ -2822,23 +2633,23 @@ impl ParterreApp {
     }
 }
 
-/// Where the GitHub CLI's installation is explained.
-const GH_INSTALL: &str = "https://github.com/cli/cli#installation";
+const GH_INSTALL_URL: &str = "https://github.com/cli/cli#installation";
+const WELCOME_RECENT_COUNT: usize = 5;
+const HEAD_MIN_ZOOM: f32 = 0.6;
+const ARROW_KEY_PAN: f32 = 60.0;
+const TOOLTIP_BODY_MAX_LINES: usize = 40;
+const TOOLTIP_BODY_MAX_CHARS: usize = 4000;
+const EDGE_TOOLTIP_MAX_COMMITS: usize = 12;
+const LEGEND_SWATCH_SIZE: Vec2 = vec2(150.0, 20.0);
 
-/// How many recent folders the welcome screen lists; the menu has them all.
-const WELCOME_RECENT: usize = 5;
-
-/// Each worktree with a rebase in progress: its HEAD, and the branch it is rebasing.
+/// Each worktree with a rebase in progress: its HEAD, and the ref of the branch it rebases.
 fn rebasing_marks(
     repo: &Repo,
     catalog: Option<&parterre_core::branches::Catalog>,
 ) -> Vec<(parterre_core::CommitIx, usize)> {
-    let Some(catalog) = catalog else {
-        return Vec::new();
-    };
     catalog
-        .worktrees
         .iter()
+        .flat_map(|catalog| &catalog.worktrees)
         .filter_map(|w| {
             let branch = w.rebasing.as_ref()?.branch.as_deref()?;
             let head = repo.lookup(&w.head?)?;
@@ -2855,12 +2666,9 @@ fn merging_marks(
     repo: &Repo,
     catalog: Option<&parterre_core::branches::Catalog>,
 ) -> Vec<(parterre_core::CommitIx, parterre_core::CommitIx)> {
-    let Some(catalog) = catalog else {
-        return Vec::new();
-    };
     catalog
-        .worktrees
         .iter()
+        .flat_map(|catalog| &catalog.worktrees)
         .filter_map(|w| {
             let theirs = w.merging.or(w.picking.as_ref().map(|p| p.commit))?;
             Some((repo.lookup(&w.head?)?, repo.lookup(&theirs)?))
@@ -2874,11 +2682,9 @@ fn palette_for(ui: &Ui, settings: &Settings) -> Palette {
 
 enum MenuAction {
     ShowLog(Vec<usize>),
-    /// Open a pull request's page in the browser.
     OpenPullRequest(String),
 }
 
-/// What opens a worktree's folder.
 #[derive(Clone, Copy, Debug)]
 enum Opener {
     FileManager,
@@ -2886,7 +2692,13 @@ enum Opener {
 }
 
 impl ParterreApp {
-    /// Opens `dir` in the file manager or a terminal, saying why not if it can't.
+    fn palette(&self, ctx: &egui::Context) -> Palette {
+        Palette::new(
+            ctx.global_style().visuals.dark_mode,
+            &self.settings.branch_colors,
+        )
+    }
+
     fn open_pull_request(&mut self, url: &str) {
         usage::action(usage::Action::OpenPullRequest);
         if let Err(e) = crate::browser::open(url) {
@@ -2910,8 +2722,7 @@ impl ParterreApp {
         }
     }
 
-    /// What the compare window's working-tree rows asked for.
-    fn file_requests(&mut self, ctx: &egui::Context) {
+    fn compare_window_requests(&mut self, ctx: &egui::Context) {
         let opener = compare_window::viewport_id();
         for request in std::mem::take(&mut self.compare.requests) {
             match request {
@@ -2940,7 +2751,7 @@ impl eframe::App for ParterreApp {
         }
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
-        // Uncloaked once a frame, "Opening…" or the graph, has been painted (#309).
+        // Uncloaked (Windows) once a frame at the final size has been painted (#309).
         if self.reveal.as_mut().is_some_and(|r| r.finish(&ctx)) {
             self.reveal = None;
         }
@@ -2957,12 +2768,12 @@ impl eframe::App for ParterreApp {
             .opening
             .as_ref()
             .map_or_else(|| window_title(self.repo.as_deref()), Opening::title);
-        if self.title != title {
+        if self.title_shown != title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
-            self.title = title;
+            self.title_shown = title;
         }
         self.finish_opening(&ctx);
-        // A folder dropped on the Dock icon, opened with parterre, or its service (#336, #337).
+        // Dropped on the Dock icon, opened with parterre, or its service (#336, #337).
         #[cfg(target_os = "macos")]
         if let Some(path) = crate::macos::take_opened(&ctx).into_iter().next() {
             self.open_folder(&path);
@@ -2992,21 +2803,23 @@ impl eframe::App for ParterreApp {
         if let Some(path) = self.branches.go_to.take() {
             self.go_to_worktree(&path);
         }
-        if let Some(path) = self.branches.open.take() {
+        if let Some(path) = self.branches.cloned.take() {
             self.open_folder(&path);
         }
-        if let Some(what) = self.automation.open.take() {
+        if let Some(what) = self.automation.pending_open.take() {
             match self.open_named(&ctx, &what) {
                 Ok(true) => {}
-                Ok(false) => self.automation.open = Some(what),
-                Err(e) => self.automation.fail(&ctx, &format!("open {what}: {e}")),
+                Ok(false) => self.automation.pending_open = Some(what),
+                Err(e) => self
+                    .automation
+                    .fail_step(&ctx, &format!("open {what}: {e}")),
             }
         }
         self.update_pull_requests(&ctx);
         self.usage_statistics(&ctx);
         self.update_check(&ctx);
         self.ensure_scene(&ctx);
-        self.view_before = self.view;
+        self.view_at_frame_start = self.view;
         self.menu_bar_keys(&ctx);
         self.handle_keys(&ctx);
 
@@ -3025,12 +2838,11 @@ impl eframe::App for ParterreApp {
             && banner
             && let Some(rebase::BannerClick::Compare(head)) = rebase::banner(ui, repo, catalog)
         {
-            self.compare_request(CompareRequest::WorkingTree(head))
+            self.compare_request(CompareRequest::WorkingTree(head));
         }
         if self.scene.is_some() {
             egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
         } else if let Some(name) = self.opening_name() {
-            // Neither the welcome view nor a bare canvas: the graph is on its way (#309).
             egui::CentralPanel::default().show(ui, |ui| opening_panel(ui, &name));
         } else {
             egui::CentralPanel::default().show(ui, |ui| self.welcome(ui));
@@ -3046,7 +2858,7 @@ impl eframe::App for ParterreApp {
         self.reset_settings_dialog(&ctx);
         self.log_window(&ctx);
         self.compare_window(&ctx);
-        self.file_requests(&ctx);
+        self.compare_window_requests(&ctx);
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         if let Some(error) = self.about.show(&ctx) {
@@ -3056,10 +2868,7 @@ impl eframe::App for ParterreApp {
         self.file_drop(&ctx);
         // Over everything else.
         self.first_run_prompt(&ctx, frame);
-        let palette = Palette::new(
-            ctx.global_style().visuals.dark_mode,
-            &self.settings.branch_colors,
-        );
+        let palette = self.palette(&ctx);
         self.branches.show(&ctx, &palette, &self.settings.graph);
         self.merge_tools.show(&ctx);
         if let Some(e) = self.merge_tools.error.take() {
@@ -3078,8 +2887,8 @@ impl eframe::App for ParterreApp {
             }
         }
 
-        // Scripted runs wait for the graph, unless there is none to wait for, and for the diffs
-        // and the pull requests (and the layout with them) being loaded.
+        // Scripted runs wait for the graph, if any, and for the diffs, the blames and the pull
+        // requests, with their layout, to load.
         if self.scene.is_some() || self.repo.is_none() {
             let pulling = self.pull_requests.is_loading()
                 || self.pull_requests_active()
@@ -3121,20 +2930,17 @@ impl eframe::App for ParterreApp {
             eframe::set_value(storage, RECENT_KEY, &self.recent);
             eframe::set_value(storage, CLONE_PARENT_KEY, &self.branches.clone_parent);
             eframe::set_value(storage, PRIVACY_KEY, &self.telemetry.privacy);
-            eframe::set_value(storage, updates::TOLD_KEY, &self.release_told);
+            eframe::set_value(storage, updates::RELEASE_TOLD_KEY, &self.release_told);
         }
     }
 
-    /// After [`Self::save`]: `Application Backgrounded`, and the usage statistics queued are
-    /// sent, waiting at most [`parterre_telemetry::CLOSE`].
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.telemetry.close();
     }
 }
 
-/// Where the diff and blame windows colour code by syntax (#209): in a child process, this
-/// program again, so that a grammar's crash costs the colours and not the window. Not at
-/// all if the program's own path is unknown, rather than in this process.
+/// Syntax colouring runs in a child process, this program again, so that a grammar's crash
+/// costs the colours and not the window; without the program's path, not at all.
 fn highlight_engine() -> parterre_highlight::Engine {
     use parterre_highlight::Engine;
     std::env::current_exe().map_or(Engine::Off, Engine::Child)

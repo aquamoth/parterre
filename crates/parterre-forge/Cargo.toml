@@ -12,8 +12,7 @@ homepage.workspace = true
 readme = "README.md"
 
 [features]
-# Open pull requests and the user's repositories from GitHub's API (`github`): the HTTPS client.
-# Without it, loading them fails.
+# GitHub's API over HTTPS. Without it, loading pull requests and repositories fails.
 github = ["dep:ureq"]
 
 [dependencies]

@@ -1,7 +1,3 @@
-//! Property tests over random inputs (adapted from a review's fuzzing).
-
-#![allow(clippy::needless_range_loop)] // index loops read better in these tests
-
 use parterre_core::layout::rank::{limit_width, rank};
 use parterre_core::layout::{
     self, Direction, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking, Trunk,
@@ -24,17 +20,32 @@ impl Rng {
     }
 }
 
-/// Random DAG with nodes permuted (so node order is not topological).
-fn random_input(rng: &mut Rng, n: usize, dup: bool, selfloop: bool, permute: bool) -> LayoutInput {
+#[derive(Clone, Copy)]
+struct Oddities {
+    duplicate_edges: bool,
+    self_loops: bool,
+    /// Nodes out of topological order.
+    shuffled: bool,
+}
+
+const PLAIN: Oddities = Oddities {
+    duplicate_edges: false,
+    self_loops: false,
+    shuffled: false,
+};
+
+/// A random DAG.
+fn random_input(rng: &mut Rng, n: usize, oddities: Oddities) -> LayoutInput {
     let mut perm: Vec<usize> = (0..n).collect();
-    if permute {
+    if oddities.shuffled {
         for i in (1..n).rev() {
             let j = rng.below(i as u64 + 1) as usize;
             perm.swap(i, j);
         }
     }
     let mut edges = Vec::new();
-    for c in 0..n {
+    for (c, &child) in perm.iter().enumerate() {
+        let child = child as u32;
         // 0..3 parents with higher index
         let k = match rng.below(10) {
             0 => 0,
@@ -57,23 +68,23 @@ fn random_input(rng: &mut Rng, n: usize, dup: bool, selfloop: bool, permute: boo
                 continue;
             }
             edges.push(LayoutEdge {
-                child: perm[c] as u32,
+                child,
                 parent: perm[p] as u32,
                 first_parent: first,
             });
-            if dup && rng.chance(0.1) {
+            if oddities.duplicate_edges && rng.chance(0.1) {
                 edges.push(LayoutEdge {
-                    child: perm[c] as u32,
+                    child,
                     parent: perm[p] as u32,
                     first_parent: false,
                 });
             }
             first = false;
         }
-        if selfloop && rng.chance(0.05) {
+        if oddities.self_loops && rng.chance(0.05) {
             edges.push(LayoutEdge {
-                child: perm[c] as u32,
-                parent: perm[c] as u32,
+                child,
+                parent: child,
                 first_parent: false,
             });
         }
@@ -87,8 +98,8 @@ fn random_input(rng: &mut Rng, n: usize, dup: bool, selfloop: bool, permute: boo
         })
         .collect();
     let mut times: Vec<i64> = vec![0; n];
-    for c in 0..n {
-        times[perm[c]] = (n - c) as i64 * 100 + rng.below(250) as i64 - 125; // with some skew
+    for (c, &node) in perm.iter().enumerate() {
+        times[node] = (n - c) as i64 * 100 + rng.below(250) as i64 - 125; // with some skew
     }
     let priority = if n > 0 && rng.chance(0.5) {
         vec![rng.below(n as u64) as u32]
@@ -156,7 +167,7 @@ fn minlen_ok(input: &LayoutInput, layers: &[i64]) -> bool {
     })
 }
 
-/// Brute force optimal weighted length for tiny graphs.
+/// By brute force, for tiny graphs.
 fn brute_optimum(input: &LayoutInput) -> i64 {
     let n = input.sizes.len();
     let maxr = (2 * n) as i64;
@@ -187,7 +198,15 @@ fn rank_all_modes_valid_random_dags() {
     let mut rng = Rng(0x9E3779B97F4A7C15);
     for iter in 0..600 {
         let n = 1 + rng.below(if iter % 10 == 0 { 300 } else { 40 }) as usize;
-        let input = random_input(&mut rng, n, true, true, iter % 2 == 0);
+        let input = random_input(
+            &mut rng,
+            n,
+            Oddities {
+                duplicate_edges: true,
+                self_loops: true,
+                shuffled: iter % 2 == 0,
+            },
+        );
         for r in Ranking::ALL {
             let mut l = rank(&input, r);
             check_layers(&input, &l, &format!("iter {iter} {r:?}"));
@@ -216,7 +235,15 @@ fn simplex_is_optimal_on_tiny_graphs() {
     let mut failures = 0;
     for iter in 0..100 {
         let n = 1 + rng.below(5) as usize;
-        let input = random_input(&mut rng, n, true, false, true);
+        let input = random_input(
+            &mut rng,
+            n,
+            Oddities {
+                duplicate_edges: true,
+                self_loops: false,
+                shuffled: true,
+            },
+        );
         let ns = rank(&input, Ranking::Compact);
         let got = weighted_length(&input, &ns);
         let opt = brute_optimum(&input);
@@ -266,7 +293,6 @@ fn check_layout(input: &LayoutInput, opts: &LayoutOptions, what: &str) {
         if e.child == e.parent {
             continue;
         }
-        // monotone along flow
         let f = opts.direction.flow();
         let proj: Vec<f32> = pts.iter().map(|p| p.x * f.x + p.y * f.y).collect();
         for w in proj.windows(2) {
@@ -275,7 +301,7 @@ fn check_layout(input: &LayoutInput, opts: &LayoutOptions, what: &str) {
                 "{what}: edge {ei} {e:?} not monotone along flow: {proj:?}"
             );
         }
-        // edge length vs layers: chain length = span - 1 dummies
+        // One bend point per layer passed.
         let span = l.layers[e.parent as usize] - l.layers[e.child as usize];
         assert_eq!(
             pts.len() as u32,
@@ -283,24 +309,23 @@ fn check_layout(input: &LayoutInput, opts: &LayoutOptions, what: &str) {
             "{what}: edge {ei} points vs span"
         );
     }
-    // Nodes in the same layer must not overlap along the layer.
     let vertical = opts.direction.is_vertical();
+    let along = |i: usize| if vertical { l.nodes[i].x } else { l.nodes[i].y };
+    let breadth = |i: usize| {
+        if vertical {
+            input.sizes[i].x
+        } else {
+            input.sizes[i].y
+        }
+    };
     let mut by_layer: HashMap<u32, Vec<usize>> = HashMap::new();
     for (i, &ly) in l.layers.iter().enumerate() {
         by_layer.entry(ly).or_default().push(i);
     }
-    for (_, mut v) in by_layer {
-        let along = |i: usize| if vertical { l.nodes[i].x } else { l.nodes[i].y };
-        let br = |i: usize| {
-            if vertical {
-                input.sizes[i].x
-            } else {
-                input.sizes[i].y
-            }
-        };
+    for mut v in by_layer.into_values() {
         v.sort_by(|&a, &b| along(a).total_cmp(&along(b)));
         for w in v.windows(2) {
-            let gap = along(w[1]) - along(w[0]) - (br(w[0]) + br(w[1])) / 2.0;
+            let gap = along(w[1]) - along(w[0]) - (breadth(w[0]) + breadth(w[1])) / 2.0;
             assert!(
                 gap >= opts.node_gap - 0.5,
                 "{what}: nodes {} {} overlap in layer (gap {gap})",
@@ -309,9 +334,7 @@ fn check_layout(input: &LayoutInput, opts: &LayoutOptions, what: &str) {
             );
         }
     }
-    // A centred trunk is one straight line.
     if opts.trunk != Trunk::Leftmost {
-        let along = |i: usize| if vertical { l.nodes[i].x } else { l.nodes[i].y };
         let line = trunk_of(input);
         for &i in &line {
             assert!(
@@ -350,7 +373,15 @@ fn layout_invariants_random() {
     let mut rng = Rng(0xDEADBEEF);
     for iter in 0..300 {
         let n = rng.below(if iter % 10 == 0 { 200 } else { 30 }) as usize;
-        let input = random_input(&mut rng, n, iter % 3 == 0, iter % 5 == 0, iter % 2 == 0);
+        let input = random_input(
+            &mut rng,
+            n,
+            Oddities {
+                duplicate_edges: iter % 3 == 0,
+                self_loops: iter % 5 == 0,
+                shuffled: iter % 2 == 0,
+            },
+        );
         for ranking in Ranking::ALL {
             for concentrate in [false, true] {
                 for mw in [0.0f32, 400.0, 1800.0] {
@@ -380,10 +411,8 @@ fn layout_invariants_random() {
 #[test]
 fn layout_edge_cases() {
     let opts = LayoutOptions::default();
-    // empty
     let l = layout::layout(&LayoutInput::default(), &opts);
     assert!(l.nodes.is_empty());
-    // single node, no edges
     let inp = LayoutInput {
         sizes: vec![Point::new(10.0, 10.0)],
         times: vec![],
@@ -400,7 +429,6 @@ fn layout_edge_cases() {
             "single",
         );
     }
-    // zero edges, many nodes
     let inp = LayoutInput {
         sizes: vec![Point::new(100.0, 10.0); 50],
         times: vec![],
@@ -417,7 +445,6 @@ fn layout_edge_cases() {
             "noedges",
         );
     }
-    // self loop only
     let inp = LayoutInput {
         sizes: vec![Point::new(10.0, 10.0); 2],
         times: vec![],
@@ -438,7 +465,6 @@ fn layout_edge_cases() {
             "selfloop",
         );
     }
-    // zero-size nodes
     let inp = LayoutInput {
         sizes: vec![Point::new(0.0, 0.0); 3],
         times: vec![],
@@ -472,7 +498,6 @@ fn layout_edge_cases() {
 
 #[test]
 fn cycle_does_not_hang() {
-    // Cycles are impossible in git but make sure nothing loops forever / panics.
     let inp = LayoutInput {
         sizes: vec![Point::new(10.0, 10.0); 3],
         times: vec![3, 2, 1],
@@ -496,9 +521,8 @@ fn cycle_does_not_hang() {
         priority: vec![],
     };
     for r in Ranking::ALL {
-        let l = rank(&inp, r);
-        eprintln!("cycle {r:?}: {l:?}");
-        let _ = layout::layout(
+        rank(&inp, r);
+        layout::layout(
             &inp,
             &LayoutOptions {
                 ranking: r,
@@ -508,7 +532,7 @@ fn cycle_does_not_hang() {
     }
 }
 
-/// Timings on large and awkward inputs; slow, so run on demand:
+/// Slow, so run on demand:
 /// `cargo test --release -p parterre-core --test properties_layout -- --ignored --nocapture`
 #[test]
 #[ignore]
@@ -547,7 +571,7 @@ fn perf_many_components_and_big_random() {
     }
     let mut rng = Rng(777);
     for n in [5_000usize, 15_000] {
-        let inp = random_input(&mut rng, n, false, false, false);
+        let inp = random_input(&mut rng, n, PLAIN);
         let t = Instant::now();
         let _ = rank(&inp, Ranking::Compact);
         eprintln!(
@@ -659,12 +683,12 @@ fn centred_trunk_has_branches_on_both_sides() {
         );
         (l.nodes[0].x, l.nodes[2].x, l.nodes[3].x)
     };
-    // Centred: the tip in the middle of its layer, one branch either side.
+    // The tip in the middle of its layer, one branch either side.
     for trunk in [Trunk::Centred, Trunk::Alternating] {
         let (tip, a, b) = at(trunk);
         assert!(a.min(b) < tip && tip < a.max(b), "{trunk:?}: {a} {tip} {b}");
     }
-    // Leftmost, as before: the tip first in its layer.
+    // The tip first in its layer.
     let (tip, a, b) = at(Trunk::Leftmost);
     assert!(tip < a && tip < b, "Leftmost: {tip} {a} {b}");
 }

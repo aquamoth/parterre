@@ -1,9 +1,5 @@
-//! The look of menus (the menu bar's on Windows and Linux, and the canvas's context menu) and of
-//! the toolbar's popovers.
-//!
-//! egui's own menus are compact, with a small corner radius and a hard, offset shadow. These
-//! follow current desktop menus instead (GNOME, Chrome): rounder, a soft shadow, roomy rows
-//! with a rounded highlight under the pointer, and shortcuts right-aligned in a weaker colour.
+//! Menus and popovers styled after current desktop menus (GNOME, Chrome) rather than egui's
+//! compact ones: rounder, a soft shadow, roomy rows, and shortcuts in a weaker colour.
 
 use eframe::egui::{
     self, Atom, Button, Color32, CornerRadius, Id, Margin, Response, Shadow, Style, Ui, Vec2,
@@ -13,11 +9,10 @@ use parterre_core::glyphs;
 
 use crate::widgets::paint_glyph;
 
-/// Menus are at least this wide, so that short ones don't look cramped.
 pub const MIN_WIDTH: f32 = 200.0;
 
-/// The style of a menu, in place of egui's `menu_style`. egui applies it before making the
-/// menu's frame, so it sets the frame too.
+/// In place of egui's `menu_style`, which egui applies before making the menu's frame: so it
+/// sets the frame too.
 pub fn style(style: &mut Style) {
     egui::containers::menu::menu_style(style);
     frame(style);
@@ -42,14 +37,12 @@ pub fn style(style: &mut Style) {
     }
 }
 
-/// The style of a toolbar popover: a menu's frame around ordinary controls.
 pub fn popover_style(style: &mut Style) {
     frame(style);
     style.spacing.menu_margin = Margin::same(12);
     style.spacing.item_spacing.y = 8.0;
 }
 
-/// The frame shared by menus and popovers.
 fn frame(style: &mut Style) {
     let dark = style.visuals.dark_mode;
     let v = &mut style.visuals;
@@ -60,7 +53,6 @@ fn frame(style: &mut Style) {
         spread: 0,
         color: Color32::from_black_alpha(if dark { 120 } else { 48 }),
     };
-    // Lifted off the canvas: white in the light theme, a lighter grey in the dark one.
     if dark {
         v.window_fill = Color32::from_gray(40);
         v.window_stroke.color = Color32::from_white_alpha(20);
@@ -75,12 +67,8 @@ fn frame(style: &mut Style) {
     style.spacing.menu_margin = Margin::same(6);
 }
 
-/// The content of a menu or popover, scrolling if it is taller than the window.
-///
-/// egui keeps a popup inside the window, moving it up when it would overflow the bottom, but it
-/// moves a popup taller than the window to the top and cuts off the bottom. Scrolling keeps
-/// all of it reachable. TortoiseGit's native menus can overflow the window instead; egui draws
-/// inside the one window, and Wayland gives winit no way to place a popup outside it (#93).
+/// Scrolls a menu or popover taller than the window: egui moves such a popup to the top and cuts
+/// off its bottom, and Wayland gives winit no way to place a popup outside the window (#93).
 pub fn fit_window<R>(ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> R {
     let frame = ui.spacing().menu_margin.sum().y + 2.0 * ui.visuals().window_stroke.width;
     let max_height = ui.ctx().content_rect().height() - frame;
@@ -92,12 +80,10 @@ pub fn fit_window<R>(ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> R {
     egui::ScrollArea::vertical().show(ui, content).inner
 }
 
-/// A line between groups of items, with some air around it.
 pub fn separator(ui: &mut Ui) {
     ui.add(egui::Separator::default().spacing(12.0));
 }
 
-/// What a menu item shows left of its label.
 #[derive(Clone, Copy, Debug)]
 pub enum Mark {
     None,
@@ -105,17 +91,22 @@ pub enum Mark {
     Radio(bool),
 }
 
-/// The room left of a menu item's label for its mark.
-pub const MARK: f32 = 16.0;
+pub const MARK_WIDTH: f32 = 16.0;
 
-/// A menu item: room on the left for a check mark or radio dot, so that the labels of a menu
-/// line up, and `shortcut` on the right.
+fn mark_id() -> Id {
+    Id::new("menu-mark")
+}
+
+/// Room for a mark before every item's label, so that the labels of a menu line up.
+fn mark_room() -> Atom<'static> {
+    Atom::custom(mark_id(), Vec2::splat(MARK_WIDTH))
+}
+
 pub fn item(ui: &mut Ui, label: impl Into<WidgetText>, shortcut: &str, mark: Mark) -> Response {
-    let id = Id::new("menu-mark");
-    let laid_out = Button::new((Atom::custom(id, Vec2::splat(MARK)), label.into()))
+    let laid_out = Button::new((mark_room(), label.into()))
         .shortcut_text(shortcut)
         .atom_ui(ui);
-    if let Some(rect) = laid_out.rect(id) {
+    if let Some(rect) = laid_out.rect(mark_id()) {
         let color = ui.style().interact(&laid_out.response).text_color();
         match mark {
             Mark::Check(true) => paint_glyph(ui.painter(), rect, glyphs::CHECK, color),
@@ -128,8 +119,8 @@ pub fn item(ui: &mut Ui, label: impl Into<WidgetText>, shortcut: &str, mark: Mar
     laid_out.response
 }
 
-/// An item opening a submenu, lined up with [`item`]s, with a chevron on the right. `open`
-/// opens or closes it, as the keyboard does in the menu bar; `None` leaves it to the pointer.
+/// Lined up with [`item`]s. `open` opens or closes it, as the keyboard does in the menu bar;
+/// `None` leaves it to the pointer.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn submenu(
     ui: &mut Ui,
@@ -137,22 +128,18 @@ pub fn submenu(
     open: Option<bool>,
     content: impl FnOnce(&mut Ui),
 ) {
-    let button = Button::new((
-        Atom::custom(Id::new("menu-mark"), Vec2::splat(MARK)),
-        label.into(),
-    ));
+    let button = Button::new((mark_room(), label.into()));
     submenu_button(ui, button, open, content);
 }
 
-/// An item opening a submenu, lined up with plain buttons (a node's menu), with a chevron on
-/// the right.
+/// Lined up with plain buttons, as in a node's menu.
 pub fn plain_submenu(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui)) {
     submenu_button(ui, Button::new(label), None, content);
 }
 
 fn submenu_button(ui: &mut Ui, button: Button, open: Option<bool>, content: impl FnOnce(&mut Ui)) {
     use egui::containers::menu::{MenuState, SubMenu};
-    const ARROW: f32 = 12.0;
+    const CHEVRON_SIZE: f32 = 12.0;
     if let Some(open) = open {
         // The id egui's submenu button gives itself, next.
         let submenu = SubMenu::id_from_widget_id(ui.next_auto_id());
@@ -168,18 +155,21 @@ fn submenu_button(ui: &mut Ui, button: Button, open: Option<bool>, content: impl
             }
         });
     }
-    let button = button.right_text(Atom::custom(Id::new("menu-arrow"), Vec2::splat(ARROW)));
+    let button = button.right_text(Atom::custom(
+        Id::new("menu-arrow"),
+        Vec2::splat(CHEVRON_SIZE),
+    ));
     let (response, _) = egui::containers::menu::SubMenuButton::from_button(button)
         .ui(ui, |ui| fit_window(ui, content));
     let padding = ui.spacing().button_padding.x;
     let center = egui::pos2(
-        response.rect.right() - padding - ARROW / 2.0,
+        response.rect.right() - padding - CHEVRON_SIZE / 2.0,
         response.rect.center().y,
     );
     let color = ui.visuals().weak_text_color();
     paint_glyph(
         ui.painter(),
-        egui::Rect::from_center_size(center, Vec2::splat(ARROW)),
+        egui::Rect::from_center_size(center, Vec2::splat(CHEVRON_SIZE)),
         glyphs::CHEVRON_RIGHT,
         color,
     );

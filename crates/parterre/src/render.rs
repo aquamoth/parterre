@@ -1,5 +1,3 @@
-//! Painting a [`Scene`]: TortoiseGit-style nodes (one coloured row per ref) and edges.
-
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
     Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2,
@@ -7,7 +5,8 @@ use eframe::egui::{
 };
 
 use crate::scene::{
-    CORNER_RADIUS, Checkout, FONT_SIZE, MARGIN_X, Row, RowKind, Scene, WORKTREE_GLYPH, to_pos,
+    CORNER_RADIUS, Checkout, FONT_SIZE, MARGIN_X, Row, RowKind, Scene, WORKTREE_LABEL_INDENT,
+    to_pos,
 };
 use crate::settings::{Arrows, EdgeStyle, Settings};
 use crate::theme::{Palette, text_on};
@@ -15,25 +14,22 @@ use crate::view::View;
 use crate::widgets;
 use parterre_core::glyphs;
 
-/// Nodes and edges that get special emphasis.
 #[derive(Clone, Debug, Default)]
 pub struct Marks {
     pub hovered: Option<usize>,
     pub hovered_edge: Option<usize>,
-    /// Per node: selected.
+    /// Per node.
     pub selected: Vec<bool>,
     /// Per node: would move along if the hovered node were dragged.
     pub preview: Vec<bool>,
     pub selected_edge: Option<usize>,
-    /// The pull request (an index into [`Scene::pull_requests`]) whose label is under the
-    /// pointer: its number is underlined, as a link.
+    /// An index into [`Scene::pull_requests`].
     pub hovered_pull_request: Option<usize>,
-    /// Per node: matches the current search.
+    /// Per node.
     pub search_hits: Vec<bool>,
-    /// The node of the commit marked for comparison.
+    /// The node marked for comparison.
     pub marked: Option<usize>,
-    /// Show how branches differ from their upstreams (see [`crate::upstreams`]).
-    pub upstreams: bool,
+    pub show_upstreams: bool,
     /// Each worktree with a rebase in progress: its HEAD, and the branch it is rebasing (an
     /// index into [`parterre_core::Repo::refs`]).
     pub rebasing: Vec<(parterre_core::CommitIx, usize)>,
@@ -44,30 +40,37 @@ pub struct Marks {
 
 impl Marks {
     fn is_hit(&self, node: usize) -> bool {
-        self.search_hits.get(node).copied().unwrap_or(false)
+        is_flagged(&self.search_hits, node)
     }
 
     fn is_selected(&self, node: usize) -> bool {
-        self.selected.get(node).copied().unwrap_or(false)
+        is_flagged(&self.selected, node)
     }
 
     fn is_previewed(&self, node: usize) -> bool {
-        self.preview.get(node).copied().unwrap_or(false)
+        is_flagged(&self.preview, node)
     }
 
-    fn emphasised(&self, node: usize) -> bool {
+    fn is_emphasised(&self, node: usize) -> bool {
         self.hovered == Some(node) || self.is_selected(node)
     }
 }
 
-/// Text smaller than this many pixels is not drawn.
-const MIN_TEXT_PX: f32 = 4.0;
-/// Arrowhead length at 100%. TortoiseGit's is smaller; this one stays visible over bundled
-/// edges.
+fn is_flagged(per_node: &[bool], node: usize) -> bool {
+    per_node.get(node).copied().unwrap_or(false)
+}
+
+const MIN_DRAWN_TEXT_PX: f32 = 4.0;
+/// At 100%. TortoiseGit's is smaller; this one stays visible over bundled edges.
 pub const ARROW_LEN: f32 = 13.0;
-/// How far (at 100%) an edge that runs against the flow (a node dragged past its parent)
-/// continues along the flow before it turns round, and how far its detour keeps off the boxes.
-const HOOK_LEN: f32 = parterre_core::route::TURN;
+/// How far (at 100%) an edge running against the flow (a node dragged past its parent) goes on
+/// along the flow before it turns round, and how far its detour keeps off the boxes.
+const HOOK_LEN: f32 = parterre_core::route::TURN_LENGTH;
+const OFFSCREEN_MARGIN: f32 = 40.0;
+
+fn visible_area(canvas: Rect) -> Rect {
+    canvas.expand(OFFSCREEN_MARGIN)
+}
 
 pub fn paint_scene(
     painter: &Painter,
@@ -79,7 +82,7 @@ pub fn paint_scene(
     marks: &Marks,
 ) {
     painter.rect_filled(canvas, 0.0, palette.background);
-    let visible = canvas.expand(40.0);
+    let visible = visible_area(canvas);
     // Sizes are worked out at 100% text size, as `zoom` is shown, and drawn `fixed`, so the
     // graph looks the same at any text size.
     let zoom = view.zoom;
@@ -92,42 +95,34 @@ pub fn paint_scene(
         let (c, p) = (edge.child as usize, edge.parent as usize);
         if marks.hovered_edge == Some(e)
             || marks.selected_edge == Some(e)
-            || settings.highlight_edges && (marks.emphasised(c) || marks.emphasised(p))
+            || settings.highlight_edges && (marks.is_emphasised(c) || marks.is_emphasised(p))
         {
             emphasised.push(e);
             continue;
         }
-        paint_edge(
-            painter,
-            canvas,
-            view,
-            scene,
-            settings,
-            e,
-            visible,
-            Stroke::new(width, palette.edge),
-        );
+        let stroke = Stroke::new(width, palette.edge);
+        paint_edge(painter, canvas, view, scene, settings, e, stroke);
     }
     for e in emphasised {
         let stroke = Stroke::new(width * 1.6, palette.selection);
-        paint_edge(painter, canvas, view, scene, settings, e, visible, stroke);
+        paint_edge(painter, canvas, view, scene, settings, e, stroke);
     }
-    if marks.upstreams {
+    if marks.show_upstreams {
         crate::upstreams::paint(painter, canvas, view, scene, palette, settings, marks);
     }
     crate::upstreams::paint_in_progress(painter, canvas, view, scene, settings, palette, marks);
 
     let font = FontId::monospace(fixed(FONT_SIZE * zoom));
-    let draw_text = FONT_SIZE * zoom >= MIN_TEXT_PX;
+    let draw_text = FONT_SIZE * zoom >= MIN_DRAWN_TEXT_PX;
     let radius = fixed(CORNER_RADIUS * zoom).round().clamp(0.0, 255.0) as u8;
-    let row_h = fixed(scene.row_height * zoom);
+    let row_height = fixed(scene.row_height * zoom);
     for (i, visual) in scene.visuals.iter().enumerate() {
         let rect = view.rect_to_screen(canvas, scene.node_rect(i));
         if !visible.intersects(rect) {
             continue;
         }
         for ((row_rect, corners), row) in
-            node_rows(rect, visual.rows.len(), row_h, radius).zip(&visual.rows)
+            node_rows(rect, visual.rows.len(), row_height, radius).zip(&visual.rows)
         {
             let (fill, border, text) = row_colors(row, palette);
             painter.rect(
@@ -152,8 +147,7 @@ pub fn paint_scene(
                     let stroke = Stroke::new(fixed(zoom.max(1.0)), text);
                     painter.hline(number.x_range(), y, stroke);
                 }
-            } else if let Some(c) = row_worktree(row) {
-                // A detached worktree's name is in italics: it is no branch.
+            } else if let Some(c) = row.worktree() {
                 let (start, icon) = worktree_label(row_rect, fixed(zoom));
                 widgets::paint_glyph(painter, icon, worktree_glyph(c), text);
                 let format = TextFormat {
@@ -200,13 +194,11 @@ pub fn paint_scene(
         }
     }
 
-    if settings.show_hidden_counts && FONT_SIZE * zoom * 0.85 >= MIN_TEXT_PX {
+    if settings.show_hidden_counts && FONT_SIZE * zoom * 0.85 >= MIN_DRAWN_TEXT_PX {
         paint_hidden_counts(painter, canvas, view, scene, palette, visible);
     }
 }
 
-/// The mark for comparison: a bookmark ribbon hanging over the top edge of the node's box,
-/// near its right end.
 fn paint_mark(painter: &Painter, node: Rect, zoom: f32, palette: &Palette) {
     let z = zoom.max(0.5);
     let size = vec2(10.0 * z, 16.0 * z);
@@ -220,7 +212,6 @@ fn paint_mark(painter: &Painter, node: Rect, zoom: f32, palette: &Palette) {
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn paint_edge(
     painter: &Painter,
     canvas: Rect,
@@ -228,7 +219,6 @@ fn paint_edge(
     scene: &Scene,
     settings: &Settings,
     e: usize,
-    visible: Rect,
     stroke: Stroke,
 ) {
     let Some(path) = edge_path(
@@ -236,26 +226,25 @@ fn paint_edge(
         e,
         settings.edge_style,
         |p| view.to_screen(canvas, p),
-        Some(visible),
+        Some(visible_area(canvas)),
     ) else {
         return;
     };
-    painter.add(Shape::line(path.clone(), stroke));
     let len = view.fixed(ARROW_LEN * view.zoom.max(0.4));
-    if let Some(head) = arrowhead_points(&path, settings.arrows, len) {
-        for tri in head {
-            painter.add(Shape::convex_polygon(
-                tri.to_vec(),
-                stroke.color,
-                Stroke::NONE,
-            ));
-        }
+    let head = arrowhead_points(&path, settings.arrows, len);
+    painter.add(Shape::line(path, stroke));
+    for triangle in head.into_iter().flatten() {
+        painter.add(Shape::convex_polygon(
+            triangle.to_vec(),
+            stroke.color,
+            Stroke::NONE,
+        ));
     }
 }
 
-/// The drawn path of edge `e`, mapped through `to_screen` (a view transform: uniform scale and
-/// translation). Either style leaves the child from its older side and enters the parent from
-/// its newer side (bottom and top, newest on top). `None` if it lies entirely outside `visible`.
+/// `to_screen` must be a view transform: a uniform scale and a translation. Either style leaves
+/// the child from its older side and enters the parent from its newer side. `None` if the edge
+/// lies entirely outside `visible`.
 pub fn edge_path(
     scene: &Scene,
     e: usize,
@@ -265,10 +254,10 @@ pub fn edge_path(
 ) -> Option<Vec<Pos2>> {
     let edge = scene.graph.edges[e];
     let (c, p) = (edge.child as usize, edge.parent as usize);
-    let pts: Vec<Pos2> = scene
+    let points: Vec<Pos2> = scene
         .net
         .edge_points(e)
-        .map(|pt| to_screen(to_pos(pt)))
+        .map(|point| to_screen(to_pos(point)))
         .collect();
     let map_rect = |r: Rect| Rect::from_two_pos(to_screen(r.min), to_screen(r.max));
     let child = map_rect(scene.node_rect(c));
@@ -276,7 +265,7 @@ pub fn edge_path(
     let zoom = to_screen(Pos2::new(1.0, 0.0)).x - to_screen(Pos2::ZERO).x;
     let hook = HOOK_LEN * zoom;
     // Detours run beside the end boxes, so those bound the drawing too.
-    let bounds = Rect::from_points(&pts)
+    let bounds = Rect::from_points(&points)
         .union(child)
         .union(parent)
         .expand(hook);
@@ -287,15 +276,14 @@ pub fn edge_path(
     }
     let f = scene.layout.direction.flow();
     let flow = vec2(f.x, f.y);
-    let turned = scene.net.turns(e) && pts.len() >= 4;
+    let turned = scene.net.has_turned_route(e) && points.len() >= 4;
     let path = match style {
-        EdgeStyle::Straight => straight_path(&pts, child, parent, flow, hook, turned),
-        EdgeStyle::Curved => curved_path(&pts, child, parent, flow, hook, turned),
+        EdgeStyle::Straight => straight_path(&points, child, parent, flow, hook, turned),
+        EdgeStyle::Curved => curved_path(&points, child, parent, flow, hook, turned),
     };
     (path.len() >= 2).then_some(path)
 }
 
-/// The two triangles of an arrowhead for `path`, or `None` without arrows.
 pub fn arrowhead_points(path: &[Pos2], arrows: Arrows, len: f32) -> Option<[[Pos2; 3]; 2]> {
     let n = path.len();
     match arrows {
@@ -305,7 +293,7 @@ pub fn arrowhead_points(path: &[Pos2], arrows: Arrows, len: f32) -> Option<[[Pos
     }
 }
 
-/// The edge whose drawn path passes within `tolerance` of `pointer` (screen space), if any.
+/// In screen space.
 pub fn edge_at(
     scene: &Scene,
     style: EdgeStyle,
@@ -341,21 +329,15 @@ fn distance_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     (a + ab * t).distance(p)
 }
 
-/// Where edges attach to a box: the middle of the side facing older commits (`sign` 1), where
-/// edges to parents leave, or of the side facing newer ones (`sign` -1), where edges from
-/// children arrive.
-fn port(rect: Rect, flow: Vec2, sign: f32) -> Pos2 {
-    let depth = flow.x.abs() * rect.width() + flow.y.abs() * rect.height();
-    rect.center() + flow * (sign * depth / 2.0)
-}
-
-/// The points an edge is drawn through: the child's port, the bend points, the parent's port.
-fn knots(pts: &[Pos2], child: Rect, parent: Rect, flow: Vec2) -> Vec<Pos2> {
-    let n = pts.len();
+/// The points an edge is drawn through: the middle of the child's side facing older commits,
+/// the bend points, and the middle of the parent's side facing newer ones.
+fn knots(points: &[Pos2], child: Rect, parent: Rect, flow: Vec2) -> Vec<Pos2> {
+    let half_depth = |r: Rect| (flow.x.abs() * r.width() + flow.y.abs() * r.height()) / 2.0;
+    let n = points.len();
     let mut knots = Vec::with_capacity(n);
-    knots.push(port(child, flow, 1.0));
-    knots.extend_from_slice(&pts[1..n - 1]);
-    knots.push(port(parent, flow, -1.0));
+    knots.push(child.center() + flow * half_depth(child));
+    knots.extend_from_slice(&points[1..n - 1]);
+    knots.push(parent.center() - flow * half_depth(parent));
     knots
 }
 
@@ -401,21 +383,21 @@ impl Detour {
     }
 }
 
-/// Straight segments from the child's port through the bend points to the parent's port. A
-/// segment against the flow takes a [`Detour`], leaving and arriving along the flow, unless the
-/// edge is `turned`: routed round its nodes already (see [`parterre_core::physics::Net::turns`]).
+/// A segment against the flow takes a [`Detour`], leaving and arriving along the flow, unless
+/// the edge is `turned`: routed round its nodes already (see
+/// [`parterre_core::physics::Net::has_turned_route`]).
 ///
 /// Deliberately unlike TortoiseGit, which aims every edge at the box centres and clips it at
 /// the border, so that edges can meet a box on any side and direction is hard to see.
 fn straight_path(
-    pts: &[Pos2],
+    points: &[Pos2],
     child: Rect,
     parent: Rect,
     flow: Vec2,
     hook: f32,
     turned: bool,
 ) -> Vec<Pos2> {
-    let knots = knots(pts, child, parent, flow);
+    let knots = knots(points, child, parent, flow);
     if turned {
         return knots;
     }
@@ -432,23 +414,22 @@ fn straight_path(
     path
 }
 
-/// A smooth path that leaves the child's port along the history direction, passes through
-/// every bend point with a tangent along that direction, and enters the parent's port the same
-/// way. A segment against the flow turns round along a [`Detour`].
+/// Leaves the child, passes every bend point and enters the parent along the flow. A segment
+/// against the flow turns round along a [`Detour`].
 ///
 /// A `turned` edge's route starts and ends with its turns round the nodes (see
-/// [`parterre_core::physics::Net::turns`]). The curve makes those turns itself, and passes the
-/// bend points in between against the flow.
+/// [`parterre_core::physics::Net::has_turned_route`]). The curve makes those turns itself, and
+/// passes the bend points in between against the flow.
 fn curved_path(
-    pts: &[Pos2],
+    points: &[Pos2],
     child: Rect,
     parent: Rect,
     flow: Vec2,
     hook: f32,
     turned: bool,
 ) -> Vec<Pos2> {
-    let n = pts.len();
-    let mut knots = knots(pts, child, parent, flow);
+    let n = points.len();
+    let mut knots = knots(points, child, parent, flow);
     if turned {
         knots.remove(n - 2);
         knots.remove(1);
@@ -521,7 +502,6 @@ fn arrowhead(from: Pos2, tip: Pos2, len: f32) -> Option<[[Pos2; 3]; 2]> {
     Some([[tip, wing1, notch], [tip, notch, wing2]])
 }
 
-/// Screen rectangles and corner radii of a node's rows (only the outer corners are rounded).
 pub fn node_rows(
     rect: Rect,
     rows: usize,
@@ -543,12 +523,10 @@ pub fn node_rows(
     })
 }
 
-/// Space between the pull-request glyph and the number, at 100%.
 const PULL_REQUEST_GAP: f32 = 4.0;
 
-/// Where a pull request's label goes in its row, for a number `width` wide at 100%: the right
-/// end of the number, level with the row's middle, and the glyph's box just left of it. The
-/// number is right-aligned, so it stands apart from the ref names above it.
+/// For a number `width` wide at 100%: where the number ends, level with the row's middle, and
+/// the glyph's box. The number is right-aligned, so it stands apart from the ref names above.
 pub fn pull_request_label(row: Rect, width: f32, zoom: f32) -> (Pos2, Rect) {
     let end = Pos2::new(row.max.x - MARGIN_X * zoom, row.center().y);
     let side = FONT_SIZE * zoom;
@@ -562,8 +540,7 @@ pub fn pull_request_label(row: Rect, width: f32, zoom: f32) -> (Pos2, Rect) {
     (end, icon)
 }
 
-/// Where a worktree's label goes in its row: the start of its name, level with the row's
-/// middle, and the folder glyph's box before it.
+/// Where the name starts, level with the row's middle, and the folder glyph's box.
 pub fn worktree_label(row: Rect, zoom: f32) -> (Pos2, Rect) {
     let left = row.min.x + MARGIN_X * zoom;
     let side = FONT_SIZE * zoom;
@@ -572,12 +549,11 @@ pub fn worktree_label(row: Rect, zoom: f32) -> (Pos2, Rect) {
         Vec2::splat(side),
     );
     (
-        Pos2::new(left + WORKTREE_GLYPH * zoom, row.center().y),
+        Pos2::new(left + WORKTREE_LABEL_INDENT * zoom, row.center().y),
         icon,
     )
 }
 
-/// The glyph before a worktree's label: a folder, crossed out if it is gone.
 pub fn worktree_glyph(c: Checkout) -> glyphs::Glyph {
     if c.missing {
         glyphs::FOLDER_GONE
@@ -586,18 +562,7 @@ pub fn worktree_glyph(c: Checkout) -> glyphs::Glyph {
     }
 }
 
-/// The worktree a row stands for, if any.
-pub fn row_worktree(row: &Row) -> Option<Checkout> {
-    match row.kind {
-        RowKind::Worktree(c)
-        | RowKind::Ref {
-            worktree: Some(c), ..
-        } => Some(c),
-        _ => None,
-    }
-}
-
-/// Fill, border and text colour of a row.
+/// Fill, border and text colour.
 pub fn row_colors(row: &Row, palette: &Palette) -> (Color32, Color32, Color32) {
     let fill = row_fill(row, palette);
     match &row.kind {
@@ -608,8 +573,7 @@ pub fn row_colors(row: &Row, palette: &Palette) -> (Color32, Color32, Color32) {
     }
 }
 
-/// Fill of a worktree's row: greyer when its folder is gone.
-pub fn worktree_fill(c: Checkout, palette: &Palette) -> Color32 {
+fn worktree_fill(c: Checkout, palette: &Palette) -> Color32 {
     if c.missing {
         palette.missing_worktree
     } else {
@@ -648,17 +612,12 @@ fn paint_hidden_counts(
         if edge.hidden == 0 {
             continue;
         }
-        let pts: Vec<Pos2> = scene
-            .net
-            .edge_points(e)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(to_pos)
-            .collect();
-        let mid = if pts.len() % 2 == 1 {
-            pts[pts.len() / 2]
+        let points: Vec<Pos2> = scene.net.edge_points(e).map(to_pos).collect();
+        let half = points.len() / 2;
+        let mid = if points.len() % 2 == 1 {
+            points[half]
         } else {
-            pts[pts.len() / 2 - 1].lerp(pts[pts.len() / 2], 0.5)
+            points[half - 1].lerp(points[half], 0.5)
         };
         let at = view.to_screen(canvas, mid);
         if visible.contains(at) {
@@ -673,8 +632,7 @@ fn paint_hidden_counts(
     }
 }
 
-/// Paints a miniature of the whole graph into `rect` with the visible area outlined.
-/// Returns the world rectangle the miniature represents and the scale used.
+/// Returns the world rectangle the miniature shows, and its scale.
 pub fn paint_overview(
     painter: &Painter,
     rect: Rect,
@@ -694,22 +652,20 @@ pub fn paint_overview(
         Stroke::new(1.0, palette.edge.gamma_multiply(0.5)),
         StrokeKind::Outside,
     );
+    let mini_edge = |e: usize| -> Vec<Pos2> {
+        scene
+            .net
+            .edge_points(e)
+            .map(|p| to_mini(to_pos(p)))
+            .collect()
+    };
     let edge_stroke = Stroke::new(1.0, palette.edge.gamma_multiply(0.35));
     for e in 0..scene.graph.edges.len() {
-        let pts: Vec<Pos2> = scene
-            .net
-            .edge_points(e)
-            .map(|p| to_mini(to_pos(p)))
-            .collect();
-        painter.add(Shape::line(pts, edge_stroke));
+        painter.add(Shape::line(mini_edge(e), edge_stroke));
     }
     if let Some(e) = selected_edge {
-        let pts = scene
-            .net
-            .edge_points(e)
-            .map(|p| to_mini(to_pos(p)))
-            .collect();
-        painter.add(Shape::line(pts, Stroke::new(2.0, palette.selection)));
+        let stroke = Stroke::new(2.0, palette.selection);
+        painter.add(Shape::line(mini_edge(e), stroke));
     }
     for (i, v) in scene.visuals.iter().enumerate() {
         let r = Rect::from_center_size(

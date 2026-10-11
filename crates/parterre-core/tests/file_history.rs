@@ -1,5 +1,3 @@
-//! The history pane's list, from git's log of a file and its blame, in throwaway repositories.
-
 mod common;
 
 use common::TestRepo;
@@ -192,7 +190,6 @@ fn an_edit_in_the_working_tree_is_a_row_on_top_that_owns_its_lines() {
     assert_eq!(rows(&h), ["wt*", "c1*"]);
     assert_eq!(h.row_of(None), Some(0));
     assert_eq!(h.rows[0].source, Source::WorkingTree);
-    // It leads to the newest commit in the graph column.
     assert_eq!(h.graph().rows(0..1)[0].lower.len(), 1);
 }
 

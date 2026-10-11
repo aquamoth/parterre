@@ -1,13 +1,9 @@
-//! The keyboard: one binding per action and platform, the one that platform's users expect
-//! (#343), labelled as they write it (#334): `⌘O` on macOS, `Ctrl+O` elsewhere.
-//!
-//! egui's `COMMAND` is ⌘ on macOS and Ctrl elsewhere, so most bindings are the same key
-//! everywhere and only their labels differ. The rest (redo, fetch, find next, closing a window)
-//! differ by platform, and are functions of [`Platform`].
+//! One binding per action and platform, the one that platform's users expect (#343), labelled
+//! as they write it (#334). egui's `COMMAND` is ⌘ on macOS and Ctrl elsewhere, so most bindings
+//! are constants; those that differ by platform are functions of [`Platform`].
 
 use eframe::egui::{self, InputState, Key, KeyboardShortcut, ModifierNames, Modifiers};
 
-/// The platform whose conventions apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Platform {
     Mac,
@@ -16,7 +12,6 @@ pub enum Platform {
 }
 
 impl Platform {
-    /// The platform parterre runs on.
     pub const CURRENT: Platform = if cfg!(target_os = "macos") {
         Platform::Mac
     } else if cfg!(windows) {
@@ -26,7 +21,6 @@ impl Platform {
     };
 }
 
-/// A key with modifiers, e.g. Ctrl+Shift+Z.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shortcut {
     pub modifiers: Modifiers,
@@ -38,17 +32,14 @@ impl Shortcut {
         Shortcut { modifiers, key }
     }
 
-    /// The key alone, as `F` or `F5`.
     pub const fn plain(key: Key) -> Shortcut {
         Shortcut::new(Modifiers::NONE, key)
     }
 
-    /// ⌘ on macOS, Ctrl elsewhere, with `key`.
     pub const fn command(key: Key) -> Shortcut {
         Shortcut::new(Modifiers::COMMAND, key)
     }
 
-    /// ⇧⌘ on macOS, Ctrl+Shift elsewhere, with `key`.
     pub const fn command_shift(key: Key) -> Shortcut {
         Shortcut::new(
             Modifiers {
@@ -59,13 +50,12 @@ impl Shortcut {
         )
     }
 
-    /// As written on the platform parterre runs on.
     pub fn label(self) -> String {
         self.label_on(Platform::CURRENT)
     }
 
-    /// As written on `platform`: Apple's symbols in Apple's order on macOS (`⇧⌘Z`, as egui's
-    /// `Context::format_shortcut` writes them), names joined by `+` elsewhere (`Ctrl+Shift+Z`).
+    /// Apple's symbols in Apple's order on macOS (`⇧⌘Z`), names joined by `+` elsewhere
+    /// (`Ctrl+Shift+Z`).
     pub fn label_on(self, platform: Platform) -> String {
         // egui names the modifiers of `COMMAND` by the platform it is told.
         if platform == Platform::Mac {
@@ -87,7 +77,6 @@ impl Shortcut {
         }
     }
 
-    /// The key press it stands for, for the tests.
     #[cfg(test)]
     pub fn event(self) -> egui::Event {
         egui::Event::Key {
@@ -99,7 +88,6 @@ impl Shortcut {
         }
     }
 
-    /// Whether it was pressed this frame, taking the press so that nothing else acts on it.
     /// egui ignores a Shift held besides: take the Shift-variants first.
     pub fn consume(self, input: &mut InputState) -> bool {
         input.consume_key(self.modifiers, self.key)
@@ -121,19 +109,17 @@ pub const ZOOM_IN: Shortcut = Shortcut::command(Key::Plus);
 pub const ZOOM_IN_UNSHIFTED: Shortcut = Shortcut::command(Key::Equals);
 pub const ZOOM_OUT: Shortcut = Shortcut::command(Key::Minus);
 pub const ACTUAL_SIZE: Shortcut = Shortcut::command(Key::Num0);
-/// F5 reloads on every platform, besides [`reload`].
 pub const RELOAD_F5: Shortcut = Shortcut::plain(Key::F5);
 pub const ZOOM_TO_FIT: Shortcut = Shortcut::plain(Key::F);
 pub const GO_TO_HEAD: Shortcut = Shortcut::plain(Key::H);
 pub const SHOW_LOG: Shortcut = Shortcut::plain(Key::L);
-/// The drag modes Adapt, Free and Subtree.
+/// In the order of `DragModel::ALL`.
 pub const DRAG: [Shortcut; 3] = [
     Shortcut::plain(Key::Num1),
     Shortcut::plain(Key::Num2),
     Shortcut::plain(Key::Num3),
 ];
 
-/// Redo a move: ⇧⌘Z on macOS, Ctrl+Y on Windows, Ctrl+Shift+Z on Linux.
 pub fn redo() -> Shortcut {
     redo_on(Platform::CURRENT)
 }
@@ -145,22 +131,21 @@ pub fn redo_on(platform: Platform) -> Shortcut {
     }
 }
 
-/// Reload: ⌘R on macOS and Ctrl+R elsewhere (#340), besides F5.
+/// Besides F5 (#340).
 pub const RELOAD: Shortcut = Shortcut::command(Key::R);
 
-/// Fetch every remote: ⇧⌘F on macOS, where F5 needs fn; Ctrl+F5 elsewhere.
 pub fn fetch() -> Shortcut {
     fetch_on(Platform::CURRENT)
 }
 
 pub fn fetch_on(platform: Platform) -> Shortcut {
+    // F5 needs fn on a Mac.
     match platform {
         Platform::Mac => Shortcut::command_shift(Key::F),
         Platform::Windows | Platform::Linux => Shortcut::command(Key::F5),
     }
 }
 
-/// The next find result: ⌘G on macOS, F3 elsewhere.
 pub fn find_next() -> Shortcut {
     find_next_on(Platform::CURRENT)
 }
@@ -172,7 +157,6 @@ pub fn find_next_on(platform: Platform) -> Shortcut {
     }
 }
 
-/// The previous find result: ⇧⌘G on macOS, Shift+F3 elsewhere.
 pub fn find_previous() -> Shortcut {
     find_previous_on(Platform::CURRENT)
 }
@@ -184,7 +168,7 @@ pub fn find_previous_on(platform: Platform) -> Shortcut {
     }
 }
 
-/// Close the log, diff, blame, compare or settings window: ⌘W on macOS, Escape elsewhere.
+/// Of the log, diff, blame, compare or settings window.
 pub fn close_window() -> Shortcut {
     close_window_on(Platform::CURRENT)
 }
@@ -196,8 +180,7 @@ pub fn close_window_on(platform: Platform) -> Shortcut {
     }
 }
 
-/// The blame window's Go to line: Ctrl+G, as in TortoiseGitBlame; ⌃G on macOS, where ⌘G is
-/// the next find result.
+/// The blame window's: Ctrl+G, as in TortoiseGitBlame; ⌃G on macOS, where ⌘G finds the next.
 pub fn go_to_line() -> Shortcut {
     match Platform::CURRENT {
         Platform::Mac => Shortcut::new(Modifiers::CTRL, Key::G),
@@ -205,7 +188,7 @@ pub fn go_to_line() -> Shortcut {
     }
 }
 
-/// Reload and fetch pressed in a window this frame. Fetch first: on macOS ⇧⌘F would otherwise
+/// Whether reload and fetch were pressed. Fetch is taken first: on macOS ⇧⌘F would otherwise
 /// pass for a window's ⌘F. Held down, F5 reloads once.
 pub fn reload_and_fetch(input: &mut InputState) -> (bool, bool) {
     let fetch = fetch().consume(input);
@@ -225,8 +208,7 @@ pub fn reload_and_fetch(input: &mut InputState) -> (bool, bool) {
     (reload, fetch)
 }
 
-/// The reload key named in menus and tips: ⌘R on macOS, where F5 needs fn; F5 elsewhere,
-/// where it is the familiar one.
+/// The one named in menus and tips: F5 needs fn on a Mac, and is the familiar one elsewhere.
 pub fn reload_shown_on(platform: Platform) -> Shortcut {
     match platform {
         Platform::Mac => RELOAD,
@@ -234,13 +216,11 @@ pub fn reload_shown_on(platform: Platform) -> Shortcut {
     }
 }
 
-/// [`reload_shown_on`] this platform, as written.
 pub fn reload_label() -> String {
     reload_shown_on(Platform::CURRENT).label()
 }
 
-/// The keys of a find field's previous, next and clear buttons: Shift+Enter or the previous
-/// find result's key, Enter or the next one's, and Esc.
+/// Of a find field's previous, next and clear buttons.
 pub fn find_field_keys() -> [String; 3] {
     [
         format!("Shift+Enter, {}", find_previous().label()),
@@ -249,7 +229,6 @@ pub fn find_field_keys() -> [String; 3] {
     ]
 }
 
-/// `action` with ⌘ or Ctrl held, as written: `⌘-click`, `Ctrl+click`.
 pub fn with_command(action: &str) -> String {
     with_command_on(Platform::CURRENT, action)
 }
@@ -261,7 +240,6 @@ pub fn with_command_on(platform: Platform, action: &str) -> String {
     }
 }
 
-/// `action` with Shift held, as written: `⇧-click`, `Shift+click`.
 pub fn with_shift(action: &str) -> String {
     match Platform::CURRENT {
         Platform::Mac => format!("⇧-{action}"),
@@ -333,16 +311,6 @@ mod tests {
         assert_eq!(with_command_on(Platform::Linux, "click"), "Ctrl+click");
     }
 
-    fn event(s: Shortcut) -> egui::Event {
-        egui::Event::Key {
-            key: s.key,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: s.modifiers,
-        }
-    }
-
     fn input(events: Vec<egui::Event>) -> InputState {
         let raw = egui::RawInput {
             events,
@@ -353,13 +321,13 @@ mod tests {
 
     #[test]
     fn fetch_is_taken_before_find() {
-        let mut i = input(vec![event(fetch())]);
+        let mut i = input(vec![fetch().event()]);
         assert_eq!(reload_and_fetch(&mut i), (false, true));
         // Gone: a window's own ⌘F (Ctrl+F) no longer sees it.
         assert!(!FIND.consume(&mut i));
-        let mut i = input(vec![event(RELOAD_F5)]);
+        let mut i = input(vec![RELOAD_F5.event()]);
         assert_eq!(reload_and_fetch(&mut i), (true, false));
-        let mut i = input(vec![event(RELOAD)]);
+        let mut i = input(vec![RELOAD.event()]);
         assert_eq!(reload_and_fetch(&mut i), (true, false));
     }
 }

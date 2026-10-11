@@ -1,12 +1,8 @@
-//! The worktree tool's operations (adding, deleting, and switching to a detached HEAD) against
-//! real, disposable repositories. Deleting a worktree can lose work that git's own check
-//! misses, so its cases are covered one by one.
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use common::TestRepo;
+use common::{TestRepo, git_in};
 use parterre_core::Oid;
 use parterre_core::branches::{Action, AddWorktree, Branches, Catalog, Checkout, Outcome, Warning};
 use parterre_util::CancelTree;
@@ -37,27 +33,6 @@ fn failed(out: Outcome) -> String {
     }
 }
 
-/// Runs git in `dir`; returns its trimmed output.
-fn git_in(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new(parterre_core::git::program())
-        .current_dir(dir)
-        .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.com")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.com")
-        .output()
-        .expect("run git");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
-
 /// A repository with one file committed, and a folder outside it for worktrees.
 fn repository() -> (TestRepo, tempfile::TempDir, Oid) {
     let mut r = TestRepo::new();
@@ -66,25 +41,63 @@ fn repository() -> (TestRepo, tempfile::TempDir, Oid) {
     (r, tempfile::tempdir().unwrap(), base)
 }
 
-/// Adds a worktree `name` in `others` with git itself: `extra` holds options (`-b topic`,
-/// `--detach`) and, last, an optional commit to check out.
-fn worktree(r: &TestRepo, others: &Path, name: &str, extra: &[&str]) -> PathBuf {
+/// Adds a worktree `name` in `others` with git itself. `args` follow its folder: options
+/// (`-b topic`, `--detach`) and the commit to check out, as git takes them in any order.
+fn worktree(r: &TestRepo, others: &Path, name: &str, args: &[&str]) -> PathBuf {
     let path = others.join(name);
-    let p = path.to_string_lossy().into_owned();
-    let commit = extra
-        .last()
-        .filter(|a| !a.starts_with('-') && extra.len() >= 2 && extra[extra.len() - 2] != "-b")
-        .or_else(|| {
-            extra
-                .first()
-                .filter(|a| extra.len() == 1 && !a.starts_with('-'))
-        });
-    let mut args = vec!["worktree", "add", "-q"];
-    args.extend(extra.iter().filter(|a| Some(*a) != commit));
-    args.push(&p);
-    args.extend(commit);
-    r.git(&args);
+    let folder = path.to_string_lossy().into_owned();
+    let mut command = vec!["worktree", "add", "-q", folder.as_str()];
+    command.extend(args);
+    r.git(&command);
     path
+}
+
+/// An empty commit in the worktree at `path`.
+fn commit_in(path: &Path, message: &str) -> Oid {
+    git_in(path, &["commit", "-q", "--allow-empty", "-m", message]);
+    oid(&git_in(path, &["rev-parse", "HEAD"]))
+}
+
+/// A worktree `rebasing` in `others`, its branch `side` stopped on a conflict rebasing onto
+/// `main`; returns its folder and `side`'s commit.
+fn stopped_rebase(r: &mut TestRepo, others: &Path) -> (PathBuf, String) {
+    r.git(&["branch", "side"]);
+    r.write("file", b"main\n");
+    r.commit_all("main change");
+    let wt = worktree(r, others, "rebasing", &["side"]);
+    std::fs::write(wt.join("file"), "side\n").unwrap();
+    git_in(&wt, &["commit", "-qam", "side change"]);
+    let side = git_in(&wt, &["rev-parse", "HEAD"]);
+    let rebase = common::git_command(&wt)
+        .args(["rebase", "main"])
+        .output()
+        .unwrap();
+    assert!(
+        !rebase.status.success(),
+        "the rebase should stop on its conflict"
+    );
+    (wt, side)
+}
+
+/// A submodule in the worktree at `path`, committed: git then refuses `worktree remove` without
+/// `--force`, though nothing parterre counts as lost work is there.
+fn add_submodule(path: &Path) -> TestRepo {
+    let sub = TestRepo::new();
+    sub.git(&["commit", "-q", "--allow-empty", "-m", "sub"]);
+    git_in(
+        path,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &sub.path().to_string_lossy(),
+            "sub",
+        ],
+    );
+    git_in(path, &["commit", "-qm", "add a submodule"]);
+    sub
 }
 
 /// The worktree's path as the catalogue lists it, as the menus pass it on.
@@ -109,7 +122,6 @@ fn deletions(r: &TestRepo, names: &[&str]) -> Action {
     }
 }
 
-/// The deletion, with the worktrees' branches too.
 fn with_branches(action: Action) -> Action {
     match action {
         Action::DeleteWorktrees { paths, .. } => Action::DeleteWorktrees {
@@ -139,9 +151,6 @@ fn add(start: Oid, path: PathBuf, checkout: Checkout) -> Action {
         checkout,
     })
 }
-
-// ---------------------------------------------------------------------------------------------
-// The catalogue.
 
 #[test]
 fn the_catalogue_lists_every_worktree_with_its_state() {
@@ -175,23 +184,7 @@ fn the_catalogue_lists_every_worktree_with_its_state() {
 #[test]
 fn a_rebase_stopped_on_a_conflict_is_an_operation_in_progress() {
     let (mut r, others, _) = repository();
-    r.git(&["branch", "side"]);
-    r.write("file", b"main\n");
-    r.commit_all("main change");
-    let wt = worktree(&r, others.path(), "rebasing", &["side"]);
-    std::fs::write(wt.join("file"), "side\n").unwrap();
-    git_in(&wt, &["commit", "-qam", "side change"]);
-    let out = Command::new(parterre_core::git::program())
-        .current_dir(&wt)
-        .args(["rebase", "main"])
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
-    assert!(
-        !out.status.success(),
-        "the rebase should stop on its conflict"
-    );
+    stopped_rebase(&mut r, others.path());
     let catalog = Catalog::load(r.path()).unwrap();
     let w = catalog
         .worktrees
@@ -210,21 +203,7 @@ fn a_rebase_stopped_on_a_conflict_is_an_operation_in_progress() {
 #[test]
 fn deleting_a_worktree_with_a_rebase_in_progress_warns_then_ends_it() {
     let (mut r, others, _) = repository();
-    r.git(&["branch", "side"]);
-    r.write("file", b"main\n");
-    r.commit_all("main change");
-    let wt = worktree(&r, others.path(), "rebasing", &["side"]);
-    std::fs::write(wt.join("file"), "side\n").unwrap();
-    git_in(&wt, &["commit", "-qam", "side change"]);
-    let side = git_in(&wt, &["rev-parse", "HEAD"]);
-    let out = Command::new(parterre_core::git::program())
-        .current_dir(&wt)
-        .args(["rebase", "main"])
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
+    let (wt, side) = stopped_rebase(&mut r, others.path());
     // The conflicted file is lost work, so it asks first.
     let w = warning(execute(&r, deletion(&r, "rebasing"), None));
     assert!(
@@ -241,9 +220,6 @@ fn deleting_a_worktree_with_a_rebase_in_progress_warns_then_ends_it() {
     assert!(!catalog.occupied.contains_key("side"));
     assert!(catalog.worktrees.iter().all(|w| w.in_progress.is_none()));
 }
-
-// ---------------------------------------------------------------------------------------------
-// Adding a worktree.
 
 #[test]
 fn adding_a_worktree_with_a_new_branch_starts_it_at_the_commit() {
@@ -262,9 +238,7 @@ fn adding_a_worktree_with_a_new_branch_starts_it_at_the_commit() {
     assert_eq!(git_in(&path, &["branch", "--show-current"]), "topic");
     assert_eq!(git_in(&path, &["rev-parse", "HEAD"]), base.to_hex());
     assert_eq!(common::read_text(&path.join("file")), "base\n");
-    // No upstream unless one was asked for.
     assert!(!r.git(&["config", "--list"]).contains("branch.topic."));
-    // The open worktree stays on its branch.
     assert_eq!(r.git(&["branch", "--show-current"]), "main");
 }
 
@@ -356,14 +330,7 @@ fn adding_a_detached_worktree_checks_out_the_commit() {
         None,
     ));
     assert_eq!(git_in(&path, &["rev-parse", "HEAD"]), base.to_hex());
-    assert!(
-        Command::new(parterre_core::git::program())
-            .current_dir(&path)
-            .args(["symbolic-ref", "-q", "HEAD"])
-            .status()
-            .map(|s| !s.success())
-            .unwrap()
-    );
+    assert_eq!(git_in(&path, &["branch", "--show-current"]), "");
 }
 
 #[test]
@@ -465,9 +432,6 @@ fn the_commands_shown_are_the_ones_run() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
-// Deleting a worktree.
-
 #[test]
 fn a_worktree_that_loses_nothing_is_confirmed_then_deleted_keeping_its_branch() {
     let (r, others, _) = repository();
@@ -529,8 +493,7 @@ fn ignored_files_are_never_lost_work() {
 fn a_detached_head_with_commits_nothing_else_reaches_is_a_warning() {
     let (r, others, _) = repository();
     let path = worktree(&r, others.path(), "detached", &["--detach"]);
-    git_in(&path, &["commit", "-q", "--allow-empty", "-m", "only here"]);
-    let only = oid(&git_in(&path, &["rev-parse", "HEAD"]));
+    let only = commit_in(&path, "only here");
     let action = deletion(&r, "detached");
     let w = warning(execute(&r, action.clone(), None));
     assert_eq!(w.commits, [only]);
@@ -560,9 +523,8 @@ fn a_detached_head_that_a_branch_or_tag_reaches_loses_nothing() {
 fn another_worktree_at_the_same_detached_commit_keeps_it() {
     let (r, others, _) = repository();
     let path = worktree(&r, others.path(), "one", &["--detach"]);
-    git_in(&path, &["commit", "-q", "--allow-empty", "-m", "shared"]);
-    let head = git_in(&path, &["rev-parse", "HEAD"]);
-    worktree(&r, others.path(), "two", &["--detach", &head]);
+    let shared = commit_in(&path, "shared");
+    worktree(&r, others.path(), "two", &["--detach", &shared.to_hex()]);
     assert!(warning(execute(&r, deletion(&r, "one"), None)).is_confirmation());
 }
 
@@ -675,23 +637,7 @@ fn a_worktree_that_moved_away_is_not_deleted_by_a_stale_request() {
 fn when_git_refuses_anyway_parterre_asks_again_before_forcing() {
     let (r, others, _) = repository();
     let path = worktree(&r, others.path(), "w", &["-b", "w"]);
-    // A submodule's git dir makes git refuse `worktree remove` without --force, though nothing
-    // parterre counts as lost work is there.
-    let sub = TestRepo::new();
-    sub.git(&["commit", "-q", "--allow-empty", "-m", "sub"]);
-    git_in(
-        &path,
-        &[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            &sub.path().to_string_lossy(),
-            "sub",
-        ],
-    );
-    git_in(&path, &["commit", "-qm", "add a submodule"]);
+    let _sub = add_submodule(&path);
     let action = deletion(&r, "w");
     let fresh = warning(execute(&r, action.clone(), None));
     assert!(fresh.is_confirmation(), "{:?}", fresh.deletions[0].files);
@@ -717,11 +663,7 @@ fn several_worktrees_are_asked_about_once_each_with_its_own_loss() {
     let dirty = worktree(&r, others.path(), "dirty", &["-b", "dirty"]);
     std::fs::write(dirty.join("file"), "changed\n").unwrap();
     let detached = worktree(&r, others.path(), "detached", &["--detach"]);
-    git_in(
-        &detached,
-        &["commit", "-q", "--allow-empty", "-m", "only here"],
-    );
-    let only = oid(&git_in(&detached, &["rev-parse", "HEAD"]));
+    let only = commit_in(&detached, "only here");
     let action = deletions(&r, &["clean", "dirty", "detached"]);
     let w = warning(execute(&r, action.clone(), None));
     assert!(!w.is_confirmation());
@@ -750,13 +692,12 @@ fn several_worktrees_are_asked_about_once_each_with_its_own_loss() {
 fn detached_worktrees_deleted_together_lose_the_commits_they_share() {
     let (r, others, _) = repository();
     let path = worktree(&r, others.path(), "one", &["--detach"]);
-    git_in(&path, &["commit", "-q", "--allow-empty", "-m", "shared"]);
-    let head = git_in(&path, &["rev-parse", "HEAD"]);
-    worktree(&r, others.path(), "two", &["--detach", &head]);
+    let shared = commit_in(&path, "shared");
+    worktree(&r, others.path(), "two", &["--detach", &shared.to_hex()]);
     let w = warning(execute(&r, deletions(&r, &["one", "two"]), None));
-    assert_eq!(w.commits, [oid(&head)]);
-    assert_eq!(w.deletions[0].commits, [oid(&head)]);
-    assert_eq!(w.deletions[1].commits, [oid(&head)]);
+    assert_eq!(w.commits, [shared]);
+    assert_eq!(w.deletions[0].commits, [shared]);
+    assert_eq!(w.deletions[1].commits, [shared]);
 }
 
 #[test]
@@ -777,21 +718,7 @@ fn the_worktrees_git_refuses_are_asked_about_again_and_the_rest_deleted() {
     let (r, others, _) = repository();
     let plain = worktree(&r, others.path(), "plain", &["-b", "plain"]);
     let path = worktree(&r, others.path(), "w", &["-b", "w"]);
-    let sub = TestRepo::new();
-    sub.git(&["commit", "-q", "--allow-empty", "-m", "sub"]);
-    git_in(
-        &path,
-        &[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            &sub.path().to_string_lossy(),
-            "sub",
-        ],
-    );
-    git_in(&path, &["commit", "-qm", "add a submodule"]);
+    let _sub = add_submodule(&path);
     let action = deletions(&r, &["w", "plain"]);
     let fresh = warning(execute(&r, action.clone(), None));
     assert!(fresh.is_confirmation());
@@ -810,9 +737,6 @@ fn the_worktrees_git_refuses_are_asked_about_again_and_the_rest_deleted() {
         other => panic!("{other:?}"),
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Deleting a worktree's branch with it.
 
 #[test]
 fn a_branch_that_loses_nothing_goes_with_its_worktree_after_the_same_confirmation() {
@@ -836,11 +760,7 @@ fn a_branch_that_loses_nothing_goes_with_its_worktree_after_the_same_confirmatio
 fn a_branch_with_commits_only_it_has_turns_the_confirmation_into_a_warning() {
     let (r, others, _) = repository();
     let path = worktree(&r, others.path(), "w", &["-b", "topic"]);
-    git_in(
-        &path,
-        &["commit", "-q", "--allow-empty", "-m", "only on topic"],
-    );
-    let only = oid(&git_in(&path, &["rev-parse", "HEAD"]));
+    let only = commit_in(&path, "only on topic");
     let mut w = warning(execute(&r, deletion(&r, "w"), None));
     // Kept, the branch keeps its commit.
     assert!(w.is_confirmation() && w.commits.is_empty());
@@ -849,7 +769,6 @@ fn a_branch_with_commits_only_it_has_turns_the_confirmation_into_a_warning() {
     assert!(!w.is_confirmation());
     assert_eq!(w.commits, [only]);
     assert_eq!(w.commands[1], ["branch", "-D", "--", "topic"]);
-    // Unticked again, it's the confirmation it was.
     w.set_deletes_branches(false);
     assert!(w.is_confirmation() && w.commits.is_empty());
     assert_eq!(w.commands.len(), 1);
@@ -890,8 +809,7 @@ fn a_branch_that_moved_since_the_approval_is_asked_about_again() {
     let mut w = warning(execute(&r, deletion(&r, "w"), None));
     w.set_deletes_branches(true);
     assert!(w.is_confirmation());
-    git_in(&path, &["commit", "-q", "--allow-empty", "-m", "after"]);
-    let after = oid(&git_in(&path, &["rev-parse", "HEAD"]));
+    let after = commit_in(&path, "after");
     let again = warning(execute(&r, w.action.clone(), Some(&w)));
     assert_eq!(again.commits, [after]);
     assert!(again.deletes_branches());
@@ -918,8 +836,7 @@ fn a_branch_git_d_refuses_but_that_loses_nothing_goes_without_asking_again() {
 fn branches_deleted_together_lose_the_commits_they_share() {
     let (r, others, _) = repository();
     let one = worktree(&r, others.path(), "one", &["-b", "one"]);
-    git_in(&one, &["commit", "-q", "--allow-empty", "-m", "shared"]);
-    let shared = oid(&git_in(&one, &["rev-parse", "HEAD"]));
+    let shared = commit_in(&one, "shared");
     worktree(&r, others.path(), "two", &["-b", "two", &shared.to_hex()]);
     let mut w = warning(execute(&r, deletions(&r, &["one", "two"]), None));
     // Each alone is kept by the other.
@@ -948,21 +865,7 @@ fn a_detached_worktree_has_no_branch_to_delete() {
 #[test]
 fn the_branch_a_worktree_is_rebasing_is_never_deleted_with_it() {
     let (mut r, others, _) = repository();
-    r.git(&["branch", "side"]);
-    r.write("file", b"main\n");
-    r.commit_all("main change");
-    let wt = worktree(&r, others.path(), "rebasing", &["side"]);
-    std::fs::write(wt.join("file"), "side\n").unwrap();
-    git_in(&wt, &["commit", "-qam", "side change"]);
-    let side = oid(&git_in(&wt, &["rev-parse", "HEAD"]));
-    let out = Command::new(parterre_core::git::program())
-        .current_dir(&wt)
-        .args(["rebase", "main"])
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
+    let (wt, side) = stopped_rebase(&mut r, others.path());
     let mut w = warning(execute(&r, deletion(&r, "rebasing"), None));
     assert!(w.deletions[0].branch.is_none());
     // Even asked to, it leaves the branch where it was.
@@ -970,7 +873,7 @@ fn the_branch_a_worktree_is_rebasing_is_never_deleted_with_it() {
     assert_eq!(w.commands.len(), 1, "no branch step");
     done(execute(&r, w.action.clone(), Some(&w)));
     assert!(!wt.exists());
-    assert_eq!(oid(&r.git(&["rev-parse", "side"])), side);
+    assert_eq!(r.git(&["rev-parse", "side"]), side);
 }
 
 #[test]
@@ -978,21 +881,7 @@ fn a_worktree_git_refuses_keeps_its_branch_and_the_others_go() {
     let (r, others, _) = repository();
     let plain = worktree(&r, others.path(), "plain", &["-b", "plain"]);
     let path = worktree(&r, others.path(), "w", &["-b", "w"]);
-    let sub = TestRepo::new();
-    sub.git(&["commit", "-q", "--allow-empty", "-m", "sub"]);
-    git_in(
-        &path,
-        &[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            &sub.path().to_string_lossy(),
-            "sub",
-        ],
-    );
-    git_in(&path, &["commit", "-qm", "add a submodule"]);
+    let _sub = add_submodule(&path);
     let mut fresh = warning(execute(&r, deletions(&r, &["w", "plain"]), None));
     fresh.set_deletes_branches(true);
     match execute(&r, fresh.action.clone(), Some(&fresh)) {
@@ -1012,9 +901,6 @@ fn a_worktree_git_refuses_keeps_its_branch_and_the_others_go() {
         other => panic!("{other:?}"),
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Switching to a detached HEAD.
 
 #[test]
 fn switching_to_a_commit_detaches_head_there() {
@@ -1067,7 +953,7 @@ fn detaching_forward_from_a_detached_head_loses_nothing() {
     let (mut r, _others, base) = repository();
     let later = oid(&r.commit("later"));
     r.git(&["switch", "-q", "--detach", &base.to_hex()]);
-    let _ = r.git(&["branch", "-f", "main", &base.to_hex()]);
+    r.git(&["branch", "-f", "main", &base.to_hex()]);
     // `later` is now reachable only from where we're going.
     done(execute(&r, Action::Detach(later), None));
     assert_eq!(r.git(&["rev-parse", "HEAD"]), later.to_hex());
@@ -1084,14 +970,10 @@ fn a_commit_that_is_gone_is_refused() {
     assert!(error.contains("no longer in the repository"), "{error}");
 }
 
-// ---------------------------------------------------------------------------------------------
-// A worktree root inside a repository.
-
 #[test]
 fn a_root_inside_a_working_tree_is_noticed_until_excluded_there() {
     use parterre_core::worktree_folder::{exclude, inside_repository};
     let (mut r, others, _) = repository();
-    // Not inside anything.
     assert_eq!(inside_repository(&others.path().join("w/fix")), None);
     // Inside this repository's working tree, before the folder exists.
     let folder = r.path().join("trees").join("fix");
@@ -1107,7 +989,6 @@ fn a_root_inside_a_working_tree_is_noticed_until_excluded_there() {
     r.write(".gitignore", b"/ignored/\n");
     r.commit_all("ignore");
     assert_eq!(inside_repository(&r.path().join("ignored/fix")), None);
-    // Inside another repository.
     let other = TestRepo::new();
     let inside = inside_repository(&other.path().join("sub/fix")).expect("inside the other");
     assert_eq!(inside.pattern, "/sub/");

@@ -1,5 +1,4 @@
-//! Every channel declares the git parterre needs (#233), so that raising
-//! `parterre_core::git::MINIMUM_VERSION` fails here until each of them is raised too.
+//! Raising `MINIMUM_VERSION` fails here until every channel declares it too (#233).
 
 use std::path::Path;
 

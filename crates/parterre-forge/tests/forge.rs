@@ -1,4 +1,4 @@
-// The throwaway-repository helpers of parterre-core's tests, shared rather than copied.
+// parterre-core's test helpers, shared rather than copied.
 #[path = "../../parterre-core/tests/common/mod.rs"]
 mod common;
 
@@ -8,6 +8,27 @@ use parterre_core::revgraph::{self, GraphOptions};
 use parterre_forge as forge;
 use parterre_forge::github::{self, GithubRepo};
 use parterre_forge::{PullRequest, PullRequests, Remote};
+
+/// Each node's subject and pull requests, in a graph with remote branches hidden.
+fn labelled_nodes(r: &TestRepo, prs: &PullRequests) -> Vec<(String, Vec<usize>)> {
+    let options = GraphOptions {
+        show_pull_requests: true,
+        show_remote_branches: false,
+        ..GraphOptions::default()
+    };
+    let repo = r.load();
+    let heads: Vec<_> = prs.heads(&repo).into_iter().map(|(h, _)| h).collect();
+    let g = revgraph::build_with_pull_requests(&repo, &options, &heads);
+    g.nodes
+        .iter()
+        .map(|n| {
+            (
+                repo.commit(n.commit).subject.clone(),
+                n.pull_requests.clone(),
+            )
+        })
+        .collect()
+}
 
 #[test]
 fn finds_github_origins_through_insteadof() {
@@ -81,25 +102,8 @@ fn pull_requests_label_their_heads_in_the_graph() {
         }],
         upstreams,
     };
-    let options = GraphOptions {
-        show_pull_requests: true,
-        show_remote_branches: false,
-        ..GraphOptions::default()
-    };
     // With remote branches hidden, main stands for its upstream as the base.
-    let repo = r.load();
-    let heads: Vec<_> = prs.heads(&repo).into_iter().map(|(h, _)| h).collect();
-    let g = revgraph::build_with_pull_requests(&repo, &options, &heads);
-    let labelled: Vec<(String, Vec<usize>)> = g
-        .nodes
-        .iter()
-        .map(|n| {
-            (
-                repo.commit(n.commit).subject.clone(),
-                n.pull_requests.clone(),
-            )
-        })
-        .collect();
+    let labelled = labelled_nodes(&r, &prs);
     assert!(
         labelled.contains(&("B".to_owned(), vec![0])),
         "{labelled:?}"
@@ -107,9 +111,9 @@ fn pull_requests_label_their_heads_in_the_graph() {
     assert!(labelled.contains(&("C".to_owned(), vec![])));
 }
 
-/// My fork, cloned with the parent as `upstream`, with remote branches hidden: my pull request
-/// into the parent shows on my branch's commit, which only `origin/topic` has. Another fork's
-/// pull request, were GitHub to list one, brings none of its commits in.
+/// My fork, cloned with the parent as `upstream`: my pull request into the parent shows on my
+/// branch's commit, which only `origin/topic` has. Another fork's pull request, were GitHub to
+/// list one, brings none of its commits in.
 #[test]
 fn a_forks_own_pull_request_shows_with_remote_branches_hidden() {
     let mut r = TestRepo::new();
@@ -163,24 +167,7 @@ fn a_forks_own_pull_request_shows_with_remote_branches_hidden() {
         ],
         upstreams: forge::upstreams(&git).unwrap(),
     };
-    let options = GraphOptions {
-        show_pull_requests: true,
-        show_remote_branches: false,
-        ..GraphOptions::default()
-    };
-    let repo = r.load();
-    let heads: Vec<_> = prs.heads(&repo).into_iter().map(|(h, _)| h).collect();
-    let g = revgraph::build_with_pull_requests(&repo, &options, &heads);
-    let labelled: Vec<(String, Vec<usize>)> = g
-        .nodes
-        .iter()
-        .map(|n| {
-            (
-                repo.commit(n.commit).subject.clone(),
-                n.pull_requests.clone(),
-            )
-        })
-        .collect();
+    let labelled = labelled_nodes(&r, &prs);
     assert!(
         labelled.contains(&("D".to_owned(), vec![0])),
         "{labelled:?}"
@@ -242,9 +229,7 @@ fn canned_pull_requests_are_on_their_heads_on_origin() {
     );
 }
 
-/// Asks GitHub for parterre's open pull requests from its `main`, signed in as `gh` is.
-/// Needs the network and a signed-in `gh`, so only on request:
-/// `cargo test -p parterre-core --features github --test forge -- --ignored`.
+/// `cargo test -p parterre-forge --features github --test forge -- --ignored`
 #[cfg(feature = "github")]
 #[test]
 #[ignore = "needs the network and a signed-in gh"]
@@ -286,8 +271,7 @@ fn github_is_not_asked_without_fetched_branches() {
         "origin",
         "https://github.com/aquamoth/parterre.git",
     ]);
-    // No branch of origin fetched: nothing could be shown, so nothing is asked (not even for
-    // a token), and there is no error.
+    // Not even for a token.
     let prs = github::load(&Git::new(r.path())).expect("nothing to ask");
     assert!(prs.list.is_empty());
 }

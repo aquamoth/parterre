@@ -1,6 +1,3 @@
-//! Resetting the open worktree's branch, against real, disposable repositories: what each mode
-//! is predicted to do is checked against what `git reset` then does, and every way a reset can
-//! lose work is covered.
 mod common;
 
 use std::collections::BTreeSet;
@@ -11,12 +8,8 @@ use parterre_core::branches::{Action, Branches, Catalog, Outcome};
 use parterre_core::reset::{self, Lost, Mode, Preview};
 use parterre_util::CancelTree;
 
-fn oid(s: &str) -> Oid {
-    Oid::from_hex(s).unwrap()
-}
-
 fn rev(r: &TestRepo, rev: &str) -> Oid {
-    oid(&r.git(&["rev-parse", rev]))
+    Oid::from_hex(&r.git(&["rev-parse", rev])).unwrap()
 }
 
 fn preview(r: &TestRepo, target: &str) -> Preview {
@@ -42,7 +35,6 @@ fn read(r: &TestRepo, path: &str) -> String {
     common::read_text(&r.path().join(path))
 }
 
-/// `git status --short` for the paths the preview lists, as `XY path` lines.
 fn real_status(r: &TestRepo, paths: &BTreeSet<String>) -> BTreeSet<String> {
     // Not trimmed, as `TestRepo::git` has it: the first line may start with a space. With the
     // system's git config, as parterre's own git runs.
@@ -65,7 +57,6 @@ fn real_status(r: &TestRepo, paths: &BTreeSet<String>) -> BTreeSet<String> {
         .collect()
 }
 
-/// The status the preview predicts for `mode`, in the same form.
 fn predicted_status(p: &Preview, mode: Mode) -> BTreeSet<String> {
     let letter = |c: Option<reset::Change>| c.map_or(' ', |c| c.letter());
     let mut lines = BTreeSet::new();
@@ -85,8 +76,6 @@ fn predicted_status(p: &Preview, mode: Mode) -> BTreeSet<String> {
     lines
 }
 
-/// For every mode git runs, in a fresh copy of the scenario: the files' status afterwards is
-/// what the preview predicted.
 fn predictions_match_git(scenario: fn() -> TestRepo, target: &str) {
     for mode in Mode::ALL {
         let r = scenario();
@@ -103,8 +92,6 @@ fn predictions_match_git(scenario: fn() -> TestRepo, target: &str) {
     }
 }
 
-/// main: base (a.txt, lib.txt) → tip (a.txt changed, notes.txt added), with tip on no other
-/// branch.
 fn two_commits() -> TestRepo {
     let mut r = TestRepo::new();
     r.write("a.txt", b"one\n");
@@ -121,7 +108,7 @@ fn commits_left_behind_are_lost_in_every_mode() {
     let r = two_commits();
     let p = preview(&r, "HEAD~1");
     let tip = rev(&r, "HEAD");
-    assert_eq!(p.commits, vec![tip]);
+    assert_eq!(p.lost_commits, vec![tip]);
     assert_eq!((p.behind, p.ahead), (1, 0));
     for mode in Mode::ALL {
         assert!(p.loses(mode), "{mode:?}");
@@ -139,7 +126,7 @@ fn commits_another_branch_has_are_not_lost() {
     let r = two_commits();
     r.git(&["branch", "pushed"]);
     let p = preview(&r, "HEAD~1");
-    assert!(p.commits.is_empty());
+    assert!(p.lost_commits.is_empty());
     assert!(!p.loses(Mode::Keep));
     assert_eq!(p.default_mode(), Mode::Keep);
     assert_eq!(
@@ -164,7 +151,6 @@ fn soft_and_mixed_keep_the_changes_of_the_commits_left_behind() {
     );
 }
 
-/// Forward, to a commit on another branch the branch is behind.
 #[test]
 fn moving_forward_loses_nothing_and_updates_the_files() {
     let mut r = TestRepo::new();
@@ -176,7 +162,7 @@ fn moving_forward_loses_nothing_and_updates_the_files() {
     r.checkout("main");
     let p = preview(&r, "ahead");
     assert_eq!((p.behind, p.ahead), (0, 1));
-    assert!(p.commits.is_empty());
+    assert!(p.lost_commits.is_empty());
     let keep = p.files(Mode::Keep);
     assert!(keep[0].updated);
     assert_eq!(keep[0].lines, Some((1, 1)));
@@ -184,8 +170,6 @@ fn moving_forward_loses_nothing_and_updates_the_files() {
     assert_eq!(read(&r, "a.txt"), "two\n");
 }
 
-/// a.txt staged as S, then edited to W; new.txt staged. Mixed and Keep unstage everything,
-/// losing S; Soft keeps the index; Hard loses all of it.
 fn partially_staged() -> TestRepo {
     let r = two_commits();
     r.git(&["branch", "pushed"]);
@@ -237,7 +221,6 @@ fn hard_loses_every_uncommitted_change() {
     assert_eq!(real_status(&r, &everything), BTreeSet::new());
 }
 
-/// An edit to lib.txt, which the commits left behind didn't touch, and an untracked file.
 fn dirty() -> TestRepo {
     let r = two_commits();
     r.git(&["branch", "pushed"]);
@@ -261,8 +244,6 @@ fn keep_keeps_uncommitted_changes_and_hard_drops_them() {
     assert_eq!(read(&r, "scratch.txt"), "mine\n");
 }
 
-/// Back to a commit that has lib.txt, from one that removed it, with an untracked lib.txt on
-/// disk: Keep refuses, Hard writes over it.
 fn in_the_way() -> TestRepo {
     let mut r = TestRepo::new();
     r.write("a.txt", b"one\n");
@@ -323,7 +304,6 @@ fn an_ignored_file_in_the_way_is_never_lost_work() {
     assert!(p.lost_files(Mode::Hard).is_empty());
 }
 
-/// A change to the file the commits left behind changed: git refuses Keep and names it.
 #[test]
 fn git_refuses_keep_over_a_change_to_a_file_the_commits_changed() {
     let r = two_commits();
@@ -349,8 +329,7 @@ fn git_refuses_keep_over_a_change_to_a_file_the_commits_changed() {
     assert_eq!(read(&r, "a.txt"), "mine\n");
 }
 
-/// A file only touched since git last looked is no change: git's dry run would refuse, and so
-/// would `reset --keep`, without the index refreshed first.
+/// Without the index refreshed first, git's dry run would refuse, and so would `reset --keep`.
 #[test]
 fn a_touched_file_is_no_reason_to_refuse() {
     let r = two_commits();
@@ -470,8 +449,6 @@ fn diffs_show_what_changes_on_disk_or_what_stays_uncommitted() {
     );
 }
 
-/// With `core.autocrlf`, an untracked file in the way that differs from the target's only in
-/// its line endings loses nothing when Hard writes over it.
 #[test]
 fn line_endings_alone_are_no_lost_work() {
     let r = in_the_way();

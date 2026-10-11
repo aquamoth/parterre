@@ -1,43 +1,44 @@
 //! The desktop's light or dark preference where winit can't tell. On Windows and macOS winit
-//! reports the system theme and its changes, and egui follows them by itself. On Linux and the
-//! BSDs winit reports nothing, so egui's "follow system" always came out dark. There the
-//! preference comes from the XDG desktop portal (`org.freedesktop.appearance color-scheme`,
-//! provided by GNOME, KDE and others): read once at startup, then kept up to date from the
-//! portal's `SettingChanged` signal, so that switching to or from night mode shows up at once.
-//! Both go through the `gdbus` tool rather than a D-Bus library, which would add some 45 crates.
+//! reports the system theme and egui follows it; on Linux and the BSDs it reports nothing, and
+//! egui's "follow system" comes out dark. There it comes from the XDG desktop portal
+//! (`org.freedesktop.appearance color-scheme`), read at startup and then followed through the
+//! portal's `SettingChanged` signal. Both go through the `gdbus` tool rather than a D-Bus
+//! library, which would add some 45 crates.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use eframe::egui::{self, Theme};
 
-/// The desktop's latest preference, if known.
 #[derive(Debug, Default)]
 pub struct SystemTheme {
     state: Arc<AtomicU8>,
-    /// The `gdbus monitor` process reporting changes, stopped on drop.
     #[cfg(all(unix, not(target_os = "macos")))]
-    monitor: Option<std::process::Child>,
+    gdbus_monitor: Option<std::process::Child>,
 }
 
-// `state` holds 0 while the preference is unknown.
+#[cfg(all(unix, not(target_os = "macos")))]
+const UNKNOWN: u8 = 0;
 const LIGHT: u8 = 1;
 const DARK: u8 = 2;
 
 impl SystemTheme {
-    /// Reads the desktop's preference now (so the first frame already has the right theme)
-    /// and keeps watching it, repainting `ctx` when it changes. Where winit knows the system
-    /// theme (Windows, macOS) this does nothing and [`Self::get`] stays `None`.
+    /// Reads the desktop's preference now, so that the first frame has the right theme, and
+    /// follows it, repainting `ctx` when it changes.
+    #[cfg(all(unix, not(target_os = "macos")))]
     pub fn watch(ctx: &egui::Context) -> SystemTheme {
-        #[allow(unused_mut)]
-        let mut theme = SystemTheme::default();
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            theme.monitor = portal::watch(ctx, &theme.state);
+        let state = Arc::new(AtomicU8::new(UNKNOWN));
+        let gdbus_monitor = portal::watch(ctx, &state);
+        SystemTheme {
+            state,
+            gdbus_monitor,
         }
-        #[cfg(not(all(unix, not(target_os = "macos"))))]
-        let _ = ctx;
-        theme
+    }
+
+    /// Where winit knows the system theme, [`Self::get`] stays `None`.
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    pub fn watch(_ctx: &egui::Context) -> SystemTheme {
+        SystemTheme::default()
     }
 
     pub fn get(&self) -> Option<Theme> {
@@ -52,26 +53,18 @@ impl SystemTheme {
 #[cfg(all(unix, not(target_os = "macos")))]
 impl Drop for SystemTheme {
     fn drop(&mut self) {
-        // (Should parterre die without dropping this, the monitor still ends at the portal's
-        // next signal, when it finds nobody reading its output.)
-        if let Some(mut monitor) = self.monitor.take() {
+        // Should parterre die without dropping this, the monitor still ends at the portal's
+        // next signal, when it finds nobody reading its output.
+        if let Some(mut monitor) = self.gdbus_monitor.take() {
             let _ = monitor.kill();
             let _ = monitor.wait();
         }
     }
 }
 
-#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
-fn encode(theme: Theme) -> u8 {
-    match theme {
-        Theme::Light => LIGHT,
-        Theme::Dark => DARK,
-    }
-}
-
 /// Parses the portal's `color-scheme` value in `gdbus` output: `(<uint32 1>,)` from
 /// `ReadOne`, `(<<uint32 1>>,)` from the older `Read`, or the tail of a signal line.
-#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
 fn parse_color_scheme(output: &str) -> Option<Theme> {
     let (_, rest) = output.split_once("uint32 ")?;
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
@@ -86,7 +79,7 @@ fn parse_color_scheme(output: &str) -> Option<Theme> {
 /// Parses a line of `gdbus monitor` output, if it announces a new `color-scheme`, e.g.
 /// `/org/freedesktop/portal/desktop: org.freedesktop.portal.Settings.SettingChanged
 /// ('org.freedesktop.appearance', 'color-scheme', <uint32 1>)`.
-#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
 fn parse_signal(line: &str) -> Option<Theme> {
     let (_, value) = line.split_once(
         "org.freedesktop.portal.Settings.SettingChanged ('org.freedesktop.appearance', \
@@ -104,24 +97,30 @@ mod portal {
 
     use eframe::egui::{self, Theme};
 
-    use super::{encode, parse_color_scheme, parse_signal};
+    use super::{DARK, LIGHT, parse_color_scheme, parse_signal};
 
-    const DEST: &str = "org.freedesktop.portal.Desktop";
-    const PATH: &str = "/org/freedesktop/portal/desktop";
+    const BUS_NAME: &str = "org.freedesktop.portal.Desktop";
+    const OBJECT_PATH: &str = "/org/freedesktop/portal/desktop";
 
-    /// Stores the current preference in `state` and starts following its changes. Returns the
-    /// monitor process, or `None` if there is no portal (or no `gdbus`), leaving it to winit
-    /// and egui.
+    fn encode(theme: Theme) -> u8 {
+        match theme {
+            Theme::Light => LIGHT,
+            Theme::Dark => DARK,
+        }
+    }
+
+    /// Stores the current preference in `state` and starts following its changes. `None`
+    /// without a portal or `gdbus`, which leaves the theme to winit and egui.
     pub fn watch(ctx: &egui::Context, state: &Arc<AtomicU8>) -> Option<Child> {
-        // Start listening before reading, so that no change falls in between.
+        // Listening before reading, so that no change falls in between.
         let mut monitor = Command::new("gdbus")
             .args([
                 "monitor",
                 "--session",
                 "--dest",
-                DEST,
+                BUS_NAME,
                 "--object-path",
-                PATH,
+                OBJECT_PATH,
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -130,7 +129,10 @@ mod portal {
             .ok()?;
         let mut lines = BufReader::new(monitor.stdout.take()?).lines();
         // Its first line ("Monitoring signals on ...") says it is listening.
-        let current = lines.next().and_then(Result::ok).and_then(|_| read());
+        let current = lines
+            .next()
+            .and_then(Result::ok)
+            .and_then(|_| read_color_scheme());
         let Some(current) = current else {
             let _ = monitor.kill();
             let _ = monitor.wait();
@@ -142,7 +144,6 @@ mod portal {
         let _ = std::thread::Builder::new()
             .name("system-theme".into())
             .spawn(move || {
-                // Ends when the monitor does.
                 for theme in lines.map_while(Result::ok).filter_map(|l| parse_signal(&l)) {
                     let new = encode(theme);
                     if state.swap(new, Ordering::Relaxed) != new {
@@ -153,7 +154,7 @@ mod portal {
         Some(monitor)
     }
 
-    fn read() -> Option<Theme> {
+    fn read_color_scheme() -> Option<Theme> {
         ["ReadOne", "Read"].into_iter().find_map(|method| {
             let output = Command::new("gdbus")
                 .args([
@@ -162,9 +163,9 @@ mod portal {
                     "--timeout",
                     "1",
                     "--dest",
-                    DEST,
+                    BUS_NAME,
                     "--object-path",
-                    PATH,
+                    OBJECT_PATH,
                     "--method",
                     &format!("org.freedesktop.portal.Settings.{method}"),
                     "org.freedesktop.appearance",
@@ -174,11 +175,10 @@ mod portal {
                 .stderr(Stdio::null())
                 .output()
                 .ok()?;
-            output
-                .status
-                .success()
-                .then(|| parse_color_scheme(&String::from_utf8_lossy(&output.stdout)))
-                .flatten()
+            if !output.status.success() {
+                return None;
+            }
+            parse_color_scheme(&String::from_utf8_lossy(&output.stdout))
         })
     }
 }

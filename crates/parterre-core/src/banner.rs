@@ -2,22 +2,21 @@
 //! wrong: a slow operation of parterre's own, or a rebase run in a terminal. So:
 //!
 //! - While parterre's own operation runs, and until the worktree has been looked at after it,
-//!   the banner stays as it was: it neither appears nor goes.
+//!   the banner neither appears nor goes.
 //! - A look right after parterre's own operation, F5 or opening the repository shows it at
 //!   once.
 //! - After a change from outside, it shows once the worktree has stayed stuck for [`WAIT`]
 //!   seconds, by looks at least that far apart. It goes at once when a look finds the
 //!   worktree no longer stuck.
 
-/// How long a worktree must stay stuck, after a change from outside, before the banner shows.
+/// Seconds.
 pub const WAIT: f64 = 1.5;
 
-/// The banner's state: fed looks at the worktree, asked whether it shows.
 #[derive(Clone, Debug, Default)]
 pub struct BannerTimer {
     /// When looks first and last found the worktree stuck, since it last wasn't.
     stuck: Option<(f64, f64)>,
-    /// A look that shows the banner at once found it stuck.
+    /// A look that shows the banner at once found the worktree stuck.
     at_once: bool,
     shown: bool,
 }
@@ -47,7 +46,8 @@ impl BannerTimer {
         self.shown
     }
 
-    /// The worktree was last found stuck: look again, to show the banner or see it go.
+    /// Whether the worktree was last found stuck, so that a look again shows the banner or
+    /// sees it go.
     pub fn watching(&self) -> bool {
         self.stuck.is_some()
     }

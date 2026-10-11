@@ -1,6 +1,3 @@
-//! Checks the channel a packaging job stamps into the build (`PARTERRE_CHANNEL`, read by
-//! `Channel::current`), and passes on the target, which names the release files.
-
 #[path = "src/channel.rs"]
 #[allow(dead_code)]
 mod channel;
@@ -14,10 +11,9 @@ fn main() {
         .filter(|s| !s.is_empty())
         && Channel::stamped(&stamp).is_none()
     {
-        let names: Vec<_> = Channel::STAMPED.map(Channel::name).into();
         panic!(
             "PARTERRE_CHANNEL={stamp} is not a channel: expected one of {}",
-            names.join(", ")
+            Channel::STAMPED.map(Channel::name).join(", ")
         );
     }
     let target = std::env::var("TARGET").unwrap();

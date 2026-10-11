@@ -1,6 +1,5 @@
-//! Core of parterre: load a repository, reduce it to a TortoiseGit-style revision graph,
-//! and lay that graph out. Nothing in this crate depends on a GUI toolkit. The pull-request
-//! client and the syntax colour are crates of their own (#214).
+//! Loads a repository, reduces it to a TortoiseGit-style revision graph and lays that out, free
+//! of any GUI toolkit.
 
 pub mod banner;
 pub mod blame;

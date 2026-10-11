@@ -1,9 +1,5 @@
-//! Open pull requests of the forge repository a repository's `origin` points at: GitHub, for
-//! now. Not in TortoiseGit. Research and decisions: `docs/research/github-forks-and-pull-requests.md`.
-//! Also the signed-in user's GitHub repositories, to clone one ([`github::repositories`]).
-//!
-//! Nothing here fetches commits. A pull request is shown only where its head is a commit the
-//! repository has already, as a label on that commit ([`PullRequests::heads`]).
+//! Design: `docs/research/github-forks-and-pull-requests.md`. Nothing here fetches commits: a
+//! pull request is shown only on a head commit the repository already has.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -15,31 +11,24 @@ use parterre_core::revgraph::PullRequestHead;
 
 pub mod github;
 
-/// An open pull request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequest {
     pub number: u64,
     pub title: String,
-    /// The login of whoever opened it.
     pub author: String,
     pub draft: bool,
-    /// The commit its head branch is at.
     pub head: Oid,
-    /// The branch it proposes, and `owner/name` of the repository that branch is in (`None` if
-    /// that repository was deleted).
     pub head_branch: String,
+    /// `owner/name`; `None` once that repository is deleted.
     pub head_repo: Option<String>,
-    /// The branch it would be merged into, and `owner/name` of the repository it is in: the
-    /// repository the pull request belongs to.
     pub base_branch: String,
+    /// `owner/name`: the repository the pull request belongs to.
     pub base_repo: String,
-    /// Its page on the forge, e.g. `https://github.com/owner/name/pull/12`.
     pub url: String,
 }
 
 impl PullRequest {
-    /// The branch it proposes as GitHub names it: `topic` in the same repository,
-    /// `owner:topic` in another (a fork), and `topic (deleted fork)` if that is gone.
+    /// The head branch as GitHub labels it.
     pub fn head_label(&self) -> String {
         match &self.head_repo {
             Some(repo) if !repo.eq_ignore_ascii_case(&self.base_repo) => {
@@ -52,32 +41,27 @@ impl PullRequest {
     }
 }
 
-/// A remote of the local repository, and the forge repository (`owner/name`) it points at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remote {
     pub name: String,
+    /// The forge repository it points at, `owner/name`.
     pub repo: String,
 }
 
-/// The open pull requests of a repository, with what is needed to find their base branches
-/// among its refs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PullRequests {
-    /// Newest first.
     pub list: Vec<PullRequest>,
-    /// The remotes that point at repositories on the forge.
+    /// Only those pointing at the forge.
     pub remotes: Vec<Remote>,
-    /// The upstream of each local branch that has one, by full ref name:
-    /// `refs/heads/main` → `refs/remotes/origin/main`.
+    /// `refs/heads/main` → `refs/remotes/origin/main`, for each local branch with an upstream.
     pub upstreams: HashMap<String, String>,
 }
 
 impl PullRequests {
-    /// The pull requests whose heads are commits of `repo`, each with where it is shown: its
-    /// head commit, the refs of its base branch, and the remote-tracking branch of its head
-    /// branch. The base branch's refs are its remote-tracking branches, in every remote that
-    /// points at the pull request's repository, and the local branches that have one of them as
-    /// upstream. The head branch's is the first in a remote that points at its repository.
+    /// The pull requests whose heads are commits of `repo`, each with where it is shown. Its
+    /// base branch's refs are the remote-tracking branches of every remote pointing at the pull
+    /// request's repository, and the local branches tracking one of them; its head branch's is
+    /// the first remote-tracking branch of a remote pointing at the head repository.
     pub fn heads(&self, repo: &Repo) -> Vec<(PullRequestHead, &PullRequest)> {
         let mut bases: HashMap<(String, &str), Vec<usize>> = HashMap::new();
         let mut tracking: HashMap<(String, &str), usize> = HashMap::new();
@@ -117,9 +101,8 @@ impl PullRequests {
     }
 }
 
-/// The forge repository (`owner/name`, lowercase) and branch of a remote-tracking branch such as
-/// `refs/remotes/origin/main`. Remote names may contain slashes: the longest that fits is the
-/// remote.
+/// The forge repository (`owner/name`, lowercase) and branch of `refs/remotes/<remote>/<branch>`.
+/// Remote names may contain slashes: the longest remote that fits wins.
 fn remote_branch<'a>(remotes: &[Remote], full_name: &'a str) -> Option<(String, &'a str)> {
     let rest = full_name.strip_prefix("refs/remotes/")?;
     remotes
@@ -138,7 +121,6 @@ pub enum ForgeError {
     NoForge,
     #[error("this build of parterre has no GitHub support")]
     Unsupported,
-    /// GitHub is only asked signed in, as the GitHub CLI is.
     #[error("the GitHub CLI (gh) isn't installed")]
     NoGh,
     #[error("the GitHub CLI (gh) isn't signed in to github.com")]
@@ -157,13 +139,12 @@ pub enum ForgeError {
     Status { status: u16, message: String },
     #[error("unexpected answer from GitHub: {0}")]
     Parse(String),
-    /// From the file of `--pull-requests-from`.
+    /// From `--pull-requests-from`'s file.
     #[error("pull requests file: {0}")]
     Canned(String),
 }
 
 impl ForgeError {
-    /// True if pull requests can't be asked for until the user signs in with `gh`.
     pub fn needs_sign_in(&self) -> bool {
         matches!(
             self,
@@ -179,7 +160,6 @@ impl ForgeError {
         }
     }
 
-    /// How to tell the user, in a dialog.
     pub fn explain(&self) -> Explanation {
         const SIGN_IN: &str = "gh auth login";
         let (title, body, command) = match self {
@@ -245,16 +225,14 @@ impl ForgeError {
     }
 }
 
-/// What a dialog says about a [`ForgeError`]: a short title, a sentence or two, and a command
-/// to run in a terminal, if one helps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Explanation {
     pub title: &'static str,
     pub body: String,
+    /// To run in a terminal.
     pub command: Option<&'static str>,
 }
 
-/// `text` with its first letter in upper case.
 fn capitalised(text: &str) -> String {
     let mut chars = text.chars();
     chars
@@ -263,27 +241,24 @@ fn capitalised(text: &str) -> String {
         .unwrap_or_default()
 }
 
-/// How long a loaded list is used before GitHub is asked again, as in t3code: a minute if it
-/// has pull requests (they change), five if not.
+/// How long a loaded list is used before GitHub is asked again, as in t3code.
 pub fn fresh_for(found_any: bool) -> Duration {
     Duration::from_secs(if found_any { 60 } else { 5 * 60 })
 }
 
-/// How long after a push or a fetch moved `origin`'s branches ([`origin_moved`]) GitHub is
-/// asked once more, however fresh the list. A pull request is usually opened a few seconds
-/// after its branch is pushed: after the load the push itself started (#294).
+/// How long after [`origin_moved`] GitHub is asked once more, however fresh the list: a pull
+/// request is usually opened seconds after its branch is pushed, after the load the push
+/// started (#294).
 pub const RECHECK_AFTER_PUSH: Duration = Duration::from_secs(60);
 
-/// How long to wait after `failures` failed loads in a row, as in t3code: 20 s, doubling, at
-/// most 15 min.
+/// How long to wait after `failures` failed loads in a row, as in t3code.
 pub fn retry_after(failures: u32) -> Duration {
     let doublings = failures.saturating_sub(1).min(6);
     Duration::from_secs((20u64 << doublings).min(15 * 60))
 }
 
-/// Whether a push or a fetch moved, added or removed a branch of `origin` between two snapshots
-/// of a repository. Those branches are what GitHub is asked about, and a pull request is
-/// usually opened just after its branch is pushed.
+/// Whether `origin`'s branches differ between two snapshots: they are what GitHub is asked
+/// about.
 pub fn origin_moved(old: &Repo, new: &Repo) -> bool {
     fn branches(repo: &Repo) -> Vec<(&str, Oid)> {
         let mut branches: Vec<_> = repo
@@ -300,14 +275,12 @@ pub fn origin_moved(old: &Repo, new: &Repo) -> bool {
     branches(old) != branches(new)
 }
 
-/// The remotes of the repository `git` works on, with their URLs (`insteadOf` rewrites
-/// applied, as git would fetch from them).
+/// Each remote's name and fetch URL, with `insteadOf` applied.
 pub fn remote_urls(git: &Git) -> Result<Vec<(String, String)>, GitError> {
     Ok(parse_remote_urls(&git.run(&["remote", "-v"])?))
 }
 
-/// Parses `git remote -v`: `name<TAB>url (fetch)` lines, and the same with `(push)`. In a
-/// partial clone the fetch line ends in the filter, e.g. `(fetch) [tree:0]`.
+/// In a partial clone the fetch line ends in the filter: `(fetch) [tree:0]`.
 fn parse_remote_urls(out: &str) -> Vec<(String, String)> {
     out.lines()
         .filter_map(|line| {
@@ -318,7 +291,6 @@ fn parse_remote_urls(out: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The upstream of every local branch that has one (see [`PullRequests::upstreams`]).
 pub fn upstreams(git: &Git) -> Result<HashMap<String, String>, GitError> {
     let out = git.run(&[
         "for-each-ref",
