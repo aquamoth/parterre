@@ -81,7 +81,7 @@ impl ParterreApp {
         let recent = self
             .recent
             .iter()
-            .filter(|p| open.is_none_or(|o| !parterre_core::recent::same_path(p, o)))
+            .filter(|p| open.is_none_or(|o| !parterre_core::recent::same_path_lexically(p, o)))
             .map(std::path::Path::to_path_buf)
             .collect();
         let (can_undo, can_redo, any_displaced) =
@@ -285,24 +285,29 @@ impl ParterreApp {
         }
     }
 
-    /// Call before the window's own keys: what the bar takes, they don't see.
-    pub(super) fn menu_bar_keys(&mut self, ctx: &egui::Context) {
+    /// Call before the window's own keys: what the bar takes, they don't see. Returns the menus
+    /// it built, unless a command chosen may have changed them.
+    pub(super) fn menu_bar_keys(&mut self, ctx: &egui::Context) -> Option<Vec<menu_bar::Menu>> {
         if Platform::CURRENT == Platform::Mac {
-            return;
+            return None;
         }
-        let state = self.menu_state(ctx);
-        let menus = menu_bar::build(&state);
-        if let Some(command) = menu_bar::bar::keys(ctx, &menus) {
-            self.run_command(ctx, command);
+        let menus = menu_bar::build(&self.menu_state(ctx));
+        match menu_bar::bar::keys(ctx, &menus) {
+            Some(command) => {
+                self.run_command(ctx, command);
+                None
+            }
+            None => Some(menus),
         }
     }
 
-    pub(super) fn menu_bar(&mut self, ui: &mut egui::Ui) {
+    /// `built`: this frame's menus, if nothing has changed them since.
+    pub(super) fn menu_bar(&mut self, ui: &mut egui::Ui, built: Option<Vec<menu_bar::Menu>>) {
         let ctx = ui.ctx().clone();
-        let state = self.menu_state(&ctx);
-        let menus = menu_bar::build(&state);
         #[cfg(target_os = "macos")]
         {
+            let state = self.menu_state(&ctx);
+            let menus = built.unwrap_or_else(|| menu_bar::build(&state));
             let badge = state.newer_version.is_some();
             let chosen = self
                 .native_menu
@@ -315,8 +320,8 @@ impl ParterreApp {
             {
                 self.cli_install = None;
                 self.status = Some(match result {
-                    Ok(message) => (message, false),
-                    Err(e) => (e, true),
+                    Ok(message) => super::Note::Info(message),
+                    Err(e) => super::Note::Error(e),
                 });
             }
             if self.cli_install.is_some() {
@@ -325,6 +330,7 @@ impl ParterreApp {
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let menus = built.unwrap_or_else(|| menu_bar::build(&self.menu_state(&ctx)));
             let mut chosen = None;
             egui::Panel::top("menu-bar")
                 .frame(

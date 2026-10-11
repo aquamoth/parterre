@@ -13,12 +13,15 @@ use super::toolbar::{
     CURRENT_BRANCH_ONLY_TIP, FIRST_PARENT_ONLY_TIP, HIDE_BRANCHES_TIP, PULL_REQUESTS_TIP,
     REF_FILTER_TIP, REMEMBER_MOVES_TIP, WORKTREES_TIP,
 };
+use super::viewport;
 use super::{ParterreApp, PickFor, privacy};
 use crate::dialogs;
+use crate::keys;
 use crate::settings::{Arrows, EdgeStyle, Look, RepoSettings, Settings};
 use crate::settings_file::{self, Imported};
 use crate::text_size;
 use crate::theme::{BranchColor, ThemeChoice};
+use crate::usage::Screen;
 use crate::widgets::{self, text_segmented};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -115,7 +118,7 @@ impl ParterreApp {
 
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
-            self.settings_window_theme = None;
+            self.settings_viewport.closed();
             self.settings_window_text_size = None;
             self.settings_window_size = None;
             return;
@@ -127,32 +130,16 @@ impl ParterreApp {
             let size = vec2(w, h).max(least);
             screen.map_or(size, |s| size.min(s * 0.9))
         });
-        let builder = egui::ViewportBuilder::default()
-            .with_title("Settings – parterre")
-            .with_app_id(crate::settings::APP_ID)
-            .with_icon(self.window_icon.clone())
-            .with_inner_size(size)
-            .with_min_inner_size(least)
+        let builder = viewport::builder("Settings – parterre", size, least, &self.window_icon)
             // winit 0.30 drops these buttons on Windows and macOS only. Maximized on Linux, the
             // page just widens.
             .with_minimize_button(false)
             .with_maximize_button(false);
         let id = settings_viewport();
-        crate::usage::screen(ctx, id.0, crate::usage::Screen::Settings);
-        // A new window is created after this frame: paint it without waiting for input.
-        if self.settings_window_theme.is_none() && !ctx.embed_viewports() {
-            ctx.request_repaint();
-        }
+        self.settings_viewport
+            .before_show(ctx, id, Screen::Settings);
         ctx.show_viewport_immediate(id, builder, |ui, class| {
-            super::commands::window_begin(ui);
-            if class != egui::ViewportClass::EmbeddedWindow {
-                if self.settings_window_theme != self.window_theme {
-                    self.settings_window_theme = self.window_theme;
-                    if let Some(theme) = self.window_theme {
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
-                    }
-                }
+            if let Some(input) = self.settings_viewport.begin(ui, class, self.window_theme) {
                 // Its size is kept in points: it grows and shrinks with the text size.
                 let text_size = ui.ctx().zoom_factor();
                 if self
@@ -163,19 +150,13 @@ impl ParterreApp {
                     let [w, h] = self.settings.settings_window.size;
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(w, h)));
-                } else if let Some(size) = ui.input(|i| i.viewport().inner_rect.map(|r| r.size()))
-                    && size.x > 0.0
-                    && size.y > 0.0
-                {
-                    self.settings.settings_window.size = [size.x, size.y];
+                } else {
+                    input.keep_size(&mut self.settings.settings_window.size);
                 }
-                let closing = ui.input_mut(|i| {
-                    i.viewport().close_requested() || crate::keys::close_window().consume(i)
-                });
-                if closing {
+                if input.close_requested || ui.input_mut(|i| keys::close_window().consume(i)) {
                     self.show_settings = false;
                 }
-                if ui.input_mut(|i| crate::keys::fetch().consume(i)) {
+                if ui.input_mut(|i| keys::fetch().consume(i)) {
                     self.fetch(ui.ctx(), id);
                 }
                 // Embedded, the main window reads the text size input.
@@ -383,7 +364,7 @@ impl ParterreApp {
                 });
                 ui.add_space(14.0);
                 if let Some(error) = privacy_page(ui, &mut self.telemetry) {
-                    self.status = Some((error, true));
+                    self.status = Some(super::Note::Error(error));
                 }
             }
             SettingsPage::Manage => self.manage_page(ui),
@@ -492,14 +473,14 @@ impl ParterreApp {
                 }
             });
         });
-        if let Some((note, failed)) = &self.settings_note {
+        if let Some(note) = &self.settings_note {
             ui.add_space(6.0);
-            let color = if *failed {
+            let color = if note.is_error() {
                 ui.visuals().error_fg_color
             } else {
                 ui.visuals().weak_text_color()
             };
-            ui.label(RichText::new(note).color(color));
+            ui.label(RichText::new(note.text()).color(color));
         }
         ui.add_space(14.0);
         title(ui, "Reset");
@@ -557,8 +538,8 @@ impl ParterreApp {
         self.settings_dir = path.parent().map(Path::to_owned);
         let text = settings_file::export(&self.settings, self.repo.is_some());
         self.settings_note = Some(match std::fs::write(&path, text) {
-            Ok(()) => (format!("Exported to {}", path.display()), false),
-            Err(e) => (format!("Could not write {}: {e}", path.display()), true),
+            Ok(()) => super::Note::Info(format!("Exported to {}", path.display())),
+            Err(e) => super::Note::Error(format!("Could not write {}: {e}", path.display())),
         });
     }
 
@@ -578,7 +559,10 @@ impl ParterreApp {
                     imported,
                 });
             }
-            Err(e) => self.settings_note = Some((format!("Could not import {name}: {e}"), true)),
+            Err(e) => {
+                let note = super::Note::Error(format!("Could not import {name}: {e}"));
+                self.settings_note = Some(note);
+            }
         }
     }
 
@@ -623,7 +607,7 @@ impl ParterreApp {
                 ui.add_space(12.0);
                 ui.separator();
                 let chosen = import.include_settings || import.include_filters;
-                dialogs::actions(ui, "Import", chosen, false, false)
+                dialogs::actions(ui, dialogs::Primary::new("Import").enabled(chosen))
             });
         match shown.inner {
             dialogs::Answer::Primary => {
@@ -658,7 +642,7 @@ impl ParterreApp {
             parts.push(format!("the filters of {name}"));
         }
         let note = format!("Imported {} from {}", parts.join(" and "), import.file);
-        self.settings_note = Some((note, false));
+        self.settings_note = Some(super::Note::Info(note));
     }
 
     pub(super) fn reset_settings_dialog(&mut self, ctx: &egui::Context) {
@@ -678,7 +662,10 @@ impl ParterreApp {
                 );
                 ui.add_space(12.0);
                 ui.separator();
-                dialogs::actions(ui, "Reset", true, true, true)
+                let primary = dialogs::Primary::new("Reset")
+                    .destructive(true)
+                    .focus_cancel(true);
+                dialogs::actions(ui, primary)
             });
         match shown.inner {
             dialogs::Answer::Primary => {
@@ -789,18 +776,12 @@ fn privacy_page(ui: &mut Ui, telemetry: &mut privacy::Telemetry) -> Option<Strin
         if let Some(id) = id.filter(|_| in_build) {
             rows.row("Install ID", INSTALL_ID_TIP, |ui| {
                 let copied_id = egui::Id::new("copied-install-id");
-                let now = ui.input(|i| i.time);
-                let at: Option<f64> = ui.data(|d| d.get_temp(copied_id));
-                let copied = at.is_some_and(|at| now - at < 1.5);
-                if copied {
-                    ui.ctx()
-                        .request_repaint_after(std::time::Duration::from_millis(300));
-                }
-                let label = if copied { "Copied" } else { "Copy" };
-                if widgets::text_button(ui, label).clicked() {
-                    ui.ctx().copy_text(id.clone());
-                    ui.data_mut(|d| d.insert_temp(copied_id, now));
-                }
+                widgets::copy_on_click(
+                    ui,
+                    copied_id,
+                    || id.clone(),
+                    |ui, copied| widgets::text_button(ui, if copied { "Copied" } else { "Copy" }),
+                );
                 ui.label(RichText::new(id).monospace().weak());
             });
         }

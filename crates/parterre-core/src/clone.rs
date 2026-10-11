@@ -7,6 +7,7 @@ use parterre_util::CancelTree;
 
 use crate::branches::{Error, Report};
 use crate::git::Git;
+use crate::operation::git_args;
 use crate::remote::Live;
 use crate::worktree_folder;
 
@@ -45,9 +46,7 @@ impl Cloning {
 /// Into the full path, which may start with `-`.
 pub fn command(cloning: &Cloning) -> Vec<String> {
     let path = cloning.path().to_string_lossy().into_owned();
-    ["clone", "--progress", "--", &cloning.url, &path]
-        .map(str::to_owned)
-        .to_vec()
+    git_args(&["clone", "--progress", "--", &cloning.url, &path])
 }
 
 /// Whether `text` is something to clone rather than words to look for: a URL with a scheme,
@@ -124,7 +123,10 @@ pub fn execute(
 
 /// git removes a folder it couldn't clone into, but not when it's killed by *Cancel*.
 fn remove_unfinished(path: &Path) {
-    let _ = std::fs::remove_dir_all(path);
+    // `exists` follows symlinks, `remove_dir_all` doesn't: a dangling one there isn't git's.
+    if path.exists() {
+        let _ = std::fs::remove_dir_all(path);
+    }
 }
 
 #[cfg(test)]

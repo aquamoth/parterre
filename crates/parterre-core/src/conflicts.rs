@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 
 use parterre_util::CancelTree;
 
-use crate::branches::{Catalog, Error, Report, run};
+use crate::branches::{Catalog, Error, Report};
 use crate::git::{Git, GitError};
-use crate::merge::last_output;
 use crate::oid::Oid;
+use crate::operation::run_or_fail;
 
 const SYMLINK_MODE: u32 = 0o120000;
 const SUBMODULE_MODE: u32 = 0o160000;
@@ -232,9 +232,7 @@ pub(crate) fn execute(
         )));
     }
     for args in conflict.commands(resolve.answer) {
-        if !run(&git, args, cancel, report)? {
-            return Err(Error::Failed(last_output(report)));
-        }
+        run_or_fail(&git, args, cancel, report)?;
     }
     Ok(())
 }

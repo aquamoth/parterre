@@ -1,8 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use crate::branches::{Attention, Catalog, Error, Report, Stuck, run};
+use crate::branches::{Attention, Catalog, Error, Report, Stuck, folder_name};
 use crate::git::Git;
 use crate::log::is_ancestor;
+use crate::operation::{
+    git_args, has_tracked_changes, in_progress, kept_stash, refuse_if_moved, refuse_if_stuck, run,
+    stash_count, stopped, stopped_or_not_committed,
+};
 use crate::{Oid, Repo};
 use parterre_util::CancelTree;
 
@@ -131,16 +135,15 @@ enum Stage {
 }
 
 fn outgoing_steps(merge: &Merge, out: &Outgoing) -> Vec<(Stage, Vec<String>)> {
-    let words = |w: &[&str]| w.iter().map(|w| (*w).to_owned()).collect::<Vec<String>>();
     let into = merge.branch.as_str();
     let mut steps = Vec::new();
     if merge.method.rebases() {
-        let mut rebase = words(&["rebase"]);
+        let mut rebase = git_args(&["rebase"]);
         rebase.extend(autostash_flag(merge).map(str::to_owned));
         rebase.push(into.to_owned());
         steps.push((Stage::Rebase, rebase));
     }
-    let mut merging = words(&["merge", merge.method.merge_flag()]);
+    let mut merging = git_args(&["merge", merge.method.merge_flag()]);
     merging.extend(message_and_target(merge));
     match &out.worktree {
         Some(w) => {
@@ -149,14 +152,14 @@ fn outgoing_steps(merge: &Merge, out: &Outgoing) -> Vec<(Stage, Vec<String>)> {
             steps.push((Stage::Merge, there));
         }
         None if out.switches(merge.method) => {
-            steps.push((Stage::SwitchToBranch, words(&["switch", into])));
+            steps.push((Stage::SwitchToBranch, git_args(&["switch", into])));
             steps.push((Stage::Merge, merging));
-            steps.push((Stage::SwitchBack, words(&["switch", &out.source])));
+            steps.push((Stage::SwitchBack, git_args(&["switch", &out.source])));
         }
         // Git moves it only if that's a fast-forward.
         None => steps.push((
             Stage::Merge,
-            words(&["fetch", ".", &format!("{}:{into}", out.source)]),
+            git_args(&["fetch", ".", &format!("{}:{into}", out.source)]),
         )),
     }
     steps
@@ -250,8 +253,8 @@ impl Preview {
             branch,
             head,
             theirs,
-            can_fast_forward: is_ancestor_git(&git, head, theirs)?,
-            dirty: dirty(&catalog.root)?,
+            can_fast_forward: git.is_ancestor(head, theirs)?,
+            dirty: has_tracked_changes(&git)?,
             auto_stash: config.merge_auto_stash,
             no_ff: config.no_ff,
             message_has_log: config.log,
@@ -283,7 +286,7 @@ impl Preview {
             )));
         };
         let git = Git::new(&catalog.root);
-        if is_ancestor_git(&git, theirs, head)? {
+        if git.is_ancestor(theirs, head)? {
             return Err(Error::Invalid(format!(
                 "Branch {into} already has {source}'s commits."
             )));
@@ -295,17 +298,21 @@ impl Preview {
             .find(|w| w.branch.as_deref() == Some(into));
         let refusal = match there {
             Some(w) if w.missing => Some(format!("{into}'s worktree {} is missing", w.name())),
-            Some(w) => w
-                .in_progress
-                .map(|what| format!("{into}'s worktree {} has {what} in progress", w.name())),
+            Some(w) => w.in_progress.map(|operation| {
+                format!(
+                    "{into}'s worktree {} has {} in progress",
+                    w.name(),
+                    operation.name()
+                )
+            }),
             // Being rebased or bisected there, detached.
             None => catalog
                 .in_use_elsewhere(into)
-                .map(|p| format!("{into} is in use in worktree {}", folder(p))),
+                .map(|p| format!("{into} is in use in worktree {}", folder_name(p))),
         };
         let usable = there.filter(|w| !w.missing);
         let merge_commit_refusal = match usable {
-            Some(w) if dirty(&w.path)? => Some(format!(
+            Some(w) if has_tracked_changes(&Git::new(&w.path))? => Some(format!(
                 "{into}'s worktree {} has uncommitted changes",
                 w.name()
             )),
@@ -337,8 +344,8 @@ impl Preview {
             branch: into.to_owned(),
             head,
             theirs,
-            can_fast_forward: is_ancestor_git(&git, head, theirs)?,
-            dirty: dirty(&catalog.root)?,
+            can_fast_forward: git.is_ancestor(head, theirs)?,
+            dirty: has_tracked_changes(&git)?,
             auto_stash: config.rebase_auto_stash,
             no_ff: config.no_ff,
             message_has_log: config.log && usable.is_some(),
@@ -524,18 +531,17 @@ pub(crate) fn execute(
             .ok()
             .flatten()
             .is_some();
-        let mut message = FINISH_OR_ABORT.to_owned();
+        let mut attention = in_progress(stopped_or_not_committed("Merge", after.conflicted.len()));
         if aside {
-            message.push_str(" Your changes are set aside until then.");
+            attention
+                .message
+                .push_str(" Your changes are set aside until then.");
         }
-        report.attention = Some(Attention {
-            title: stopped("Merge", after.conflicted.len()),
-            message,
-        });
+        report.attention = Some(attention);
         return Ok(());
     }
     if !ok {
-        return Err(Error::Failed(last_output(report)));
+        return Err(Error::Failed(report.last_output()));
     }
     if stash_count(&git) > before {
         report.attention = Some(kept_stash(merged(merge), after.conflicted.len()));
@@ -585,7 +591,7 @@ fn execute_into(
         let elsewhere = out.worktree.as_deref().filter(|_| stage == Stage::Merge);
         let after = Catalog::load(elsewhere.unwrap_or(&catalog.root))?;
         let Some(Stuck::InProgress(_)) = after.stuck() else {
-            let output = last_output(report);
+            let output = report.last_output();
             return Err(Error::Failed(match stage {
                 Stage::SwitchBack => format!(
                     "Merged {source} into {into}, but couldn't switch back to {source}. {output}"
@@ -597,34 +603,33 @@ fn execute_into(
             }));
         };
         let n = after.conflicted.len();
-        let (title, message) = match (stage, elsewhere) {
-            (Stage::Rebase, _) => (
-                if n == 0 {
-                    "Rebase stopped".to_owned()
-                } else {
-                    stopped("Rebase", n)
-                },
-                format!(
-                    "{FINISH_OR_ABORT} Once rebased, {source} merges into {into} without \
-                     conflicts."
+        report.attention = Some(match (stage, elsewhere) {
+            (Stage::Rebase, _) => {
+                let mut attention = in_progress(stopped("Rebase", n));
+                attention.message.push_str(&format!(
+                    " Once rebased, {source} merges into {into} without conflicts."
+                ));
+                attention
+            }
+            (_, Some(w)) => Attention {
+                title: format!(
+                    "{} in {}",
+                    stopped_or_not_committed("Merge", n),
+                    folder_name(w)
                 ),
-            ),
-            (_, Some(w)) => (
-                format!("{} in {}", stopped("Merge", n), folder(w)),
-                format!(
+                message: format!(
                     "{into} is checked out there. Finish or abort the merge in that worktree \
                      with git."
                 ),
-            ),
-            _ => (
-                stopped("Merge", n),
-                format!(
+            },
+            _ => Attention {
+                title: stopped_or_not_committed("Merge", n),
+                message: format!(
                     "This worktree is on {into} now. Finish or abort the merge with git, then \
                      switch back to {source}."
                 ),
-            ),
-        };
-        report.attention = Some(Attention { title, message });
+            },
+        });
         return Ok(());
     }
     if stash_count(&git) > before {
@@ -638,100 +643,6 @@ fn merged(merge: &Merge) -> String {
     format!("Merged {} into {}", short_target(merge), merge.branch)
 }
 
-fn folder(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
 pub fn short_target(merge: &Merge) -> String {
-    if merge.target == merge.theirs.to_hex() {
-        merge.theirs.short(7)
-    } else {
-        merge.target.clone()
-    }
-}
-
-pub(crate) const FINISH_OR_ABORT: &str = "Finish or abort it with git, or go to another worktree.";
-
-pub(crate) fn refuse_if_stuck(catalog: &Catalog) -> Result<(), Error> {
-    match catalog.stuck() {
-        Some(stuck) => Err(Error::Invalid(format!("{}.", stuck.reason()))),
-        None => Ok(()),
-    }
-}
-
-pub(crate) fn refuse_if_moved(catalog: &Catalog, branch: &str, head: Oid) -> Result<(), Error> {
-    if catalog.current.as_deref() == Some(branch) && catalog.head == Some(head) {
-        return Ok(());
-    }
-    Err(Error::Invalid(format!(
-        "Branch {branch} moved, or is no longer checked out here. Reload and try again."
-    )))
-}
-
-pub(crate) fn is_ancestor_git(git: &Git, ancestor: Oid, of: Oid) -> Result<bool, Error> {
-    Ok(git
-        .query(&[
-            "merge-base",
-            "--is-ancestor",
-            &ancestor.to_hex(),
-            &of.to_hex(),
-        ])?
-        .is_some())
-}
-
-/// Uncommitted changes to tracked files in the worktree at `dir`.
-pub(crate) fn dirty(dir: &Path) -> Result<bool, Error> {
-    Ok(!Git::new(dir)
-        .run(&["status", "--porcelain", "--untracked-files=no"])?
-        .trim()
-        .is_empty())
-}
-
-pub(crate) fn stash_count(git: &Git) -> usize {
-    git.run(&["stash", "list"])
-        .map(|out| out.lines().count())
-        .unwrap_or(0)
-}
-
-/// Stashed changes that couldn't be put back: git applied what it could, with conflict
-/// markers, and kept the stash entry too.
-pub(crate) fn kept_stash(title: String, conflicted: usize) -> Attention {
-    let message = match conflicted {
-        0 => "Git couldn't put your changes back, and kept them in a stash entry. \
-              Recover them with git stash pop."
-            .to_owned(),
-        n => format!(
-            "Putting your changes back conflicted in {}. Resolve {} with git; your \
-             changes are also kept in a stash entry until you drop it.",
-            plural(n, "file"),
-            if n == 1 { "it" } else { "them" }
-        ),
-    };
-    Attention { title, message }
-}
-
-/// With nothing conflicted, a hook refused to commit.
-pub(crate) fn stopped(what: &str, conflicted: usize) -> String {
-    if conflicted == 0 {
-        format!("{what} not committed")
-    } else {
-        format!(
-            "{what} stopped on conflicts in {}",
-            plural(conflicted, "file")
-        )
-    }
-}
-
-pub(crate) fn last_output(report: &Report) -> String {
-    report
-        .steps
-        .last()
-        .map(|s| s.output.clone())
-        .unwrap_or_default()
-}
-
-pub(crate) fn plural(n: usize, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+    crate::operation::short_target(&merge.target, merge.theirs)
 }

@@ -12,7 +12,7 @@ use parterre_core::log_graph::LogGraph;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::{CommitIx, Oid, Repo};
 
-use super::branches::{Asked, answer_of, commit_line};
+use super::branches::Asked;
 use super::commit_table::Row;
 use super::rebase::{
     Choice, ListedCommits, choice_buttons, choice_menu, icon_of, listing_dialog_width, shared,
@@ -94,7 +94,7 @@ impl CherryPickDialog {
             .resizable()
             .show(ctx, |ui| {
                 // Only the commits scroll: everything else stays in view.
-                if commit_line(ui, self.listed.repo(), self.preview.head) {
+                if dialogs::commit_line(ui, self.listed.repo(), self.preview.head) {
                     show_in_log = Some(self.preview.head);
                 }
                 if let Some(oid) = self.commits_table(ui, palette, options) {
@@ -128,11 +128,13 @@ impl CherryPickDialog {
                     .map(|c| command_text(c))
                     .collect();
                 dialogs::command_box(ui, &commands);
-                dialogs::actions(ui, "Cherry-pick", blocked.is_none() && !busy, false, false)
+                let primary =
+                    dialogs::Primary::new("Cherry-pick").enabled(blocked.is_none() && !busy);
+                dialogs::actions(ui, primary)
             });
         self.fresh = false;
         Asked {
-            answer: answer_of(shown),
+            answer: shown.answer(),
             show_in_log,
         }
     }

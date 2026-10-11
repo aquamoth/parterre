@@ -227,7 +227,7 @@ pub fn keys(ctx: &egui::Context, menus: &[Menu]) -> Option<Command> {
                     }
                     Key::Enter | Key::Space => match under {
                         Some(Entry::Item(item)) if item.enabled => {
-                            chosen = Some(item.command.clone());
+                            chosen = item.command.clone();
                             release_keyboard(&mut nav);
                         }
                         Some(Entry::Submenu(s)) if s.enabled => {
@@ -253,7 +253,7 @@ pub fn keys(ctx: &egui::Context, menus: &[Menu]) -> Option<Command> {
                             });
                             match found.map(|i| (i, &here[i])) {
                                 Some((_, Entry::Item(item))) if item.enabled => {
-                                    chosen = Some(item.command.clone());
+                                    chosen = item.command.clone();
                                     release_keyboard(&mut nav);
                                 }
                                 Some((i, Entry::Submenu(s))) if s.enabled => {
@@ -472,11 +472,11 @@ fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Opt
                     None => response,
                 };
                 let response = match &item.why_disabled {
-                    Some(why) => response.on_disabled_hover_text(why),
+                    Some(why) => response.on_disabled_hover_text(why.text()),
                     None => response,
                 };
                 if response.clicked() {
-                    *chosen = Some(item.command.clone());
+                    *chosen = item.command.clone();
                     ui.close();
                 }
             }
@@ -505,7 +505,7 @@ fn entries(ui: &mut Ui, entries: &[Entry], keyboard: &Keyboard, chosen: &mut Opt
                     }
                 });
                 if let Some(why) = &submenu.why_disabled {
-                    shown.response.on_disabled_hover_text(why);
+                    shown.response.on_disabled_hover_text(why.text());
                 }
             }
             Entry::System(_) => {}
@@ -536,11 +536,13 @@ fn heading(ui: &mut Ui, text: &str, context_menu: bool) {
 
 #[cfg(all(test, not(target_os = "macos")))]
 mod tests {
-    use eframe::egui::{self, Event, Pos2, Rect};
+    use eframe::egui::{self, Event, Modifiers, PointerButton, Pos2, Rect, vec2};
 
     use super::super::{Command, Entry, Item, Kind, Menu, Submenu};
     use super::{keys, show};
-    use crate::app::tool_harness::collect;
+    use crate::app::tool_harness::{
+        assert_no_id_clashes, click_events, raw_input, run_frame, text_at,
+    };
 
     struct Bar {
         ctx: egui::Context,
@@ -555,41 +557,21 @@ mod tests {
         fn frame(&mut self) {
             let mut events = std::mem::take(&mut self.events);
             events.insert(0, Event::ModifiersChanged(self.modifiers));
-            let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 600.0))),
-                events,
-                ..Default::default()
-            };
             let menus = &self.menus;
             let mut chosen = None;
-            let mut output = self.ctx.run_ui(input, |ui| {
+            self.texts = run_frame(&self.ctx, raw_input(vec2(900.0, 600.0), events), |ui| {
                 let typed = keys(ui.ctx(), menus);
                 egui::Panel::top("bar").show(ui, |ui| chosen = show(ui, menus));
                 chosen = chosen.take().or(typed);
             });
-            output.textures_delta.clear();
             if chosen.is_some() {
                 self.chosen = chosen;
             }
-            self.texts.clear();
-            for clipped in &output.shapes {
-                collect(&clipped.shape, &mut self.texts);
-            }
-            let clashes: Vec<_> = self
-                .texts
-                .iter()
-                .filter(|(t, _)| t.contains("use of") || t.contains("is above this"))
-                .collect();
-            assert!(clashes.is_empty(), "egui reports id clashes: {clashes:?}");
+            assert_no_id_clashes(&self.texts);
         }
 
         fn at(&self, text: &str) -> Pos2 {
-            self.texts
-                .iter()
-                .find(|(t, _)| t == text)
-                .unwrap_or_else(|| panic!("no {text:?} on screen: {:?}", self.texts))
-                .1
-                .center()
+            text_at(&self.texts, text)
         }
 
         fn hover(&mut self, text: &str) {
@@ -604,13 +586,8 @@ mod tests {
             let at = self.at(text);
             self.events.push(Event::PointerMoved(at));
             self.frame();
-            for pressed in [true, false] {
-                self.events.push(Event::PointerButton {
-                    pos: at,
-                    button: egui::PointerButton::Primary,
-                    pressed,
-                    modifiers: egui::Modifiers::NONE,
-                });
+            for events in click_events(at, PointerButton::Primary, Modifiers::NONE) {
+                self.events.extend(events);
                 self.frame();
             }
             self.frame();

@@ -17,7 +17,7 @@ use crate::file_diff::{Content, FileDiffSpec, LoadedDiff, Rev, Version, decode};
 use crate::file_history::{self, FileLog};
 use crate::oid::Oid;
 use crate::repo::{Commit, CommitIx, DEFAULT_ABBREV_LEN, GitRef, Head, RefKind, Repo, Worktree};
-use crate::worktree_folder::same_path;
+use crate::worktree_folder::same_path_on_disk;
 
 mod program;
 mod version;
@@ -49,6 +49,18 @@ pub enum GitError {
     Parse(String),
     #[error("could not read {path}: {source}")]
     Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not create {path}: {source}")]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not write {path}: {source}")]
+    Write {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -96,7 +108,7 @@ pub struct Git {
 }
 
 /// Ref names cannot contain control characters.
-const REF_FIELD_SEPARATOR: &str = "\x1f";
+const REF_FIELD_SEPARATOR: char = '\x1f';
 const REF_FIELDS: [&str; 9] = [
     "%(refname)",
     "%(objecttype)",
@@ -111,6 +123,7 @@ const REF_FIELDS: [&str; 9] = [
 /// NUL-separated, so subjects and names may contain anything.
 const LOG_FORMAT: &str = "--format=%H%x00%P%x00%T%x00%an%x00%ae%x00%at%x00%ad%x00%ct%x00%s";
 const LOG_FIELDS: usize = 9;
+const LOG_DATE_FORMAT: &str = "--date=format-local:%Y-%m-%d %H:%M";
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 
@@ -530,7 +543,7 @@ impl Git {
                         "log",
                         "--no-color",
                         "--no-decorate",
-                        "--date=format-local:%Y-%m-%d %H:%M",
+                        LOG_DATE_FORMAT,
                         "-z",
                         LOG_FORMAT,
                         "--stdin",
@@ -603,7 +616,7 @@ impl Git {
                     locked: w.locked.is_some(),
                     // A locked worktree is never prunable, even with its folder gone.
                     missing: w.prunable || !path.is_dir(),
-                    open: has_working_tree && same_path(&path, &root),
+                    open: has_working_tree && same_path_on_disk(&path, &root),
                     path,
                 }
             })
@@ -626,7 +639,10 @@ impl Git {
     /// Run in the repository's root.
     pub(crate) fn list(&self, location: Location) -> Result<Listing, GitError> {
         let root = location.root().to_owned();
-        let ref_format = format!("--format={}", REF_FIELDS.join(REF_FIELD_SEPARATOR));
+        let ref_format = format!(
+            "--format={}",
+            REF_FIELDS.join(&REF_FIELD_SEPARATOR.to_string())
+        );
         let (listing, worktrees) = std::thread::scope(|s| {
             // Listed alongside the refs, and before the walk, which starts from their HEADs
             // too.
@@ -677,7 +693,7 @@ impl Git {
         let open = if location.work_tree.is_some() {
             worktrees
                 .iter()
-                .find(|w| same_path(Path::new(&w.path), &root))
+                .find(|w| same_path_on_disk(Path::new(&w.path), &root))
         } else {
             None
         };
@@ -864,6 +880,24 @@ impl Git {
         Ok(out.and_then(|hex| Oid::from_hex(&hex)))
     }
 
+    pub(crate) fn is_ancestor(&self, ancestor: Oid, of: Oid) -> Result<bool, GitError> {
+        let (ancestor, of) = (ancestor.to_hex(), of.to_hex());
+        Ok(self
+            .query(&["merge-base", "--is-ancestor", &ancestor, &of])?
+            .is_some())
+    }
+
+    /// The commit `rev` names, if it names one.
+    pub(crate) fn resolve_commit(&self, rev: &str) -> Result<Option<Oid>, GitError> {
+        let out = self.query(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ])?;
+        Ok(out.and_then(|hex| Oid::from_hex(&hex)))
+    }
+
     /// As `git diff <commit>` lists them, untracked files left out; `reverse` lists the working
     /// tree against the commit instead. The index is refreshed in memory only.
     pub fn changed_in_working_tree(
@@ -1034,7 +1068,7 @@ impl Git {
             "--parents",
             "--no-color",
             "--no-decorate",
-            file_history::DATE_FORMAT,
+            LOG_DATE_FORMAT,
             "-z",
             file_history::LOG_FORMAT,
         ];
@@ -1197,19 +1231,28 @@ pub fn load_repo(dir: &Path) -> Result<Repo, GitError> {
     Git::new(dir).load()
 }
 
-fn parse_log(log: &str) -> Result<(Vec<Commit>, HashMap<Oid, CommitIx>), GitError> {
-    let mut tokens: Vec<&str> = log.split('\0').collect();
+/// `git log -z` output's fields, `per_record` to a record, or how many there are when that's
+/// not a whole number of records.
+pub(crate) fn log_fields(log: &str, per_record: usize) -> Result<Vec<&str>, usize> {
+    let mut fields: Vec<&str> = log.split('\0').collect();
     // `-z` terminates the last record with a NUL too.
-    if tokens.last() == Some(&"") && tokens.len() % LOG_FIELDS == 1 {
-        tokens.pop();
+    if fields.last() == Some(&"") && fields.len() % per_record == 1 {
+        fields.pop();
     }
-    if !tokens.len().is_multiple_of(LOG_FIELDS) {
-        return Err(GitError::Parse(format!(
-            "log output has {} fields, not a multiple of {LOG_FIELDS}",
-            tokens.len()
-        )));
+    if fields.len().is_multiple_of(per_record) {
+        Ok(fields)
+    } else {
+        Err(fields.len())
     }
-    let (records, _) = tokens.as_chunks::<LOG_FIELDS>();
+}
+
+fn parse_log(log: &str) -> Result<(Vec<Commit>, HashMap<Oid, CommitIx>), GitError> {
+    let fields = log_fields(log, LOG_FIELDS).map_err(|n| {
+        GitError::Parse(format!(
+            "log output has {n} fields, not a multiple of {LOG_FIELDS}"
+        ))
+    })?;
+    let (records, _) = fields.as_chunks::<LOG_FIELDS>();
     let oids = records
         .iter()
         .map(|[hash, ..]| {
@@ -1220,7 +1263,7 @@ fn parse_log(log: &str) -> Result<(Vec<Commit>, HashMap<Oid, CommitIx>), GitErro
     let by_oid: HashMap<Oid, CommitIx> = oids
         .iter()
         .enumerate()
-        .map(|(i, &oid)| (oid, CommitIx(i as u32)))
+        .map(|(i, &oid)| (oid, CommitIx::new(i)))
         .collect();
     let commits = records
         .iter()

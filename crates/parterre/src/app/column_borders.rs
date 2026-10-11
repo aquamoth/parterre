@@ -4,7 +4,7 @@
 use eframe::egui::{CursorIcon, Id, Rect, Sense, Stroke, Ui};
 use parterre_core::columns::{ColumnWidths, Layout};
 
-use super::log_window::Colors;
+use super::table_style::Colors;
 use crate::widgets;
 
 /// `flex` is the column taking what the others leave, down to `flex_min`.

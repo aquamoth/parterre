@@ -117,6 +117,19 @@ pub fn line_number(text: &str, lines: usize) -> Option<usize> {
     (1..=lines).contains(&n).then(|| n - 1)
 }
 
+/// `1 file`, `2 files`.
+pub fn plural(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+}
+
+pub fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 /// The word (or run of blanks, or other character) at character `col` of `text`, as a range
 /// of characters; the last character's when `col` is past the end. `None` for an empty text.
 pub fn word_at(text: &str, col: usize) -> Option<Range<usize>> {
@@ -229,6 +242,15 @@ mod tests {
         ] {
             assert_eq!(line_number(text, 100_000), None, "{text:?}");
         }
+    }
+
+    #[test]
+    fn plurals_and_capitals() {
+        assert_eq!(plural(1, "file"), "1 file");
+        assert_eq!(plural(0, "commit"), "0 commits");
+        assert_eq!(capitalized("a rebase"), "A rebase");
+        assert_eq!(capitalized("ärende"), "Ärende");
+        assert_eq!(capitalized(""), "");
     }
 
     #[test]

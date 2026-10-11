@@ -23,6 +23,7 @@ mod commands;
 mod commit_table;
 mod compare_window;
 mod diff_window;
+mod divider;
 mod file_drop;
 mod file_table;
 mod git_menu;
@@ -39,10 +40,13 @@ mod reset;
 mod revert;
 mod settings_window;
 mod syntax;
+mod table_style;
+mod text_view;
 #[cfg(test)]
 mod tool_harness;
 mod toolbar;
 mod updates;
+mod viewport;
 
 use toolbar::popup_id;
 pub use toolbar::toolbar_button_id;
@@ -68,6 +72,7 @@ use crate::text_size;
 use crate::theme::{Palette, ThemeChoice};
 use crate::usage;
 use crate::view::View;
+use crate::worker;
 use compare_window::CompareRequest;
 
 #[derive(Clone, Copy, Debug)]
@@ -155,56 +160,20 @@ impl Selection {
     }
 }
 
-/// Commit details, fetched from git on a worker thread when first asked for.
 #[derive(Debug, Default)]
-struct Details {
-    /// `None` while loading.
-    cache: HashMap<Oid, Option<Result<CommitDetails, String>>>,
-    rx: Option<mpsc::Receiver<(Oid, Result<CommitDetails, String>)>>,
-    tx: Option<mpsc::Sender<Oid>>,
-    repo_path: Option<PathBuf>,
-}
+struct Details(file_table::Lister<Oid, Result<CommitDetails, String>>);
 
 impl Details {
-    /// `None` while loading. Asked about another folder, such as another worktree, it starts
-    /// afresh.
+    /// `None` while loading.
     fn get(
         &mut self,
         repo_path: &Path,
         oid: Oid,
         ctx: &egui::Context,
     ) -> Option<&Result<CommitDetails, String>> {
-        if self.repo_path.as_deref() != Some(repo_path) {
-            *self = Details {
-                repo_path: Some(repo_path.to_owned()),
-                ..Details::default()
-            };
-        }
-        while let Some(Ok((oid, details))) = self.rx.as_ref().map(|rx| rx.try_recv()) {
-            self.cache.insert(oid, Some(details));
-        }
-        if let std::collections::hash_map::Entry::Vacant(slot) = self.cache.entry(oid) {
-            slot.insert(None);
-            let tx = self.tx.get_or_insert_with(|| {
-                let (req_tx, req_rx) = mpsc::channel::<Oid>();
-                let (res_tx, res_rx) = mpsc::channel();
-                let git = parterre_core::git::Git::new(repo_path);
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    for oid in req_rx {
-                        let details = git.details(&oid).map_err(|e| e.to_string());
-                        if res_tx.send((oid, details)).is_err() {
-                            break;
-                        }
-                        ctx.request_repaint();
-                    }
-                });
-                self.rx = Some(res_rx);
-                req_tx
-            });
-            let _ = tx.send(oid);
-        }
-        self.cache.get(&oid).and_then(Option::as_ref)
+        self.0.get(repo_path, oid, ctx, |git, oid| {
+            git.details(oid).map_err(|e| e.to_string())
+        })
     }
 
     fn message(&mut self, repo_path: &Path, oid: Oid, ctx: &egui::Context) -> Option<String> {
@@ -244,6 +213,25 @@ struct Search {
     request_focus: bool,
 }
 
+/// For the status bar, or the settings window's.
+#[derive(Debug)]
+enum Note {
+    Info(String),
+    Error(String),
+}
+
+impl Note {
+    fn text(&self) -> &str {
+        match self {
+            Note::Info(text) | Note::Error(text) => text,
+        }
+    }
+
+    fn is_error(&self) -> bool {
+        matches!(self, Note::Error(_))
+    }
+}
+
 const CORRUPT_SETTINGS_STATUS: &str = "The saved settings were corrupt: defaults restored";
 
 pub struct ParterreApp {
@@ -279,8 +267,7 @@ pub struct ParterreApp {
     select_after_layout: Vec<Oid>,
     drag: Option<Drag>,
     search: Search,
-    /// The message, and whether it is an error.
-    status: Option<(String, bool)>,
+    status: Option<Note>,
     show_shortcuts: bool,
     show_legend: bool,
     show_settings: bool,
@@ -290,17 +277,14 @@ pub struct ParterreApp {
     export_dir: Option<PathBuf>,
     settings_file_requested: Option<PickFor>,
     settings_dir: Option<PathBuf>,
-    /// The message, and whether it is an error.
-    settings_note: Option<(String, bool)>,
+    settings_note: Option<Note>,
     settings_import: Option<settings_window::Import>,
     confirm_reset_settings: bool,
     details: Details,
     log: log_window::LogWindow,
-    focus_log: bool,
     diffs: diff_window::DiffWindows,
     blames: blame_window::BlameWindows,
     compare: compare_window::CompareWindow,
-    focus_compare: bool,
     merge_tools: merge_tool::MergeTools,
     /// The commit marked for comparison, and its label.
     marked: Option<(Oid, String)>,
@@ -319,7 +303,7 @@ pub struct ParterreApp {
     system_theme: SystemTheme,
     /// The theme last sent to the window, for its title bar.
     window_theme: Option<egui::SystemTheme>,
-    settings_window_theme: Option<egui::SystemTheme>,
+    settings_viewport: viewport::Viewport,
     settings_window_text_size: Option<f32>,
     settings_window_size: Option<Vec2>,
     window_icon: Arc<egui::IconData>,
@@ -356,7 +340,11 @@ impl ParterreApp {
         crate::startup::mark("window created");
         let persist = !automation.is_scripted();
         let storage = cc.storage.filter(|_| persist);
-        let (mut settings, stored, corrupt) = settings_file::load(storage);
+        let settings_file::Loaded {
+            mut settings,
+            stored,
+            corrupt,
+        } = settings_file::load(storage);
         // eframe starts from nothing when its whole file is corrupt.
         let corrupt = corrupt || persist && crate::settings::storage_corrupt();
         let repo_settings = repo
@@ -437,7 +425,7 @@ impl ParterreApp {
             drag: None,
             search: Search::default(),
             status: corrupt
-                .then(|| (CORRUPT_SETTINGS_STATUS.to_owned(), true))
+                .then(|| Note::Error(CORRUPT_SETTINGS_STATUS.to_owned()))
                 .or_else(|| opening.as_ref().and_then(Opening::status)),
             opening,
             reveal,
@@ -455,11 +443,9 @@ impl ParterreApp {
             confirm_reset_settings: false,
             details: Details::default(),
             log: log_window::LogWindow::default(),
-            focus_log: false,
             diffs: diff_window::DiffWindows::new(highlight_engine()),
             blames: blame_window::BlameWindows::new(highlight_engine()),
             compare: compare_window::CompareWindow::default(),
-            focus_compare: false,
             merge_tools: merge_tool::MergeTools::default(),
             marked: None,
             moves,
@@ -477,7 +463,7 @@ impl ParterreApp {
             telemetry,
             system_theme: SystemTheme::watch(&cc.egui_ctx),
             window_theme: None,
-            settings_window_theme: None,
+            settings_viewport: viewport::Viewport::default(),
             settings_window_text_size: None,
             settings_window_size: None,
             window_icon: Arc::new(crate::icon::icon()),
@@ -510,13 +496,7 @@ impl ParterreApp {
                 let pull_requests = self.pull_requests.list().map(|p| &**p);
                 Scene::prepare(repo, &self.settings, pull_requests, &mut width, text_height)
             });
-            let (tx, rx) = mpsc::channel();
-            let repaint = ctx.clone();
-            std::thread::spawn(move || {
-                // The receiver is gone if a newer layout superseded this one.
-                let _ = tx.send(input.lay_out());
-                repaint.request_repaint();
-            });
+            let rx = worker::spawn(ctx, move || input.lay_out());
             let pending = std::mem::take(&mut self.select_after_layout);
             self.job = Some(LayoutJob {
                 rx,
@@ -649,7 +629,7 @@ impl ParterreApp {
 
     fn carried_places(&self) -> Option<Carried> {
         let scene = self.scene.as_ref()?;
-        let hex = |node: usize| node_oid(scene, node).to_hex();
+        let hex = |node: usize| scene.node_oid(node).to_hex();
         let places = scene.net.rest_places().map(|p| {
             let place = CarriedPlace {
                 offset: (p.offset.x, p.offset.y),
@@ -705,14 +685,14 @@ impl ParterreApp {
             })
         })?;
         Some((
-            node_oid(scene, node),
+            scene.node_oid(node),
             self.view.to_screen(self.canvas, scene.node_center(node)),
         ))
     }
 
     fn selected_commit(&self) -> Option<Oid> {
         let scene = self.scene.as_ref()?;
-        Some(node_oid(scene, self.selection.current()?))
+        Some(scene.node_oid(self.selection.current()?))
     }
 
     /// The current node's commit last.
@@ -723,7 +703,7 @@ impl ParterreApp {
         self.selection
             .nodes
             .iter()
-            .map(|&n| node_oid(scene, n))
+            .map(|&n| scene.node_oid(n))
             .collect()
     }
 
@@ -731,7 +711,7 @@ impl ParterreApp {
     fn selected_edge_commits(&self) -> Option<(Oid, Oid)> {
         let scene = self.scene.as_ref()?;
         let edge = scene.graph.edges[self.selected_edge?];
-        let oid = |node: u32| node_oid(scene, node as usize);
+        let oid = |node: u32| scene.node_oid(node as usize);
         Some((oid(edge.child), oid(edge.parent)))
     }
 
@@ -741,7 +721,7 @@ impl ParterreApp {
         frame: &eframe::Frame,
     ) -> Option<rfd::AsyncFileDialog> {
         let (Some(repo), Some(_)) = (&self.repo, &self.scene) else {
-            self.status = Some(("Nothing to export yet".into(), true));
+            self.status = Some(Note::Error("Nothing to export yet".into()));
             return None;
         };
         let ext = format.extension();
@@ -777,8 +757,8 @@ impl ParterreApp {
         let ppp = ctx.native_pixels_per_point().unwrap_or(1.0);
         self.status = Some(
             match export::write(&path, format, scene, &self.settings, &palette, zoom, ppp) {
-                Ok(what) => (format!("Saved {} ({what})", path.display()), false),
-                Err(e) => (format!("Could not save {}: {e}", path.display()), true),
+                Ok(what) => Note::Info(format!("Saved {} ({what})", path.display())),
+                Err(e) => Note::Error(format!("Could not save {}: {e}", path.display())),
             },
         );
     }
@@ -793,7 +773,10 @@ impl ParterreApp {
                 if matches!(e, parterre_core::git::GitError::NotARepository(_)) {
                     self.recent.remove(dir);
                 }
-                self.status = Some((format!("Could not open {}: {e}", dir.display()), true));
+                self.status = Some(Note::Error(format!(
+                    "Could not open {}: {e}",
+                    dir.display()
+                )));
             }
         }
     }
@@ -921,16 +904,16 @@ impl ParterreApp {
                 let corrupt = self
                     .status
                     .as_ref()
-                    .is_some_and(|(message, _)| message == CORRUPT_SETTINGS_STATUS);
+                    .is_some_and(|note| note.text() == CORRUPT_SETTINGS_STATUS);
                 self.show_opened(repo);
                 if corrupt {
-                    self.status = Some((CORRUPT_SETTINGS_STATUS.to_owned(), true));
+                    self.status = Some(Note::Error(CORRUPT_SETTINGS_STATUS.to_owned()));
                 }
             }
             Err(e) if opening.named => {
                 let message = format!("Could not open {}: {e}", opening.path.display());
                 eprintln!("parterre: {message}");
-                self.status = Some((message, true));
+                self.status = Some(Note::Error(message));
             }
             // The current directory, tried for want of a name, seldom is a repository.
             Err(_) => self.status = None,
@@ -944,7 +927,7 @@ impl ParterreApp {
         self.branches.look_at_once();
         match parterre_core::git::load_repo(&path) {
             Ok(repo) => self.show_reloaded(repo),
-            Err(e) => self.status = Some((format!("Reload failed: {e}"), true)),
+            Err(e) => self.status = Some(Note::Error(format!("Reload failed: {e}"))),
         }
     }
 
@@ -964,11 +947,9 @@ impl ParterreApp {
             return;
         }
         usage::action(usage::Action::Reload);
-        let (tx, rx) = mpsc::channel();
-        let (dir, ctx) = (path.clone(), ctx.clone());
-        std::thread::spawn(move || {
-            let _ = tx.send(parterre_core::git::load_repo(&dir).map_err(|e| e.to_string()));
-            ctx.request_repaint();
+        let dir = path.clone();
+        let rx = worker::spawn(ctx, move || {
+            parterre_core::git::load_repo(&dir).map_err(|e| e.to_string())
         });
         self.reloading = Some((path, rx));
     }
@@ -994,7 +975,7 @@ impl ParterreApp {
         let Some((path, rx)) = &self.reloading else {
             return;
         };
-        let Some(result) = try_result(rx, "it stopped unexpectedly") else {
+        let Some(result) = worker::received(rx, || Err("it stopped unexpectedly".into())) else {
             return;
         };
         let path = path.clone();
@@ -1010,7 +991,7 @@ impl ParterreApp {
                 // A graph that hasn't changed looks the same: say it was reloaded.
                 self.branches.inform(ctx, path, "Reloaded");
             }
-            Err(e) => self.status = Some((format!("Reload failed: {e}"), true)),
+            Err(e) => self.status = Some(Note::Error(format!("Reload failed: {e}"))),
         }
     }
 
@@ -1053,7 +1034,7 @@ impl ParterreApp {
                         self.import_settings(Path::new(arg));
                     }
                     return match &self.settings_note {
-                        Some((note, true)) => Err(note.clone()),
+                        Some(Note::Error(note)) => Err(note.clone()),
                         _ => Ok(true),
                     };
                 }
@@ -1153,15 +1134,9 @@ impl ParterreApp {
             "fetch" => branches::Request::Run(parterre_core::branches::Action::Fetch),
             "pull" => {
                 let head = catalog.head.ok_or("HEAD has no commit")?;
-                let branch = parterre_core::remote::pull_offered(&catalog, head)
+                let (_, pull) = remote::pull_at(&catalog, head)
                     .ok_or("the current branch has no upstream to pull")?;
-                branches::Request::Run(parterre_core::branches::Action::Pull(Box::new(
-                    parterre_core::remote::Pull {
-                        branch: branch.name.clone(),
-                        head,
-                        how: None,
-                    },
-                )))
+                pull
             }
             "push" => {
                 let (branch, remote) = match name.split_once(':') {
@@ -1243,7 +1218,10 @@ impl ParterreApp {
                 self.watcher = None;
             }
             Err(e) => {
-                self.status = Some((format!("Could not go to {}: {e}", path.display()), true));
+                self.status = Some(Note::Error(format!(
+                    "Could not go to {}: {e}",
+                    path.display()
+                )));
             }
         }
     }
@@ -1264,7 +1242,7 @@ impl ParterreApp {
             self.marked = Some((oid, self.commit_label(oid)));
         }
         self.requested_options = None;
-        self.status = Some((status.into(), false));
+        self.status = Some(Note::Info(status.into()));
     }
 
     fn auto_reload(&mut self, ctx: &egui::Context) {
@@ -1305,7 +1283,7 @@ impl ParterreApp {
                     _ => 0,
                 };
                 if asked {
-                    self.status = Some((pull_requests::loaded_status(count, here), false));
+                    self.status = Some(Note::Info(pull_requests::loaded_status(count, here)));
                 }
                 self.requested_options = None;
             }
@@ -1346,7 +1324,7 @@ impl ParterreApp {
             pull_requests::DialogAnswer::Close => self.pull_requests_error = None,
             pull_requests::DialogAnswer::Install => {
                 if let Err(e) = crate::browser::open(GH_INSTALL_URL) {
-                    self.status = Some((e, true));
+                    self.status = Some(Note::Error(e));
                 }
             }
         }
@@ -1644,13 +1622,13 @@ impl ParterreApp {
                         scene.node_count(),
                         scene.graph.visible_commits,
                     ));
-                    if let Some((message, error)) = &self.status {
+                    if let Some(note) = &self.status {
                         ui.separator();
-                        status_label(ui, message, *error);
+                        status_label(ui, note);
                     }
                 });
-            } else if let Some((message, error)) = &self.status {
-                status_label(ui, message, *error);
+            } else if let Some(note) = &self.status {
+                status_label(ui, note);
             }
         });
     }
@@ -1697,9 +1675,9 @@ impl ParterreApp {
                     }
                 });
             });
-            if let Some((message, true)) = &self.status {
+            if let Some(note @ Note::Error(_)) = &self.status {
                 ui.add_space(10.0);
-                status_label(ui, message, true);
+                status_label(ui, note);
             }
             if !self.recent.is_empty() {
                 ui.add_space(24.0);
@@ -2085,9 +2063,9 @@ impl ParterreApp {
             .show(ctx, |ui| {
                 open_colours = crate::dialogs::fields(ui, |ui| legend(ui, &palette, rules));
                 ui.separator();
-                crate::dialogs::actions(ui, "", false, false, false)
+                crate::dialogs::close_only(ui)
             });
-        if shown.inner == crate::dialogs::Answer::Cancel || shown.should_close() {
+        if shown.answer() == crate::dialogs::Answer::Cancel {
             self.show_legend = false;
         }
         if open_colours {
@@ -2106,9 +2084,9 @@ impl ParterreApp {
             .show(ctx, |ui| {
                 crate::dialogs::fields(ui, shortcuts);
                 ui.separator();
-                crate::dialogs::actions(ui, "", false, false, false)
+                crate::dialogs::close_only(ui)
             });
-        if shown.inner == crate::dialogs::Answer::Cancel || shown.should_close() {
+        if shown.answer() == crate::dialogs::Answer::Cancel {
             self.show_shortcuts = false;
         }
     }
@@ -2145,14 +2123,10 @@ fn node_tooltip(ui: &mut Ui, scene: &Scene, node: usize, details: &mut Details) 
             if !body.is_empty() {
                 let body = body
                     .lines()
-                    .take(TOOLTIP_BODY_MAX_LINES)
+                    .take(MESSAGE_TIP_MAX_LINES)
                     .collect::<Vec<_>>()
                     .join("\n");
-                ui.label(
-                    body.chars()
-                        .take(TOOLTIP_BODY_MAX_CHARS)
-                        .collect::<String>(),
-                );
+                ui.label(body.chars().take(MESSAGE_TIP_MAX_CHARS).collect::<String>());
             }
         }
         None => {
@@ -2508,12 +2482,12 @@ impl Opening {
     }
 
     fn poll(&self) -> Option<Result<Repo, String>> {
-        try_result(&self.rx, "loading stopped unexpectedly")
+        worker::received(&self.rx, || Err("loading stopped unexpectedly".into()))
     }
 
-    fn status(&self) -> Option<(String, bool)> {
+    fn status(&self) -> Option<Note> {
         self.named
-            .then(|| (format!("Opening {}…", self.path.display()), false))
+            .then(|| Note::Info(format!("Opening {}…", self.path.display())))
     }
 
     /// The one the repository will have, so that it doesn't change when the repository is in.
@@ -2526,15 +2500,6 @@ impl Opening {
 
     fn name(&self) -> Option<String> {
         self.named.then(|| name_and_place(&self.path).0)
-    }
-}
-
-/// `None` while `rx` waits; `gone` if its sender is gone without sending.
-fn try_result<T>(rx: &mpsc::Receiver<Result<T, String>>, gone: &str) -> Option<Result<T, String>> {
-    match rx.try_recv() {
-        Ok(result) => Some(result),
-        Err(mpsc::TryRecvError::Empty) => None,
-        Err(mpsc::TryRecvError::Disconnected) => Some(Err(gone.to_owned())),
     }
 }
 
@@ -2591,23 +2556,19 @@ fn node_name(scene: &Scene, node: u32) -> String {
     }
 }
 
-fn node_oid(scene: &Scene, node: usize) -> Oid {
-    scene.repo.commit(scene.graph.nodes[node].commit).oid
-}
-
 fn resolve_oid(repo: &Repo, name: &str) -> Result<Oid, String> {
     repo.resolve(name)
         .map(|c| repo.commit(c).oid)
         .ok_or_else(|| format!("no commit named {name}"))
 }
 
-fn status_label(ui: &mut Ui, message: &str, error: bool) {
-    let color = if error {
+fn status_label(ui: &mut Ui, note: &Note) {
+    let color = if note.is_error() {
         Color32::RED
     } else {
         ui.visuals().weak_text_color()
     };
-    ui.colored_label(color, message);
+    ui.colored_label(color, note.text());
 }
 
 impl ParterreApp {
@@ -2637,8 +2598,8 @@ const GH_INSTALL_URL: &str = "https://github.com/cli/cli#installation";
 const WELCOME_RECENT_COUNT: usize = 5;
 const HEAD_MIN_ZOOM: f32 = 0.6;
 const ARROW_KEY_PAN: f32 = 60.0;
-const TOOLTIP_BODY_MAX_LINES: usize = 40;
-const TOOLTIP_BODY_MAX_CHARS: usize = 4000;
+const MESSAGE_TIP_MAX_LINES: usize = 40;
+const MESSAGE_TIP_MAX_CHARS: usize = 4000;
 const EDGE_TOOLTIP_MAX_COMMITS: usize = 12;
 const LEGEND_SWATCH_SIZE: Vec2 = vec2(150.0, 20.0);
 
@@ -2702,7 +2663,7 @@ impl ParterreApp {
     fn open_pull_request(&mut self, url: &str) {
         usage::action(usage::Action::OpenPullRequest);
         if let Err(e) = crate::browser::open(url) {
-            self.status = Some((e, true));
+            self.status = Some(Note::Error(e));
         }
     }
 
@@ -2718,7 +2679,7 @@ impl ParterreApp {
             }
         };
         if let Err(e) = opened {
-            self.status = Some((e, true));
+            self.status = Some(Note::Error(e));
         }
     }
 
@@ -2820,10 +2781,16 @@ impl eframe::App for ParterreApp {
         self.update_check(&ctx);
         self.ensure_scene(&ctx);
         self.view_at_frame_start = self.view;
-        self.menu_bar_keys(&ctx);
+        let menus = self.menu_bar_keys(&ctx);
+        // The window's keys may change what the menus show.
+        let window_keys = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))
+        });
         self.handle_keys(&ctx);
 
-        self.menu_bar(ui);
+        self.menu_bar(ui, menus.filter(|_| !window_keys));
         egui::Panel::top("toolbar")
             .frame(
                 egui::Frame::side_top_panel(&ctx.global_style())
@@ -2836,7 +2803,7 @@ impl eframe::App for ParterreApp {
         let banner = self.branches.banner_shown();
         if let (Some(repo), Some(catalog)) = (&self.repo, &self.branches.catalog)
             && banner
-            && let Some(rebase::BannerClick::Compare(head)) = rebase::banner(ui, repo, catalog)
+            && let Some(head) = rebase::banner(ui, repo, catalog)
         {
             self.compare_request(CompareRequest::WorkingTree(head));
         }
@@ -2862,7 +2829,7 @@ impl eframe::App for ParterreApp {
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
         if let Some(error) = self.about.show(&ctx) {
-            self.status = Some((error, true));
+            self.status = Some(Note::Error(error));
         }
         self.release_dialog(&ctx);
         self.file_drop(&ctx);
@@ -2872,7 +2839,7 @@ impl eframe::App for ParterreApp {
         self.branches.show(&ctx, &palette, &self.settings.graph);
         self.merge_tools.show(&ctx);
         if let Some(e) = self.merge_tools.error.take() {
-            self.status = Some((e, true));
+            self.status = Some(Note::Error(e));
         }
         for (repo, spec) in std::mem::take(&mut self.branches.diff_requests) {
             self.diffs

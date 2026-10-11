@@ -11,7 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui::{self, Align, Color32, Id, Layout, Pos2, RichText, Ui, Vec2, ViewportId, vec2};
-use parterre_core::{Commit, glyphs::Glyph};
+use parterre_core::glyphs::Glyph;
+use parterre_core::{Oid, Repo};
 
 use crate::{menu, widgets};
 
@@ -152,6 +153,17 @@ impl<R> Shown<R> {
     /// Closed from its title bar.
     pub fn should_close(&self) -> bool {
         self.close
+    }
+
+    /// The content's answer, or `closed` once the window is closed.
+    pub fn or_closed(self, closed: R) -> R {
+        if self.close { closed } else { self.inner }
+    }
+}
+
+impl Shown<Answer> {
+    pub fn answer(self) -> Answer {
+        self.or_closed(Answer::Cancel)
     }
 }
 
@@ -839,30 +851,73 @@ pub enum Answer {
     Cancel,
 }
 
-/// Destructive dialogs always treat Enter as Cancel. Only an explicit click accepts loss.
-pub fn actions(
-    ui: &mut Ui,
-    label: &str,
+/// The button beside *Cancel* that answers [`Answer::Primary`].
+#[derive(Clone, Copy, Debug)]
+pub struct Primary<'a> {
+    label: &'a str,
     enabled: bool,
     destructive: bool,
     focus_cancel: bool,
-) -> Answer {
+}
+
+impl<'a> Primary<'a> {
+    pub fn new(label: &'a str) -> Self {
+        Primary {
+            label,
+            enabled: true,
+            destructive: false,
+            focus_cancel: false,
+        }
+    }
+
+    pub fn enabled(self, enabled: bool) -> Self {
+        Primary { enabled, ..self }
+    }
+
+    /// Red, and Enter cancels: only an explicit click accepts loss.
+    pub fn destructive(self, destructive: bool) -> Self {
+        Primary {
+            destructive,
+            ..self
+        }
+    }
+
+    pub fn focus_cancel(self, focus_cancel: bool) -> Self {
+        Primary {
+            focus_cancel,
+            ..self
+        }
+    }
+}
+
+/// `primary` and *Cancel*, which Esc clicks too.
+pub fn actions(ui: &mut Ui, primary: Primary) -> Answer {
+    action_row(ui, Some(primary))
+}
+
+/// *Close* alone, which Esc clicks too, for a dialog that only informs.
+pub fn close_only(ui: &mut Ui) -> Answer {
+    action_row(ui, None)
+}
+
+fn action_row(ui: &mut Ui, primary: Option<Primary>) -> Answer {
     let mut answer = Answer::Open;
+    let destructive = primary.is_some_and(|p| p.destructive);
     let size = vec2(ui.available_width(), 34.0);
     ui.allocate_ui_with_layout(size, Layout::right_to_left(Align::Center), |ui| {
-        if !label.is_empty() {
+        if let Some(primary) = primary {
             let ok = ui
-                .add_enabled_ui(enabled, |ui| {
+                .add_enabled_ui(primary.enabled, |ui| {
                     if destructive {
                         let color = ui.visuals().error_fg_color;
                         ui.add(
-                            egui::Button::new(RichText::new(label).color(Color32::WHITE))
+                            egui::Button::new(RichText::new(primary.label).color(Color32::WHITE))
                                 .fill(color)
                                 .corner_radius(8)
                                 .min_size(vec2(90.0, 30.0)),
                         )
                     } else {
-                        widgets::primary_button(ui, label, 90.0)
+                        widgets::primary_button(ui, primary.label, 90.0)
                     }
                 })
                 .inner;
@@ -870,8 +925,8 @@ pub fn actions(
                 answer = Answer::Primary;
             }
         }
-        let cancel = widgets::text_button(ui, if label.is_empty() { "Close" } else { "Cancel" });
-        if focus_cancel {
+        let cancel = widgets::text_button(ui, if primary.is_some() { "Cancel" } else { "Close" });
+        if primary.is_some_and(|p| p.focus_cancel) {
             cancel.request_focus();
         }
         if cancel.has_focus() {
@@ -976,22 +1031,9 @@ pub fn command_box(ui: &mut Ui, commands: &[String]) {
                         wrapped_commands(ui, commands, w - 16.0);
                     });
                 });
-                // A check mark for a moment after a click.
-                let copied_id = egui::Id::new("copied-command").with(&text);
-                let now = ui.input(|i| i.time);
-                let at: Option<f64> = ui.data(|d| d.get_temp(copied_id));
-                let copied = at.is_some_and(|at| now - at < 1.5);
-                if copied {
-                    ui.ctx().request_repaint_after(Duration::from_millis(300));
-                }
-                let done = Color32::from_rgb(0x2e, 0xa0, 0x43);
-                if widgets::copy_button(ui, copied, done)
-                    .on_hover_text("Copy, to run in a terminal")
-                    .clicked()
-                {
-                    ui.ctx().copy_text(text.clone());
-                    ui.data_mut(|d| d.insert_temp(copied_id, now));
-                }
+                let id = Id::new("copied-command").with(&text);
+                let hover = "Copy, to run in a terminal";
+                widgets::copy_button(ui, id, || text.clone(), hover, widgets::COPIED_GREEN);
             });
         });
 }
@@ -1066,9 +1108,14 @@ fn wrapped_commands(ui: &mut Ui, commands: &[String], width: f32) {
     }
 }
 
-/// One subtitle row, matching a log commit. Returns whether its hash was clicked.
-pub fn commit_line(ui: &mut Ui, commit: &Commit, abbrev: usize) -> bool {
+/// One subtitle row, matching a log commit, if `repo` has `oid`. Returns whether its hash was
+/// clicked.
+pub fn commit_line(ui: &mut Ui, repo: &Repo, oid: Oid) -> bool {
     const TEXT_SIZE: f32 = 12.0;
+    let Some(ix) = repo.lookup(&oid) else {
+        return false;
+    };
+    let commit = repo.commit(ix);
     let mut clicked = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
@@ -1082,7 +1129,7 @@ pub fn commit_line(ui: &mut Ui, commit: &Commit, abbrev: usize) -> bool {
         ui.label(RichText::new("at").weak().size(TEXT_SIZE));
         clicked = ui
             .link(
-                RichText::new(commit.oid.short(abbrev))
+                RichText::new(commit.oid.short(repo.abbrev_len))
                     .monospace()
                     .size(TEXT_SIZE),
             )
@@ -1116,6 +1163,55 @@ pub fn commit_line(ui: &mut Ui, commit: &Commit, abbrev: usize) -> bool {
         ui.label(RichText::new(&commit.author_date).weak().size(TEXT_SIZE));
     });
     clicked
+}
+
+/// A radio button, `name_width` wide so that the help after each starts at the same edge, with
+/// `flag` on hover. Clicking the help picks it too. Returns whether it was picked.
+pub fn radio_with_help(
+    ui: &mut Ui,
+    selected: bool,
+    name: &str,
+    name_width: f32,
+    flag: &str,
+    help: String,
+) -> bool {
+    ui.horizontal_top(|ui| {
+        let radio = ui
+            .allocate_ui_with_layout(
+                vec2(name_width, 18.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_min_width(name_width);
+                    ui.radio(selected, name)
+                },
+            )
+            .inner
+            .on_hover_text(flag);
+        let help = ui.add(
+            egui::Label::new(RichText::new(help).small().weak())
+                .wrap()
+                .sense(egui::Sense::click()),
+        );
+        radio.clicked() || help.clicked()
+    })
+    .inner
+}
+
+/// An amber box for something to be aware of that isn't lost work.
+pub fn caution(ui: &mut Ui, content: impl FnOnce(&mut Ui)) {
+    let color = if ui.visuals().dark_mode {
+        Color32::from_rgb(240, 191, 95)
+    } else {
+        Color32::from_rgb(139, 86, 0)
+    };
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.10))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.visuals_mut().override_text_color = Some(color);
+            content(ui);
+        });
 }
 
 /// A non-editable dropdown, styled like the dialog's text fields. Returns true for an explicit
@@ -1222,7 +1318,10 @@ mod tests {
             };
             let mut answer = Answer::Open;
             let mut output = ctx.run_ui(input, |ui| {
-                answer = actions(ui, "Delete anyway", true, true, true);
+                let primary = Primary::new("Delete anyway")
+                    .destructive(true)
+                    .focus_cancel(true);
+                answer = actions(ui, primary);
             });
             output.textures_delta.clear();
             assert_eq!(answer, Answer::Cancel, "{key:?}");
@@ -1413,7 +1512,7 @@ mod tests {
                             ui.label(format!("row {i}"));
                         }
                     });
-                    actions(ui, "OK", true, false, false)
+                    actions(ui, Primary::new("OK"))
                 });
         });
         output.textures_delta.clear();

@@ -2,33 +2,16 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::TestRepo;
-use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Catalog, Outcome};
+use common::{TestRepo, done, failed, git_fails, git_with_system_config, rev};
+use parterre_core::branches::{Action, Catalog, Outcome};
 use parterre_core::reset::{self, Lost, Mode, Preview};
-use parterre_util::CancelTree;
-
-fn rev(r: &TestRepo, rev: &str) -> Oid {
-    Oid::from_hex(&r.git(&["rev-parse", rev])).unwrap()
-}
 
 fn preview(r: &TestRepo, target: &str) -> Preview {
     Preview::load(r.path(), rev(r, target)).unwrap()
 }
 
 fn execute(r: &TestRepo, reset: reset::Reset) -> Outcome {
-    Branches::new(r.path()).execute(Action::Reset(Box::new(reset)), None, &CancelTree::default())
-}
-
-fn done(out: Outcome) {
-    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
-}
-
-fn failed(out: Outcome) -> String {
-    match out {
-        Outcome::Failed { error, .. } => error.to_string(),
-        other => panic!("expected a failure: {other:?}"),
-    }
+    common::execute(r, Action::Reset(Box::new(reset)), None)
 }
 
 fn read(r: &TestRepo, path: &str) -> String {
@@ -36,21 +19,14 @@ fn read(r: &TestRepo, path: &str) -> String {
 }
 
 fn real_status(r: &TestRepo, paths: &BTreeSet<String>) -> BTreeSet<String> {
-    // Not trimmed, as `TestRepo::git` has it: the first line may start with a space. With the
-    // system's git config, as parterre's own git runs.
-    let out = std::process::Command::new(parterre_core::git::program())
-        .current_dir(r.path())
-        .args([
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--no-renames",
-        ])
-        .output()
-        .unwrap();
-    String::from_utf8(out.stdout)
-        .unwrap()
+    let status = [
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--no-renames",
+    ];
+    git_with_system_config(r.path(), &status)
         .split('\0')
         .filter(|e| e.len() > 3 && paths.contains(&e[3..]))
         .map(str::to_owned)
@@ -214,7 +190,6 @@ fn hard_loses_every_uncommitted_change() {
     done(execute(&r, p.reset(Mode::Hard)));
     assert_eq!(read(&r, "lib.txt"), "lib\n");
     assert!(!r.path().join("new.txt").exists());
-    // Asked as parterre asks, with the system's git config (`core.autocrlf` on Windows).
     let everything = ["lib.txt", "new.txt", "a.txt", "notes.txt"]
         .map(String::from)
         .into();
@@ -411,13 +386,7 @@ fn no_reset_is_offered_detached_mid_merge_or_where_the_branch_is() {
     r.write("a.txt", b"theirs\n");
     r.commit_all("theirs");
     r.checkout("main");
-    let out = std::process::Command::new(parterre_core::git::program())
-        .current_dir(r.path())
-        .args(["merge", "-q", "other"])
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "the merge stops on a conflict");
+    git_fails(r.path(), &["merge", "-q", "other"]);
     let catalog = Catalog::load(r.path()).unwrap();
     let why = reset::branch(&catalog, base).unwrap_err();
     assert!(why.contains("merge is in progress"), "{why}");

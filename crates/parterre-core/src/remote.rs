@@ -9,9 +9,10 @@ use parterre_util::CancelTree;
 
 use crate::branches::{
     Action, Attention, Catalog, Deletion, Error, LocalBranch, Report, Step, Warning, all_commits,
-    git_args, is_ancestor, lost_commits, resolve_commit, run_or_fail, same_losses,
+    lost_commits, same_losses,
 };
 use crate::git::{Git, GitError};
+use crate::operation::{git_args, in_progress, refuse_if_moved_or_stuck, run_or_fail, stopped};
 use crate::upstream::Side;
 use crate::{Oid, Repo};
 
@@ -313,7 +314,7 @@ pub(crate) fn pull(
     live: Option<&Live>,
 ) -> Result<Option<Diverged>, Error> {
     let branch = pull.branch.as_str();
-    catalog.check_unmoved(branch, pull.head)?;
+    refuse_if_moved_or_stuck(catalog, branch, pull.head)?;
     let Some(upstream) = catalog
         .locals
         .iter()
@@ -350,7 +351,7 @@ pub(crate) fn pull(
     let pulled = run_live(&git, pull_command(pull.how), cancel, report, live)?;
     let after = Catalog::load(&catalog.root)?;
     if after.stuck().is_some() {
-        report.attention = Some(Attention::stopped("Pull", after.conflicted.len()));
+        report.attention = Some(in_progress(stopped("Pull", after.conflicted.len())));
         return Ok(None);
     }
     if !pulled {
@@ -391,16 +392,16 @@ pub(crate) fn push(
     let git = Git::new(&catalog.root);
     let tracking = push.tracking_ref();
     let theirs_name = push.remote_branch();
-    let theirs = resolve_commit(&git, &tracking)?;
+    let theirs = git.resolve_commit(&tracking)?;
     if let Some(theirs) = theirs
-        && is_ancestor(&git, push.tip, theirs)?
+        && git.is_ancestor(push.tip, theirs)?
     {
         return Err(Error::Invalid(format!(
             "{theirs_name} has every commit of {branch}: there's nothing to push."
         )));
     }
     let force = match theirs {
-        Some(theirs) if !is_ancestor(&git, theirs, push.tip)? => Some(theirs),
+        Some(theirs) if !git.is_ancestor(theirs, push.tip)? => Some(theirs),
         _ => None,
     };
     if force.is_some() {
@@ -439,7 +440,7 @@ pub(crate) fn push(
     if !run_live(&git, fetch, cancel, report, live)? {
         return Err(failed_without_prompt(&pushed));
     }
-    match resolve_commit(&git, &tracking)? {
+    match git.resolve_commit(&tracking)? {
         // The lease held, so it was `--force-if-includes`: the remote's commits were fetched,
         // but never on the branch.
         now if force.is_some() && push.to == push.branch && now == theirs => {
@@ -448,7 +449,7 @@ pub(crate) fn push(
                  them. Take them into {branch} first.\n\n{pushed}"
             )))
         }
-        Some(now) if !is_ancestor(&git, now, push.tip)? => Err(Error::Failed(format!(
+        Some(now) if !git.is_ancestor(now, push.tip)? => Err(Error::Failed(format!(
             "{theirs_name} has commits you don't have."
         ))),
         _ => Err(Error::Failed(pushed)),
@@ -807,7 +808,7 @@ fn network_command(git: &Git, args: &[String]) -> std::process::Command {
     command
 }
 
-/// Runs a git command as [`crate::branches::run`] does, streaming its output to `live` as it
+/// Runs a git command as [`crate::operation::run`] does, streaming its output to `live` as it
 /// comes.
 pub(crate) fn run_live(
     git: &Git,

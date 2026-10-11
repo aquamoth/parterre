@@ -320,7 +320,7 @@ pub fn banner_texts(dir: &Path) -> Vec<String> {
 }
 
 /// What clicking `click` in the banner of the repository at `dir` asks for.
-pub fn banner_click(dir: &Path, click: &str) -> Option<super::rebase::BannerClick> {
+pub fn banner_click(dir: &Path, click: &str) -> Option<Oid> {
     let (repo, catalog) = load(dir);
     let banner = |ui: &mut egui::Ui| super::rebase::banner(ui, &repo, &catalog);
     show_and_click(vec2(1200.0, 600.0), banner, Some(click)).1

@@ -1,43 +1,28 @@
+mod common;
+
+use common::Rng;
 use parterre_core::layout::rank::{limit_width, rank};
 use parterre_core::layout::{
     self, Direction, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking, Trunk,
 };
 use std::collections::HashMap;
 
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn below(&mut self, n: u64) -> u64 {
-        if n == 0 { 0 } else { self.next() % n }
-    }
-    fn chance(&mut self, p: f64) -> bool {
-        (self.next() % 1_000_000) as f64 / 1e6 < p
-    }
-}
-
 #[derive(Clone, Copy)]
 struct Oddities {
     duplicate_edges: bool,
     self_loops: bool,
-    /// Nodes out of topological order.
-    shuffled: bool,
+    out_of_topological_order: bool,
 }
 
 const PLAIN: Oddities = Oddities {
     duplicate_edges: false,
     self_loops: false,
-    shuffled: false,
+    out_of_topological_order: false,
 };
 
-/// A random DAG.
-fn random_input(rng: &mut Rng, n: usize, oddities: Oddities) -> LayoutInput {
+fn random_dag(rng: &mut Rng, n: usize, oddities: Oddities) -> LayoutInput {
     let mut perm: Vec<usize> = (0..n).collect();
-    if oddities.shuffled {
+    if oddities.out_of_topological_order {
         for i in (1..n).rev() {
             let j = rng.below(i as u64 + 1) as usize;
             perm.swap(i, j);
@@ -167,8 +152,7 @@ fn minlen_ok(input: &LayoutInput, layers: &[i64]) -> bool {
     })
 }
 
-/// By brute force, for tiny graphs.
-fn brute_optimum(input: &LayoutInput) -> i64 {
+fn brute_force_optimum(input: &LayoutInput) -> i64 {
     let n = input.sizes.len();
     let maxr = (2 * n) as i64;
     let mut best = i64::MAX;
@@ -198,13 +182,13 @@ fn rank_all_modes_valid_random_dags() {
     let mut rng = Rng(0x9E3779B97F4A7C15);
     for iter in 0..600 {
         let n = 1 + rng.below(if iter % 10 == 0 { 300 } else { 40 }) as usize;
-        let input = random_input(
+        let input = random_dag(
             &mut rng,
             n,
             Oddities {
                 duplicate_edges: true,
                 self_loops: true,
-                shuffled: iter % 2 == 0,
+                out_of_topological_order: iter % 2 == 0,
             },
         );
         for r in Ranking::ALL {
@@ -235,18 +219,18 @@ fn simplex_is_optimal_on_tiny_graphs() {
     let mut failures = 0;
     for iter in 0..100 {
         let n = 1 + rng.below(5) as usize;
-        let input = random_input(
+        let input = random_dag(
             &mut rng,
             n,
             Oddities {
                 duplicate_edges: true,
                 self_loops: false,
-                shuffled: true,
+                out_of_topological_order: true,
             },
         );
         let ns = rank(&input, Ranking::Compact);
         let got = weighted_length(&input, &ns);
-        let opt = brute_optimum(&input);
+        let opt = brute_force_optimum(&input);
         if got != opt {
             failures += 1;
             if failures < 5 {
@@ -373,13 +357,13 @@ fn layout_invariants_random() {
     let mut rng = Rng(0xDEADBEEF);
     for iter in 0..300 {
         let n = rng.below(if iter % 10 == 0 { 200 } else { 30 }) as usize;
-        let input = random_input(
+        let input = random_dag(
             &mut rng,
             n,
             Oddities {
                 duplicate_edges: iter % 3 == 0,
                 self_loops: iter % 5 == 0,
-                shuffled: iter % 2 == 0,
+                out_of_topological_order: iter % 2 == 0,
             },
         );
         for ranking in Ranking::ALL {
@@ -571,7 +555,7 @@ fn perf_many_components_and_big_random() {
     }
     let mut rng = Rng(777);
     for n in [5_000usize, 15_000] {
-        let inp = random_input(&mut rng, n, PLAIN);
+        let inp = random_dag(&mut rng, n, PLAIN);
         let t = Instant::now();
         let _ = rank(&inp, Ranking::Compact);
         eprintln!(
@@ -609,7 +593,7 @@ fn perf_many_components_and_big_random() {
 }
 
 #[test]
-fn limit_width_long_edges() {
+fn limiting_the_layer_width_lays_out_thousands_of_pairs() {
     use std::time::Instant;
     for n in [2_000usize, 8_000] {
         let edges = (0..n / 2)

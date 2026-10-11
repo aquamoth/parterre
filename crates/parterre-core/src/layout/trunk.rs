@@ -42,11 +42,11 @@ pub fn sides(
     // The trunk: first parents from the anchor down. Where the graph dropped a merge's first
     // parent as redundant (it is an ancestor of another parent), the line goes on through the
     // edge that is left.
-    let mut next: Vec<Option<usize>> = vec![None; n];
+    let mut next: Vec<Option<u32>> = vec![None; n];
     for (k, e) in input.edges.iter().enumerate() {
         let slot = &mut next[e.child as usize];
-        if slot.is_none_or(|s| e.first_parent && !input.edges[s].first_parent) {
-            *slot = Some(k);
+        if slot.is_none_or(|s| e.first_parent && !input.edges[s as usize].first_parent) {
+            *slot = Some(k as u32);
         }
     }
     let mut node = anchor as usize;
@@ -55,6 +55,7 @@ pub fn sides(
         let Some(k) = next[node] else {
             break;
         };
+        let k = k as usize;
         edges[k] = Side::Trunk;
         node = input.edges[k].parent as usize;
         if nodes[node] == Side::Trunk {

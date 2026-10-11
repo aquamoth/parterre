@@ -1,39 +1,15 @@
 mod common;
 
-use common::TestRepo;
-use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck};
+use common::{TestRepo, done, failed, oid, rev};
+use parterre_core::branches::{Action, Catalog, GitOperation, Outcome, Stuck};
 use parterre_core::merge::{self, Method, Preview};
-use parterre_util::CancelTree;
-
-fn oid(s: &str) -> Oid {
-    Oid::from_hex(s).unwrap()
-}
-
-fn rev(r: &TestRepo, rev: &str) -> Oid {
-    oid(&r.git(&["rev-parse", rev]))
-}
 
 fn preview(r: &TestRepo, target: &str) -> Preview {
     Preview::load(r.path(), rev(r, target), target).unwrap()
 }
 
 fn execute(r: &TestRepo, merge: merge::Merge) -> Outcome {
-    Branches::new(r.path()).execute(Action::Merge(Box::new(merge)), None, &CancelTree::default())
-}
-
-fn done(out: Outcome) -> Report {
-    match out {
-        Outcome::Done(report) => report,
-        other => panic!("expected it done: {other:?}"),
-    }
-}
-
-fn failed(out: Outcome) -> String {
-    match out {
-        Outcome::Failed { error, .. } => error.to_string(),
-        other => panic!("expected a failure: {other:?}"),
-    }
+    common::execute(r, Action::Merge(Box::new(merge)), None)
 }
 
 fn offered(r: &TestRepo, theirs: &str) -> Option<String> {
@@ -260,7 +236,10 @@ fn a_conflict_stops_it_and_leaves_the_worktree_stuck() {
     );
 
     let catalog = Catalog::load(r.path()).unwrap();
-    assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a merge")));
+    assert_eq!(
+        catalog.stuck(),
+        Some(Stuck::InProgress(GitOperation::Merge))
+    );
     assert_eq!(catalog.conflicted, ["file"]);
     let open = catalog.worktrees.iter().find(|w| w.open).unwrap();
     assert_eq!(open.merging, Some(rev(&r, "up")));
@@ -297,7 +276,10 @@ fn a_hook_that_refuses_leaves_the_merge_uncommitted() {
     assert_eq!(attention.title, "Merge not committed");
     assert!(report.steps[0].output.contains("refused by the hook"));
     let catalog = Catalog::load(r.path()).unwrap();
-    assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a merge")));
+    assert_eq!(
+        catalog.stuck(),
+        Some(Stuck::InProgress(GitOperation::Merge))
+    );
     assert!(catalog.conflicted.is_empty());
     assert_eq!(rev(&r, "main"), mine);
 }

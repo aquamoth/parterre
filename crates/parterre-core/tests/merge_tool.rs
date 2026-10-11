@@ -2,7 +2,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{TestRepo, git_command, read_text};
+use common::{TestRepo, git_fails, read_text};
 use parterre_core::git::Git;
 use parterre_core::merge_tool::{self, Configured, Tool};
 
@@ -88,11 +88,7 @@ fn opening_a_file_runs_git_mergetool_and_git_stages_the_result() {
     r.checkout("main");
     r.write("list.txt", b"one\n2 (main)\n");
     r.commit_all("Main");
-    let merged = git_command(r.path())
-        .args(["merge", "-q", "topic"])
-        .output()
-        .unwrap();
-    assert!(!merged.status.success());
+    git_fails(r.path(), &["merge", "-q", "topic"]);
     // A tool that takes their side, as a user resolving it would.
     r.git(&[
         "config",

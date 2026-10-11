@@ -1,45 +1,45 @@
 use std::ops::Range;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
-use eframe::egui::scroll_area::ScrollAreaOutput;
-use eframe::egui::text::{CCursor, LayoutJob, TextFormat};
+use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
-    self, Color32, CornerRadius, FontId, Key, Modifiers, Painter, Pos2, Rangef, Rect, Response,
-    RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2, pos2, vec2,
+    self, Color32, FontId, Key, Modifiers, Pos2, Rect, Response, RichText, ScrollArea, Sense,
+    Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use parterre_core::blame::BlameSpec;
 use parterre_core::changed_files::FileStatus;
 use parterre_core::file_diff::{
     self, CONTEXT_LINES, Content, DiffLine, DiffOptions, FileDiff, FileDiffSpec, Found, LineKind,
-    LoadedDiff, Note, Rev, Row, Shown, Version, Whitespace, WordMode, display_column, fold,
-    fold_lines, raw_offset,
+    LoadedDiff, Note, Rev, Row, Shown, Side, Version, Whitespace, WordMode, display_column, fold,
+    fold_lines,
 };
-use parterre_core::find;
+use parterre_core::find::{self, Step};
 use parterre_core::glyphs;
 use parterre_core::text::word_at;
 use parterre_core::{Oid, Repo};
 use parterre_highlight::{self as highlight, Engine, Spans};
 use parterre_util::Cancel;
 
+use super::text_view::{
+    Colors, Find, FindInText, HEADER_HEIGHT, LINE_END, Load, OVERVIEW_WIDTH, SCROLLBAR_HEIGHT,
+    SIDEWAYS_MARGIN, ScrollView, TOOL_GAP, TextAt, TextMetrics, TextRow, chosen_columns, colors,
+    file_window_title, hscrollbar, line_numbers_width, message, overview_background,
+    overview_found, overview_scale, overview_scroll, overview_view, paint_text, raw_slice, reveal,
+    reveal_columns, scroll_sideways, text_font, toolbar_row, with_arrows,
+};
+use super::viewport::{self, Viewport};
 use super::{ParterreApp, syntax};
 use crate::keys;
 use crate::settings::{DiffForm, DiffWindowSettings};
 use crate::text_size;
+use crate::usage::Screen;
 use crate::widgets;
+use crate::worker;
 
-pub(super) const TOOLBAR_HEIGHT: f32 = 44.0;
-pub(super) const HEADER_HEIGHT: f32 = 34.0;
 const NOTES_HEIGHT: f32 = 20.0;
 const PANE_TITLE_HEIGHT: f32 = 24.0;
-pub(super) const TOOL_GAP: f32 = 14.0;
-const FONT_SIZE: f32 = 13.0;
 const MARKER_WIDTH: f32 = 16.0;
-pub(super) const OVERVIEW_WIDTH: f32 = 14.0;
-pub(super) const SCROLLBAR_HEIGHT: f32 = 10.0;
 const ROWS_ABOVE_CHANGE: usize = 3;
-/// Shown left of a place scrolled to sideways.
-const SIDEWAYS_MARGIN: f32 = 80.0;
-pub(super) const LINE_END: usize = usize::MAX;
 
 #[derive(Debug, Default)]
 pub struct DiffWindows {
@@ -82,7 +82,7 @@ impl DiffWindows {
                 *w = DiffWindow::new(w.id, repo, spec, settings, &self.engine, ctx);
             }
             w.goto_line = line.or(w.goto_line);
-            w.bring_to_front = true;
+            w.viewport.bring_to_front = true;
             return;
         }
         self.last_id += 1;
@@ -97,34 +97,6 @@ impl DiffWindows {
 
     pub fn is_loading(&self) -> bool {
         self.windows.iter().any(|w| w.load.is_loading())
-    }
-}
-
-#[derive(Debug)]
-pub(super) enum Load<T> {
-    Loading(mpsc::Receiver<Result<T, String>>),
-    Ready(Box<T>),
-    Failed(String),
-}
-
-impl<T> Load<T> {
-    pub(super) fn ready(&self) -> Option<&T> {
-        match self {
-            Load::Ready(r) => Some(r),
-            _ => None,
-        }
-    }
-
-    pub(super) fn is_loading(&self) -> bool {
-        matches!(self, Load::Loading(_))
-    }
-
-    /// The worker's result, once it has come.
-    pub(super) fn received(&self) -> Option<Result<T, String>> {
-        match self {
-            Load::Loading(rx) => rx.try_recv().ok(),
-            _ => None,
-        }
     }
 }
 
@@ -186,28 +158,11 @@ impl Ready {
     }
 }
 
-/// The version text is chosen in: side by side, a pane's; unified, that of the line the
-/// choosing started on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Side {
-    Old,
-    New,
-}
-
-impl Side {
-    /// As [`FileDiff::line`] takes it.
-    fn line_side(self) -> Option<bool> {
-        match self {
-            Side::Old => Some(true),
-            Side::New => Some(false),
-        }
-    }
-}
-
 /// Text chosen with the mouse in one side, from `anchor` to `head`: each a row of the form and
 /// a display column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Selection {
+    /// Side by side, a pane's; unified, that of the line the choosing started on.
     side: Side,
     anchor: (usize, usize),
     head: (usize, usize),
@@ -309,9 +264,8 @@ struct DiffWindow {
     top: usize,
     selection: Option<Selection>,
     dragging: bool,
-    bring_to_front: bool,
+    viewport: Viewport,
     closed: bool,
-    title_theme: Option<egui::SystemTheme>,
     blame_request: Option<(BlameSpec, Option<usize>)>,
     fetch_requested: bool,
     /// From 0, in the new version; its change is gone to once loaded.
@@ -335,29 +289,24 @@ impl DiffWindow {
         engine: &Engine,
         ctx: &egui::Context,
     ) -> DiffWindow {
-        let (tx, rx) = mpsc::channel();
-        let window = DiffWindow::new_loading(id, repo, spec, settings, rx);
+        let mut window = DiffWindow::unloaded(id, repo, spec, settings);
         let git = parterre_core::git::Git::new(&window.repo.path);
         let (job, options) = (window.spec.clone(), window.options);
         let (engine, stop) = (engine.clone(), window.stop_colouring.clone());
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let result = git
-                .load_file_diff(&job)
+        window.load = Load::Loading(worker::spawn(ctx, move || {
+            git.load_file_diff(&job)
                 .map(|loaded| Ready::new(loaded, options, &engine, &stop))
-                .map_err(|e| e.to_string());
-            let _ = tx.send(result);
-            ctx.request_repaint();
-        });
+                .map_err(|e| e.to_string())
+        }));
         window
     }
 
-    fn new_loading(
+    /// Not loading yet: see [`DiffWindow::new`].
+    fn unloaded(
         id: u64,
         repo: Arc<Repo>,
         spec: FileDiffSpec,
         settings: &DiffWindowSettings,
-        rx: mpsc::Receiver<Result<Ready, String>>,
     ) -> DiffWindow {
         let [w, h] = settings.size;
         DiffWindow {
@@ -365,7 +314,7 @@ impl DiffWindow {
             repo,
             spec,
             initial_size: vec2(w, h),
-            load: Load::Loading(rx),
+            load: Load::Failed(String::new()),
             form: settings.form,
             options: DiffOptions {
                 words: settings.words,
@@ -385,9 +334,8 @@ impl DiffWindow {
             top: 0,
             selection: None,
             dragging: false,
-            bring_to_front: false,
+            viewport: Viewport::default(),
             closed: false,
-            title_theme: None,
             blame_request: None,
             fetch_requested: false,
             goto_line: None,
@@ -531,16 +479,16 @@ impl DiffWindow {
         self.jump_to_change = Some(self.current_change.unwrap_or(0));
     }
 
-    fn step_change(&mut self, forward: bool) {
+    fn step_change(&mut self, step: Step) {
         let changes = self.change_starts.len();
         if changes == 0 {
             return;
         }
-        let target = match (self.current_change, forward) {
-            (None, true) => 0,
-            (None, false) => return,
-            (Some(c), true) => (c + 1).min(changes - 1),
-            (Some(c), false) => c.saturating_sub(1),
+        let target = match (self.current_change, step) {
+            (None, Step::Next) => 0,
+            (None, Step::Previous) => return,
+            (Some(c), Step::Next) => (c + 1).min(changes - 1),
+            (Some(c), Step::Previous) => c.saturating_sub(1),
         };
         self.jump_to_change = Some(target);
     }
@@ -578,10 +526,10 @@ impl DiffWindow {
             settings.form = other;
         }
         if next {
-            self.step_change(true);
+            self.step_change(Step::Next);
         }
         if previous {
-            self.step_change(false);
+            self.step_change(Step::Previous);
         }
         if close {
             self.closed = true;
@@ -671,10 +619,10 @@ impl DiffWindow {
             })
             .inner;
         if previous.clicked() {
-            self.step_change(false);
+            self.step_change(Step::Previous);
         }
         if next.clicked() {
-            self.step_change(true);
+            self.step_change(Step::Next);
         }
         let label = match (changes, at) {
             (0, _) => "No changes".to_owned(),
@@ -1153,11 +1101,11 @@ impl DiffWindow {
         for (i, s) in self.shown.iter().enumerate() {
             let Shown::Row(r) = s else { continue };
             let row = rows[*r];
-            let kind = |old| diff.line(row, Some(old)).map(|l| l.kind);
-            if kind(true) == Some(LineKind::Removed) {
+            let kind = |side| diff.line(row, side).map(|l| l.kind);
+            if kind(Side::Old) == Some(LineKind::Removed) {
                 mark(i, LineKind::Removed);
             }
-            if kind(false) == Some(LineKind::Added) {
+            if kind(Side::New) == Some(LineKind::Added) {
                 mark(i, LineKind::Added);
             }
         }
@@ -1249,7 +1197,7 @@ impl DiffWindow {
 
     fn word_at(&self, side: Side, row: usize, col: usize) -> Option<Range<usize>> {
         let (diff, rows) = self.diff_rows()?;
-        let line = diff.line(*rows.get(row)?, side.line_side())?;
+        let line = diff.line(*rows.get(row)?, side)?;
         word_at(&line.text, col)
     }
 
@@ -1279,61 +1227,28 @@ impl DiffWindow {
         window_theme: Option<egui::SystemTheme>,
         icon: &Arc<egui::IconData>,
     ) {
-        let builder = egui::ViewportBuilder::default()
-            .with_title(self.title())
-            .with_app_id(crate::settings::APP_ID)
-            .with_icon(icon.clone())
-            .with_inner_size(self.initial_size)
-            .with_min_inner_size([520.0, 320.0]);
         let id = self.viewport_id();
-        crate::usage::screen(ctx, id.0, crate::usage::Screen::Diff);
-        if self.title_theme.is_none() && !ctx.embed_viewports() {
-            ctx.request_repaint();
-        }
-        if std::mem::take(&mut self.bring_to_front) && !ctx.embed_viewports() {
-            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
-        }
+        let builder = viewport::builder(self.title(), self.initial_size, [520.0, 320.0], icon);
+        self.viewport.before_show(ctx, id, Screen::Diff);
         ctx.show_viewport_immediate(id, builder, |ui, class| {
-            super::commands::window_begin(ui);
+            let input = self.viewport.begin(ui, class, window_theme);
             self.poll();
-            if class != egui::ViewportClass::EmbeddedWindow {
-                if self.title_theme != window_theme {
-                    self.title_theme = window_theme;
-                    if let Some(theme) = window_theme {
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
-                    }
-                }
-                let (close, size, fetch) = ui.input_mut(|i| {
-                    (
-                        i.viewport().close_requested(),
-                        i.viewport().inner_rect.map(|r| r.size()),
-                        crate::keys::fetch().consume(i),
-                    )
-                });
-                self.fetch_requested |= fetch;
-                if let Some(size) = size
-                    && size.x > 0.0
-                    && size.y > 0.0
-                {
-                    settings.size = [size.x, size.y];
-                }
-                // Not when embedded: its keys reach the main window too.
+            if let Some(input) = input {
+                input.keep_size(&mut settings.size);
+                self.fetch_requested |= ui.input_mut(|i| keys::fetch().consume(i));
                 self.handle_keys(ui, settings);
                 text_size::read_input(ui, text_size, true);
-                if close {
+                if input.close_requested {
                     self.closed = true;
                 }
             }
             if let Some(text) = self.copied(ui) {
                 ui.ctx().copy_text(text);
             }
-            egui::CentralPanel::default()
-                .frame(egui::Frame::central_panel(&ui.ctx().global_style()).inner_margin(0))
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing = Vec2::ZERO;
-                    self.contents(ui, settings, syntax);
-                });
+            viewport::central_panel(ui).show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                self.contents(ui, settings, syntax);
+            });
         });
     }
 }
@@ -1354,11 +1269,14 @@ impl FindInText for DiffWindow {
     }
 
     fn places(&self) -> Vec<Found> {
-        let Some((diff, rows)) = self.diff_rows() else {
+        let Some(ready) = self.ready() else {
             return Vec::new();
         };
-        let side_by_side = self.form == DiffForm::SideBySide;
-        file_diff::find(diff, rows, side_by_side, &self.find.query)
+        let query = &self.find.query;
+        match self.form {
+            DiffForm::SideBySide => file_diff::find_side_by_side(&ready.diff, query),
+            DiffForm::Unified => file_diff::find_unified(&ready.diff, query),
+        }
     }
 
     fn top(&self) -> usize {
@@ -1380,7 +1298,7 @@ impl FindInText for DiffWindow {
         let (start, end) = s.ordered();
         let mut lines = Vec::new();
         for (r, &row) in rows.iter().enumerate().take(end.0 + 1).skip(start.0) {
-            let Some(line) = diff.line(row, s.side.line_side()) else {
+            let Some(line) = diff.line(row, s.side) else {
                 continue;
             };
             lines.push(raw_slice(&line.raw, s.columns(s.side, r)?));
@@ -1459,8 +1377,9 @@ impl RowPainter<'_> {
         let side = if self.side_by_side {
             column.side
         } else {
-            let line = self.diff.line(self.rows[r], None);
-            self.unified_side(line, p.x, column.rect.left())
+            let row = self.rows[r];
+            let line = self.diff.line(row, row.unified_side());
+            self.press_side(line, p.x, column.rect.left())
         };
         if self.pressed && response.hovered() {
             input.press = Some(Press {
@@ -1481,16 +1400,15 @@ impl RowPainter<'_> {
         ];
         let drawn = halves.map(|(side, xs)| {
             let half = Rect::from_x_y_ranges(xs, rect.y_range());
-            let old = side == Side::Old;
-            let line = self.diff.line(row, side.line_side());
+            let line = self.diff.line(row, side);
             let marks = Marks {
                 chosen: self
                     .selection
                     .and_then(|s| Some((s.columns(side, r)?, s.whole_lines))),
                 query: self.query,
-                current_found: self.current_found_columns(r, old),
+                current_found: self.current_found_columns(r, side),
             };
-            let spans = line.and_then(|l| spans_of(self.syntax, l, old));
+            let spans = line.and_then(|l| spans_of(self.syntax, l, side));
             let text = paint_line(ui, half, line, spans, Numbers::Own, &self.style, &marks);
             DrawnColumn {
                 side,
@@ -1509,11 +1427,12 @@ impl RowPainter<'_> {
 
     fn paint_unified(&self, ui: &Ui, rect: Rect, r: usize) -> DrawnColumn {
         let row = self.rows[r];
-        let line = self.diff.line(row, None);
+        let side = row.unified_side();
+        let line = self.diff.line(row, side);
         // Only lines of the chosen side are chosen.
         let chosen = self
             .selection
-            .filter(|s| self.diff.line(row, s.side.line_side()).is_some())
+            .filter(|s| self.diff.line(row, s.side).is_some())
             .and_then(|s| Some((s.columns(s.side, r)?, s.whole_lines)));
         // The side a press would choose lights up in the numbers under the pointer; while
         // choosing, the chosen one.
@@ -1522,20 +1441,19 @@ impl RowPainter<'_> {
             .filter(|p| rect.intersect(ui.clip_rect()).contains(*p))
             .map(|p| match self.selection.filter(|_| self.dragging) {
                 Some(s) => s.side,
-                None => self.unified_side(line, p.x, rect.left()),
+                None => self.press_side(line, p.x, rect.left()),
             });
         let numbers = Numbers::Both {
             old: row.old,
             new: row.new,
             lit,
         };
-        let old = row.new.is_none();
         let marks = Marks {
             chosen,
             query: self.query,
-            current_found: self.current_found_columns(r, old),
+            current_found: self.current_found_columns(r, side),
         };
-        let spans = line.and_then(|l| spans_of(self.syntax, l, old));
+        let spans = line.and_then(|l| spans_of(self.syntax, l, side));
         let text = paint_line(ui, rect, line, spans, numbers, &self.style, &marks);
         // Its side is settled when a press starts choosing.
         DrawnColumn {
@@ -1547,7 +1465,7 @@ impl RowPainter<'_> {
     }
 
     /// Unified: the side a press at `x` chooses, on a row from `left`.
-    fn unified_side(&self, line: Option<&DiffLine>, x: f32, left: f32) -> Side {
+    fn press_side(&self, line: Option<&DiffLine>, x: f32, left: f32) -> Side {
         if let Some(side) = self.extend {
             return side;
         }
@@ -1568,16 +1486,19 @@ impl RowPainter<'_> {
 
     /// The columns of the place gone to in row `r`'s line of a side. An unchanged line is found
     /// once, but both sides show the place if their text is the same.
-    fn current_found_columns(&self, r: usize, old: bool) -> Option<Range<usize>> {
+    fn current_found_columns(&self, r: usize, side: Side) -> Option<Range<usize>> {
         let m = self.current_found.filter(|m| m.row == r)?;
         let same_text = || {
             let row = self.rows[r];
-            match (self.diff.line(row, Some(true)), self.diff.line(row, None)) {
+            match (
+                self.diff.line(row, Side::Old),
+                self.diff.line(row, Side::New),
+            ) {
                 (Some(o), Some(n)) => o.kind == LineKind::Same && o.raw == n.raw,
                 _ => false,
             }
         };
-        (m.old == old || same_text()).then(|| m.columns.clone())
+        (m.side == side || same_text()).then(|| m.columns.clone())
     }
 }
 
@@ -1600,10 +1521,13 @@ struct Marks<'a> {
 fn spans_of<'a>(
     syntax: Option<&'a [Vec<Spans>; 2]>,
     line: &DiffLine,
-    old: bool,
+    side: Side,
 ) -> Option<&'a Spans> {
     let [old_spans, new_spans] = syntax?;
-    let version = if old { old_spans } else { new_spans };
+    let version = match side {
+        Side::Old => old_spans,
+        Side::New => new_spans,
+    };
     version.get(line.index as usize)
 }
 
@@ -1746,27 +1670,11 @@ fn first_word_column(diff: &FileDiff, rows: &[Row], shown: &[Shown], at: usize) 
     let Some(Shown::Row(r)) = shown.get(at) else {
         return None;
     };
-    [Some(true), Some(false)]
+    [Side::Old, Side::New]
         .into_iter()
-        .filter_map(|old| diff.line(rows[*r], old))
+        .filter_map(|side| diff.line(rows[*r], side))
         .filter_map(|l| l.spans.first().map(|s| l.text[..s.start].chars().count()))
         .min()
-}
-
-/// `text` in `font`, but its arrows in the monospace font: the proportional one has none.
-fn with_arrows(text: &str, font: &FontId, color: Color32) -> LayoutJob {
-    let mut job = LayoutJob::default();
-    for (i, part) in text.split('→').enumerate() {
-        if i > 0 {
-            job.append(
-                "→",
-                0.0,
-                TextFormat::simple(FontId::monospace(font.size), color),
-            );
-        }
-        job.append(part, 0.0, TextFormat::simple(font.clone(), color));
-    }
-    job
 }
 
 fn size_text(size: Option<u64>) -> String {
@@ -1779,567 +1687,6 @@ fn size_text(size: Option<u64>) -> String {
         format!("{:.1} KiB", n as f64 / 1024.0)
     } else {
         format!("{:.1} MiB", n as f64 / 1024.0 / 1024.0)
-    }
-}
-
-// What the diff and blame windows share.
-
-pub(super) fn text_font() -> FontId {
-    FontId::monospace(FONT_SIZE)
-}
-
-pub(super) struct TextMetrics {
-    pub(super) row_h: f32,
-    pub(super) char_w: f32,
-}
-
-impl TextMetrics {
-    pub(super) fn new(ctx: &egui::Context) -> TextMetrics {
-        let font = text_font();
-        let (row_h, char_w) =
-            ctx.fonts_mut(|f| (f.row_height(&font).ceil() + 3.0, f.glyph_width(&font, '0')));
-        TextMetrics { row_h, char_w }
-    }
-}
-
-/// The width of the longest of `lines` line numbers.
-pub(super) fn line_numbers_width(lines: usize, char_w: f32) -> f32 {
-    (lines.max(1).ilog10() + 1) as f32 * char_w
-}
-
-pub(super) fn file_window_title(path: &str, rev: Option<Rev>, repo: &Repo, window: &str) -> String {
-    let file = path.rsplit('/').next().unwrap_or(path);
-    let rev = match rev {
-        Some(Rev::Commit(oid)) => oid.short(repo.abbrev_len),
-        Some(Rev::WorkingTree) => "working tree".to_owned(),
-        None => String::new(),
-    };
-    format!("{file} ({rev}) – {} – {window}", repo.display_name())
-}
-
-/// The toolbar across the top of `ui`, and a row in it for the tools.
-pub(super) fn toolbar_row(ui: &mut Ui) -> (Rect, Ui) {
-    let (rect, _) =
-        ui.allocate_exact_size(vec2(ui.available_width(), TOOLBAR_HEIGHT), Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
-    let mut row = ui.new_child(
-        UiBuilder::new()
-            .max_rect(rect.shrink2(vec2(10.0, 0.0)))
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    row.spacing_mut().item_spacing.x = 4.0;
-    (rect, row)
-}
-
-pub(super) fn message(ui: &Ui, body: Rect, text: &str, color: Color32) {
-    let g = ui
-        .painter()
-        .layout_job(with_arrows(text, &FontId::proportional(14.0), color));
-    ui.painter().galley(body.min + vec2(20.0, 20.0), g, color);
-}
-
-/// Find in the text (Ctrl+F), in one window alone.
-#[derive(Debug)]
-pub(super) struct Find<P> {
-    pub(super) query: String,
-    /// Offered by Ctrl+F after Esc cleared the field.
-    pub(super) last_query: String,
-    pub(super) matches: Vec<P>,
-    /// The place gone to, an index into `matches`.
-    pub(super) current: Option<usize>,
-    /// Focus the field, the query selected, in the next frame.
-    focus_field: bool,
-    reveal_current: bool,
-}
-
-impl<P> Default for Find<P> {
-    fn default() -> Self {
-        Find {
-            query: String::new(),
-            last_query: String::new(),
-            matches: Vec::new(),
-            current: None,
-            focus_field: false,
-            reveal_current: false,
-        }
-    }
-}
-
-impl<P> Find<P> {
-    pub(super) fn current_match(&self) -> Option<&P> {
-        self.matches.get(self.current?)
-    }
-
-    /// The place just gone to, to scroll into view: once.
-    pub(super) fn take_reveal(&mut self) -> Option<&P> {
-        if std::mem::take(&mut self.reveal_current) {
-            self.current_match()
-        } else {
-            None
-        }
-    }
-
-    fn count(&self) -> String {
-        match (self.current, self.matches.len()) {
-            (_, 0) => "No matches".to_owned(),
-            (Some(c), n) => format!("{} of {n}", c + 1),
-            (None, 1) => "1 match".to_owned(),
-            (None, n) => format!("{n} matches"),
-        }
-    }
-}
-
-/// A window whose find field finds in its text ([`Find`]).
-pub(super) trait FindInText {
-    type Place: find::Place;
-
-    fn find(&self) -> &Find<Self::Place>;
-    fn find_mut(&mut self) -> &mut Find<Self::Place>;
-    fn find_id(&self) -> egui::Id;
-    /// Every place the query occurs, in reading order.
-    fn places(&self) -> Vec<Self::Place>;
-    /// The first row drawn last frame: finding goes on from there.
-    fn top(&self) -> usize;
-    /// The chosen characters, if they are within one line.
-    fn chosen_in_line(&self) -> Option<String>;
-    /// The chosen text as in the file, tabs kept.
-    fn selected_text(&self) -> Option<String>;
-
-    /// Finds the query again, with nothing gone to.
-    fn refind(&mut self) {
-        let matches = self.places();
-        let state = self.find_mut();
-        state.matches = matches;
-        state.current = None;
-    }
-
-    /// The query was typed: goes to its first place from the top of the view on.
-    fn query_changed(&mut self) {
-        self.refind();
-        let top = self.top();
-        let state = self.find_mut();
-        if !state.query.is_empty() {
-            state.last_query = state.query.clone();
-        }
-        state.current = find::first_from(&state.matches, top);
-        state.reveal_current = true;
-    }
-
-    /// Goes to the next place, or the previous one, round the ends.
-    fn find_step(&mut self, forward: bool) {
-        let top = self.top();
-        let state = self.find_mut();
-        state.current = find::step(&state.matches, state.current, forward, top);
-        state.reveal_current = true;
-    }
-
-    /// Focuses the find field with the chosen characters, if they are within one line, or else
-    /// the last query, selected so that typing replaces it.
-    fn open_find(&mut self) {
-        let query = self
-            .chosen_in_line()
-            .unwrap_or_else(|| self.find().last_query.clone());
-        if query != self.find().query {
-            self.find_mut().query = query;
-            self.query_changed();
-        }
-        self.find_mut().focus_field = true;
-    }
-
-    /// Empties the find field, and leaves it.
-    fn close_find(&mut self, ctx: &egui::Context) {
-        self.find_mut().query.clear();
-        self.refind();
-        ctx.memory_mut(|m| m.surrender_focus(self.find_id()));
-    }
-
-    fn find_field(&mut self, ui: &mut Ui, width: f32, hint: &str) {
-        let id = self.find_id();
-        let state = self.find_mut();
-        let count = state.count();
-        let focus = std::mem::take(&mut state.focus_field);
-        let field = widgets::Find {
-            id,
-            width,
-            hint,
-            count: &count,
-            keys: &keys::find_field_keys(),
-            focus,
-            select: focus,
-        };
-        let found = widgets::find_field(ui, &field, &mut state.query);
-        if found.changed {
-            self.query_changed();
-        }
-        if found.cleared {
-            self.close_find(ui.ctx());
-        }
-        if found.next || found.previous {
-            self.find_step(found.next);
-        }
-    }
-
-    /// Ctrl+F, F3 and Shift+F3, wherever the focus is. True while the find field has the keys.
-    fn find_keys(&mut self, ui: &Ui) -> bool {
-        let id = self.find_id();
-        // egui drops the focus on Esc before the frame starts.
-        let in_field = ui.memory(|m| m.has_focus(id) || m.had_focus_last_frame(id));
-        if ui.input_mut(|i| keys::FIND.consume(i)) {
-            self.open_find();
-        }
-        // The previous place first: egui takes F3 for Shift+F3 too, and ⌘G for ⇧⌘G.
-        let (previous, next) = ui.input_mut(|i| {
-            (
-                keys::find_previous().consume(i),
-                keys::find_next().consume(i),
-            )
-        });
-        if previous || next {
-            self.find_step(next);
-        }
-        in_field
-    }
-
-    /// What Ctrl+C copies from the text: nothing while the find field has the focus, as it
-    /// copies from itself.
-    fn copied(&self, ui: &Ui) -> Option<String> {
-        let copy = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
-        let in_field = ui.memory(|m| m.has_focus(self.find_id()));
-        (copy && !in_field).then(|| self.selected_text()).flatten()
-    }
-}
-
-/// The display columns chosen in `row` by characters chosen from `start` to `end`, each a row
-/// and a display column, in order.
-pub(super) fn chosen_columns(
-    start: (usize, usize),
-    end: (usize, usize),
-    row: usize,
-) -> Option<Range<usize>> {
-    if row < start.0 || row > end.0 {
-        return None;
-    }
-    let from = if row == start.0 { start.1 } else { 0 };
-    let to = if row == end.0 { end.1 } else { LINE_END };
-    Some(from..to)
-}
-
-/// What display `columns` of a line show of its `raw` text.
-pub(super) fn raw_slice(raw: &str, columns: Range<usize>) -> &str {
-    let start = raw_offset(raw, columns.start);
-    let end = if columns.end == LINE_END {
-        raw.len()
-    } else {
-        raw_offset(raw, columns.end)
-    };
-    &raw[start..end.max(start)]
-}
-
-/// A line's text as laid out, and where it was drawn.
-pub(super) struct TextAt {
-    pub(super) galley: Arc<egui::Galley>,
-    pub(super) origin: Pos2,
-}
-
-impl TextAt {
-    pub(super) fn column_at(&self, p: Pos2) -> usize {
-        if p.x <= self.origin.x {
-            0
-        } else {
-            self.galley.cursor_from_pos(p - self.origin).index.0
-        }
-    }
-
-    fn x_of(&self, col: usize) -> f32 {
-        self.origin.x + self.galley.pos_from_cursor(CCursor::new(col)).min.x
-    }
-}
-
-/// The row a line's text is painted in.
-pub(super) struct TextRow<'a> {
-    pub(super) y_range: Rangef,
-    pub(super) row_h: f32,
-    pub(super) colors: &'a Colors,
-}
-
-/// Paints a line's `text` over the places found in it (display columns, and whether it is the
-/// one gone to) and its `chosen` display columns.
-pub(super) fn paint_text(
-    painter: &Painter,
-    text: &TextAt,
-    row: &TextRow,
-    found: impl IntoIterator<Item = (Range<usize>, bool)>,
-    chosen: Option<Range<usize>>,
-) {
-    let c = row.colors;
-    for (columns, current) in found {
-        let fill = if current { c.found_current } else { c.found };
-        let xs = text.x_of(columns.start)..=text.x_of(columns.end);
-        painter.rect_filled(Rect::from_x_y_ranges(xs, row.y_range), 0.0, fill);
-    }
-    if let Some(columns) = chosen {
-        let end = if columns.end == LINE_END {
-            // Past the end, a little, to show the line break is included.
-            text.origin.x + text.galley.size().x + row.row_h / 2.0
-        } else {
-            text.x_of(columns.end)
-        };
-        let xs = text.x_of(columns.start)..=end;
-        painter.rect_filled(Rect::from_x_y_ranges(xs, row.y_range), 0.0, c.selection);
-    }
-    painter.galley(text.origin, text.galley.clone(), c.text);
-}
-
-/// The sideways scroll offset that brings display `columns` into view, if they are out of view
-/// at `scroll_x` in text `text_w` wide.
-pub(super) fn reveal_columns(
-    scroll_x: f32,
-    columns: &Range<usize>,
-    char_w: f32,
-    text_w: f32,
-) -> Option<f32> {
-    let (x0, x1) = (columns.start as f32 * char_w, columns.end as f32 * char_w);
-    let in_view = text_w - char_w;
-    let start = if x1 < in_view {
-        0.0
-    } else {
-        x0 - SIDEWAYS_MARGIN
-    };
-    (x0 < scroll_x || x1 > scroll_x + in_view).then_some(start)
-}
-
-/// Scrolls sideways with the wheel or trackpad while the pointer is over `area`.
-pub(super) fn scroll_sideways(ui: &Ui, area: Rect, scroll_x: &mut f32, max: f32) {
-    if ui.rect_contains_pointer(area) {
-        *scroll_x -= ui.input(|i| i.smooth_scroll_delta.x);
-    }
-    *scroll_x = scroll_x.clamp(0.0, max);
-}
-
-/// The scroll offset that puts row `i` a third of the way down the `height` in view.
-pub(super) fn third_of_the_way_down(i: usize, height: f32, row_h: f32) -> f32 {
-    let above = (height / row_h / 3.0).floor();
-    ((i as f32 - above) * row_h).max(0.0)
-}
-
-/// [`third_of_the_way_down`], if row `i` is out of view at `scroll` in text `height` tall.
-pub(super) fn reveal(i: usize, scroll: f32, height: f32, row_h: f32) -> Option<f32> {
-    let y = i as f32 * row_h;
-    (y < scroll || y + row_h > scroll + height).then(|| third_of_the_way_down(i, height, row_h))
-}
-
-/// A scroll area's offset, the height in view, and the height of all its rows.
-#[derive(Clone, Copy)]
-pub(super) struct ScrollView {
-    pub(super) offset: f32,
-    pub(super) height: f32,
-    pub(super) content: f32,
-}
-
-impl ScrollView {
-    pub(super) fn of<R>(out: &ScrollAreaOutput<R>) -> ScrollView {
-        ScrollView {
-            offset: out.state.offset.y,
-            height: out.inner_rect.height(),
-            content: out.content_size.y,
-        }
-    }
-}
-
-/// At most the row height: a text shorter than the strip has its marks level with its rows.
-pub(super) fn overview_scale(strip: Rect, rows: usize, row_h: f32) -> f32 {
-    (strip.height() / rows.max(1) as f32).min(row_h)
-}
-
-pub(super) fn overview_background(ui: &Ui, strip: Rect, c: &Colors) {
-    let painter = ui.painter();
-    painter.rect_filled(strip, 0.0, ui.visuals().panel_fill);
-    painter.vline(
-        strip.left() + 0.5,
-        strip.y_range(),
-        Stroke::new(1.0, c.line),
-    );
-}
-
-/// Marks `rows` in an overview strip, at least 2 points tall.
-pub(super) fn overview_mark(ui: &Ui, strip: Rect, scale: f32, rows: Range<usize>, color: Color32) {
-    let (y0, y1) = (rows.start as f32 * scale, rows.end as f32 * scale);
-    let mark = Rect::from_min_max(
-        pos2(strip.left() + 3.0, strip.top() + y0),
-        pos2(strip.right() - 2.0, strip.top() + y1.max(y0 + 2.0)),
-    );
-    ui.painter().rect_filled(mark, 0.0, color);
-}
-
-/// Marks the rows places were found in, given in order.
-pub(super) fn overview_found(
-    ui: &Ui,
-    strip: Rect,
-    scale: f32,
-    rows: impl IntoIterator<Item = usize>,
-    c: &Colors,
-) {
-    let mut marked = None;
-    for i in rows {
-        if marked != Some(i) {
-            marked = Some(i);
-            overview_mark(ui, strip, scale, i..i + 1, c.found_mark);
-        }
-    }
-}
-
-pub(super) fn overview_view(ui: &Ui, strip: Rect, view: ScrollView, c: &Colors) {
-    if view.content > view.height {
-        let y0 = strip.top() + view.offset / view.content * strip.height();
-        let y1 = strip.top() + (view.offset + view.height) / view.content * strip.height();
-        ui.painter().rect_stroke(
-            Rect::from_min_max(
-                pos2(strip.left() + 1.5, y0),
-                pos2(strip.right() - 0.5, y1.min(strip.bottom())),
-            ),
-            1.0,
-            Stroke::new(1.0, c.weak),
-            StrokeKind::Inside,
-        );
-    }
-}
-
-/// A click or drag on an overview strip: the scroll offset that puts that place in the middle.
-pub(super) fn overview_scroll(
-    ui: &Ui,
-    id: egui::Id,
-    strip: Rect,
-    rows: usize,
-    row_h: f32,
-    view: ScrollView,
-) -> Option<f32> {
-    let response = ui.interact(strip, id, Sense::click_and_drag());
-    let p = response.interact_pointer_pos()?;
-    if !(response.clicked() || response.dragged()) || view.content <= view.height {
-        return None;
-    }
-    ui.ctx().request_repaint();
-    let row = (p.y - strip.top()) / overview_scale(strip, rows, row_h);
-    Some(row * row_h - view.height / 2.0)
-}
-
-/// Drag the thumb, or click to put it there; `visible` is the share of the width in view.
-pub(super) fn hscrollbar(
-    ui: &mut Ui,
-    id: egui::Id,
-    track: Rect,
-    scroll_x: &mut f32,
-    visible: f32,
-    max: f32,
-    c: &Colors,
-) {
-    ui.painter()
-        .rect_filled(track, 0.0, ui.visuals().panel_fill);
-    let thumb_w = (track.width() * visible).clamp(30.0, track.width());
-    let room = (track.width() - thumb_w).max(1.0);
-    let x = track.left() + room * (*scroll_x / max);
-    let thumb = Rect::from_min_size(
-        pos2(x, track.top() + 2.0),
-        vec2(thumb_w, SCROLLBAR_HEIGHT - 4.0),
-    );
-    let response = ui.interact(track, id, Sense::click_and_drag());
-    if response.dragged() {
-        *scroll_x = (*scroll_x + response.drag_delta().x * max / room).clamp(0.0, max);
-    } else if response.clicked()
-        && let Some(p) = response.interact_pointer_pos()
-    {
-        *scroll_x = ((p.x - track.left() - thumb_w / 2.0) / room * max).clamp(0.0, max);
-    }
-    let fill = if response.hovered() || response.dragged() {
-        c.thumb_hover
-    } else {
-        c.thumb
-    };
-    ui.painter().rect_filled(thumb, CornerRadius::same(3), fill);
-}
-
-pub(super) struct Colors {
-    pub(super) pane: Color32,
-    pub(super) line: Color32,
-    pub(super) weak: Color32,
-    pub(super) text: Color32,
-    pub(super) filler: Color32,
-    pub(super) fold: Color32,
-    pub(super) fold_hover: Color32,
-    pub(super) removed_line: Color32,
-    pub(super) removed_word: Color32,
-    pub(super) added_line: Color32,
-    pub(super) added_word: Color32,
-    pub(super) removed: Color32,
-    pub(super) added: Color32,
-    pub(super) renamed: Color32,
-    pub(super) note: Color32,
-    pub(super) selected_bg: Color32,
-    pub(super) selected_fg: Color32,
-    pub(super) selection: Color32,
-    pub(super) found: Color32,
-    pub(super) found_current: Color32,
-    pub(super) found_mark: Color32,
-    pub(super) thumb: Color32,
-    pub(super) thumb_hover: Color32,
-}
-
-pub(super) fn colors(ui: &Ui) -> Colors {
-    let t = widgets::tones(ui);
-    let weak = ui.visuals().weak_text_color();
-    let text = ui.visuals().text_color();
-    if ui.visuals().dark_mode {
-        Colors {
-            pane: Color32::from_gray(22),
-            line: Color32::from_white_alpha(23),
-            weak,
-            text,
-            filler: Color32::from_gray(30),
-            fold: Color32::from_gray(28),
-            fold_hover: Color32::from_gray(36),
-            removed_line: Color32::from_rgb(0x3d, 0x1c, 0x20),
-            removed_word: Color32::from_rgb(0x80, 0x2c, 0x35),
-            added_line: Color32::from_rgb(0x17, 0x33, 0x21),
-            added_word: Color32::from_rgb(0x26, 0x62, 0x37),
-            removed: Color32::from_rgb(0xff, 0x8a, 0x80),
-            added: Color32::from_rgb(0x7b, 0xd8, 0x8f),
-            renamed: Color32::from_rgb(0xd1, 0xa5, 0xff),
-            note: Color32::from_rgb(0xe8, 0xc0, 0x6a),
-            selected_bg: t.on_bg,
-            selected_fg: Color32::from_rgb(0xcf, 0xe5, 0xff),
-            selection: Color32::from_rgba_unmultiplied(0x35, 0x84, 0xe4, 110),
-            found: Color32::from_rgba_unmultiplied(0xd0, 0x9a, 0x1c, 80),
-            found_current: Color32::from_rgba_unmultiplied(0xc2, 0x6a, 0x00, 200),
-            found_mark: Color32::from_rgb(0xf0, 0xa0, 0x30),
-            thumb: Color32::from_white_alpha(50),
-            thumb_hover: Color32::from_white_alpha(90),
-        }
-    } else {
-        Colors {
-            pane: Color32::WHITE,
-            line: Color32::from_black_alpha(26),
-            weak,
-            text,
-            filler: Color32::from_gray(243),
-            fold: Color32::from_rgb(0xf3, 0xf6, 0xfa),
-            fold_hover: Color32::from_rgb(0xe6, 0xee, 0xf8),
-            removed_line: Color32::from_rgb(0xff, 0xeb, 0xe9),
-            removed_word: Color32::from_rgb(0xff, 0xc0, 0xc0),
-            added_line: Color32::from_rgb(0xe6, 0xff, 0xec),
-            added_word: Color32::from_rgb(0xab, 0xf2, 0xbc),
-            removed: Color32::from_rgb(0xc6, 0x28, 0x28),
-            added: Color32::from_rgb(0x2e, 0x7d, 0x32),
-            renamed: Color32::from_rgb(0x7b, 0x3f, 0xc4),
-            note: Color32::from_rgb(0x9a, 0x5b, 0x00),
-            selected_bg: t.on_bg,
-            selected_fg: Color32::from_rgb(0x0b, 0x3d, 0x7a),
-            selection: Color32::from_rgba_unmultiplied(0x35, 0x84, 0xe4, 80),
-            found: Color32::from_rgba_unmultiplied(0xff, 0xcc, 0x33, 130),
-            found_current: Color32::from_rgba_unmultiplied(0xff, 0x8c, 0x00, 190),
-            found_mark: Color32::from_rgb(0xe0, 0x82, 0x00),
-            thumb: Color32::from_black_alpha(45),
-            thumb_hover: Color32::from_black_alpha(90),
-        }
     }
 }
 
@@ -2402,6 +1749,7 @@ impl ParterreApp {
 
 #[cfg(test)]
 mod tests {
+    use super::super::text_view::TOOLBAR_HEIGHT;
     use super::*;
     use parterre_core::file_diff::Version;
     use parterre_core::repo::Head;
@@ -2437,8 +1785,7 @@ mod tests {
                 target: None,
             },
         ));
-        let (_, rx) = mpsc::channel();
-        let mut w = DiffWindow::new_loading(1, repo, spec, settings, rx);
+        let mut w = DiffWindow::unloaded(1, repo, spec, settings);
         let options = w.options;
         let ready = Ready::new(loaded, options, &Engine::InProcess, &Cancel::new());
         w.load = Load::Ready(Box::new(ready));
@@ -2846,11 +2193,15 @@ mod tests {
             .matches
             .iter()
             .map(|m| {
-                let line = ready.diff.line(rows[m.row], Some(m.old)).unwrap();
+                let line = ready.diff.line(rows[m.row], m.side).unwrap();
                 let text = line.text.chars().collect::<Vec<_>>()[m.columns.clone()]
                     .iter()
                     .collect();
-                (m.row, if m.old { '-' } else { '+' }, text)
+                let sign = match m.side {
+                    Side::Old => '-',
+                    Side::New => '+',
+                };
+                (m.row, sign, text)
             })
             .collect()
     }

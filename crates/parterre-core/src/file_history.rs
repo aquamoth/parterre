@@ -15,13 +15,12 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use crate::blame::Blame;
+use crate::git::log_fields;
 use crate::log_graph::LogGraph;
 use crate::oid::Oid;
 use crate::repo::{CommitIx, Repo};
 
 pub(crate) const LOG_FORMAT: &str = "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%ad%x00%ct%x00%s";
-/// As the snapshot's log dates commits.
-pub(crate) const DATE_FORMAT: &str = "--date=format-local:%Y-%m-%d %H:%M";
 const LOG_FIELDS: usize = 8;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -242,18 +241,9 @@ fn interleave(log: Vec<HistoryRow>, mut extra: Vec<HistoryRow>) -> Vec<HistoryRo
 
 pub(crate) fn parse_log(out: &[u8]) -> Result<Vec<LogCommit>, String> {
     let out = String::from_utf8_lossy(out);
-    let mut tokens: Vec<&str> = out.split('\0').collect();
-    // `-z` ends the last record with a NUL too.
-    if tokens.last() == Some(&"") && tokens.len() % LOG_FIELDS == 1 {
-        tokens.pop();
-    }
-    if !tokens.len().is_multiple_of(LOG_FIELDS) {
-        return Err(format!(
-            "file log has {} fields, not a multiple of {LOG_FIELDS}",
-            tokens.len()
-        ));
-    }
-    let (records, _) = tokens.as_chunks::<LOG_FIELDS>();
+    let fields = log_fields(&out, LOG_FIELDS)
+        .map_err(|n| format!("file log has {n} fields, not a multiple of {LOG_FIELDS}"))?;
+    let (records, _) = fields.as_chunks::<LOG_FIELDS>();
     records
         .iter()
         .map(

@@ -1,22 +1,11 @@
 mod common;
 
-use common::{TestRepo, git_command};
-use parterre_core::branches::{Action, Branches, Outcome};
+use common::{TestRepo, done, execute, failed_with_report, git_fails, rev};
+use parterre_core::branches::{Action, Outcome};
+use parterre_core::changed_files::FileStatus;
 use parterre_core::compare::Comparison;
 use parterre_core::conflicts::{self, Answer, Conflict, Resolve, Sides};
 use parterre_core::git::Git;
-use parterre_core::{Oid, changed_files::FileStatus};
-use parterre_util::CancelTree;
-
-fn try_git(r: &TestRepo, args: &[&str]) -> bool {
-    git_command(r.path())
-        .args(args)
-        .env("GIT_EDITOR", "true")
-        .output()
-        .expect("run git")
-        .status
-        .success()
-}
 
 /// Stages a symlink or a submodule straight into the index, so no file system support is
 /// needed: `target` is the link's text or the submodule's commit.
@@ -51,21 +40,16 @@ fn sides(r: &TestRepo) -> Sides {
     conflicts::sides(&git, &root, &list)
 }
 
-fn answer(r: &TestRepo, path: &str, answer: Answer) -> Outcome {
-    let resolve = Resolve {
-        conflict: conflict(r, path),
+fn resolve(conflict: Conflict, answer: Answer) -> Action {
+    Action::Resolve(Box::new(Resolve {
+        conflict,
         answer,
         item: String::new(),
-    };
-    Branches::new(r.path()).execute(
-        Action::Resolve(Box::new(resolve)),
-        None,
-        &CancelTree::default(),
-    )
+    }))
 }
 
-fn done(out: Outcome) {
-    assert!(matches!(out, Outcome::Done(_)), "expected it done: {out:?}");
+fn answer(r: &TestRepo, path: &str, answer: Answer) -> Outcome {
+    execute(r, resolve(conflict(r, path), answer), None)
 }
 
 fn unmerged(r: &TestRepo) -> Vec<String> {
@@ -114,7 +98,7 @@ fn merge_of_every_kind() -> TestRepo {
     stage_mode(&r, "120000", "link", "target-main");
     stage_mode(&r, "160000", "sub", &"3".repeat(40));
     r.commit("Main");
-    assert!(!try_git(&r, &["merge", "-q", "feature"]), "the merge stops");
+    git_fails(r.path(), &["merge", "-q", "feature"]);
     r
 }
 
@@ -236,26 +220,9 @@ fn a_file_resolved_meanwhile_is_left_alone() {
     let r = merge_of_every_kind();
     let stale = conflict(&r, "deleted-by-them.txt");
     r.git(&["rm", "-q", "deleted-by-them.txt"]);
-    let resolve = Resolve {
-        conflict: stale,
-        answer: Answer::Ours,
-        item: String::new(),
-    };
-    let out = Branches::new(r.path()).execute(
-        Action::Resolve(Box::new(resolve)),
-        None,
-        &CancelTree::default(),
-    );
-    match out {
-        Outcome::Failed { error, report } => {
-            assert!(
-                error.to_string().contains("no longer conflicted"),
-                "{error}"
-            );
-            assert!(report.steps.is_empty(), "nothing ran");
-        }
-        other => panic!("expected a refusal: {other:?}"),
-    }
+    let (error, report) = failed_with_report(execute(&r, resolve(stale, Answer::Ours), None));
+    assert!(error.contains("no longer conflicted"), "{error}");
+    assert!(report.steps.is_empty(), "nothing ran");
 }
 
 #[test]
@@ -298,7 +265,7 @@ fn a_merge_of_a_deletion_names_the_branch_merged() {
     r.checkout("main");
     r.write("f", b"main\n");
     r.commit_all("Edit f");
-    assert!(!try_git(&r, &["merge", "-q", "topic"]));
+    git_fails(r.path(), &["merge", "-q", "topic"]);
     assert_eq!(conflict(&r, "f").code(), "UD");
     assert_eq!(sides(&r), named("main", "topic", 2));
 }
@@ -324,7 +291,7 @@ fn short(r: &TestRepo, rev: &str) -> String {
 fn a_rebase_s_mine_is_the_branch_replayed_onto_theirs() {
     let (r, _) = diverged();
     r.checkout("topic");
-    assert!(!try_git(&r, &["rebase", "-q", "main"]));
+    git_fails(r.path(), &["rebase", "-q", "main"]);
     let sides = sides(&r);
     assert_eq!(sides, named("main", "topic", 3));
     let c = conflict(&r, "list.txt");
@@ -339,7 +306,7 @@ fn a_rebase_s_mine_is_the_branch_replayed_onto_theirs() {
 #[test]
 fn a_cherry_pick_s_theirs_is_the_commit_picked() {
     let (r, topic) = diverged();
-    assert!(!try_git(&r, &["cherry-pick", &topic]));
+    git_fails(r.path(), &["cherry-pick", &topic]);
     assert_eq!(sides(&r), named("main", &short(&r, &topic), 2));
 }
 
@@ -349,7 +316,7 @@ fn a_revert_s_theirs_is_the_revert() {
     let edit = r.git(&["rev-parse", "HEAD"]);
     r.write("list.txt", b"one\n2 (main), again\nthree\n");
     r.commit_all("Main: edit again");
-    assert!(!try_git(&r, &["revert", "--no-edit", &edit]));
+    git_fails(r.path(), &["revert", "--no-edit", &edit]);
     assert_eq!(
         sides(&r),
         named("main", &format!("revert of {}", short(&r, &edit)), 2)
@@ -365,7 +332,7 @@ fn a_stash_pop_s_theirs_is_named_as_the_markers_name_it() {
     r.git(&["stash", "-q"]);
     r.write("settings.ini", b"colour = red\n");
     r.commit_all("Red");
-    assert!(!try_git(&r, &["stash", "pop", "-q"]));
+    git_fails(r.path(), &["stash", "pop", "-q"]);
     assert_eq!(sides(&r), named("main", "Stashed changes", 2));
     let c = conflict(&r, "settings.ini");
     assert!(c.merge_tool().is_ok());
@@ -375,7 +342,7 @@ fn a_stash_pop_s_theirs_is_named_as_the_markers_name_it() {
 #[test]
 fn comparing_with_the_working_tree_lists_every_conflicted_file() {
     let r = merge_of_every_kind();
-    let head = Oid::from_hex(&r.git(&["rev-parse", "HEAD"])).unwrap();
+    let head = rev(&r, "HEAD");
     let compared = Comparison::with_working_tree(head, false)
         .run(&Git::new(r.path()))
         .unwrap();
@@ -395,6 +362,8 @@ fn comparing_with_the_working_tree_lists_every_conflicted_file() {
         .find(|f| f.path == "deleted-by-them.txt")
         .unwrap();
     assert_eq!(kept.status, FileStatus::Unmerged);
+    // Equal, so on both sides, though feature deleted it.
+    assert_eq!(kept.modes, [0o100644; 2]);
     assert_eq!(tree.sides.theirs.as_deref(), Some("feature"));
     // Not binary, so its diff is read as text.
     assert_eq!(kept.added, Some(0));
@@ -403,8 +372,8 @@ fn comparing_with_the_working_tree_lists_every_conflicted_file() {
 #[test]
 fn comparing_commits_lists_no_conflicts() {
     let r = merge_of_every_kind();
-    let head = Oid::from_hex(&r.git(&["rev-parse", "HEAD"])).unwrap();
-    let base = Oid::from_hex(&r.git(&["rev-parse", "HEAD~"])).unwrap();
+    let head = rev(&r, "HEAD");
+    let base = rev(&r, "HEAD~");
     let compared = Comparison {
         old: parterre_core::file_diff::Rev::Commit(base),
         new: parterre_core::file_diff::Rev::Commit(head),
@@ -427,7 +396,7 @@ fn a_file_against_a_directory_is_finished_by_its_moved_aside_name() {
     r.checkout("main");
     r.write("guide", b"the guide, longer\n");
     r.commit_all("Longer guide");
-    assert!(!try_git(&r, &["merge", "-q", "feature"]));
+    git_fails(r.path(), &["merge", "-q", "feature"]);
     let aside = listed(&r)
         .into_iter()
         .find(|c| c.path.starts_with("guide~"))

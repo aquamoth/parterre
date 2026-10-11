@@ -1,6 +1,7 @@
 //! Git queries and operations run on worker threads. The dialogs are modeless windows, opened
 //! over the window they were asked from.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
@@ -16,21 +17,23 @@ use parterre_core::file_diff::FileDiffSpec;
 use parterre_core::remote::{Live, RemoteBranchTip};
 use parterre_core::reset::{self, Mode};
 use parterre_core::revgraph::GraphOptions;
+use parterre_core::text::plural;
 use parterre_core::worktree_folder;
 use parterre_core::{GitRef, Oid, RefKind, Repo, cherry_pick, glyphs, merge, rebase, revert};
 use parterre_util::CancelTree;
 
 use super::cherry_pick::CherryPickDialog;
 use super::clone::CloneDialog;
+use super::menu_bar::Why;
 use super::merge::MergeDialog;
 use super::rebase::{RebaseDialog, stuck_color};
 use super::remote::{PullDialog, PullRequestCheck, SetUpstreamDialog};
 use super::reset::ResetDialog;
 use super::revert::{RestoreDialog, RevertDialog};
-use crate::file_dialog::Pending;
+use crate::file_dialog::{self, Pending};
 use crate::theme::Palette;
 use crate::usage::{self, Screen};
-use crate::{dialogs, menu, widgets};
+use crate::{dialogs, menu, widgets, worker};
 
 #[derive(Clone, Debug)]
 pub enum Request {
@@ -95,15 +98,8 @@ pub fn row_node_menu(
     branch.or(remote).or(worktree)
 }
 
-const OPERATION_RUNNING: &str = "A Git operation is running";
-
-pub(super) fn loading_reason(busy: bool) -> &'static str {
-    if busy {
-        OPERATION_RUNNING
-    } else {
-        "Loading branch information"
-    }
-}
+pub(super) const OPERATION_RUNNING: &str = "A Git operation is running";
+pub(super) const LOADING_BRANCHES: &str = "Loading branch information";
 
 fn branch_section(
     ui: &mut Ui,
@@ -120,7 +116,7 @@ fn branch_section(
             !busy && catalog.is_some(),
             egui::Button::new("Create branch here…"),
         )
-        .on_disabled_hover_text(loading_reason(busy))
+        .on_disabled_hover_text(Why::waiting(busy).text())
         .clicked()
     {
         request = Some(Request::Create {
@@ -205,19 +201,21 @@ fn branch_section(
 pub(super) fn refs_at<'a>(repo: &'a Repo, commit: Oid, catalog: &Catalog) -> Vec<&'a GitRef> {
     repo.refs
         .iter()
-        .filter(|r| repo.commit(r.target).oid == commit)
-        .filter(|r| match r.kind {
-            RefKind::LocalBranch => catalog
-                .locals
-                .iter()
-                .any(|b| b.name == r.name && b.tip == commit),
-            RefKind::RemoteBranch => catalog
-                .remotes
-                .iter()
-                .any(|b| b.name == r.name && b.tip == commit),
-            _ => false,
-        })
+        .filter(|r| is_branch_at(repo, catalog, r, commit))
         .collect()
+}
+
+/// Whether `r` is a local or remote-tracking branch at `commit`, as the catalog has it too.
+fn is_branch_at(repo: &Repo, catalog: &Catalog, r: &GitRef, commit: Oid) -> bool {
+    let at = |name: &str, tip: Oid| name == r.name && tip == commit;
+    let in_catalog = || match r.kind {
+        RefKind::LocalBranch => catalog.locals.iter().any(|b| at(&b.name, b.tip)),
+        RefKind::RemoteBranch => catalog.remotes.iter().any(|b| at(&b.name, b.tip)),
+        _ => false,
+    };
+    matches!(r.kind, RefKind::LocalBranch | RefKind::RemoteBranch)
+        && repo.commit(r.target).oid == commit
+        && in_catalog()
 }
 
 /// *Switch to*: each local branch at `commit` (or tracking a remote one there) that is
@@ -294,12 +292,14 @@ pub(super) fn switch_targets(
 
 /// The local branches at `commit` that are checked out nowhere.
 pub(super) fn deletable_locals(repo: &Repo, catalog: &Catalog, commit: Oid) -> Vec<BranchTip> {
-    let mut found: Vec<BranchTip> = refs_at(repo, commit, catalog)
-        .into_iter()
+    let mut found: Vec<BranchTip> = repo
+        .refs
+        .iter()
         .filter(|r| {
             r.kind == RefKind::LocalBranch
                 && catalog.current.as_ref() != Some(&r.name)
                 && !catalog.occupied.contains_key(&r.name)
+                && is_branch_at(repo, catalog, r, commit)
         })
         .map(|r| BranchTip {
             name: r.name.clone(),
@@ -316,9 +316,14 @@ pub(super) fn deletable_remotes(
     catalog: &Catalog,
     commit: Oid,
 ) -> Vec<RemoteBranchTip> {
-    let mut found: Vec<RemoteBranchTip> = refs_at(repo, commit, catalog)
-        .into_iter()
-        .filter(|r| r.kind == RefKind::RemoteBranch && !r.name.ends_with("/HEAD"))
+    let mut found: Vec<RemoteBranchTip> = repo
+        .refs
+        .iter()
+        .filter(|r| {
+            r.kind == RefKind::RemoteBranch
+                && !r.name.ends_with("/HEAD")
+                && is_branch_at(repo, catalog, r, commit)
+        })
         .filter_map(|r| {
             let (remote, branch) = catalog.tracking_parts(&r.name)?;
             Some(RemoteBranchTip {
@@ -532,9 +537,10 @@ pub(super) fn operation_item(
     busy: bool,
 ) -> Response {
     let stuck = catalog.stuck();
+    let why: Cow<str> = stuck.map_or(OPERATION_RUNNING.into(), |s| s.reason().into());
     let response = ui
         .add_enabled(!busy && stuck.is_none(), egui::Button::new(label))
-        .on_disabled_hover_text(stuck.map_or_else(|| OPERATION_RUNNING.to_owned(), Stuck::reason));
+        .on_disabled_hover_text(why);
     if response.clicked() {
         ui.close();
     }
@@ -569,7 +575,7 @@ fn worktree_section(
             !busy && catalog.is_some(),
             egui::Button::new("Add worktree here…"),
         )
-        .on_disabled_hover_text(loading_reason(busy))
+        .on_disabled_hover_text(Why::waiting(busy).text())
         .clicked()
     {
         request = Some(Request::AddWorktree { start: commit });
@@ -580,12 +586,12 @@ fn worktree_section(
     };
     let go_to = go_to_targets(catalog, commit);
     target_menu(ui, "Go to worktree", &go_to, false, &mut request);
-    let each: Vec<Vec<&Worktree>> = group
-        .iter()
-        .map(|&c| deletable_worktrees(catalog, c))
-        .collect();
-    if group.len() > 1 && each.iter().all(|found| !found.is_empty()) {
-        let all: Vec<&Worktree> = each.into_iter().flatten().collect();
+    let any_deletable_at = |c: Oid| catalog.worktrees.iter().any(|w| is_deletable_at(w, c));
+    if group.len() > 1 && group.iter().all(|&c| any_deletable_at(c)) {
+        let all: Vec<&Worktree> = group
+            .iter()
+            .flat_map(|&c| deletable_worktrees(catalog, c))
+            .collect();
         let blocked = all.iter().find_map(|w| {
             let reason = w.locked.as_ref()?;
             Some(if reason.is_empty() {
@@ -633,10 +639,14 @@ pub(super) fn deletable_worktrees(catalog: &Catalog, commit: Oid) -> Vec<&Worktr
     let mut found: Vec<_> = catalog
         .worktrees
         .iter()
-        .filter(|w| !w.open && !w.main && w.head == Some(commit))
+        .filter(|w| is_deletable_at(w, commit))
         .collect();
     found.sort_by_key(|w| w.label());
     found
+}
+
+fn is_deletable_at(worktree: &Worktree, commit: Oid) -> bool {
+    !worktree.open && !worktree.main && worktree.head == Some(commit)
 }
 
 /// *Delete worktree*: each of [`deletable_worktrees`], greyed out while locked. An operation in
@@ -676,7 +686,7 @@ fn all_item(
     let response = ui
         .add_enabled(!busy && blocked.is_none(), egui::Button::new(label))
         .on_hover_text(names.join(", "))
-        .on_disabled_hover_text(blocked.unwrap_or_else(|| OPERATION_RUNNING.to_owned()));
+        .on_disabled_hover_text(blocked.map_or(Cow::Borrowed(OPERATION_RUNNING), Cow::Owned));
     if response.clicked() {
         *request = Some(value);
         ui.close();
@@ -778,14 +788,6 @@ pub(super) fn target_menu_named(
             }
         }),
     }
-}
-
-pub(super) fn capitalized(s: &str) -> String {
-    let mut chars = s.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -1063,7 +1065,7 @@ impl Form {
             .resizable()
             .show(ctx, |ui| {
                 let commands = dialogs::fields(ui, |ui| {
-                    log = commit_line(ui, &self.repo, self.start);
+                    log = dialogs::commit_line(ui, &self.repo, self.start);
                     if adding {
                         self.worktree_branch_field(ui);
                     } else {
@@ -1112,7 +1114,8 @@ impl Form {
                     None if self.switch => "Create and switch",
                     None => "Create",
                 };
-                dialogs::actions(ui, label, commands.is_ok() && !busy, false, false)
+                let primary = dialogs::Primary::new(label).enabled(commands.is_ok() && !busy);
+                dialogs::actions(ui, primary)
             });
         self.fresh = false;
         let mut answer = shown.inner;
@@ -1199,7 +1202,11 @@ impl Form {
             wt.follow(&base, &registered);
         }
         if browse {
-            wt.browse = Some(pick_folder(ui.ctx(), "Worktree root", &wt.root));
+            wt.browse = Some(file_dialog::pick_folder(
+                ui.ctx(),
+                "Worktree root",
+                &wt.root,
+            ));
         }
         // A root inside a working tree, where git would see the worktree as untracked.
         if let Some(folder) = &folder {
@@ -1212,13 +1219,13 @@ impl Form {
                     .catalog
                     .worktrees
                     .iter()
-                    .find(|w| worktree_folder::same_path(&w.path, &inside.top))
+                    .find(|w| worktree_folder::same_path_on_disk(&w.path, &inside.top))
                 {
                     Some(w) => format!("this repository's worktree {}", w.name()),
                     None => format!("another repository, {}", inside.top.display()),
                 };
                 let mut exclude = false;
-                caution(ui, |ui| {
+                dialogs::caution(ui, |ui| {
                     ui.label(format!(
                         "This folder is inside {place}. It will show there as untracked, \
                          git add . there would record it as an embedded repository, and \
@@ -1240,7 +1247,7 @@ impl Form {
         ui.label(RichText::new("Worktree name").strong());
         let name = &mut wt.folder_name;
         let follow_tip = "Follow the branch name";
-        if folder_name_field(ui, name, &mut wt.folder_name_edited, follow_tip) {
+        if widgets::folder_name_field(ui, name, &mut wt.folder_name_edited, follow_tip) {
             wt.follow(&base, &registered);
         }
         if let Some(error) = error {
@@ -1375,7 +1382,7 @@ impl Form {
             .map(|s| self.catalog.trackers(s))
             .unwrap_or_default();
         if !trackers.is_empty() {
-            caution(ui, |ui| {
+            dialogs::caution(ui, |ui| {
                 ui.label(format!(
                     "Already tracked by {}. This creates another local branch tracking {}.",
                     trackers.join(", "),
@@ -1386,167 +1393,11 @@ impl Form {
     }
 }
 
-/// An amber box for something to be aware of that isn't lost work.
-pub(super) fn caution(ui: &mut Ui, content: impl FnOnce(&mut Ui)) {
-    let color = if ui.visuals().dark_mode {
-        Color32::from_rgb(240, 191, 95)
-    } else {
-        Color32::from_rgb(139, 86, 0)
-    };
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.10))
-        .corner_radius(6)
-        .inner_margin(egui::Margin::same(10))
-        .show(ui, |ui| {
-            ui.visuals_mut().override_text_color = Some(color);
-            content(ui);
-        });
-}
-
-pub(super) fn plural(n: usize, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
-}
-
-/// [`dialogs::commit_line`] of `oid`, if `repo` has it. Returns whether its hash was clicked.
-pub(super) fn commit_line(ui: &mut Ui, repo: &Repo, oid: Oid) -> bool {
-    repo.lookup(&oid)
-        .is_some_and(|ix| dialogs::commit_line(ui, repo.commit(ix), repo.abbrev_len))
-}
-
-/// A shown dialog's answer, *Cancel* once its window is closed.
-pub(super) fn answer_of(shown: dialogs::Shown<dialogs::Answer>) -> dialogs::Answer {
-    if shown.should_close() {
-        dialogs::Answer::Cancel
-    } else {
-        shown.inner
-    }
-}
-
 /// What an operation's dialog asks for in a frame.
 #[derive(Debug)]
 pub struct Asked {
     pub answer: dialogs::Answer,
     pub show_in_log: Option<Oid>,
-}
-
-/// A radio button, `name_width` wide so that the help after each starts at the same edge, with
-/// `flag` on hover. Clicking the help picks it too. Returns whether it was picked.
-pub(super) fn radio_with_help(
-    ui: &mut Ui,
-    selected: bool,
-    name: &str,
-    name_width: f32,
-    flag: &str,
-    help: String,
-) -> bool {
-    ui.horizontal_top(|ui| {
-        let radio = ui
-            .allocate_ui_with_layout(
-                vec2(name_width, 18.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.set_min_width(name_width);
-                    ui.radio(selected, name)
-                },
-            )
-            .inner
-            .on_hover_text(flag);
-        let help = ui.add(
-            egui::Label::new(RichText::new(help).small().weak())
-                .wrap()
-                .sense(egui::Sense::click()),
-        );
-        radio.clicked() || help.clicked()
-    })
-    .inner
-}
-
-/// The system's folder picker, opened at `near` or the nearest folder above it that exists.
-pub(super) fn pick_folder(ctx: &egui::Context, title: &str, near: &str) -> Pending<()> {
-    let mut dialog = rfd::AsyncFileDialog::new().set_title(title);
-    if let Some(dir) = Path::new(near).ancestors().find(|a| a.is_dir()) {
-        dialog = dialog.set_directory(dir);
-    }
-    Pending::start((), dialog.pick_folder(), ctx)
-}
-
-/// A folder name field, which drops what can't be in a folder's name (separators, and what
-/// Windows forbids) as it's typed, and a button to have the name follow what it follows again.
-/// Returns whether that was clicked.
-pub(super) fn folder_name_field(
-    ui: &mut Ui,
-    name: &mut String,
-    edited: &mut bool,
-    follow_tip: &str,
-) -> bool {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        let width = ui.available_width() - widgets::BUTTON_SIZE - 4.0;
-        let mut typed = name.clone();
-        if widgets::text_field(ui, &mut typed, "Folder name", width).changed() {
-            *name = typed
-                .chars()
-                .filter(|c| !worktree_folder::forbidden(*c))
-                .collect();
-            *edited = true;
-        }
-        let follow = ui
-            .add_enabled_ui(*edited, |ui| widgets::icon_button(ui, glyphs::RESET, false))
-            .inner
-            .on_hover_text(follow_tip)
-            .clicked();
-        if follow {
-            *edited = false;
-        }
-        follow
-    })
-    .inner
-}
-
-/// Copies `text` when clicked, with a check mark in the `done` colour for a moment after.
-pub(super) fn copy_button(
-    ui: &mut Ui,
-    id: Id,
-    text: impl FnOnce() -> String,
-    hover: &str,
-    done: Color32,
-) {
-    let now = ui.input(|i| i.time);
-    let copied_at: Option<f64> = ui.data(|d| d.get_temp(id));
-    let copied = copied_at.is_some_and(|at| now - at < 1.5);
-    if copied {
-        ui.ctx().request_repaint_after(Duration::from_millis(300));
-    }
-    if widgets::copy_button(ui, copied, done)
-        .on_hover_text(hover)
-        .clicked()
-    {
-        ui.ctx().copy_text(text());
-        ui.data_mut(|d| d.insert_temp(id, now));
-    }
-}
-
-/// Runs `work` on a worker thread, repainting when it's done.
-pub(super) fn worker<T: Send + 'static>(
-    ctx: &egui::Context,
-    work: impl FnOnce() -> T + Send + 'static,
-) -> mpsc::Receiver<T> {
-    let (tx, rx) = mpsc::channel();
-    let ctx = ctx.clone();
-    std::thread::spawn(move || {
-        let _ = tx.send(work());
-        ctx.request_repaint();
-    });
-    rx
-}
-
-/// What `rx` has received, if anything; `stopped()` once its worker is gone without sending.
-pub(super) fn received<T>(rx: &mpsc::Receiver<T>, stopped: impl FnOnce() -> T) -> Option<T> {
-    match rx.try_recv() {
-        Ok(value) => Some(value),
-        Err(mpsc::TryRecvError::Empty) => None,
-        Err(mpsc::TryRecvError::Disconnected) => Some(stopped()),
-    }
 }
 
 #[derive(Debug)]
@@ -1644,7 +1495,7 @@ impl<P: Send + 'static, K> PreviewLoading<P, K> {
         opener: ViewportId,
         load: impl FnOnce() -> Result<P, E> + Send + 'static,
     ) -> Self {
-        let rx = worker(ctx, move || load().map_err(|e| e.to_string()));
+        let rx = worker::spawn(ctx, move || load().map_err(|e| e.to_string()));
         PreviewLoading {
             request,
             opener,
@@ -1659,7 +1510,7 @@ fn previewed<P, K>(
     what: &str,
 ) -> Option<(Result<P, String>, PreviewLoading<P, K>)> {
     let stopped = || Err(format!("The {what} preview stopped unexpectedly."));
-    let result = received(&slot.as_ref()?.rx, stopped)?;
+    let result = worker::received(&slot.as_ref()?.rx, stopped)?;
     slot.take().map(|loading| (result, loading))
 }
 
@@ -1749,7 +1600,7 @@ impl Tool {
     fn load_catalog(&mut self, ctx: &egui::Context, repo: &Arc<Repo>) {
         let repo = repo.clone();
         let load = move || Catalog::of(&repo).map_err(|e| e.to_string());
-        self.catalog_loading = Some(worker(ctx, load));
+        self.catalog_loading = Some(worker::spawn(ctx, load));
         self.catalog_asked_at = ctx.input(|i| i.time);
     }
 
@@ -1783,7 +1634,10 @@ impl Tool {
             ),
             report: Report::default(),
         };
-        let outcome = self.job.as_ref().and_then(|job| received(&job.rx, stopped));
+        let outcome = self
+            .job
+            .as_ref()
+            .and_then(|job| worker::received(&job.rx, stopped));
         if let Some(outcome) = outcome
             && let Some(job) = self.job.take()
         {
@@ -1825,7 +1679,7 @@ impl Tool {
         let Some(loaded) = self
             .catalog_loading
             .as_ref()
-            .and_then(|rx| received(rx, stopped))
+            .and_then(|rx| worker::received(rx, stopped))
         else {
             return;
         };
@@ -2170,7 +2024,7 @@ impl Tool {
             branches = branches.with_live(live.clone());
         }
         let worker_cancel = cancel.clone();
-        let rx = worker(ctx, move || {
+        let rx = worker::spawn(ctx, move || {
             branches.execute(action, approval.as_ref(), &worker_cancel)
         });
         self.job.insert(Job {
@@ -2300,7 +2154,7 @@ impl Tool {
     pub fn fetch_blocked(&self) -> Option<&'static str> {
         match &self.catalog {
             _ if self.busy() => Some(OPERATION_RUNNING),
-            None => Some(loading_reason(false)),
+            None => Some(LOADING_BRANCHES),
             Some(c) if c.remote_names.is_empty() => Some("This repository has no remote"),
             Some(_) => None,
         }
@@ -2502,7 +2356,11 @@ impl Tool {
             let remote = check.is_some();
             let allowed = check.as_ref().is_none_or(PullRequestCheck::allow);
             let focus = loss.fresh && (remote || !confirmation);
-            dialogs::actions(ui, button, !busy && allowed, !confirmation, focus)
+            let primary = dialogs::Primary::new(button)
+                .enabled(!busy && allowed)
+                .destructive(!confirmation)
+                .focus_cancel(focus);
+            dialogs::actions(ui, primary)
         });
         if let Some(commits) = show_log
             && let Some(repo) = warning.repo.clone().or_else(|| self.repo.clone())
@@ -2646,8 +2504,8 @@ impl Tool {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     let id = Id::new("copied-operation-details").with(n.id);
-                                    let done = Color32::from_rgb(0x2e, 0xa0, 0x43);
-                                    copy_button(ui, id, || details_text(n), "Copy", done);
+                                    let done = widgets::COPIED_GREEN;
+                                    widgets::copy_button(ui, id, || details_text(n), "Copy", done);
                                 },
                             );
                         });
@@ -2670,9 +2528,9 @@ impl Tool {
                         }
                     });
                     ui.separator();
-                    dialogs::actions(ui, "", false, false, false)
+                    dialogs::close_only(ui)
                 });
-            if shown.inner == dialogs::Answer::Cancel || shown.should_close() {
+            if shown.answer() == dialogs::Answer::Cancel {
                 self.notice_details = None;
             }
         }
@@ -3051,7 +2909,7 @@ mod tests {
                 catalog
                     .worktrees
                     .iter()
-                    .find(|w| parterre_core::worktree_folder::same_path(&w.path, p))
+                    .find(|w| parterre_core::worktree_folder::same_path_on_disk(&w.path, p))
                     .unwrap()
                     .path
                     .clone()
@@ -3117,7 +2975,9 @@ mod tests {
             .1
             .worktrees
             .into_iter()
-            .find(|w| parterre_core::worktree_folder::same_path(&w.path, &others.join(name)))
+            .find(|w| {
+                parterre_core::worktree_folder::same_path_on_disk(&w.path, &others.join(name))
+            })
             .unwrap()
             .path
     }

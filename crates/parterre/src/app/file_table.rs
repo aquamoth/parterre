@@ -17,10 +17,10 @@ use parterre_core::compare::WorkingTree;
 use parterre_core::conflicts::{Answer, Conflict};
 use parterre_core::file_diff::GITLINK_MODE;
 use parterre_core::git::Git;
-use parterre_core::text::{elide_start, thousands};
+use parterre_core::text::{capitalized, elide_start, thousands};
 
 use super::column_borders::{self, Columns};
-use super::log_window::{CELL_PAD, Colors, HEADING_HEIGHT, cell, colors, heading_background};
+use super::table_style::{CELL_PAD, Colors, HEADING_HEIGHT, cell, colors, heading_background};
 use crate::widgets;
 
 const MAX_DIFFS_WITHOUT_ASKING: usize = 10;
@@ -737,14 +737,6 @@ fn working_tree_menu(
     pick
 }
 
-fn capitalized(words: &str) -> String {
-    let mut chars = words.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
-}
-
 /// The nearest that still exists.
 pub fn file_folder(root: &Path, path: &str) -> PathBuf {
     let mut dir = root.join(path);
@@ -803,7 +795,7 @@ impl<T> DiffQueue<T> {
                 ui.label("A window opens for every selected file.");
                 ui.add_space(12.0);
                 ui.separator();
-                crate::dialogs::actions(ui, "Open all", true, false, false)
+                crate::dialogs::actions(ui, crate::dialogs::Primary::new("Open all"))
             });
         match shown.inner {
             crate::dialogs::Answer::Primary => self
@@ -820,7 +812,7 @@ impl<T> DiffQueue<T> {
 #[derive(Debug)]
 pub struct Lister<K, V> {
     /// `None` while git works on it.
-    cache: HashMap<K, Option<V>>,
+    pub(super) cache: HashMap<K, Option<V>>,
     /// `None` for a request dropped because a newer one came in.
     rx: Option<mpsc::Receiver<(K, Option<V>)>>,
     tx: Option<mpsc::Sender<K>>,

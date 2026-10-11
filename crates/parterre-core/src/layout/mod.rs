@@ -11,6 +11,8 @@ mod position;
 pub mod rank;
 mod trunk;
 
+use std::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
+
 use serde::{Deserialize, Serialize};
 
 use layered::LayeredGraph;
@@ -25,6 +27,58 @@ pub struct Point {
 impl Point {
     pub const fn new(x: f32, y: f32) -> Point {
         Point { x, y }
+    }
+
+    pub fn dot(self, other: Point) -> f32 {
+        self.x * other.x + self.y * other.y
+    }
+
+    pub fn length(self) -> f32 {
+        self.dot(self).sqrt()
+    }
+}
+
+impl Add for Point {
+    type Output = Point;
+
+    fn add(self, other: Point) -> Point {
+        Point::new(self.x + other.x, self.y + other.y)
+    }
+}
+
+impl AddAssign for Point {
+    fn add_assign(&mut self, other: Point) {
+        *self = *self + other;
+    }
+}
+
+impl Sub for Point {
+    type Output = Point;
+
+    fn sub(self, other: Point) -> Point {
+        Point::new(self.x - other.x, self.y - other.y)
+    }
+}
+
+impl SubAssign for Point {
+    fn sub_assign(&mut self, other: Point) {
+        *self = *self - other;
+    }
+}
+
+impl Mul<f32> for Point {
+    type Output = Point;
+
+    fn mul(self, factor: f32) -> Point {
+        Point::new(self.x * factor, self.y * factor)
+    }
+}
+
+impl Neg for Point {
+    type Output = Point;
+
+    fn neg(self) -> Point {
+        Point::new(-self.x, -self.y)
     }
 }
 

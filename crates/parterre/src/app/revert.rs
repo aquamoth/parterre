@@ -5,7 +5,7 @@ use parterre_core::Repo;
 use parterre_core::branches::{Stashed, command_text};
 use parterre_core::revert::{self, Preview};
 
-use super::branches::{Asked, answer_of, caution, commit_line};
+use super::branches::Asked;
 use crate::{dialogs, widgets};
 
 /// To tell whether Enter is typed into it.
@@ -88,7 +88,7 @@ impl RevertDialog {
             .resizable()
             .show(ctx, |ui| {
                 let p = &self.preview;
-                if commit_line(ui, &self.repo, p.commit) {
+                if dialogs::commit_line(ui, &self.repo, p.commit) {
                     show_in_log = Some(p.commit);
                 }
                 ui.label("Message");
@@ -129,7 +129,7 @@ impl RevertDialog {
                             });
                     }
                 } else if let Some(caution_text) = p.caution(stash) {
-                    caution(ui, |ui| {
+                    dialogs::caution(ui, |ui| {
                         ui.label(caution_text);
                     });
                 }
@@ -145,7 +145,7 @@ impl RevertDialog {
                     .collect();
                 dialogs::command_box(ui, &commands);
                 let enabled = blocked.is_none() && !busy;
-                let answer = dialogs::actions(ui, "Revert", enabled, false, false);
+                let answer = dialogs::actions(ui, dialogs::Primary::new("Revert").enabled(enabled));
                 // Enter runs it, but in the message it's a new line.
                 let typing = ui.memory(|m| m.has_focus(message_id()));
                 let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -157,7 +157,7 @@ impl RevertDialog {
             });
         self.fresh = false;
         Asked {
-            answer: answer_of(shown),
+            answer: shown.answer(),
             show_in_log,
         }
     }
@@ -205,7 +205,7 @@ impl RestoreDialog {
                 }
             });
         self.fresh = false;
-        answer_of(shown)
+        shown.answer()
     }
 }
 
@@ -237,7 +237,7 @@ mod tests {
     use std::path::Path;
 
     use parterre_core::Oid;
-    use parterre_core::branches::Stuck;
+    use parterre_core::branches::{GitOperation, Stuck};
 
     use super::super::branches::{self, Request};
     use super::super::tool_harness::{Harness, banner_texts, git, init, load, menu, read, write};
@@ -465,7 +465,10 @@ mod tests {
         });
         assert!(!h.shows("Restore stashed changes?"));
         let (_, catalog) = load(h.path());
-        assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a revert")));
+        assert_eq!(
+            catalog.stuck(),
+            Some(Stuck::InProgress(GitOperation::Revert))
+        );
         let texts = banner_texts(h.path());
         assert!(texts.contains(&"1 conflicted file".to_owned()), "{texts:?}");
         assert!(

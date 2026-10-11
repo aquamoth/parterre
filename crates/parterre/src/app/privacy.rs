@@ -266,9 +266,10 @@ fn choice(ui: &mut Ui, on: &mut bool, label: &str, text: &str) {
 
 #[cfg(test)]
 mod tests {
-    use eframe::egui::{Event, Key, Pos2, Rect};
+    use eframe::egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, vec2};
 
     use super::*;
+    use crate::app::tool_harness::{click_events, raw_input, run_frame, text_at};
 
     struct Screen {
         ctx: egui::Context,
@@ -302,20 +303,13 @@ mod tests {
         fn frame(&mut self) {
             self.time += 1.0 / 60.0;
             let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
                 time: Some(self.time),
-                events: std::mem::take(&mut self.events),
-                ..Default::default()
+                ..raw_input(vec2(1200.0, 800.0), std::mem::take(&mut self.events))
             };
             let telemetry = &mut self.telemetry;
-            let mut output = self.ctx.run_ui(input, |ui| {
+            self.texts = run_frame(&self.ctx, input, |ui| {
                 telemetry.prompt(ui.ctx());
             });
-            output.textures_delta.clear();
-            self.texts.clear();
-            for clipped in &output.shapes {
-                crate::app::tool_harness::collect(&clipped.shape, &mut self.texts);
-            }
         }
 
         fn shows(&self, text: &str) -> bool {
@@ -323,28 +317,15 @@ mod tests {
         }
 
         fn press(&mut self, at: Pos2) {
-            for pressed in [true, false] {
-                self.events.push(Event::PointerMoved(at));
-                self.events.push(Event::PointerButton {
-                    pos: at,
-                    button: egui::PointerButton::Primary,
-                    pressed,
-                    modifiers: egui::Modifiers::NONE,
-                });
+            for events in click_events(at, PointerButton::Primary, Modifiers::NONE) {
+                self.events.extend(events);
                 self.frame();
             }
             self.frame();
         }
 
         fn click(&mut self, text: &str) {
-            let at = self
-                .texts
-                .iter()
-                .find(|(t, _)| t == text)
-                .unwrap_or_else(|| panic!("no {text:?} on screen: {:?}", self.texts))
-                .1
-                .center();
-            self.press(at);
+            self.press(text_at(&self.texts, text));
         }
 
         fn key(&mut self, key: Key) {

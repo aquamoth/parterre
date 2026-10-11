@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use eframe::egui::{
     self, Align, Id, Key, Layout, Margin, Popup, PopupCloseBehavior, RectAlign, Response, Sense,
     Stroke, Ui, vec2,
@@ -7,7 +9,7 @@ use parterre_core::physics::DragModel;
 use parterre_core::revgraph::Simplification;
 
 use super::ParterreApp;
-use crate::keys;
+use crate::keys::{self, Shortcut};
 use crate::menu;
 use crate::usage::{self, Menu};
 use crate::widgets::{self, tip, tip_explained};
@@ -103,7 +105,7 @@ impl ParterreApp {
                 popover(&response, RectAlign::BOTTOM_END)
                     .show(|ui| menu::fit_window(ui, |ui| self.drag_popover(ui)));
                 let drag = widgets::segmented(ui, self.settings.net.model, &DRAG_MODELS, |m, r| {
-                    tip_explained(r, m.label(), &drag_key(m), m.description())
+                    tip_explained(r, m.label(), drag_key(m), m.description())
                 });
                 if let Some(m) = drag {
                     self.set_drag_model(m);
@@ -406,12 +408,13 @@ fn detail_description(s: Simplification) -> &'static str {
     DETAIL_LEVELS.iter().find(|x| x.0 == s).map_or("", |x| x.2)
 }
 
-fn drag_key(model: DragModel) -> String {
+fn drag_key(model: DragModel) -> &'static str {
+    static LABELS: LazyLock<[String; 3]> = LazyLock::new(|| keys::DRAG.map(Shortcut::label));
     DragModel::ALL
         .iter()
-        .zip(keys::DRAG)
+        .zip(LABELS.iter())
         .find(|(m, _)| **m == model)
-        .map_or_else(String::new, |(_, key)| key.label())
+        .map_or("", |(_, label)| label)
 }
 
 fn popover(button: &Response, align: RectAlign) -> Popup<'_> {

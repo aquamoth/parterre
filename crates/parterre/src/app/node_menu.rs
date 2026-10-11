@@ -5,11 +5,10 @@
 use parterre_core::RefKind;
 use parterre_core::Worktree;
 
-use super::branches::loading_reason;
 use super::compare_window::CompareRequest;
 use super::git_menu::is_pull;
-use super::menu_bar::{Command, Entry, Item, Submenu, case, case_with};
-use super::{Opener, ParterreApp, node_oid};
+use super::menu_bar::{Command, Entry, Item, Submenu, Why, case, case_with};
+use super::{Opener, ParterreApp};
 use crate::keys::{self, Platform};
 
 impl ParterreApp {
@@ -38,7 +37,7 @@ impl ParterreApp {
             return Vec::new();
         };
         let group = self.selection.group_of(node);
-        let oid = node_oid(scene, node);
+        let oid = scene.node_oid(node);
         let pull_here = scene.graph.nodes[node].refs.iter().any(|&r| {
             let r = &scene.repo.refs[r];
             r.kind == RefKind::LocalBranch && r.is_head
@@ -52,7 +51,7 @@ impl ParterreApp {
             match entry {
                 Entry::Heading(heading) => sections.push((heading, Vec::new())),
                 Entry::Separator => {}
-                Entry::Item(i) if matches!(i.command, Command::Fetch) => {}
+                Entry::Item(i) if matches!(i.command, Some(Command::Fetch)) => {}
                 Entry::Item(i) if is_pull(&i) && (!pull_here || group.len() > 1) => {}
                 entry => {
                     if let Some((_, items)) = sections.last_mut() {
@@ -90,7 +89,7 @@ impl ParterreApp {
         let Some(scene) = &self.scene else {
             return Vec::new();
         };
-        let oid = node_oid(scene, node);
+        let oid = scene.node_oid(node);
         let marked = self.marked.as_ref();
         let mark = match marked {
             Some((m, _)) if *m == oid => Item::new(
@@ -261,10 +260,7 @@ impl ParterreApp {
 /// A greyed-out item goes, unless only a running git operation holds it up; a submenu keeps
 /// what applies, and goes when nothing does.
 fn applying(entry: Entry) -> Option<Entry> {
-    let waiting = |why: &Option<String>| {
-        why.as_deref()
-            .is_some_and(|w| w == loading_reason(true) || w == loading_reason(false))
-    };
+    let waiting = |why: &Option<Why>| why.as_ref().is_some_and(Why::is_waiting);
     match entry {
         Entry::Item(i) if !i.enabled && !waiting(&i.why_disabled) => None,
         Entry::Submenu(s) if !s.enabled && !waiting(&s.why_disabled) => None,
@@ -310,6 +306,7 @@ mod tests {
         let empty = Submenu::new("Open", vec![item("c", Some("No"))]);
         assert!(applying(empty.into()).is_none());
         assert!(applying(item("d", Some("Up to date"))).is_none());
-        assert!(applying(item("e", Some(loading_reason(true)))).is_some());
+        let waiting = Item::new("e", Command::ShowLog).blocked(Some(Why::GitBusy));
+        assert!(applying(waiting.into()).is_some());
     }
 }

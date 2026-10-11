@@ -73,22 +73,28 @@ pub fn first_from<P: Place>(matches: &[P], line: usize) -> Option<usize> {
     Some(if at < matches.len() { at } else { 0 })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    Next,
+    Previous,
+}
+
 /// Goes round the ends. With no match current, starts from `line`.
 pub fn step<P: Place>(
     matches: &[P],
     current: Option<usize>,
-    forward: bool,
+    step: Step,
     line: usize,
 ) -> Option<usize> {
     let n = matches.len();
     if n == 0 {
         return None;
     }
-    Some(match (current, forward) {
-        (Some(c), true) => (c + 1) % n,
-        (Some(c), false) => (c + n - 1) % n,
-        (None, true) => first_from(matches, line)?,
-        (None, false) => {
+    Some(match (current, step) {
+        (Some(c), Step::Next) => (c + 1) % n,
+        (Some(c), Step::Previous) => (c + n - 1) % n,
+        (None, Step::Next) => first_from(matches, line)?,
+        (None, Step::Previous) => {
             let at = matches.partition_point(|m| m.line() < line);
             (at + n - 1) % n
         }
@@ -158,11 +164,11 @@ mod tests {
     #[test]
     fn steps_round_the_ends() {
         let matches = at(&[2, 5, 5, 9]);
-        assert_eq!(step(&matches, Some(0), true, 0), Some(1));
-        assert_eq!(step(&matches, Some(3), true, 0), Some(0));
-        assert_eq!(step(&matches, Some(0), false, 0), Some(3));
-        assert_eq!(step(&matches, Some(2), false, 0), Some(1));
-        assert_eq!(step::<Match>(&[], Some(0), true, 0), None);
+        assert_eq!(step(&matches, Some(0), Step::Next, 0), Some(1));
+        assert_eq!(step(&matches, Some(3), Step::Next, 0), Some(0));
+        assert_eq!(step(&matches, Some(0), Step::Previous, 0), Some(3));
+        assert_eq!(step(&matches, Some(2), Step::Previous, 0), Some(1));
+        assert_eq!(step::<Match>(&[], Some(0), Step::Next, 0), None);
     }
 
     #[test]
@@ -174,8 +180,8 @@ mod tests {
         // Past the last: round to the first.
         assert_eq!(first_from(&matches, 10), Some(0));
         assert_eq!(first_from::<Match>(&[], 3), None);
-        assert_eq!(step(&matches, None, true, 6), Some(3));
-        assert_eq!(step(&matches, None, false, 6), Some(2));
-        assert_eq!(step(&matches, None, false, 0), Some(3));
+        assert_eq!(step(&matches, None, Step::Next, 6), Some(3));
+        assert_eq!(step(&matches, None, Step::Previous, 6), Some(2));
+        assert_eq!(step(&matches, None, Step::Previous, 0), Some(3));
     }
 }

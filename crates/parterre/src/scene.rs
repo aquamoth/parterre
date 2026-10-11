@@ -4,7 +4,7 @@ use eframe::egui::{Color32, FontId, Pos2, Rect, Vec2, pos2, vec2};
 use parterre_core::layout::{self, Layout, LayoutEdge, LayoutInput, LayoutOptions, Point};
 use parterre_core::physics::{DragModel, Net};
 use parterre_core::revgraph::{self, RevGraph, RevNode};
-use parterre_core::{Label, RefKind, Repo};
+use parterre_core::{Label, Oid, RefKind, Repo};
 use parterre_forge::{PullRequest, PullRequests};
 
 use crate::settings::Settings;
@@ -217,6 +217,10 @@ impl Scene {
 
     pub fn node_count(&self) -> usize {
         self.visuals.len()
+    }
+
+    pub fn node_oid(&self, node: usize) -> Oid {
+        self.repo.commit(self.graph.nodes[node].commit).oid
     }
 
     /// In world coordinates.

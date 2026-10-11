@@ -4,39 +4,36 @@ use std::sync::Arc;
 
 use eframe::egui::text::{LayoutJob, TextFormat, TextWrapping};
 use eframe::egui::{
-    self, Color32, CornerRadius, CursorIcon, FontId, Galley, Id, Key, Margin, Modifiers, Painter,
-    Pos2, Rangef, Rect, RichText, ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
+    self, Color32, FontId, Id, Key, Margin, Modifiers, Rangef, Rect, RichText, ScrollArea, Sense,
+    Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use parterre_core::blame::BlameSpec;
 use parterre_core::columns::ColumnWidths;
 use parterre_core::file_diff::{FileDiffSpec, Rev};
-use parterre_core::find;
+use parterre_core::find::{self, Step};
 use parterre_core::glyphs::{self, Glyph};
 use parterre_core::log::{self, LogList, LogOptions, LogOrder, LogQuery};
 use parterre_core::log_graph::LogGraph;
 use parterre_core::log_layout::LogLayout;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{find_urls, thousands};
-use parterre_core::{Commit, CommitIx, GitRef, Label, Oid, RefKind, Repo, Worktree};
+use parterre_core::{Commit, CommitIx, Oid, Repo};
 
 use super::commit_table::{CommitList, CommitTable, Row, Select};
 use super::compare_window::CompareRequest;
+use super::divider::{Bar, DIVIDER_THICKNESS, divider};
 use super::file_table::{DiffQueue, FileTable, Lister, Listing};
+use super::table_style::{Colors, badge_widget, badges, colors};
+use super::text_view::match_count;
+use super::viewport::{self, Viewport};
 use super::{Details, ParterreApp};
 use crate::keys;
 use crate::settings::LogWindowSettings;
 use crate::text_size;
-use crate::theme::{Palette, text_on};
+use crate::theme::Palette;
+use crate::usage::Screen;
 use crate::widgets;
 
-pub(super) const HEADING_HEIGHT: f32 = 26.0;
-pub(super) const DIVIDER_THICKNESS: f32 = 6.0;
-pub(super) const CELL_PAD: f32 = 8.0;
-pub(super) const BADGE_HEIGHT: f32 = 17.0;
-pub(super) const BADGE_PAD: f32 = 5.0;
-pub(super) const BADGE_FONT_SIZE: f32 = 11.5;
-const BADGE_FOLDER_SIZE: f32 = 11.0;
-const BADGE_FOLDER_ROOM: f32 = BADGE_FOLDER_SIZE + 3.0;
 const HEADER_HEIGHT: f32 = 40.0;
 const COPIED_CHECK_SECONDS: f64 = 1.2;
 /// A copy button's height.
@@ -71,7 +68,7 @@ pub struct LogWindow {
     changed_files: Lister<Oid, Listing>,
     /// Fixed while the window is open: egui resizes a window whose viewport builder changes.
     size: Vec2,
-    title_theme: Option<egui::SystemTheme>,
+    viewport: Viewport,
     copied_at: Option<(Copied, f64)>,
     logs_opened: u64,
     diffs: DiffQueue<(Arc<Repo>, FileDiffSpec)>,
@@ -269,24 +266,6 @@ struct Arrangement {
     dividers: [Bar; 2],
 }
 
-/// A draggable divider, and how a pointer position maps to its fraction in
-/// [`Dividers`](parterre_core::log_layout::Dividers).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct Bar {
-    pub(super) rect: Rect,
-    pub(super) vertical: bool,
-    /// Where the bar's middle is at fraction 0 (along x for a vertical bar, else y), and the
-    /// room its fraction is of.
-    pub(super) origin: f32,
-    pub(super) room: f32,
-}
-
-impl Bar {
-    fn fraction(&self, middle: f32) -> f32 {
-        (middle - self.origin) / self.room
-    }
-}
-
 struct Cut {
     first: Rangef,
     bar: Rangef,
@@ -388,118 +367,6 @@ fn arrange(layout: LogLayout, [a, b]: [f32; 2], body: Rect) -> Arrangement {
                 ],
             }
         }
-    }
-}
-
-pub(super) struct Colors {
-    pub(super) pane: Color32,
-    pub(super) stripe: Color32,
-    pub(super) hover: Color32,
-    pub(super) line: Color32,
-    pub(super) selected_bg: Color32,
-    pub(super) selected_fg: Color32,
-    pub(super) link: Color32,
-    pub(super) added: Color32,
-    pub(super) removed: Color32,
-    pub(super) renamed: Color32,
-    pub(super) modified: Color32,
-    pub(super) found: Color32,
-    pub(super) lanes: [Color32; 8],
-}
-
-pub(super) fn colors(ui: &Ui) -> Colors {
-    let t = widgets::tones(ui);
-    if ui.visuals().dark_mode {
-        Colors {
-            pane: Color32::from_gray(22),
-            stripe: Color32::from_white_alpha(5),
-            hover: Color32::from_white_alpha(13),
-            line: Color32::from_white_alpha(23),
-            selected_bg: t.on_bg,
-            selected_fg: Color32::from_rgb(0xcf, 0xe5, 0xff),
-            link: t.on_fg,
-            added: Color32::from_rgb(0x7b, 0xd8, 0x8f),
-            removed: Color32::from_rgb(0xff, 0x8a, 0x80),
-            renamed: Color32::from_rgb(0xd1, 0xa5, 0xff),
-            modified: Color32::from_rgb(0xe0, 0xa8, 0x40),
-            found: Color32::from_rgba_unmultiplied(0xd0, 0x9a, 0x1c, 80),
-            lanes: [
-                Color32::from_rgb(0xef, 0x53, 0x50),
-                Color32::from_rgb(0x42, 0xa5, 0xf5),
-                Color32::from_rgb(0x66, 0xbb, 0x6a),
-                Color32::from_rgb(0xff, 0xa7, 0x26),
-                Color32::from_rgb(0xab, 0x47, 0xbc),
-                Color32::from_rgb(0x26, 0xc6, 0xda),
-                Color32::from_rgb(0xec, 0x40, 0x7a),
-                Color32::from_rgb(0xa1, 0x88, 0x7f),
-            ],
-        }
-    } else {
-        Colors {
-            pane: Color32::WHITE,
-            stripe: Color32::from_black_alpha(5),
-            hover: Color32::from_black_alpha(11),
-            line: Color32::from_black_alpha(26),
-            selected_bg: t.on_bg,
-            selected_fg: Color32::from_rgb(0x0b, 0x3d, 0x7a),
-            link: t.on_fg,
-            added: Color32::from_rgb(0x2e, 0x7d, 0x32),
-            removed: Color32::from_rgb(0xc6, 0x28, 0x28),
-            renamed: Color32::from_rgb(0x6a, 0x1b, 0x9a),
-            modified: Color32::from_rgb(0xa8, 0x6a, 0x00),
-            found: Color32::from_rgba_unmultiplied(0xff, 0xcc, 0x33, 130),
-            lanes: [
-                Color32::from_rgb(0xd3, 0x2f, 0x2f),
-                Color32::from_rgb(0x19, 0x76, 0xd2),
-                Color32::from_rgb(0x38, 0x8e, 0x3c),
-                Color32::from_rgb(0xf5, 0x7c, 0x00),
-                Color32::from_rgb(0x7b, 0x1f, 0xa2),
-                Color32::from_rgb(0x00, 0x83, 0x8f),
-                Color32::from_rgb(0xc2, 0x18, 0x5b),
-                Color32::from_rgb(0x5d, 0x40, 0x37),
-            ],
-        }
-    }
-}
-
-pub(super) struct WindowInput {
-    pub(super) close: bool,
-    pub(super) reload: bool,
-    pub(super) fetch: bool,
-}
-
-/// For a window in a viewport of its own: its title bar follows `theme`, and `size` the
-/// window's.
-pub(super) fn window_input(
-    ui: &Ui,
-    title_theme: &mut Option<egui::SystemTheme>,
-    theme: Option<egui::SystemTheme>,
-    size: &mut [f32; 2],
-) -> WindowInput {
-    if *title_theme != theme {
-        *title_theme = theme;
-        if let Some(theme) = theme {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
-        }
-    }
-    let (close, inner_size, (reload, fetch)) = ui.input_mut(|i| {
-        (
-            i.viewport().close_requested(),
-            i.viewport().inner_rect.map(|r| r.size()),
-            keys::reload_and_fetch(i),
-        )
-    });
-    if let Some(inner) = inner_size
-        && inner.x > 0.0
-        && inner.y > 0.0
-    {
-        *size = [inner.x, inner.y];
-    }
-    WindowInput {
-        close,
-        reload,
-        fetch,
     }
 }
 
@@ -607,23 +474,17 @@ impl LogWindow {
         }
     }
 
-    fn find_step(&mut self, forward: bool) {
+    fn find_step(&mut self, step: Step) {
         let current = self.current_match();
         let Some(view) = &mut self.view else { return };
         let from = view.list.selected.unwrap_or(0);
-        if let Some(k) = find::step(&self.find.matches, current, forward, from) {
+        if let Some(k) = find::step(&self.find.matches, current, step, from) {
             view.list.select(Some(self.find.matches[k]));
         }
     }
 
     fn find_field(&mut self, ui: &mut Ui, width: f32) {
-        let n = self.find.matches.len();
-        let count = match (self.current_match(), n) {
-            (_, 0) => "No matches".to_owned(),
-            (Some(c), n) => format!("{} of {n}", c + 1),
-            (None, 1) => "1 match".to_owned(),
-            (None, n) => format!("{n} matches"),
-        };
+        let count = match_count(self.current_match(), self.find.matches.len());
         let focus = std::mem::take(&mut self.find.focus_next_frame);
         let find = widgets::Find {
             id: Self::find_id(),
@@ -641,8 +502,10 @@ impl LogWindow {
         if found.cleared {
             self.close_find(ui.ctx());
         }
-        if found.next || found.previous {
-            self.find_step(found.next);
+        if found.next {
+            self.find_step(Step::Next);
+        } else if found.previous {
+            self.find_step(Step::Previous);
         }
     }
 
@@ -660,8 +523,10 @@ impl LogWindow {
                 keys::find_next().consume(i),
             )
         });
-        if previous || next {
-            self.find_step(next);
+        if next {
+            self.find_step(Step::Next);
+        } else if previous {
+            self.find_step(Step::Previous);
         }
         if in_find {
             if ui.input(|i| i.key_pressed(Key::Escape)) {
@@ -978,7 +843,7 @@ impl LogWindow {
                         let label_width = field_label_width(ui);
                         field(ui, label_width, "Commit", |ui| {
                             ui.label(RichText::new(commit.oid.to_hex()).monospace());
-                            if widgets::copy_button(ui, copied == Some(Copied::Hash), c.added)
+                            if widgets::copy_icon_button(ui, copied == Some(Copied::Hash), c.added)
                                 .on_hover_text("Copy the full hash")
                                 .clicked()
                             {
@@ -1004,7 +869,7 @@ impl LogWindow {
                         }
                         field(ui, label_width, "Author", |ui| {
                             ui.label(format!("{} <{}>", commit.author_name, commit.author_email));
-                            if widgets::copy_button(ui, copied == Some(Copied::Email), c.added)
+                            if widgets::copy_icon_button(ui, copied == Some(Copied::Email), c.added)
                                 .on_hover_text("Copy the email address")
                                 .clicked()
                             {
@@ -1194,241 +1059,6 @@ fn row_menu(ui: &mut Ui, commit: &Commit, env: &MenuEnv) -> Option<CompareReques
     request
 }
 
-/// One line, cut with an ellipsis at `width`.
-pub(super) fn cell(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<Galley> {
-    let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = TextWrapping::truncate_at_width(width.max(1.0));
-    ui.painter().layout_job(job)
-}
-
-/// A label before a commit's subject, as the graph draws them.
-#[derive(Clone, Copy, Debug)]
-pub(super) enum Badge<'a> {
-    Ref {
-        git_ref: &'a GitRef,
-        worktree: Option<&'a Worktree>,
-        ahead_behind: Option<(usize, usize)>,
-    },
-    DetachedWorktree(&'a Worktree),
-}
-
-impl<'a> Badge<'a> {
-    fn text(&self) -> String {
-        match *self {
-            Badge::Ref {
-                git_ref,
-                worktree: Some(w),
-                ..
-            } if git_ref.kind == RefKind::DetachedHead => w.name(),
-            Badge::Ref { git_ref, .. } => git_ref.name.clone(),
-            Badge::DetachedWorktree(w) => w.name(),
-        }
-    }
-
-    fn is_detached_worktree(&self) -> bool {
-        match *self {
-            Badge::Ref {
-                git_ref, worktree, ..
-            } => git_ref.kind == RefKind::DetachedHead && worktree.is_some(),
-            Badge::DetachedWorktree(_) => true,
-        }
-    }
-
-    fn worktree(&self) -> Option<&'a Worktree> {
-        match *self {
-            Badge::Ref { worktree, .. } => worktree,
-            Badge::DetachedWorktree(w) => Some(w),
-        }
-    }
-
-    fn ahead_behind(&self) -> Option<(usize, usize)> {
-        match *self {
-            Badge::Ref { ahead_behind, .. } => ahead_behind,
-            Badge::DetachedWorktree(_) => None,
-        }
-    }
-
-    fn fill(&self, palette: &Palette) -> Color32 {
-        let worktree_fill = |w: &Worktree| {
-            if w.missing {
-                palette.missing_worktree
-            } else {
-                palette.worktree
-            }
-        };
-        match *self {
-            Badge::Ref {
-                git_ref,
-                worktree: Some(w),
-                ..
-            } if !git_ref.is_head => worktree_fill(w),
-            Badge::Ref { git_ref: r, .. } => palette.ref_fill(r.kind, r.is_head, &r.name),
-            Badge::DetachedWorktree(w) => worktree_fill(w),
-        }
-    }
-
-    /// Besides the name: the padding, a worktree's folder and the ahead and behind counts.
-    fn chrome_width(&self, painter: &Painter) -> f32 {
-        let folder = if self.worktree().is_some() {
-            BADGE_FOLDER_ROOM
-        } else {
-            0.0
-        };
-        let counts = self
-            .ahead_behind()
-            .map_or(0.0, |c| crate::upstreams::counts_width(painter, c));
-        2.0 * BADGE_PAD + folder + counts
-    }
-}
-
-/// `refs` index [`Repo::refs`] in display order; `commit` is `None` for one outside the
-/// snapshot.
-pub(super) fn badges<'a>(
-    repo: &'a Repo,
-    refs: &[usize],
-    commit: Option<CommitIx>,
-    graph: &GraphOptions,
-) -> Vec<Badge<'a>> {
-    let worktrees_shown = graph.show_worktrees;
-    let refs: Vec<usize> = refs
-        .iter()
-        .copied()
-        .filter(|&i| {
-            let r = &repo.refs[i];
-            graph.shows(r.kind)
-                || (worktrees_shown && repo.worktrees_on(&r.full_name).next().is_some())
-        })
-        .collect();
-    let detached: Vec<usize> = match commit {
-        Some(c) if worktrees_shown => repo.detached_worktrees_at(c).collect(),
-        _ => Vec::new(),
-    };
-    repo.labels(&refs, &detached, worktrees_shown)
-        .into_iter()
-        .map(|label| match label {
-            Label::Ref { index, worktree } => Badge::Ref {
-                git_ref: &repo.refs[index],
-                worktree: worktree.map(|k| &repo.worktrees[k]),
-                ahead_behind: repo
-                    .upstream_of(index)
-                    .filter(|_| graph.show_upstreams)
-                    .map(|u| (u.ahead(), u.behind()))
-                    .filter(|&(ahead, behind)| ahead + behind > 0),
-            },
-            Label::Worktree(k) => Badge::DetachedWorktree(&repo.worktrees[k]),
-        })
-        .collect()
-}
-
-/// At most `max_width` wide. Returns its width.
-pub(super) fn badge(
-    ui: &Ui,
-    badge: &Badge,
-    palette: &Palette,
-    left_center: Pos2,
-    max_width: f32,
-) -> f32 {
-    let fill = badge.fill(palette);
-    let color = text_on(fill);
-    let painter = ui.painter();
-    let chrome = badge.chrome_width(painter);
-    let mut job = LayoutJob::single_section(
-        badge.text(),
-        TextFormat {
-            font_id: FontId::proportional(BADGE_FONT_SIZE),
-            color,
-            italics: badge.is_detached_worktree(),
-            ..TextFormat::default()
-        },
-    );
-    job.wrap = TextWrapping::truncate_at_width((max_width - chrome).max(1.0));
-    let g = painter.layout_job(job);
-    let size = vec2(g.size().x + chrome, BADGE_HEIGHT);
-    let rect = Rect::from_min_size(pos2(left_center.x, left_center.y - size.y / 2.0), size);
-    painter.rect(
-        rect,
-        CornerRadius::same(3),
-        fill,
-        Stroke::new(1.0, Color32::from_black_alpha(64)),
-        egui::StrokeKind::Inside,
-    );
-    let mut text_left = rect.left() + BADGE_PAD;
-    if let Some(w) = badge.worktree() {
-        let icon = Rect::from_center_size(
-            pos2(text_left + BADGE_FOLDER_SIZE / 2.0, rect.center().y),
-            Vec2::splat(BADGE_FOLDER_SIZE),
-        );
-        let folder = if w.missing {
-            glyphs::FOLDER_GONE
-        } else {
-            glyphs::FOLDER
-        };
-        widgets::paint_glyph(painter, icon, folder, color);
-        text_left += BADGE_FOLDER_ROOM;
-    }
-    painter.galley(
-        pos2(text_left, rect.center().y - g.size().y / 2.0),
-        g,
-        color,
-    );
-    if let Some(counts) = badge.ahead_behind() {
-        let width = crate::upstreams::counts_width(painter, counts);
-        let at = pos2(rect.right() - BADGE_PAD - width, rect.center().y);
-        crate::upstreams::paint_counts(painter, at, counts, color);
-    }
-    size.x
-}
-
-pub(super) fn heading_background(ui: &Ui, rect: Rect, c: &Colors) {
-    let painter = ui.painter();
-    painter.rect_filled(rect, 0.0, ui.visuals().panel_fill);
-    painter.hline(
-        rect.x_range(),
-        rect.bottom() - 0.5,
-        Stroke::new(1.0, c.line),
-    );
-}
-
-/// While dragged, returns where its middle should go: the pointer's position across the bar,
-/// less where on the bar it was grabbed.
-pub(super) fn divider(ui: &mut Ui, id: Id, bar: &Bar) -> Option<f32> {
-    let c = colors(ui);
-    let rect = bar.rect;
-    let cursor = if bar.vertical {
-        CursorIcon::ResizeHorizontal
-    } else {
-        CursorIcon::ResizeVertical
-    };
-    let response = ui.interact(rect, id, Sense::drag()).on_hover_cursor(cursor);
-    let active = response.hovered() || response.dragged();
-    let painter = ui.painter();
-    let fill = if active {
-        widgets::tones(ui).accent
-    } else {
-        ui.visuals().panel_fill
-    };
-    painter.rect_filled(rect, 0.0, fill);
-    let line = Stroke::new(1.0, c.line);
-    if bar.vertical {
-        painter.vline(rect.left() + 0.5, rect.y_range(), line);
-        painter.vline(rect.right() - 0.5, rect.y_range(), line);
-    } else {
-        painter.hline(rect.x_range(), rect.top() + 0.5, line);
-        painter.hline(rect.x_range(), rect.bottom() - 0.5, line);
-    }
-    let along = |p: Pos2| if bar.vertical { p.x } else { p.y };
-    let pointer = response.interact_pointer_pos().map(along)?;
-    if response.drag_started() {
-        let middle = along(rect.center());
-        ui.data_mut(|d| d.insert_temp(id, pointer - middle));
-    }
-    if !response.dragged() {
-        return None;
-    }
-    let grabbed = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
-    Some(pointer - grabbed)
-}
-
 /// In a right-to-left layout.
 fn layout_tools(ui: &mut Ui, settings: &mut LogWindowSettings) {
     let current = settings.layout;
@@ -1549,20 +1179,6 @@ fn field<R>(ui: &mut Ui, label_width: f32, label: &str, add: impl FnOnce(&mut Ui
     });
 }
 
-fn badge_widget(ui: &mut Ui, b: &Badge, palette: &Palette) {
-    let name = ui.painter().layout_no_wrap(
-        b.text(),
-        FontId::proportional(BADGE_FONT_SIZE),
-        Color32::PLACEHOLDER,
-    );
-    let width = name.size().x + 1.0 + b.chrome_width(ui.painter());
-    let (rect, response) = ui.allocate_exact_size(vec2(width, BADGE_HEIGHT), Sense::hover());
-    badge(ui, b, palette, rect.left_center(), rect.width());
-    if let Some(w) = b.worktree() {
-        response.on_hover_text(format!("Worktree {}", w.path.display()));
-    }
-}
-
 /// A merge parent's short hash, as `git log`'s `Merge:` line has it: a link that returns the
 /// parent's row when clicked, or weak text where the log doesn't list it.
 fn parent_link(ui: &mut Ui, view: &LogView, parent: CommitIx) -> Option<usize> {
@@ -1648,10 +1264,7 @@ impl ParterreApp {
         };
         let commits: Vec<CommitIx> = nodes
             .iter()
-            .filter_map(|&n| {
-                let oid = scene.repo.commit(scene.graph.nodes[n].commit).oid;
-                repo.lookup(&oid)
-            })
+            .filter_map(|&n| repo.lookup(&scene.node_oid(n)))
             .collect();
         if commits.len() != nodes.len() {
             return;
@@ -1671,49 +1284,36 @@ impl ParterreApp {
         let options = self.settings.log_window.options;
         self.log.open(repo, query, options, vec2(w, h));
         if was_open {
-            self.focus_log = true;
+            self.log.viewport.bring_to_front = true;
         }
     }
 
-    /// Screenshot runs embed it in the main window.
     pub(super) fn log_window(&mut self, ctx: &egui::Context) {
         if !self.log.is_open() {
-            self.log.title_theme = None;
+            self.log.viewport.closed();
             return;
         }
-        let builder = egui::ViewportBuilder::default()
-            .with_title(self.log.title())
-            .with_app_id(crate::settings::APP_ID)
-            .with_icon(self.window_icon.clone())
-            .with_inner_size(self.log.size)
-            .with_min_inner_size([480.0, 360.0]);
         let id = viewport_id();
-        crate::usage::screen(ctx, id.0, crate::usage::Screen::Log);
-        if self.log.title_theme.is_none() && !ctx.embed_viewports() {
-            ctx.request_repaint();
-        }
-        if std::mem::take(&mut self.focus_log) && !ctx.embed_viewports() {
-            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
-        }
+        let builder = viewport::builder(
+            self.log.title(),
+            self.log.size,
+            [480.0, 360.0],
+            &self.window_icon,
+        );
+        self.log.viewport.before_show(ctx, id, Screen::Log);
         ctx.show_viewport_immediate(id, builder, |ui, class| {
-            super::commands::window_begin(ui);
-            if class != egui::ViewportClass::EmbeddedWindow {
-                let input = window_input(
-                    ui,
-                    &mut self.log.title_theme,
-                    self.window_theme,
-                    &mut self.settings.log_window.size,
-                );
-                if input.reload {
+            if let Some(input) = self.log.viewport.begin(ui, class, self.window_theme) {
+                input.keep_size(&mut self.settings.log_window.size);
+                let (reload, fetch) = ui.input_mut(keys::reload_and_fetch);
+                if reload {
                     self.reload();
                 }
-                if input.fetch {
+                if fetch {
                     self.fetch(ui.ctx(), id);
                 }
-                // Keys go to the main window too when the log is embedded in it.
                 self.log.handle_keys(ui);
                 text_size::read_input(ui, &mut self.settings.text_size, true);
-                if input.close {
+                if input.close_requested {
                     self.log.view = None;
                 }
             }
@@ -1732,9 +1332,7 @@ impl ParterreApp {
                 branch_busy: self.branches.busy(),
             };
             let log = &mut self.log;
-            egui::CentralPanel::default()
-                .frame(egui::Frame::central_panel(&ui.ctx().global_style()).inner_margin(0))
-                .show(ui, |ui| log.contents(ui, &mut env));
+            viewport::central_panel(ui).show(ui, |ui| log.contents(ui, &mut env));
         });
         for request in std::mem::take(&mut self.log.compare_requests) {
             self.compare_request(request);
@@ -1755,6 +1353,7 @@ impl ParterreApp {
 mod tests {
     use super::*;
     use crate::app::commit_table::ROW_HEIGHT;
+    use crate::app::table_style::HEADING_HEIGHT;
     use parterre_core::log_layout::Dividers;
 
     #[test]

@@ -6,7 +6,7 @@ use parterre_core::branches::command_text;
 use parterre_core::merge::{self, Method, Preview};
 use parterre_core::revgraph::GraphOptions;
 
-use super::branches::{Asked, answer_of, commit_line, radio_with_help};
+use super::branches::Asked;
 use super::rebase::{ListedCommits, listing_dialog_width, stash_checkbox};
 use crate::dialogs;
 use crate::theme::Palette;
@@ -74,7 +74,7 @@ impl MergeDialog {
             .resizable()
             .show(ctx, |ui| {
                 // Only the commits scroll: everything else stays in view.
-                if commit_line(ui, self.listed.repo(), self.preview.theirs) {
+                if dialogs::commit_line(ui, self.listed.repo(), self.preview.theirs) {
                     show_in_log = Some(self.preview.theirs);
                 }
                 if let Some(oid) = self.listed.show(ui, palette, options) {
@@ -109,11 +109,12 @@ impl MergeDialog {
                     .map(|c| command_text(c))
                     .collect();
                 dialogs::command_box(ui, &commands);
-                dialogs::actions(ui, "Merge", blocked.is_none() && !busy, false, false)
+                let primary = dialogs::Primary::new("Merge").enabled(blocked.is_none() && !busy);
+                dialogs::actions(ui, primary)
             });
         self.fresh = false;
         Asked {
-            answer: answer_of(shown),
+            answer: shown.answer(),
             show_in_log,
         }
     }
@@ -125,7 +126,7 @@ impl MergeDialog {
             let unavailable = self.preview.unavailable(m, name);
             let help = m.help(&self.preview.branch, name);
             let picked = ui.add_enabled_ui(unavailable.is_none(), |ui| {
-                radio_with_help(
+                dialogs::radio_with_help(
                     ui,
                     self.method == m,
                     m.name(),
@@ -149,7 +150,7 @@ mod tests {
     use std::path::Path;
 
     use parterre_core::Oid;
-    use parterre_core::branches::Stuck;
+    use parterre_core::branches::{GitOperation, Stuck};
 
     use super::super::branches::{self, Request};
     use super::super::tool_harness::{Harness, banner_texts, git, init, load, menu, read, write};
@@ -337,7 +338,10 @@ mod tests {
         assert!(h.shows("Finish or abort it with git, or go to another worktree."));
 
         let (repo, catalog) = load(h.path());
-        assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a merge")));
+        assert_eq!(
+            catalog.stuck(),
+            Some(Stuck::InProgress(GitOperation::Merge))
+        );
         let texts = banner_texts(h.path());
         assert!(texts.contains(&"1 conflicted file".to_owned()), "{texts:?}");
         // Merging is greyed out until it's finished with git.

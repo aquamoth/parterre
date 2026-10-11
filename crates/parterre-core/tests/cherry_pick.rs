@@ -1,18 +1,8 @@
 mod common;
 
-use common::TestRepo;
-use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck};
+use common::{TestRepo, done, failed, oid, rev};
+use parterre_core::branches::{Action, Catalog, GitOperation, Outcome, Stuck};
 use parterre_core::cherry_pick::{self, CherryPick, Picks, Preview, Skipped};
-use parterre_util::CancelTree;
-
-fn oid(s: &str) -> Oid {
-    Oid::from_hex(s).unwrap()
-}
-
-fn rev(r: &TestRepo, rev: &str) -> Oid {
-    oid(&r.git(&["rev-parse", rev]))
-}
 
 fn lacking(r: &TestRepo, of: &str) -> Preview {
     Preview::load(r.path(), &Picks::Lacking(rev(r, of)), Some(of.into())).unwrap()
@@ -24,25 +14,7 @@ fn chosen(r: &TestRepo, commits: &[&str]) -> Preview {
 }
 
 fn execute(r: &TestRepo, pick: CherryPick) -> Outcome {
-    Branches::new(r.path()).execute(
-        Action::CherryPick(Box::new(pick)),
-        None,
-        &CancelTree::default(),
-    )
-}
-
-fn done(out: Outcome) -> Report {
-    match out {
-        Outcome::Done(report) => report,
-        other => panic!("expected it done: {other:?}"),
-    }
-}
-
-fn failed(out: Outcome) -> String {
-    match out {
-        Outcome::Failed { error, .. } => error.to_string(),
-        other => panic!("expected a failure: {other:?}"),
-    }
+    common::execute(r, Action::CherryPick(Box::new(pick)), None)
 }
 
 fn subjects(r: &TestRepo, range: &str) -> Vec<String> {
@@ -252,7 +224,10 @@ fn a_conflict_midway_stops_it_and_says_where() {
         "Finish or abort it with git, or go to another worktree."
     );
     let catalog = Catalog::load(r.path()).unwrap();
-    assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a cherry-pick")));
+    assert_eq!(
+        catalog.stuck(),
+        Some(Stuck::InProgress(GitOperation::CherryPick))
+    );
     assert_eq!(catalog.conflicted, ["file"]);
     let p = picking(&r);
     assert_eq!(p.commit, oid(&theirs));
@@ -301,7 +276,10 @@ fn a_pick_that_turns_out_empty_stops_as_git_does() {
         "Cherry-pick stopped"
     );
     let catalog = Catalog::load(r.path()).unwrap();
-    assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a cherry-pick")));
+    assert_eq!(
+        catalog.stuck(),
+        Some(Stuck::InProgress(GitOperation::CherryPick))
+    );
 }
 
 #[test]

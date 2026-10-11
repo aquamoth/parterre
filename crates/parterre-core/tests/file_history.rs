@@ -1,19 +1,11 @@
 mod common;
 
-use common::TestRepo;
-use parterre_core::Oid;
+use common::{TestRepo, blame_at, oid};
 use parterre_core::blame::{BlameOptions, BlameSpec, Moves};
 use parterre_core::file_diff::Rev;
 use parterre_core::file_history::{FileHistory, Source};
 use parterre_core::git::Git;
 use parterre_util::Cancel;
-
-fn at(hash: &str, path: &str) -> BlameSpec {
-    BlameSpec {
-        rev: Rev::Commit(Oid::from_hex(hash).unwrap()),
-        path: path.into(),
-    }
-}
 
 fn working_tree(path: &str) -> BlameSpec {
     BlameSpec {
@@ -54,10 +46,6 @@ fn rows(h: &FileHistory) -> Vec<String> {
         .collect()
 }
 
-fn oid(hash: &str) -> Option<Oid> {
-    Oid::from_hex(hash)
-}
-
 #[test]
 fn a_linear_history_lists_the_commits_that_changed_the_file() {
     let mut r = TestRepo::new();
@@ -72,14 +60,14 @@ fn a_linear_history_lists_the_commits_that_changed_the_file() {
     r.write("f.txt", b"one\nTWO\nTHREE\nfour\n");
     let c5 = r.commit_all("c5");
 
-    let h = history(&r, &at(&c5, "f.txt"));
+    let h = history(&r, &blame_at(&c5, "f.txt"));
     assert_eq!(rows(&h), ["c5*", "c4*", "c2*", "c1*"]);
     assert_eq!(h.path, "f.txt");
     // Parents as the file's history has them: c3 didn't change the file.
-    let row = &h.rows[h.row_of(oid(&c4)).unwrap()];
-    assert_eq!(row.parents, [oid(&c2).unwrap()]);
+    let row = &h.rows[h.row_of(Some(oid(&c4))).unwrap()];
+    assert_eq!(row.parents, [oid(&c2)]);
     assert!(h.rows.iter().all(|r| r.snapshot.is_some()));
-    assert_eq!(h.row_of(oid(&c1)), Some(3));
+    assert_eq!(h.row_of(Some(oid(&c1))), Some(3));
     // Dated as the snapshot's log dates them.
     let repo = r.load();
     for row in &h.rows {
@@ -105,19 +93,22 @@ fn commits_from_before_a_rename_come_from_the_blame_with_their_old_path() {
     r.write("b.txt", b"ONE\nTWO\nTHREE\nfour\nfive\nsix\n");
     let c5 = r.commit_all("c5");
 
-    let h = history(&r, &at(&c5, "b.txt"));
+    let h = history(&r, &blame_at(&c5, "b.txt"));
     // The log stops at the rename; the blame names c2 and c1, which are older.
     assert_eq!(
         rows(&h),
         ["c5*", "c4 rename*", "c2* [a.txt]", "c1* [a.txt]"]
     );
-    let c2_row = &h.rows[h.row_of(oid(&c2)).unwrap()];
+    let c2_row = &h.rows[h.row_of(Some(oid(&c2))).unwrap()];
     assert!(c2_row.parents.is_empty());
     assert!(c2_row.snapshot.is_some());
-    assert_eq!(h.rows[h.row_of(oid(&c4)).unwrap()].source, Source::Log);
+    assert_eq!(
+        h.rows[h.row_of(Some(oid(&c4))).unwrap()].source,
+        Source::Log
+    );
     // Every line's commit has a row.
     let blame = Git::new(r.path())
-        .blame(&at(&c5, "b.txt"), BlameOptions::default())
+        .blame(&blame_at(&c5, "b.txt"), BlameOptions::default())
         .unwrap();
     assert!(blame.origins.iter().all(|o| h.row_of(o.commit).is_some()));
     // The blame's rows stand alone in the graph.
@@ -141,10 +132,10 @@ fn lines_moved_from_another_file_bring_its_commit() {
         ignore_whitespace: false,
         moves: Moves::AcrossFiles,
     };
-    let h = history_with(&r, &at(&c2, "a.txt"), options);
+    let h = history_with(&r, &blame_at(&c2, "a.txt"), options);
     assert_eq!(rows(&h), ["c2 move*", "c1 src* [src.txt]"]);
     // Without move detection the line is c2's, and c1 has nothing to do with the file.
-    let h = history(&r, &at(&c2, "a.txt"));
+    let h = history(&r, &blame_at(&c2, "a.txt"));
     assert_eq!(rows(&h), ["c2 move*"]);
 }
 
@@ -172,8 +163,8 @@ fn a_merge_that_took_one_side_is_not_listed_but_an_evil_merge_is() {
     r.git(&["add", "f.txt"]);
     let m4 = r.commit("M4 evil");
 
-    let h = history(&r, &at(&m4, "f.txt"));
-    assert_eq!(h.row_of(oid(&m2)), None);
+    let h = history(&r, &blame_at(&m4, "f.txt"));
+    assert_eq!(h.row_of(Some(oid(&m2))), None);
     assert_eq!(rows(&h), ["M4 evil*", "t1*", "s1*", "c1*"]);
     let evil = &h.rows[0];
     assert_eq!(evil.parents.len(), 2);
@@ -244,12 +235,12 @@ fn during_a_merge_the_other_sides_commits_are_listed_even_outside_the_snapshot()
 
     let h = history(&r, &working_tree("f.txt"));
     assert_eq!(rows(&h), ["wt", "s1*", "c1*"]);
-    let s1_row = &h.rows[h.row_of(oid(&s1)).unwrap()];
+    let s1_row = &h.rows[h.row_of(Some(oid(&s1))).unwrap()];
     assert_eq!(s1_row.source, Source::Log);
     assert_eq!(s1_row.snapshot, None);
     assert!(h.rows[2].snapshot.is_some());
     // Its whole message, for the row's tooltip, comes by its hash all the same.
-    let details = Git::new(r.path()).details(&oid(&s1).unwrap()).unwrap();
+    let details = Git::new(r.path()).details(&oid(&s1)).unwrap();
     assert_eq!(details.message, "s1\n\nWhy the side changed it.");
 }
 
@@ -262,7 +253,7 @@ fn nothing_newer_than_the_blamed_revision_is_listed() {
     let c2 = r.commit_all("c2");
     r.write("f.txt", b"one\ntwo\nthree\n");
     r.commit_all("c3");
-    let h = history(&r, &at(&c2, "f.txt"));
+    let h = history(&r, &blame_at(&c2, "f.txt"));
     assert_eq!(rows(&h), ["c2*", "c1*"]);
 }
 
@@ -309,7 +300,7 @@ fn cancelling_kills_git() {
 
     let cancel = Cancel::new();
     let (tx, rx) = mpsc::channel();
-    let (git, spec, c) = (Git::new(r.path()), at(&c1, "f.txt"), cancel.clone());
+    let (git, spec, c) = (Git::new(r.path()), blame_at(&c1, "f.txt"), cancel.clone());
     std::thread::spawn(move || {
         let _ = tx.send(git.file_log(&spec, &c));
     });
@@ -334,6 +325,6 @@ fn cancelling_kills_git() {
         }
     }
     // A cancelled handle stops what comes after it at once.
-    let again = Git::new(r.path()).file_log(&at(&c1, "f.txt"), &cancel);
+    let again = Git::new(r.path()).file_log(&blame_at(&c1, "f.txt"), &cancel);
     assert!(matches!(again, Err(GitError::Cancelled)));
 }

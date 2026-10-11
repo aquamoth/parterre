@@ -10,6 +10,7 @@ use parterre_core::git::Git;
 use parterre_core::merge_tool::{self, Configured, Detected, Tool};
 
 use crate::dialogs::{self, Answer, Dialog};
+use crate::worker;
 
 #[derive(Clone, Debug)]
 struct File {
@@ -44,13 +45,9 @@ impl MergeTools {
             self.start(&file, &tool);
             return;
         }
-        let (tx, rx) = mpsc::channel();
-        let worker_root = file.root.clone();
-        let worker_ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let detected = merge_tool::detect(&Git::new(worker_root)).map_err(|e| e.to_string());
-            let _ = tx.send(detected);
-            worker_ctx.request_repaint();
+        let root = file.root.clone();
+        let rx = worker::spawn(ctx, move || {
+            merge_tool::detect(&Git::new(root)).map_err(|e| e.to_string())
         });
         self.detecting = Some((file, rx));
     }
@@ -148,7 +145,7 @@ impl Picker {
                     if let Some(e) = terminal_error {
                         ui.label(RichText::new(e.as_str()).color(ui.visuals().error_fg_color));
                     }
-                    return dialogs::actions(ui, "", false, false, false);
+                    return dialogs::close_only(ui);
                 }
                 dialogs::fields(ui, |ui| {
                     for (i, tool) in tools.iter().enumerate() {
@@ -163,7 +160,7 @@ impl Picker {
                         .collect();
                 ui.checkbox(remember, "Remember this choice")
                     .on_hover_text(commands.join("\n"));
-                dialogs::actions(ui, "Open", true, false, false)
+                dialogs::actions(ui, dialogs::Primary::new("Open"))
             });
         self.just_opened = false;
         if shown.should_close() {

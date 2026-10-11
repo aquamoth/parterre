@@ -13,12 +13,14 @@ use parterre_core::revgraph::GraphOptions;
 use parterre_core::{Oid, Repo};
 
 use super::file_table::{DiffQueue, FileTable, Lister, Listing, WorkingTreePick, file_folder};
-use super::log_window::{Colors, badge, badges, colors, window_input};
+use super::table_style::{Colors, badge, badges, colors};
+use super::viewport::{self, Viewport};
 use super::{Opener, ParterreApp};
 use crate::keys;
 use crate::settings::CompareWindowSettings;
 use crate::text_size;
 use crate::theme::Palette;
+use crate::usage::Screen;
 use crate::widgets;
 
 const SIDE_ROW_HEIGHT: f32 = 26.0;
@@ -59,7 +61,7 @@ pub struct CompareWindow {
     compared: Lister<Comparison, Compared>,
     /// Fixed while the window is open: egui resizes a window whose viewport builder changes.
     size: Vec2,
-    title_theme: Option<egui::SystemTheme>,
+    viewport: Viewport,
     diffs: DiffQueue<(Arc<Repo>, FileDiffSpec)>,
     blame_requests: Vec<(Arc<Repo>, BlameSpec)>,
     pub requests: Vec<FileRequest>,
@@ -369,8 +371,8 @@ impl ParterreApp {
                 }
                 self.marked = oid.map(|oid| (oid, self.commit_label(oid)));
                 self.status = Some(match &self.marked {
-                    Some((_, name)) => (format!("Marked {name} for comparison"), false),
-                    None => ("Mark cleared".to_owned(), false),
+                    Some((_, name)) => super::Note::Info(format!("Marked {name} for comparison")),
+                    None => super::Note::Info("Mark cleared".to_owned()),
                 });
             }
             CompareRequest::Compare(first, second) => self.compare(first, second),
@@ -400,7 +402,8 @@ impl ParterreApp {
             return;
         };
         let (Some(a), Some(b)) = (repo.lookup(&first), repo.lookup(&second)) else {
-            self.status = Some(("That commit is no longer in the repository".into(), true));
+            let gone = "That commit is no longer in the repository";
+            self.status = Some(super::Note::Error(gone.into()));
             return;
         };
         let since = self.settings.compare_window.since_ancestor;
@@ -415,49 +418,36 @@ impl ParterreApp {
         let [w, h] = self.settings.compare_window.size;
         self.compare.open(repo, comparison, vec2(w, h));
         if was_open {
-            self.focus_compare = true;
+            self.compare.viewport.bring_to_front = true;
         }
     }
 
-    /// Screenshot runs embed it in the main window.
     pub(super) fn compare_window(&mut self, ctx: &egui::Context) {
         if !self.compare.is_open() {
-            self.compare.title_theme = None;
+            self.compare.viewport.closed();
             return;
         }
-        let builder = egui::ViewportBuilder::default()
-            .with_title(self.compare.title())
-            .with_app_id(crate::settings::APP_ID)
-            .with_icon(self.window_icon.clone())
-            .with_inner_size(self.compare.size)
-            .with_min_inner_size([480.0, 300.0]);
         let id = viewport_id();
-        crate::usage::screen(ctx, id.0, crate::usage::Screen::Compare);
-        if self.compare.title_theme.is_none() && !ctx.embed_viewports() {
-            ctx.request_repaint();
-        }
-        if std::mem::take(&mut self.focus_compare) && !ctx.embed_viewports() {
-            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
-        }
+        let builder = viewport::builder(
+            self.compare.title(),
+            self.compare.size,
+            [480.0, 300.0],
+            &self.window_icon,
+        );
+        self.compare.viewport.before_show(ctx, id, Screen::Compare);
         ctx.show_viewport_immediate(id, builder, |ui, class| {
-            super::commands::window_begin(ui);
-            if class != egui::ViewportClass::EmbeddedWindow {
-                let input = window_input(
-                    ui,
-                    &mut self.compare.title_theme,
-                    self.window_theme,
-                    &mut self.settings.compare_window.size,
-                );
-                if input.reload {
+            if let Some(input) = self.compare.viewport.begin(ui, class, self.window_theme) {
+                input.keep_size(&mut self.settings.compare_window.size);
+                let (reload, fetch) = ui.input_mut(keys::reload_and_fetch);
+                if reload {
                     self.reload();
                 }
-                if input.fetch {
+                if fetch {
                     self.fetch(ui.ctx(), id);
                 }
-                // Keys go to the main window too when the window is embedded in it.
                 self.compare.handle_keys(ui);
                 text_size::read_input(ui, &mut self.settings.text_size, true);
-                if input.close {
+                if input.close_requested {
                     self.compare.view = None;
                 }
             }
@@ -471,9 +461,7 @@ impl ParterreApp {
                 settings: &mut self.settings.compare_window,
             };
             let compare = &mut self.compare;
-            egui::CentralPanel::default()
-                .frame(egui::Frame::central_panel(&ui.ctx().global_style()).inner_margin(0))
-                .show(ui, |ui| compare.contents(ui, &mut env));
+            viewport::central_panel(ui).show(ui, |ui| compare.contents(ui, &mut env));
         });
         for (repo, spec) in self.compare.diffs.take() {
             self.diffs.open(repo, spec, &self.settings.diff_window, ctx);

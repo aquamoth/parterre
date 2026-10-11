@@ -29,7 +29,7 @@ impl Default for View {
 }
 
 impl View {
-    fn points_per_world_unit(self) -> f32 {
+    pub fn points_per_world_unit(self) -> f32 {
         self.zoom / self.text_size
     }
 

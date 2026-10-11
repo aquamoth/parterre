@@ -23,12 +23,8 @@ pub fn copyright() -> String {
 }
 
 fn copyright_of(notice: &str) -> String {
-    let line = notice
-        .lines()
-        .find(|line| line.starts_with("Copyright"))
-        .unwrap_or_default();
-    let holder = line.split(" <").next().unwrap_or_default();
-    let holder = holder.trim_start_matches("Copyright").trim_start();
+    let line = crate::notice::copyright_line(notice);
+    let holder = line.trim_start_matches("Copyright").trim_start();
     format!("© {}", holder.trim_start_matches("(C)").trim_start())
 }
 

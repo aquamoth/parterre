@@ -7,8 +7,8 @@
 //! for it or opens a new one. Lanes keep their column while they pass rows by, so their lines
 //! stay straight, and a lane that is freed stays free until a new line needs one.
 //!
-//! So that memory stays small for long logs, [`LogGraph`] keeps only the lanes at every
-//! [`ROWS_PER_CHECKPOINT`]th row and works out the rows asked for from the nearest one.
+//! So that memory stays small for long logs, [`LogGraph`] keeps the lanes only at checkpoint
+//! rows and works out the rows asked for from the nearest one.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -198,7 +198,7 @@ mod tests {
 
     /// Nothing is outside the log.
     fn graph(parents: &[&[u32]]) -> LogGraph {
-        let commits: Vec<CommitIx> = (0..parents.len() as u32).map(CommitIx).collect();
+        let commits: Vec<CommitIx> = (0..parents.len()).map(CommitIx::new).collect();
         let list = LogList {
             parents: parents
                 .iter()

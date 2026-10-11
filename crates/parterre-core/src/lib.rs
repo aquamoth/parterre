@@ -24,6 +24,7 @@ pub mod log_layout;
 pub mod merge;
 pub mod merge_tool;
 pub mod oid;
+mod operation;
 pub mod pattern;
 pub mod physics;
 pub mod rebase;

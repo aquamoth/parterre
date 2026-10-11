@@ -1,39 +1,15 @@
 mod common;
 
-use common::{TestRepo, read_text};
-use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck};
+use common::{TestRepo, done, failed, read_text, rev};
+use parterre_core::branches::{Action, Catalog, GitOperation, Outcome, Stuck};
 use parterre_core::revert::{self, Preview};
-use parterre_util::CancelTree;
-
-fn rev(r: &TestRepo, rev: &str) -> Oid {
-    Oid::from_hex(&r.git(&["rev-parse", rev])).unwrap()
-}
 
 fn preview(r: &TestRepo, commit: &str) -> Preview {
     Preview::load(r.path(), rev(r, commit)).unwrap()
 }
 
-fn run(r: &TestRepo, action: Action) -> Outcome {
-    Branches::new(r.path()).execute(action, None, &CancelTree::default())
-}
-
 fn execute(r: &TestRepo, revert: revert::Revert) -> Outcome {
-    run(r, Action::Revert(Box::new(revert)))
-}
-
-fn done(out: Outcome) -> Report {
-    match out {
-        Outcome::Done(report) => report,
-        other => panic!("expected it done: {other:?}"),
-    }
-}
-
-fn failed(out: Outcome) -> (String, Report) {
-    match out {
-        Outcome::Failed { error, report } => (error.to_string(), report),
-        other => panic!("expected a failure: {other:?}"),
-    }
+    common::execute(r, Action::Revert(Box::new(revert)), None)
 }
 
 fn plain(p: &Preview, stash: bool) -> revert::Revert {
@@ -245,7 +221,7 @@ fn local_changes_to_a_file_the_revert_changes_need_a_stash() {
     assert!(p.blocked(false, &p.message).is_some());
     // Run anyway, as a stale dialog might: refused before git touches anything.
     let head = rev(&r, "HEAD");
-    let (error, _) = failed(execute(&r, plain(&p, false)));
+    let error = failed(execute(&r, plain(&p, false)));
     assert!(error.contains("local changes changed"), "{error}");
     assert_eq!(rev(&r, "HEAD"), head);
     assert_eq!(text(&r, "file"), "mine\n");
@@ -285,7 +261,7 @@ fn stashing_reverts_and_leaves_the_changes_to_restore() {
     // Another entry on top since: it's found by its commit.
     r.write("later", b"someone else's\n");
     r.git(&["stash", "push", "-q", "-m", "theirs"]);
-    let report = done(run(&r, Action::RestoreStash(stash.oid)));
+    let report = done(common::execute(&r, Action::RestoreStash(stash.oid), None));
     assert!(report.attention.is_none());
     assert_eq!(text(&r, "other"), "also mine\n");
     assert_eq!(text(&r, "staged"), "staged\n");
@@ -298,7 +274,7 @@ fn a_restore_that_conflicts_keeps_the_entry() {
     r.write("file", b"mine\n");
     let p = preview(&r, "change");
     let stash = done(execute(&r, plain(&p, true))).stash.unwrap();
-    let report = done(run(&r, Action::RestoreStash(stash.oid)));
+    let report = done(common::execute(&r, Action::RestoreStash(stash.oid), None));
     let attention = report.attention.expect("conflicted");
     assert_eq!(
         attention.title,
@@ -316,7 +292,7 @@ fn restoring_an_entry_gone_since_says_so() {
     let p = preview(&r, "change");
     let stash = done(execute(&r, plain(&p, true))).stash.unwrap();
     r.git(&["stash", "drop", "-q"]);
-    let (error, _) = failed(run(&r, Action::RestoreStash(stash.oid)));
+    let error = failed(common::execute(&r, Action::RestoreStash(stash.oid), None));
     assert!(error.contains("gone from the stash list"), "{error}");
 }
 
@@ -336,7 +312,10 @@ fn a_conflict_leaves_the_revert_in_progress() {
     assert_eq!(attention.title, "Revert stopped on conflicts in 1 file");
     assert!(report.created.is_none() && report.stash.is_none());
     let catalog = Catalog::load(r.path()).unwrap();
-    assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a revert")));
+    assert_eq!(
+        catalog.stuck(),
+        Some(Stuck::InProgress(GitOperation::Revert))
+    );
     let open = catalog.worktrees.iter().find(|w| w.open).unwrap();
     assert_eq!(open.reverting, Some(rev(&r, "change")));
     assert_eq!(catalog.stashed_for_revert, None);
@@ -362,7 +341,8 @@ fn a_conflict_after_stashing_names_the_entry_instead_of_restoring() {
     assert_eq!(catalog.stashed_for_revert.as_deref(), Some("stash@{0}"));
     assert_eq!(text(&r, "other"), "other\n");
     r.git(&["revert", "--abort"]);
-    // The test's git, without the system's `core.autocrlf`, as parterre's git checked out.
+    // The test's git, without the system's `core.autocrlf`, sees the files parterre's git
+    // checked out as changed.
     r.git(&["reset", "-q", "--hard"]);
     r.git(&["stash", "pop", "-q"]);
     assert_eq!(text(&r, "other"), "mine\n");
@@ -399,7 +379,7 @@ fn nothing_to_revert_after_stashing_still_offers_the_stash() {
     let report = done(execute(&r, plain(&p, true)));
     assert!(report.attention.is_some());
     let stash = report.stash.expect("stashed");
-    done(run(&r, Action::RestoreStash(stash.oid)));
+    done(common::execute(&r, Action::RestoreStash(stash.oid), None));
     assert_eq!(text(&r, "other"), "mine\n");
 }
 
@@ -410,7 +390,7 @@ fn an_untracked_file_in_the_way_is_a_refusal_not_nothing_to_revert() {
     r.commit("remove other");
     r.write("other", b"untracked\n");
     let p = preview(&r, "HEAD");
-    let (error, _) = failed(execute(&r, plain(&p, false)));
+    let error = failed(execute(&r, plain(&p, false)));
     assert!(!error.is_empty());
     assert_eq!(text(&r, "other"), "untracked\n");
     assert_eq!(Catalog::load(r.path()).unwrap().stuck(), None);
@@ -423,7 +403,7 @@ fn a_branch_that_moved_is_not_reverted() {
     r.write("new", b"new\n");
     r.commit_all("meanwhile");
     let head = rev(&r, "HEAD");
-    let (error, _) = failed(execute(&r, plain(&p, false)));
+    let error = failed(execute(&r, plain(&p, false)));
     assert!(error.contains("moved"), "{error}");
     assert_eq!(rev(&r, "HEAD"), head);
 }

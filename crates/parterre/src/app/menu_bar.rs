@@ -154,16 +154,57 @@ pub enum Entry {
     System(System),
 }
 
+/// Why an entry is greyed out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Why {
+    /// A git operation is running: the entry applies again once it's done.
+    GitBusy,
+    /// The branch information is loading: likewise.
+    Loading,
+    Other(String),
+}
+
+impl Why {
+    pub fn waiting(busy: bool) -> Why {
+        if busy { Why::GitBusy } else { Why::Loading }
+    }
+
+    pub fn text(&self) -> &str {
+        match self {
+            Why::GitBusy => branches::OPERATION_RUNNING,
+            Why::Loading => branches::LOADING_BRANCHES,
+            Why::Other(text) => text,
+        }
+    }
+
+    pub fn is_waiting(&self) -> bool {
+        matches!(self, Why::GitBusy | Why::Loading)
+    }
+}
+
+impl From<&str> for Why {
+    fn from(text: &str) -> Why {
+        Why::Other(text.to_owned())
+    }
+}
+
+impl From<String> for Why {
+    fn from(text: String) -> Why {
+        Why::Other(text)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Item {
     pub label: String,
-    pub command: Command,
+    /// `None` for an item that is only ever greyed out.
+    pub command: Option<Command>,
     pub shortcut: Option<Shortcut>,
     pub enabled: bool,
     pub mark: Mark,
     pub accent: bool,
     pub tip: Option<String>,
-    pub why_disabled: Option<String>,
+    pub why_disabled: Option<Why>,
     /// Weak text in the shortcut's place.
     pub detail: Option<String>,
     pub folder_icon: Option<PathBuf>,
@@ -171,8 +212,16 @@ pub struct Item {
 
 impl Item {
     pub fn new(label: impl Into<String>, command: Command) -> Item {
+        Item::with_command(label.into(), Some(command))
+    }
+
+    pub fn disabled(label: impl Into<String>, why: impl Into<Why>) -> Item {
+        Item::with_command(label.into(), None).blocked(Some(why))
+    }
+
+    fn with_command(label: String, command: Option<Command>) -> Item {
         Item {
-            label: label.into(),
+            label,
             command,
             shortcut: None,
             enabled: true,
@@ -195,7 +244,7 @@ impl Item {
         self
     }
 
-    pub fn blocked(mut self, why: Option<impl Into<String>>) -> Item {
+    pub fn blocked(mut self, why: Option<impl Into<Why>>) -> Item {
         if let Some(why) = why {
             self.enabled = false;
             self.why_disabled = Some(why.into());
@@ -230,7 +279,7 @@ pub struct Submenu {
     pub label: String,
     pub entries: Vec<Entry>,
     pub enabled: bool,
-    pub why_disabled: Option<String>,
+    pub why_disabled: Option<Why>,
 }
 
 impl Submenu {
@@ -435,7 +484,9 @@ pub fn build(state: &State) -> Vec<Menu> {
 fn grey_all_but_quit(entries: &mut [Entry]) {
     for entry in entries {
         match entry {
-            Entry::Item(item) if !matches!(item.command, Command::Quit) => item.enabled = false,
+            Entry::Item(item) if !matches!(item.command, Some(Command::Quit)) => {
+                item.enabled = false
+            }
             Entry::Submenu(submenu) => grey_all_but_quit(&mut submenu.entries),
             _ => {}
         }
@@ -451,7 +502,7 @@ fn graph_only(state: &State, mut entries: Vec<Entry>) -> Vec<Entry> {
     fn grey(entries: &mut [Entry]) {
         for entry in entries {
             match entry {
-                Entry::Item(item) if !matches!(item.command, Command::Fetch) => {
+                Entry::Item(item) if !matches!(item.command, Some(Command::Fetch)) => {
                     item.enabled = false
                 }
                 Entry::Submenu(submenu) => {

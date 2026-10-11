@@ -8,6 +8,7 @@ use parterre_core::git::{Git, GitError};
 use parterre_core::oid::Oid;
 use parterre_core::repo::{RefKind, Repo};
 use parterre_core::revgraph::PullRequestHead;
+use parterre_core::text::capitalized;
 
 pub mod github;
 
@@ -207,13 +208,13 @@ impl ForgeError {
                 "Couldn't reach GitHub",
                 format!(
                     "{}. Check the network connection, and turn pull requests on again.",
-                    capitalised(why)
+                    capitalized(why)
                 ),
                 None,
             ),
             other => (
                 "Couldn't show pull requests",
-                format!("{}.", capitalised(&other.to_string())),
+                format!("{}.", capitalized(&other.to_string())),
                 None,
             ),
         };
@@ -231,14 +232,6 @@ pub struct Explanation {
     pub body: String,
     /// To run in a terminal.
     pub command: Option<&'static str>,
-}
-
-fn capitalised(text: &str) -> String {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
 }
 
 /// How long a loaded list is used before GitHub is asked again, as in t3code.

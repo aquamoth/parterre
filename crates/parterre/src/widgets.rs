@@ -1,10 +1,12 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use eframe::egui::{
     self, Color32, CornerRadius, Galley, Id, Painter, Rect, Response, Sense, Shape, Stroke,
     StrokeKind, Ui, Vec2, vec2,
 };
 use parterre_core::glyphs::{self, Glyph, Part};
+use parterre_core::worktree_folder;
 
 const ICON_SIZE: f32 = 18.0;
 pub const BUTTON_SIZE: f32 = 30.0;
@@ -193,8 +195,38 @@ pub fn mini_button(ui: &mut Ui, glyph: Glyph) -> Response {
     response
 }
 
+pub const COPIED_GREEN: Color32 = Color32::from_rgb(0x2e, 0xa0, 0x43);
+const COPIED_SHOWN_SECONDS: f64 = 1.5;
+
+/// Copies `text()` when the button `button` draws is clicked. `button` is told whether that
+/// happened a moment ago, to say so.
+pub fn copy_on_click(
+    ui: &mut Ui,
+    id: Id,
+    text: impl FnOnce() -> String,
+    button: impl FnOnce(&mut Ui, bool) -> Response,
+) {
+    let now = ui.input(|i| i.time);
+    let copied_at: Option<f64> = ui.data(|d| d.get_temp(id));
+    let copied = copied_at.is_some_and(|at| now - at < COPIED_SHOWN_SECONDS);
+    if copied {
+        ui.ctx().request_repaint_after(Duration::from_millis(300));
+    }
+    if button(ui, copied).clicked() {
+        ui.ctx().copy_text(text());
+        ui.data_mut(|d| d.insert_temp(id, now));
+    }
+}
+
+/// Copies `text()` when clicked, with a check mark in `done` for a moment after.
+pub fn copy_button(ui: &mut Ui, id: Id, text: impl FnOnce() -> String, hover: &str, done: Color32) {
+    copy_on_click(ui, id, text, |ui, copied| {
+        copy_icon_button(ui, copied, done).on_hover_text(hover)
+    });
+}
+
 /// Shows a check mark in `done` instead of its icon while `copied`.
-pub fn copy_button(ui: &mut Ui, copied: bool, done: Color32) -> Response {
+pub fn copy_icon_button(ui: &mut Ui, copied: bool, done: Color32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
     paint_background(ui, rect, &response, false, false);
     let icon = Rect::from_center_size(rect.center(), Vec2::splat(14.0));
@@ -497,6 +529,39 @@ pub struct Found {
     pub next: bool,
     pub previous: bool,
     pub cleared: bool,
+}
+
+/// A folder name field, which drops what can't be in a folder's name (separators, and what
+/// Windows forbids) as it's typed, and a button to have the name follow what it follows again.
+/// Returns whether that was clicked.
+pub fn folder_name_field(
+    ui: &mut Ui,
+    name: &mut String,
+    edited: &mut bool,
+    follow_tip: &str,
+) -> bool {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let width = ui.available_width() - BUTTON_SIZE - 4.0;
+        let mut typed = name.clone();
+        if text_field(ui, &mut typed, "Folder name", width).changed() {
+            *name = typed
+                .chars()
+                .filter(|c| !worktree_folder::forbidden(*c))
+                .collect();
+            *edited = true;
+        }
+        let follow = ui
+            .add_enabled_ui(*edited, |ui| icon_button(ui, glyphs::RESET, false))
+            .inner
+            .on_hover_text(follow_tip)
+            .clicked();
+        if follow {
+            *edited = false;
+        }
+        follow
+    })
+    .inner
 }
 
 /// A find field for `query`: the query (a hint and the find shortcut while empty, if there is

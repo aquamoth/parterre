@@ -24,11 +24,14 @@ use objc2_foundation::{NSAttributedString, NSDictionary, NSObjectProtocol, NSSiz
 use super::{Command, Entry, Item, Kind, Menu, System};
 use crate::keys::Shortcut;
 
+/// An item's command, and whether it is enabled.
+type Slot = (Option<Command>, bool);
+
 thread_local! {
     /// The menus as last built by the app, and whether keys without a modifier are left out.
     static LATEST: RefCell<(Vec<Menu>, bool)> = const { RefCell::new((Vec::new(), false)) };
-    /// Per menu of the bar, by item tag: its command, and whether it is enabled.
-    static TABLE: RefCell<Vec<Vec<(Command, bool)>>> = const { RefCell::new(Vec::new()) };
+    /// Per menu of the bar, by item tag.
+    static TABLE: RefCell<Vec<Vec<Slot>>> = const { RefCell::new(Vec::new()) };
     /// Per menu of the bar, its [`signature`] when last built.
     static BUILT_SIGNATURES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static CHOSEN: RefCell<Vec<Command>> = const { RefCell::new(Vec::new()) };
@@ -52,7 +55,7 @@ define_class!(
     impl Target {
         #[unsafe(method(itemChosen:))]
         fn item_chosen(&self, item: &NSMenuItem) {
-            if let Some((command, true)) = entry_of(item.tag()) {
+            if let Some((Some(command), true)) = entry_of(item.tag()) {
                 CHOSEN.with_borrow_mut(|chosen| chosen.push(command));
                 CONTEXT.with_borrow(|ctx| {
                     if let Some(ctx) = ctx {
@@ -112,7 +115,7 @@ fn bar_index(menu: &NSMenu) -> Option<usize> {
     BAR_MENUS.with_borrow(|menus| menus.iter().position(|m| std::ptr::eq(&**m, menu)))
 }
 
-fn entry_of(tag: isize) -> Option<(Command, bool)> {
+fn entry_of(tag: isize) -> Option<Slot> {
     let tag = usize::try_from(tag).ok()?;
     let (top, index) = (tag >> TAG_SHIFT, tag & ((1 << TAG_SHIFT) - 1));
     TABLE.with_borrow(|table| table.get(top)?.get(index).cloned())
@@ -242,7 +245,7 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    fn fill(&self, ns: &NSMenu, entries: &[Entry], table: &mut Vec<(Command, bool)>) {
+    fn fill(&self, ns: &NSMenu, entries: &[Entry], table: &mut Vec<Slot>) {
         let mtm = self.mtm;
         ns.removeAllItems();
         for entry in entries {
@@ -258,7 +261,7 @@ impl Builder<'_> {
                     item.setTitle(&title);
                     item.setSubmenu(Some(&child));
                     if let Some(why) = &submenu.why_disabled {
-                        item.setToolTip(Some(&NSString::from_str(why)));
+                        item.setToolTip(Some(&NSString::from_str(why.text())));
                     }
                     ns.addItem(&item);
                 }
@@ -267,7 +270,7 @@ impl Builder<'_> {
         }
     }
 
-    fn item(&self, item: &Item, table: &mut Vec<(Command, bool)>) -> Retained<NSMenuItem> {
+    fn item(&self, item: &Item, table: &mut Vec<Slot>) -> Retained<NSMenuItem> {
         let mtm = self.mtm;
         let tag = (self.top << TAG_SHIFT) | table.len();
         table.push((item.command.clone(), item.enabled));
@@ -300,7 +303,8 @@ impl Builder<'_> {
             }),
             crate::menu::Mark::None => {}
         }
-        if let Some(tip) = item.tip.as_ref().or(item.why_disabled.as_ref()) {
+        let why_disabled = item.why_disabled.as_ref().map(super::Why::text);
+        if let Some(tip) = item.tip.as_deref().or(why_disabled) {
             ns.setToolTip(Some(&NSString::from_str(tip)));
         }
         if item.accent {

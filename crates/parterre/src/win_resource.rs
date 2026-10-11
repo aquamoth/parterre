@@ -10,7 +10,7 @@ pub struct Resources<'a> {
     pub numeric_version: [u16; 3],
     pub version: &'a str,
     pub description: &'a str,
-    pub notice: &'a str,
+    pub copyright: &'a str,
 }
 
 pub fn script(resources: &Resources) -> String {
@@ -22,7 +22,7 @@ pub fn script(resources: &Resources) -> String {
         ("FileDescription", "parterre"),
         ("FileVersion", resources.version),
         ("InternalName", "parterre"),
-        ("LegalCopyright", copyright(resources.notice)),
+        ("LegalCopyright", resources.copyright),
         ("OriginalFilename", "parterre.exe"),
         ("ProductName", "parterre"),
         ("ProductVersion", resources.version),
@@ -64,15 +64,6 @@ pub fn script(resources: &Resources) -> String {
     rc
 }
 
-fn copyright(notice: &str) -> &str {
-    let line = notice
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("Copyright"))
-        .unwrap_or_default();
-    line.split_once('<').map_or(line, |(name, _)| name).trim()
-}
-
 /// Escapes anything outside ASCII as UTF-16 code units: a plain ASCII script needs no code page,
 /// which the resource compilers would guess differently.
 fn wide_string(s: &str) -> String {
@@ -98,13 +89,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn copyright_comes_from_the_notice_without_the_email() {
-        let notice = "parterre, a viewer\nCopyright (C) 2026 Trustfall AB <m@example.com>\n\nMore";
-        assert_eq!(copyright(notice), "Copyright (C) 2026 Trustfall AB");
-        assert_eq!(copyright("no such line"), "");
-    }
-
-    #[test]
     fn wide_strings_are_ascii_with_escapes() {
         assert_eq!(wide_string("plain"), r#"L"plain""#);
         assert_eq!(wide_string(r#"a "b" c\d"#), r#"L"a ""b"" c\\d""#);
@@ -120,7 +104,7 @@ mod tests {
             numeric_version: [0, 4, 1],
             version: "0.4.1 (a1b2c3d)",
             description: "A viewer.",
-            notice: "Copyright (C) 2026 Trustfall AB <m@example.com>",
+            copyright: "Copyright (C) 2026 Trustfall AB",
         });
         assert!(rc.starts_with("1 ICON \"C:/src/parterre.ico\"\n"));
         assert!(rc.contains("FILEVERSION 0,4,1,0\n"));

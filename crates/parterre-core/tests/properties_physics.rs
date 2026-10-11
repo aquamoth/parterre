@@ -1,23 +1,10 @@
+mod common;
+
+use common::Rng;
 use parterre_core::layout::{
     self, Direction, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking,
 };
 use parterre_core::physics::{DragModel, FLOW_GAP, Net, NetParams, RestPlace};
-
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn below(&mut self, n: u64) -> u64 {
-        if n == 0 { 0 } else { self.next() % n }
-    }
-    fn unit(&mut self) -> f32 {
-        (self.next() % 10_000) as f32 / 10_000.0
-    }
-}
 
 fn input(rng: &mut Rng, n: usize) -> LayoutInput {
     let mut edges = Vec::new();

@@ -1,9 +1,11 @@
 mod common;
 
-use common::{TestRepo, git_command, git_in};
-use parterre_core::Oid;
+use common::{
+    TestRepo, done, execute, failed, failed_with_report, git_command, git_fails, git_in, oid, rev,
+    warning,
+};
 use parterre_core::branches::{
-    Action, Branches, Catalog, Outcome, Report, Stuck, Warning, command_text,
+    Action, Branches, Catalog, GitOperation, Outcome, Report, Stuck, command_text,
 };
 use parterre_core::remote::{
     self, Diverged, Live, Pull, Push, PushState, Reconcile, RemoteBranchTip, SetUpstream,
@@ -40,14 +42,6 @@ fn setup() -> Setup {
     }
 }
 
-fn oid(s: &str) -> Oid {
-    Oid::from_hex(s).unwrap()
-}
-
-fn rev(r: &TestRepo, rev: &str) -> Oid {
-    oid(&r.git(&["rev-parse", rev]))
-}
-
 fn on_origin(s: &Setup, branch: &str) -> Option<String> {
     let out = git_command(s.origin.path())
         .args([
@@ -61,31 +55,6 @@ fn on_origin(s: &Setup, branch: &str) -> Option<String> {
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
-}
-
-fn execute(r: &TestRepo, action: Action, approval: Option<&Warning>) -> Outcome {
-    Branches::new(r.path()).execute(action, approval, &CancelTree::default())
-}
-
-fn done(out: Outcome) -> Report {
-    match out {
-        Outcome::Done(report) => report,
-        other => panic!("expected it done: {other:?}"),
-    }
-}
-
-fn failed(out: Outcome) -> (String, Report) {
-    match out {
-        Outcome::Failed { error, report } => (error.to_string(), report),
-        other => panic!("expected a failure: {other:?}"),
-    }
-}
-
-fn warning(out: Outcome) -> Warning {
-    match out {
-        Outcome::Warning(w) => w,
-        other => panic!("expected a warning: {other:?}"),
-    }
 }
 
 fn commands(report: &Report) -> Vec<String> {
@@ -189,7 +158,7 @@ fn fetching_brings_every_remotes_commits_and_prunes_deleted_branches() {
 fn fetching_without_a_remote_is_refused() {
     let mut r = TestRepo::new();
     r.commit("only");
-    let (error, report) = failed(execute(&r, Action::Fetch, None));
+    let (error, report) = failed_with_report(execute(&r, Action::Fetch, None));
     assert!(error.contains("no remote"), "{error}");
     assert!(report.steps.is_empty());
 }
@@ -203,7 +172,7 @@ fn a_failed_fetch_says_parterre_cannot_ask_for_credentials() {
         "origin",
         "/nonexistent/parterre-remote",
     ]);
-    let (error, _) = failed(execute(&s.work, Action::Fetch, None));
+    let error = failed(execute(&s.work, Action::Fetch, None));
     assert!(error.contains("credential helper"), "{error}");
 }
 
@@ -348,7 +317,10 @@ fn a_pull_that_conflicts_leaves_the_merge_in_progress_and_says_so() {
     let attention = report.attention.expect("a stop needs attention");
     assert_eq!(attention.title, "Pull stopped on conflicts in 1 file");
     let catalog = Catalog::load(s.work.path()).unwrap();
-    assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a merge")));
+    assert_eq!(
+        catalog.stuck(),
+        Some(Stuck::InProgress(GitOperation::Merge))
+    );
 }
 
 #[test]
@@ -364,7 +336,10 @@ fn a_pull_that_conflicts_while_rebasing_leaves_the_rebase_in_progress() {
     ));
     assert!(report.attention.is_some());
     let catalog = Catalog::load(s.work.path()).unwrap();
-    assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a rebase")));
+    assert_eq!(
+        catalog.stuck(),
+        Some(Stuck::InProgress(GitOperation::Rebase))
+    );
 }
 
 #[test]
@@ -373,7 +348,7 @@ fn a_pull_git_refuses_over_uncommitted_changes_fails_and_changes_nothing() {
     push_from_other(&mut s, "base", "theirs\n");
     s.work.write("base", b"uncommitted\n");
     let head = rev(&s.work, "main");
-    let (error, _) = failed(execute(&s.work, pull(&s.work, None), None));
+    let error = failed(execute(&s.work, pull(&s.work, None), None));
     assert!(!error.is_empty());
     assert_eq!(rev(&s.work, "main"), head);
     assert_eq!(
@@ -387,7 +362,7 @@ fn pulling_a_moved_or_stuck_branch_is_refused() {
     let mut s = setup();
     let stale = pull(&s.work, None);
     s.work.commit("moved");
-    let (error, report) = failed(execute(&s.work, stale, None));
+    let (error, report) = failed_with_report(execute(&s.work, stale, None));
     assert!(error.contains("moved"), "{error}");
     assert!(report.steps.is_empty());
 
@@ -397,15 +372,8 @@ fn pulling_a_moved_or_stuck_branch_is_refused() {
     s.work.checkout("main");
     s.work.write("base", b"main\n");
     s.work.commit_all("main");
-    let merge = git_command(s.work.path())
-        .args(["merge", "side"])
-        .output()
-        .unwrap();
-    assert!(
-        !merge.status.success(),
-        "the merge should stop on its conflict"
-    );
-    let (error, report) = failed(execute(&s.work, pull(&s.work, None), None));
+    git_fails(s.work.path(), &["merge", "side"]);
+    let (error, report) = failed_with_report(execute(&s.work, pull(&s.work, None), None));
     assert!(error.contains("in progress"), "{error}");
     assert!(report.steps.is_empty());
 }
@@ -516,7 +484,7 @@ fn a_rejected_push_fetches_and_says_the_remote_has_commits_you_dont() {
     // origin/main is stale here: by the last fetch, main is just ahead.
     let theirs = push_from_other(&mut s, "theirs", "theirs\n");
     s.work.commit("mine");
-    let (error, report) = failed(execute(&s.work, push(&s.work, "main"), None));
+    let (error, report) = failed_with_report(execute(&s.work, push(&s.work, "main"), None));
     assert_eq!(error, "origin/main has commits you don't have.");
     assert_eq!(
         commands(&report),
@@ -590,7 +558,7 @@ fn an_approved_force_push_whose_remote_moved_unseen_is_stopped_by_the_lease() {
     let w = warning(execute(&s.work, push(&s.work, "feature"), None));
     // After the answer, `other` pushes to feature; `work` hasn't fetched it.
     let three = other_adds_to_feature(&mut s);
-    let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
+    let (error, report) = failed_with_report(execute(&s.work, w.action.clone(), Some(&w)));
     assert_eq!(error, "origin/feature has commits you don't have.");
     assert_eq!(report.steps.len(), 2, "the push, then a fetch");
     assert_eq!(on_origin(&s, "feature"), Some(three));
@@ -683,7 +651,7 @@ fn a_force_push_to_an_upstream_of_another_name_wont_lose_commits_the_branch_neve
     s.work.commit("mine");
     let w = warning(execute(&s.work, push_offered(&s.work, "topic"), None));
     assert_eq!(w.commits, vec![oid(&theirs)]);
-    let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
+    let (error, report) = failed_with_report(execute(&s.work, w.action.clone(), Some(&w)));
     assert_eq!(
         error,
         "origin/main has commits topic never had, so parterre won't force push over them. \
@@ -698,7 +666,7 @@ fn a_moved_branch_is_not_pushed() {
     let mut s = setup();
     let stale = push(&s.work, "main");
     s.work.commit("moved");
-    let (error, report) = failed(execute(&s.work, stale, None));
+    let (error, report) = failed_with_report(execute(&s.work, stale, None));
     assert!(error.contains("moved"), "{error}");
     assert!(report.steps.is_empty());
 }
@@ -782,7 +750,7 @@ fn pull_is_offered_on_the_current_branchs_upstream_too() {
 }
 
 #[test]
-fn setting_an_upstream() {
+fn setting_an_upstream_runs_git_branch_and_refuses_a_missing_one() {
     let s = setup();
     s.work.git(&["branch", "feature"]);
     let set = Action::SetUpstream(Box::new(SetUpstream {
@@ -799,7 +767,7 @@ fn setting_an_upstream() {
         branch: "feature".into(),
         upstream: "origin/nowhere".into(),
     }));
-    let (error, report) = failed(execute(&s.work, missing, None));
+    let (error, report) = failed_with_report(execute(&s.work, missing, None));
     assert!(error.contains("no remote-tracking branch"), "{error}");
     assert!(report.steps.is_empty());
 }
@@ -809,7 +777,7 @@ fn a_branch_behind_its_remote_has_nothing_to_push() {
     let mut s = setup();
     push_from_other(&mut s, "theirs", "theirs\n");
     s.work.git(&["fetch", "-q", "origin"]);
-    let (error, report) = failed(execute(&s.work, push(&s.work, "main"), None));
+    let (error, report) = failed_with_report(execute(&s.work, push(&s.work, "main"), None));
     assert!(error.contains("nothing to push"), "{error}");
     assert!(report.steps.is_empty());
 }
@@ -843,7 +811,7 @@ fn git_wont_force_past_commits_the_branch_never_had_and_says_why() {
     let three = other_adds_to_feature(&mut s);
     s.work.git(&["fetch", "-q", "origin"]);
     let w = warning(execute(&s.work, push(&s.work, "feature"), None));
-    let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
+    let (error, report) = failed_with_report(execute(&s.work, w.action.clone(), Some(&w)));
     assert!(
         error.starts_with("origin/feature has commits feature never had"),
         "{error}"
@@ -852,7 +820,6 @@ fn git_wont_force_past_commits_the_branch_never_had_and_says_why() {
     assert_eq!(on_origin(&s, "feature"), Some(three));
 }
 
-/// A pre-push hook that waits a minute, to cancel the push under.
 #[cfg(unix)]
 #[test]
 fn a_cancelled_push_stops_git_and_pushes_nothing() {
@@ -881,7 +848,7 @@ fn a_cancelled_push_stops_git_and_pushes_nothing() {
         Branches::new(s.work.path())
             .with_live(live)
             .execute(push(&s.work, "main"), None, &cancel);
-    let (error, _) = failed(out);
+    let error = failed(out);
     assert_eq!(error, "Operation cancelled.");
     assert!(started.elapsed() < std::time::Duration::from_secs(30));
     assert_eq!(on_origin(&s, "main"), before);
@@ -975,7 +942,7 @@ fn a_remote_branch_that_moved_since_it_was_offered_is_not_deleted() {
     s.work.checkout("feature");
     s.work.commit("more");
     s.work.git(&["push", "-q", "origin", "feature"]);
-    let (error, report) = failed(execute(&s.work, stale, None));
+    let (error, report) = failed_with_report(execute(&s.work, stale, None));
     assert!(error.contains("moved"), "{error}");
     assert!(report.steps.is_empty());
     assert!(on_origin(&s, "feature").is_some());
@@ -988,7 +955,7 @@ fn a_remote_branch_that_moved_on_the_remote_unseen_is_kept_and_a_fetch_suggested
     other_on_feature(&s);
     let theirs = s.other.commit("theirs");
     s.other.git(&["push", "-q", "origin", "feature"]);
-    let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
+    let (error, report) = failed_with_report(execute(&s.work, w.action.clone(), Some(&w)));
     assert_eq!(
         error,
         "origin/feature moved on origin since the last fetch. Fetch, and look again."
@@ -1049,7 +1016,7 @@ fn a_deletion_that_stops_partway_says_which_were_already_gone() {
     other_on_feature(&s);
     s.other.commit("theirs");
     s.other.git(&["push", "-q", "origin", "feature", ":copy"]);
-    let (error, report) = failed(execute(&s.work, w.action.clone(), Some(&w)));
+    let (error, report) = failed_with_report(execute(&s.work, w.action.clone(), Some(&w)));
     assert_eq!(
         error,
         "origin/feature moved on origin since the last fetch. Fetch, and look again. \
@@ -1097,7 +1064,7 @@ fn a_deletion_that_stops_partway_says_which_went() {
     other_on_feature(&s);
     s.other.commit("theirs");
     s.other.git(&["push", "-q", "origin", "feature"]);
-    let (error, _) = failed(execute(&s.work, w.action.clone(), Some(&w)));
+    let error = failed(execute(&s.work, w.action.clone(), Some(&w)));
     assert_eq!(
         error,
         "origin/feature moved on origin since the last fetch. Fetch, and look again. \

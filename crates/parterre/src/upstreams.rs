@@ -144,8 +144,6 @@ fn special_route(
     style: EdgeStyle,
 ) -> Vec<Pos2> {
     let node_box = |n: usize| view.rect_to_screen(canvas, scene.node_rect(n));
-    let points_per_world_unit =
-        view.to_screen(canvas, pos2(1.0, 0.0)).x - view.to_screen(canvas, Pos2::ZERO).x;
     let near = canvas.expand(160.0);
     let others: Vec<Rect> = (0..scene.graph.nodes.len())
         .filter(|&n| n != a && n != b)
@@ -158,7 +156,7 @@ fn special_route(
         &others,
         margin,
         style,
-        points_per_world_unit,
+        view.points_per_world_unit(),
     )
 }
 
@@ -280,8 +278,8 @@ pub fn paint_in_progress(
     canvas: Rect,
     view: &View,
     scene: &Scene,
-    settings: &Settings,
     palette: &Palette,
+    settings: &Settings,
     marks: &Marks,
 ) {
     let (repo, graph) = (&*scene.repo, &scene.graph);

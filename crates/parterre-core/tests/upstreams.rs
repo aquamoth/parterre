@@ -1,6 +1,6 @@
 mod common;
 
-use common::{TestRepo, git_at, git_command};
+use common::{TestRepo, git_at, git_fails};
 use parterre_core::revgraph::{self, GraphOptions, Simplification};
 use parterre_core::upstream::{Side, Upstream};
 use parterre_core::{CommitIx, Repo};
@@ -355,11 +355,7 @@ fn a_conflict_resolved_in_a_rebase_still_replaces() {
     s.repo.write("clash.txt", b"main's version\n");
     s.repo.commit_all("Main clashes");
     s.repo.git(&["switch", "-q", "clash"]);
-    let rebase = git_command(s.repo.path())
-        .args(["rebase", "-q", "main"])
-        .output()
-        .expect("run git");
-    assert!(!rebase.status.success(), "the rebase should conflict");
+    git_fails(s.repo.path(), &["rebase", "-q", "main"]);
     s.repo.write("clash.txt", b"both\n");
     s.repo.git(&["add", "clash.txt"]);
     s.repo

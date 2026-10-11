@@ -5,7 +5,7 @@ use crate::git::{Git, GitError};
 /// As VS Code suggests it: `<parent>/<repo>.worktrees` from the main worktree, and from a
 /// linked one its siblings' folder. Nothing is stored: it is worked out each time.
 pub fn default_root(main: &Path, open: &Path) -> PathBuf {
-    if !same_path(main, open) {
+    if !same_path_on_disk(main, open) {
         return open.parent().unwrap_or(open).to_owned();
     }
     let name = main
@@ -59,7 +59,7 @@ pub fn name_error(name: &str) -> Option<&'static str> {
 /// A folder git would refuse to add a worktree in: a file, a folder with something in it, or
 /// the folder of a worktree git still knows (`registered`), even one that's gone.
 pub fn taken(path: &Path, registered: &[PathBuf]) -> bool {
-    registered.iter().any(|r| same_path(r, path))
+    registered.iter().any(|r| same_path_on_disk(r, path))
         || path.is_file()
         || path.read_dir().is_ok_and(|mut d| d.next().is_some())
 }
@@ -73,7 +73,7 @@ pub fn free_name(root: &Path, base: &str, registered: &[PathBuf]) -> String {
 }
 
 /// As written, or once symlinks are resolved.
-pub fn same_path(a: &Path, b: &Path) -> bool {
+pub fn same_path_on_disk(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
     }
@@ -132,17 +132,16 @@ pub fn exclude(inside: &Inside) -> Result<(), GitError> {
         "info/exclude",
     ])?;
     let path = PathBuf::from(path.trim());
-    let io_error = |source| GitError::Read {
-        path: path.clone(),
-        source,
-    };
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(io_error)?;
+        std::fs::create_dir_all(dir).map_err(|source| GitError::Create {
+            path: dir.to_owned(),
+            source,
+        })?;
     }
     let mut text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(io_error(e)),
+        Err(source) => return Err(GitError::Read { path, source }),
     };
     if text.lines().any(|l| l.trim() == inside.pattern) {
         return Ok(());
@@ -152,7 +151,7 @@ pub fn exclude(inside: &Inside) -> Result<(), GitError> {
     }
     text.push_str(&inside.pattern);
     text.push('\n');
-    std::fs::write(&path, text).map_err(io_error)
+    std::fs::write(&path, text).map_err(|source| GitError::Write { path, source })
 }
 
 #[cfg(test)]

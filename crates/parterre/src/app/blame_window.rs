@@ -22,20 +22,24 @@ use parterre_highlight::{self as highlight, Engine, Spans};
 use parterre_util::Cancel;
 
 use super::commit_table::{CommitList, CommitTable, ROW_HEIGHT, Row, Select};
-use super::diff_window::{
+use super::divider::{Bar, DIVIDER_THICKNESS, divider};
+use super::table_style::{self, CELL_PAD, HEADING_HEIGHT, cell};
+use super::text_view::{
     Colors, Find, FindInText, HEADER_HEIGHT, LINE_END, Load, OVERVIEW_WIDTH, SCROLLBAR_HEIGHT,
     ScrollView, TOOL_GAP, TextAt, TextMetrics, TextRow, chosen_columns, colors, file_window_title,
     hscrollbar, line_numbers_width, message, overview_background, overview_found, overview_mark,
     overview_scale, overview_scroll, overview_view, paint_text, raw_slice, reveal, reveal_columns,
     scroll_sideways, text_font, third_of_the_way_down, toolbar_row,
 };
-use super::log_window::{self, Bar, CELL_PAD, DIVIDER_THICKNESS, HEADING_HEIGHT, cell, divider};
-use super::{Details, ParterreApp, syntax};
+use super::viewport::{self, Viewport};
+use super::{Details, MESSAGE_TIP_MAX_CHARS, MESSAGE_TIP_MAX_LINES, ParterreApp, syntax};
 use crate::keys;
 use crate::settings::{BlameWindowSettings, Settings};
 use crate::text_size;
 use crate::theme::Palette;
+use crate::usage::Screen;
 use crate::widgets;
+use crate::worker;
 
 const INFO_BAR_HEIGHT: f32 = 26.0;
 const AUTHOR_WIDTH: f32 = 130.0;
@@ -84,7 +88,7 @@ impl BlameWindows {
             if line.is_some() {
                 w.pending_line = line;
             }
-            w.bring_to_front = true;
+            w.viewport.bring_to_front = true;
             return;
         }
         self.last_id += 1;
@@ -342,9 +346,8 @@ struct BlameWindow {
     find: Find<find::Match>,
     go_to: GoTo,
     reveal_line: Option<usize>,
-    bring_to_front: bool,
+    viewport: Viewport,
     closed: bool,
-    title_theme: Option<egui::SystemTheme>,
 }
 
 impl BlameWindow {
@@ -389,9 +392,8 @@ impl BlameWindow {
             find: Find::default(),
             go_to: GoTo::default(),
             reveal_line: None,
-            bring_to_front: false,
+            viewport: Viewport::default(),
             closed: false,
-            title_theme: None,
         }
     }
 
@@ -402,36 +404,25 @@ impl BlameWindow {
         self.stop_listing = Cancel::new();
         self.stop_colouring.cancel();
         self.stop_colouring = Cancel::new();
-        let (tx, rx) = mpsc::channel();
         let git = Git::new(&self.repo.path);
         let (spec, options, repo) = (self.spec.clone(), self.options, self.repo.clone());
         let (engine, cancel) = (self.engine.clone(), self.stop_colouring.clone());
-        let repaint = ctx.clone();
-        std::thread::spawn(move || {
-            let result = git
-                .blame(&spec, options)
+        self.load = Load::Loading(worker::spawn(ctx, move || {
+            git.blame(&spec, options)
                 .map(|blame| Ready::new(blame, &repo, &spec.path, &engine, &cancel))
-                .map_err(|e| e.to_string());
-            let _ = tx.send(result);
-            repaint.request_repaint();
-        });
+                .map_err(|e| e.to_string())
+        }));
         self.requested_options = options;
-        self.load = Load::Loading(rx);
         self.dragging = false;
 
-        let (tx, rx) = mpsc::channel();
         let (git, spec, cancel) = (
             Git::new(&self.repo.path),
             self.spec.clone(),
             self.stop_listing.clone(),
         );
-        let repaint = ctx.clone();
-        std::thread::spawn(move || {
-            let result = git.file_log(&spec, &cancel).map_err(|e| e.to_string());
-            let _ = tx.send(result);
-            repaint.request_repaint();
-        });
-        self.listing = Listing::Running(rx);
+        self.listing = Listing::Running(worker::spawn(ctx, move || {
+            git.file_log(&spec, &cancel).map_err(|e| e.to_string())
+        }));
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
@@ -1256,7 +1247,7 @@ impl BlameWindow {
         env: &Env,
         requests: &mut Vec<BlameRequest>,
     ) {
-        let c = log_window::colors(ui);
+        let c = table_style::colors(ui);
         ui.painter().rect_filled(rect, 0.0, c.pane);
         let mut child = ui.new_child(
             UiBuilder::new()
@@ -1452,55 +1443,25 @@ impl BlameWindow {
         window_theme: Option<egui::SystemTheme>,
         icon: &Arc<egui::IconData>,
     ) -> Vec<BlameRequest> {
-        let builder = egui::ViewportBuilder::default()
-            .with_title(self.title())
-            .with_app_id(crate::settings::APP_ID)
-            .with_icon(icon.clone())
-            .with_inner_size(self.initial_size)
-            .with_min_inner_size([560.0, 320.0]);
         let id = self.viewport_id();
-        crate::usage::screen(ctx, id.0, crate::usage::Screen::Blame);
-        if self.title_theme.is_none() && !ctx.embed_viewports() {
-            ctx.request_repaint();
-        }
-        if std::mem::take(&mut self.bring_to_front) && !ctx.embed_viewports() {
-            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
-        }
+        let builder = viewport::builder(self.title(), self.initial_size, [560.0, 320.0], icon);
+        self.viewport.before_show(ctx, id, Screen::Blame);
         let mut requests = Vec::new();
         ctx.show_viewport_immediate(id, builder, |ui, class| {
-            super::commands::window_begin(ui);
+            let input = self.viewport.begin(ui, class, window_theme);
             self.poll(ui.ctx());
-            if class != egui::ViewportClass::EmbeddedWindow {
-                if self.title_theme != window_theme {
-                    self.title_theme = window_theme;
-                    if let Some(theme) = window_theme {
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
-                    }
-                }
-                let (close, size, (reload, fetch)) = ui.input_mut(|i| {
-                    (
-                        i.viewport().close_requested(),
-                        i.viewport().inner_rect.map(|r| r.size()),
-                        crate::keys::reload_and_fetch(i),
-                    )
-                });
-                if let Some(size) = size
-                    && size.x > 0.0
-                    && size.y > 0.0
-                {
-                    settings.blame_window.size = [size.x, size.y];
-                }
+            if let Some(input) = input {
+                input.keep_size(&mut settings.blame_window.size);
+                let (reload, fetch) = ui.input_mut(keys::reload_and_fetch);
                 if reload {
                     self.reload(ui.ctx());
                 }
                 if fetch {
                     requests.push(BlameRequest::Fetch(id));
                 }
-                // Not when embedded: its keys reach the main window too.
                 self.handle_keys(ui);
                 text_size::read_input(ui, &mut settings.text_size, true);
-                if close {
+                if input.close_requested {
                     self.closed = true;
                 }
             }
@@ -1511,17 +1472,15 @@ impl BlameWindow {
                 palette: Palette::new(ui.visuals().dark_mode, &settings.branch_colors),
                 graph: &settings.graph,
             };
-            egui::CentralPanel::default()
-                .frame(egui::Frame::central_panel(&ui.ctx().global_style()).inner_margin(0))
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing = Vec2::ZERO;
-                    requests = self.contents(
-                        ui,
-                        &mut settings.blame_window,
-                        &mut settings.syntax_colour,
-                        &env,
-                    );
-                });
+            viewport::central_panel(ui).show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                requests.extend(self.contents(
+                    ui,
+                    &mut settings.blame_window,
+                    &mut settings.syntax_colour,
+                    &env,
+                ));
+            });
         });
         requests
     }
@@ -1880,7 +1839,7 @@ fn history_row<'a>(
     Row {
         hash,
         hash_fill: h.ages[i].filter(|_| row.owns_lines).map(|age| bc.age(age)),
-        refs: log_window::badges(repo, &h.refs[i], row.snapshot, graph),
+        refs: table_style::badges(repo, &h.refs[i], row.snapshot, graph),
         outlined_label: (row.commit.is_some() && row.snapshot.is_none())
             .then_some("not in the graph"),
         subject,
@@ -2068,9 +2027,6 @@ fn origin_tip(ui: &mut Ui, origin: &Origin, date: &str, abbrev_len: usize) {
     ui.weak(format!("{date}   {}", oid.short(abbrev_len.max(12))));
 }
 
-const TIP_MAX_LINES: usize = 40;
-const TIP_MAX_CHARS: usize = 4000;
-
 /// The tooltip over a row's subject: the commit's whole message, author and date, as the log
 /// window's details show them; until git has given the message, or if it failed, the subject.
 #[derive(Debug, PartialEq, Eq)]
@@ -2097,9 +2053,9 @@ impl<'a> MessageTip<'a> {
             None => (row.subject.as_str(), row.author_date.as_str(), None),
         };
         let lines: Vec<&str> = message.trim_end().lines().collect();
-        let mut shown = lines[..lines.len().min(TIP_MAX_LINES)].join("\n");
-        let mut truncated = lines.len() > TIP_MAX_LINES;
-        if let Some((at, _)) = shown.char_indices().nth(TIP_MAX_CHARS) {
+        let mut shown = lines[..lines.len().min(MESSAGE_TIP_MAX_LINES)].join("\n");
+        let mut truncated = lines.len() > MESSAGE_TIP_MAX_LINES;
+        if let Some((at, _)) = shown.char_indices().nth(MESSAGE_TIP_MAX_CHARS) {
             shown.truncate(at);
             truncated = true;
         }
@@ -2258,7 +2214,7 @@ impl ParterreApp {
 
 #[cfg(test)]
 mod tests {
-    use super::super::diff_window::TOOLBAR_HEIGHT;
+    use super::super::text_view::TOOLBAR_HEIGHT;
     use super::*;
     use parterre_core::file_history::LogCommit;
     use parterre_core::repo::Head;
@@ -2705,7 +2661,7 @@ mod tests {
         let [w] = windows.windows.as_slice() else {
             panic!("expected one window");
         };
-        assert!(w.bring_to_front);
+        assert!(w.viewport.bring_to_front);
         assert_eq!(w.pending_line, Some(2));
         // Not blamed again: a commit's blame can't change.
         assert!(w.ready().is_some());
@@ -3443,14 +3399,14 @@ mod tests {
         for _ in 0..3 {
             frame(&ctx, &mut w, Vec::new());
         }
-        assert!(!w.details.cache.contains_key(&oid(A)));
+        assert!(!w.details.0.cache.contains_key(&oid(A)));
         // Over row 0's subject: B's message is asked for.
         frame(&ctx, &mut w, vec![egui::Event::PointerMoved(row_at(0))]);
         for _ in 0..3 {
             frame(&ctx, &mut w, Vec::new());
         }
-        assert!(w.details.cache.contains_key(&oid(B)));
-        assert_eq!(w.details.cache.len(), 1);
+        assert!(w.details.0.cache.contains_key(&oid(B)));
+        assert_eq!(w.details.0.cache.len(), 1);
     }
 
     #[test]
@@ -3482,7 +3438,7 @@ mod tests {
         let long: String = (1..=50).map(|i| format!("line {i}\n")).collect();
         let fetched = details(&long);
         let tip = MessageTip::new(row, Some(&fetched));
-        assert_eq!(tip.message.lines().count(), TIP_MAX_LINES);
+        assert_eq!(tip.message.lines().count(), MESSAGE_TIP_MAX_LINES);
         assert!(tip.truncated);
 
         // Git failed: the subject, and why.

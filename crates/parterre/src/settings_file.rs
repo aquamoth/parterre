@@ -111,14 +111,29 @@ impl Stored {
     }
 }
 
-/// The defaults without stored settings, or if they are corrupt, which the last value says.
-pub fn load(storage: Option<&dyn eframe::Storage>) -> (Settings, Stored, bool) {
+#[derive(Debug, Default)]
+pub struct Loaded {
+    pub settings: Settings,
+    pub stored: Stored,
+    /// The stored settings didn't read: these are the defaults.
+    pub corrupt: bool,
+}
+
+/// The defaults without stored settings.
+pub fn load(storage: Option<&dyn eframe::Storage>) -> Loaded {
     let Some(text) = storage.and_then(|storage| storage.get_string(STORAGE_KEY)) else {
-        return Default::default();
+        return Loaded::default();
     };
     match Stored::read(&text) {
-        Some((settings, stored)) => (settings, stored, false),
-        None => (Settings::default(), Stored::default(), true),
+        Some((settings, stored)) => Loaded {
+            settings,
+            stored,
+            corrupt: false,
+        },
+        None => Loaded {
+            corrupt: true,
+            ..Loaded::default()
+        },
     }
 }
 
@@ -334,14 +349,22 @@ mod tests {
         stored.keep(RepoSettings::key(&repo), filtered());
         let mut storage = Memory::default();
         eframe::Storage::set_string(&mut storage, STORAGE_KEY, stored.write(&settings));
-        let (back, stored, corrupt) = load(Some(&storage));
+        let Loaded {
+            settings: back,
+            stored,
+            corrupt,
+        } = load(Some(&storage));
         assert_eq!(back, settings);
         assert_eq!(stored.settings_of(&repo), filtered());
         assert!(!corrupt);
 
         // Nothing stored, or an automated run: the defaults.
         for storage in [Some(&Memory::default() as &dyn eframe::Storage), None] {
-            let (back, stored, corrupt) = load(storage);
+            let Loaded {
+                settings: back,
+                stored,
+                corrupt,
+            } = load(storage);
             assert_eq!(back, Settings::default());
             assert!(stored.repositories.is_empty());
             assert!(!corrupt);
@@ -358,7 +381,11 @@ mod tests {
         ] {
             let mut storage = Memory::default();
             eframe::Storage::set_string(&mut storage, STORAGE_KEY, text.into());
-            let (settings, stored, corrupt) = load(Some(&storage));
+            let Loaded {
+                settings,
+                stored,
+                corrupt,
+            } = load(Some(&storage));
             assert_eq!(settings, Settings::default(), "{text}");
             assert!(stored.repositories.is_empty());
             assert!(corrupt, "{text}");

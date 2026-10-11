@@ -8,10 +8,13 @@ use std::path::Path;
 
 use parterre_util::CancelTree;
 
-use crate::branches::{Attention, Catalog, Error, Report, Stuck, plural, run, run_with};
+use crate::branches::{Catalog, Error, Report, Stuck};
 use crate::git::Git;
 use crate::log::is_ancestor;
-use crate::repo::DEFAULT_ABBREV_LEN;
+use crate::operation::{
+    Edited, has_tracked_changes, in_progress, kept_stash, refuse_if_moved_or_stuck,
+    refuse_if_stuck, run, run_with_edited, stash_count, stopped,
+};
 use crate::{Oid, Repo};
 
 /// A rebase the user agreed to. It runs only while the branch is still where it was.
@@ -144,9 +147,7 @@ pub struct Preview {
 impl Preview {
     pub fn load(path: &Path, onto: Oid) -> Result<Preview, Error> {
         let catalog = Catalog::load(path)?;
-        if let Some(stuck) = catalog.stuck() {
-            return Err(Error::Invalid(format!("{}.", stuck.reason())));
-        }
+        refuse_if_stuck(&catalog)?;
         let (Some(branch), Some(head)) = (catalog.current.clone(), catalog.head) else {
             return Err(Error::Invalid(
                 "There's no branch checked out to rebase.".into(),
@@ -178,10 +179,7 @@ impl Preview {
             "--no-merges",
             &range,
         ])?;
-        let dirty = !git
-            .run(&["status", "--porcelain", "--untracked-files=no"])?
-            .trim()
-            .is_empty();
+        let dirty = has_tracked_changes(&git)?;
         let auto_stash = git
             .query(&["config", "--bool", "rebase.autoStash"])
             .ok()
@@ -280,82 +278,37 @@ pub(crate) fn execute(
     cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<(), Error> {
-    catalog.check_unmoved(&rebase.branch, rebase.head)?;
+    refuse_if_moved_or_stuck(catalog, &rebase.branch, rebase.head)?;
     let git = Git::new(&catalog.root);
-    let stash_entries = || {
-        git.run(&["stash", "list"])
-            .map(|out| out.lines().count())
-            .unwrap_or(0)
-    };
-    let stashed_before = stash_entries();
+    let stashed_before = stash_count(&git);
     let rebased = if rebase.todo.is_empty() {
         run(&git, command(rebase), cancel, report)?
     } else {
-        run_interactive(&git, rebase, cancel, report)?
+        let todo = todo_list(&rebase.todo);
+        run_with_edited(
+            &git,
+            command(rebase),
+            Edited::TodoList,
+            &todo,
+            cancel,
+            report,
+        )?
     };
     let after = Catalog::load(&catalog.root)?;
     if let Some(Stuck::InProgress(_)) = after.stuck() {
-        report.attention = Some(Attention::stopped("Rebase", after.conflicted.len()));
+        report.attention = Some(in_progress(stopped("Rebase", after.conflicted.len())));
         return Ok(());
     }
     if !rebased {
         return Err(Error::Failed(report.last_output()));
     }
-    if stash_entries() > stashed_before {
-        // Git applied what it could, with conflict markers, and kept the stash entry too.
-        let message = match after.conflicted.len() {
-            0 => "Git couldn't put your changes back, and kept them in a stash entry. \
-                  Recover them with git stash pop."
-                .to_owned(),
-            n => format!(
-                "Putting your changes back conflicted in {}. Resolve {} with git; your \
-                 changes are also kept in a stash entry until you drop it.",
-                plural(n, "file"),
-                if n == 1 { "it" } else { "them" }
-            ),
-        };
-        report.attention = Some(Attention {
-            title: format!("Rebased {} onto {}", rebase.branch, short_target(rebase)),
-            message,
-        });
+    if stash_count(&git) > stashed_before {
+        let title = format!("Rebased {} onto {}", rebase.branch, short_target(rebase));
+        report.attention = Some(kept_stash(title, after.conflicted.len()));
     }
     Ok(())
 }
 
-/// Runs `git rebase -i`, with our todo list copied over the one git asks its sequence editor
-/// for.
-fn run_interactive(
-    git: &Git,
-    rebase: &Rebase,
-    cancel: &CancelTree,
-    report: &mut Report,
-) -> Result<bool, Error> {
-    let dir = git.run(&["rev-parse", "--absolute-git-dir"])?;
-    let path = Path::new(dir.trim()).join("parterre-rebase-todo");
-    std::fs::write(&path, todo_list(&rebase.todo))
-        .map_err(|e| Error::Invalid(format!("Couldn't write the todo list: {e}")))?;
-    // Git runs it with sh, Git for Windows' too, which takes forward slashes.
-    let quoted = path
-        .to_string_lossy()
-        .replace('\\', "/")
-        .replace('\'', r"'\''");
-    let editor = format!("cp '{quoted}'");
-    let ran = run_with(
-        git,
-        command(rebase),
-        &[("GIT_SEQUENCE_EDITOR", &editor)],
-        cancel,
-        report,
-    );
-    let _ = std::fs::remove_file(&path);
-    ran
-}
-
-/// The target as the menus name it: a branch, or a short hash.
 pub fn short_target(rebase: &Rebase) -> String {
-    if rebase.target == rebase.onto.to_hex() {
-        rebase.onto.short(DEFAULT_ABBREV_LEN)
-    } else {
-        rebase.target.clone()
-    }
+    crate::operation::short_target(&rebase.target, rebase.onto)
 }

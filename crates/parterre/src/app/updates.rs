@@ -1,7 +1,7 @@
 use eframe::egui;
 use parterre_telemetry::{Download, Update, UpdateCheck};
 
-use super::ParterreApp;
+use super::{Note, ParterreApp};
 use crate::dialogs::{self, Dialog};
 use crate::widgets;
 
@@ -66,17 +66,13 @@ impl ParterreApp {
                 }
                 answer
             });
-        let answer = if shown.should_close() {
-            ReleaseAnswer::Close
-        } else {
-            shown.inner
-        };
+        let answer = shown.or_closed(ReleaseAnswer::Close);
         match answer {
             ReleaseAnswer::Open => {}
             ReleaseAnswer::Close => self.release_dialog = None,
             ReleaseAnswer::Notes => {
                 if let Err(e) = crate::browser::open(&update.notes()) {
-                    self.status = Some((e, true));
+                    self.status = Some(Note::Error(e));
                 }
             }
             ReleaseAnswer::Download => {
@@ -102,12 +98,12 @@ impl ParterreApp {
         match download {
             Download::Open(url) => {
                 if let Err(e) = crate::browser::open(url) {
-                    self.status = Some((e, true));
+                    self.status = Some(Note::Error(e));
                 }
             }
             Download::Copy(command) => {
                 ctx.copy_text((*command).to_owned());
-                self.status = Some((format!("Copied: {command}"), false));
+                self.status = Some(Note::Info(format!("Copied: {command}")));
             }
         }
     }

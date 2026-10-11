@@ -4,12 +4,15 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::branches::{Attention, Catalog, Error, Report, Stashed, Stuck, run, run_with};
+use crate::branches::{Attention, Catalog, Error, Report, Stashed, Stuck};
 use crate::git::{Git, GitError};
 use crate::log::is_ancestor;
-use crate::merge::{
-    FINISH_OR_ABORT, is_ancestor_git, last_output, plural, refuse_if_stuck, stopped,
+use crate::operation::{
+    Edited, git_args, in_progress, refuse_if_stuck, run, run_or_fail, run_with_edited,
+    stopped_or_not_committed,
 };
+use crate::repo::DEFAULT_ABBREV_LEN;
+use crate::text::plural;
 use crate::{Oid, Repo};
 use parterre_util::CancelTree;
 
@@ -53,13 +56,14 @@ pub fn commands(revert: &Revert) -> Vec<Vec<String>> {
 }
 
 fn stash_command(commit: Oid) -> Vec<String> {
-    ["stash", "push", "-m", &stash_message(commit)]
-        .map(str::to_owned)
-        .to_vec()
+    git_args(&["stash", "push", "-m", &stash_message(commit)])
 }
 
 fn stash_message(commit: Oid) -> String {
-    format!("autostash for reverting {}", commit.short(7))
+    format!(
+        "autostash for reverting {}",
+        commit.short(DEFAULT_ABBREV_LEN)
+    )
 }
 
 pub(crate) fn stash_entry(git: &Git, commit: Oid) -> Option<String> {
@@ -117,10 +121,10 @@ impl Preview {
             ));
         };
         let git = Git::new(&catalog.root);
-        if !is_ancestor_git(&git, commit, head)? {
+        if !git.is_ancestor(commit, head)? {
             return Err(Error::Invalid(format!(
                 "{} is not on {}. Reload and try again.",
-                commit.short(7),
+                commit.short(DEFAULT_ABBREV_LEN),
                 catalog.current.as_deref().unwrap_or("HEAD")
             )));
         }
@@ -179,7 +183,7 @@ impl Preview {
         } else {
             format!(
                 "{} changes {} with local changes",
-                self.commit.short(7),
+                self.commit.short(DEFAULT_ABBREV_LEN),
                 plural(n, "file")
             )
         })
@@ -339,8 +343,8 @@ pub(crate) fn execute(
     }
     refuse_if_stuck(catalog)?;
     let git = Git::new(&catalog.root);
-    let short = revert.commit.short(7);
-    if !is_ancestor_git(&git, revert.commit, revert.head)? {
+    let short = revert.commit.short(DEFAULT_ABBREV_LEN);
+    if !git.is_ancestor(revert.commit, revert.head)? {
         return Err(Error::Invalid(format!("{short} is not on {name}.")));
     }
     let (uncommitted, staged) = local_changes(&git)?;
@@ -359,7 +363,14 @@ pub(crate) fn execute(
     }
     let ok = match &revert.message {
         None => run(&git, command(revert), cancel, report)?,
-        Some(message) => run_with_message(&git, command(revert), message, cancel, report)?,
+        Some(message) => run_with_edited(
+            &git,
+            command(revert),
+            Edited::CommitMessage,
+            message,
+            cancel,
+            report,
+        )?,
     };
     let after = Catalog::load(&catalog.root)?;
     if !ok
@@ -371,12 +382,7 @@ pub(crate) fn execute(
         // The commit's changes are undone already. Git 2.34 leaves the revert in progress
         // then; later versions don't.
         if matches!(after.stuck(), Some(Stuck::InProgress(_))) {
-            run(
-                &git,
-                ["revert", "--abort"].map(str::to_owned).to_vec(),
-                cancel,
-                report,
-            )?;
+            run(&git, git_args(&["revert", "--abort"]), cancel, report)?;
         }
         report.attention = Some(Attention {
             title: format!("Nothing to revert: {short}'s changes are already undone"),
@@ -385,19 +391,18 @@ pub(crate) fn execute(
         return Ok(());
     }
     if let Some(Stuck::InProgress(_)) = after.stuck() {
-        let mut message = FINISH_OR_ABORT.to_owned();
+        let mut attention = in_progress(stopped_or_not_committed("Revert", after.conflicted.len()));
         if let Some(stashed) = report.stash.take() {
             let entry = stash_entry(&git, revert.commit).unwrap_or_else(|| stashed.oid.to_hex());
-            message.push_str(&format!(" Your changes are stashed in {entry}."));
+            attention
+                .message
+                .push_str(&format!(" Your changes are stashed in {entry}."));
         }
-        report.attention = Some(Attention {
-            title: stopped("Revert", after.conflicted.len()),
-            message,
-        });
+        report.attention = Some(attention);
         return Ok(());
     }
     if !ok {
-        return Err(Error::Failed(last_output(report)));
+        return Err(Error::Failed(report.last_output()));
     }
     report.created = after.head;
     Ok(())
@@ -410,9 +415,7 @@ fn stash(
     report: &mut Report,
 ) -> Result<Option<Stashed>, Error> {
     let before = stash_top(git);
-    if !run(git, stash_command(commit), cancel, report)? {
-        return Err(Error::Failed(last_output(report)));
-    }
+    run_or_fail(git, stash_command(commit), cancel, report)?;
     let Some(top) = stash_top(git).filter(|top| Some(top) != before.as_ref()) else {
         return Ok(None);
     };
@@ -425,29 +428,6 @@ fn stash(
         name: stash_entry(git, commit).unwrap_or_else(|| "stash@{0}".into()),
         files: nul_separated(&files),
     }))
-}
-
-/// Git asks its editor for the message: `message` is copied over it.
-fn run_with_message(
-    git: &Git,
-    args: Vec<String>,
-    message: &str,
-    cancel: &CancelTree,
-    report: &mut Report,
-) -> Result<bool, Error> {
-    let dir = git.run(&["rev-parse", "--absolute-git-dir"])?;
-    let path = Path::new(dir.trim()).join("parterre-revert-message");
-    std::fs::write(&path, message)
-        .map_err(|e| Error::Invalid(format!("Couldn't write the message: {e}")))?;
-    // Git runs it with sh, Git for Windows' too, which takes forward slashes.
-    let quoted = path
-        .to_string_lossy()
-        .replace('\\', "/")
-        .replace('\'', r"'\''");
-    let editor = format!("cp '{quoted}'");
-    let ok = run_with(git, args, &[("GIT_EDITOR", &editor)], cancel, report);
-    let _ = std::fs::remove_file(&path);
-    ok
 }
 
 /// Git fails without a conflict where the revert would write over untracked files.
@@ -479,15 +459,10 @@ pub(crate) fn restore(
     let entry = stash_named(&git, "%H", |oid| oid == hex)?.ok_or_else(|| {
         Error::Invalid(format!(
             "The stash entry {} is gone from the stash list.",
-            stash.short(7)
+            stash.short(DEFAULT_ABBREV_LEN)
         ))
     })?;
-    let ok = run(
-        &git,
-        ["stash", "pop", &entry].map(str::to_owned).to_vec(),
-        cancel,
-        report,
-    )?;
+    let ok = run(&git, git_args(&["stash", "pop", &entry]), cancel, report)?;
     let after = Catalog::load(&catalog.root)?;
     if !after.conflicted.is_empty() {
         let n = after.conflicted.len();
@@ -504,7 +479,7 @@ pub(crate) fn restore(
         return Ok(());
     }
     if !ok {
-        return Err(Error::Failed(last_output(report)));
+        return Err(Error::Failed(report.last_output()));
     }
     Ok(())
 }

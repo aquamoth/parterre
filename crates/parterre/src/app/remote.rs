@@ -3,7 +3,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use eframe::egui::{self, Align, Layout, RichText, Ui, ViewportId, vec2};
-use parterre_core::branches::{Action, Catalog, command_text};
+use parterre_core::branches::{Action, Catalog, LocalBranch, command_text};
 use parterre_core::git::Git;
 use parterre_core::remote::{
     self, Diverged, Live, Pull, PushState, Reconcile, RemoteBranchTip, SetUpstream,
@@ -11,10 +11,20 @@ use parterre_core::remote::{
 use parterre_core::{Oid, Repo};
 use parterre_forge::github::{self, Proposed};
 
-use super::branches::{
-    Request, Target, answer_of, operation_item, received, target_menu_named, worker,
-};
-use crate::{dialogs, menu, widgets};
+use super::branches::{Request, Target, operation_item, target_menu_named};
+use crate::{dialogs, menu, widgets, worker};
+
+/// Pulling the current branch, where [`remote::pull_offered`] offers it at `commit`, and the
+/// branch.
+pub(super) fn pull_at(catalog: &Catalog, commit: Oid) -> Option<(&LocalBranch, Request)> {
+    let branch = remote::pull_offered(catalog, commit)?;
+    let pull = Pull {
+        branch: branch.name.clone(),
+        head: catalog.head?,
+        how: None,
+    };
+    Some((branch, Request::Run(Action::Pull(Box::new(pull)))))
+}
 
 /// *Pull* on the open worktree's branch or its upstream, *Push* and *Set upstream…* for the
 /// local branches at `commit`, after a separator; nothing without a remote.
@@ -26,23 +36,19 @@ pub(super) fn section(
     busy: bool,
 ) -> Option<Request> {
     let locals: Vec<_> = catalog.locals.iter().filter(|b| b.tip == commit).collect();
-    let pull = remote::pull_offered(catalog, commit).zip(catalog.head);
+    let pull = pull_at(catalog, commit);
     if (locals.is_empty() && pull.is_none()) || catalog.remote_names.is_empty() {
         return None;
     }
     let mut request = None;
     menu::separator(ui);
-    if let Some((branch, head)) = pull {
+    if let Some((branch, pull)) = pull {
         let upstream = branch.upstream.as_deref().unwrap_or_default();
         if operation_item(ui, format!("Pull {}", branch.name), catalog, busy)
             .on_hover_text(format!("From {upstream}"))
             .clicked()
         {
-            request = Some(Request::Run(Action::Pull(Box::new(Pull {
-                branch: branch.name.clone(),
-                head,
-                how: None,
-            }))));
+            request = Some(pull);
         }
     }
     if locals.is_empty() {
@@ -200,10 +206,10 @@ impl PullDialog {
                     }
                 }
                 dialogs::command_box(ui, &[command_text(&d.command(self.how))]);
-                dialogs::actions(ui, "Pull", !busy, false, false)
+                dialogs::actions(ui, dialogs::Primary::new("Pull").enabled(!busy))
             });
         self.fresh = false;
-        answer_of(shown)
+        shown.answer()
     }
 }
 
@@ -291,10 +297,10 @@ impl SetUpstreamDialog {
                     .collect();
                 dialogs::command_box(ui, &commands);
                 let changed = chosen.is_some() && self.upstream != self.configured;
-                dialogs::actions(ui, "Set", changed && !busy, false, false)
+                dialogs::actions(ui, dialogs::Primary::new("Set").enabled(changed && !busy))
             });
         self.fresh = false;
-        answer_of(shown)
+        shown.answer()
     }
 }
 
@@ -318,7 +324,7 @@ impl PullRequestCheck {
             .iter()
             .map(|b| (b.remote.clone(), b.branch.clone()))
             .collect();
-        let rx = worker(ctx, move || {
+        let rx = worker::spawn(ctx, move || {
             github::proposals(&Git::new(&path), &named, canned.as_deref())
         });
         PullRequestCheck {
@@ -333,7 +339,11 @@ impl PullRequestCheck {
             let why = Proposed::Unknown("the check stopped unexpectedly".into());
             vec![why; self.branch_count]
         };
-        if let Some(found) = self.rx.as_ref().and_then(|rx| received(rx, stopped)) {
+        if let Some(found) = self
+            .rx
+            .as_ref()
+            .and_then(|rx| worker::received(rx, stopped))
+        {
             self.found = Some(found);
             self.rx = None;
         }
@@ -416,7 +426,7 @@ mod tests {
     use parterre_core::remote::{Live, Pull, Push, RemoteBranchTip};
 
     use super::super::branches::Request;
-    use super::super::tool_harness::{Harness, collect, git, load, menu, write};
+    use super::super::tool_harness::{Harness, git, load, menu, run_frame, write};
 
     /// A bare `origin`, and a clone of it on `main` at one commit, tracking `origin/main`.
     fn cloned() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -674,14 +684,9 @@ mod tests {
         let ctx = egui::Context::default();
         let mut texts = Vec::new();
         for _ in 0..3 {
-            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            texts = run_frame(&ctx, egui::RawInput::default(), |ui| {
                 super::network_window(ui.ctx(), "Fetch", &live, egui::ViewportId::ROOT);
             });
-            output.textures_delta.clear();
-            texts.clear();
-            for clipped in &output.shapes {
-                collect(&clipped.shape, &mut texts);
-            }
         }
         let texts: Vec<_> = texts.into_iter().map(|(t, _)| t).collect();
         for text in [

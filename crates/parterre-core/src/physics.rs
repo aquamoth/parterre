@@ -29,12 +29,12 @@
 //! nodes ([`crate::route`]). A routed edge joins its bundle's trunk, and a trunk is routed
 //! afresh as a whole.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
 use crate::layout::{Layout, Point};
-use crate::route::{self, Obstacles, add, dot, len, scale, sub};
+use crate::route::{self, Obstacles};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DragModel {
@@ -364,7 +364,7 @@ impl Net {
                     springs.push(Spring {
                         a: w[0],
                         b: w[1],
-                        layout_offset: sub(layout_pos[w[1] as usize], layout_pos[w[0] as usize]),
+                        layout_offset: layout_pos[w[1] as usize] - layout_pos[w[0] as usize],
                         stiffness: 1.0,
                         along_edge: true,
                     });
@@ -389,7 +389,7 @@ impl Net {
                 springs.push(Spring {
                     a: w[0],
                     b: w[1],
-                    layout_offset: sub(layout_pos[w[1] as usize], layout_pos[w[0] as usize]),
+                    layout_offset: layout_pos[w[1] as usize] - layout_pos[w[0] as usize],
                     stiffness: 0.5,
                     along_edge: false,
                 });
@@ -486,7 +486,7 @@ impl Net {
     }
 
     fn pos(&self, i: usize) -> Point {
-        add(self.layout_pos[i], self.disp[i])
+        self.layout_pos[i] + self.disp[i]
     }
 
     pub fn node_pos(&self, node: usize) -> Point {
@@ -563,11 +563,11 @@ impl Net {
             if !self.is_reversed(e) {
                 let back: f32 = pts
                     .windows(2)
-                    .map(|w| (-dot(sub(w[1], w[0]), self.flow)).max(0.0))
+                    .map(|w| (-(w[1] - w[0]).dot(self.flow)).max(0.0))
                     .sum();
                 out.edges_doubling_back += usize::from(back > route::TURN_LENGTH);
-                let length: f32 = pts.windows(2).map(|w| len(sub(w[1], w[0]))).sum();
-                let direct = len(sub(pts[last], pts[0]));
+                let length: f32 = pts.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+                let direct = (pts[last] - pts[0]).length();
                 out.edges_detouring += usize::from(length > DETOUR_FACTOR * direct + DETOUR_SLACK);
             }
         }
@@ -577,8 +577,8 @@ impl Net {
     /// True if the segment from `p` to `q` enters node `i`'s box shrunk by `inset`.
     fn segment_enters(&self, p: Point, q: Point, i: usize, inset: f32) -> bool {
         let (c, half) = (self.pos(i), self.half_size[i]);
-        let h = Point::new(half.x - inset, half.y - inset);
-        route::box_entry(p, q, sub(c, h), add(c, h)).is_some()
+        let h = half - Point::new(inset, inset);
+        route::box_entry(p, q, c - h, c + h).is_some()
     }
 
     pub fn is_rerouted(&self, e: usize) -> bool {
@@ -595,7 +595,7 @@ impl Net {
     /// True if edge `e`'s parent has been moved before its child, against the flow.
     fn is_reversed(&self, e: usize) -> bool {
         let (c, p) = self.ends(e);
-        dot(sub(self.pos(p), self.pos(c)), self.flow) < 0.0
+        (self.pos(p) - self.pos(c)).dot(self.flow) < 0.0
     }
 
     pub fn is_displaced(&self, node: usize) -> bool {
@@ -650,17 +650,18 @@ impl Net {
         }
         let edges = self.edges_at(held.iter().copied());
         // Bend points whose edges all run between held nodes are held too.
-        let mut internal: HashMap<u32, u32> = HashMap::new();
-        for &e in &edges {
-            let (a, b) = self.ends(e as usize);
-            if self.is_held[a] && self.is_held[b] {
-                for p in sorted_unique(self.bends(e as usize).iter().copied()) {
-                    *internal.entry(p).or_default() += 1;
-                }
-            }
-        }
-        for (p, k) in internal {
-            if k == self.edges_through_bend[p as usize - n] {
+        let mut internal_bends: Vec<u32> = edges
+            .iter()
+            .filter(|&&e| {
+                let (a, b) = self.ends(e as usize);
+                self.is_held[a] && self.is_held[b]
+            })
+            .flat_map(|&e| sorted_unique(self.bends(e as usize).iter().copied()))
+            .collect();
+        internal_bends.sort_unstable();
+        for same_bend in internal_bends.chunk_by(|a, b| a == b) {
+            let p = same_bend[0];
+            if same_bend.len() == self.edges_through_bend[p as usize - n] as usize {
                 self.is_held[p as usize] = true;
                 held.push(p);
             }
@@ -708,8 +709,8 @@ impl Net {
     /// Moves the anchor's centre to `target`, and the other dragged nodes with it.
     pub fn drag_to(&mut self, target: Point) {
         if let Some(g) = &mut self.grab {
-            let at = sub(target, self.layout_pos[g.anchor as usize]);
-            g.delta = sub(at, g.anchor_start);
+            let at = target - self.layout_pos[g.anchor as usize];
+            g.delta = at - g.anchor_start;
             self.awake = true;
         }
     }
@@ -720,7 +721,7 @@ impl Net {
         let Some(grab) = &self.grab else {
             return;
         };
-        if len(grab.delta) <= REST_EPSILON {
+        if grab.delta.length() <= REST_EPSILON {
             self.cancel_grab();
             return;
         }
@@ -748,7 +749,7 @@ impl Net {
         for k in 0..self.active.len() {
             let p = self.active[k] as usize;
             let t = self.target[p];
-            if len(sub(t, self.home[p])) > REST_EPSILON {
+            if (t - self.home[p]).length() > REST_EPSILON {
                 changed.push((p as u32, self.home[p], t));
                 self.set_home(p, t);
             }
@@ -848,10 +849,10 @@ impl Net {
     /// else moves. Undoable.
     pub fn return_to_layout(&mut self, nodes: &[usize]) {
         self.cancel_grab();
-        let shifts: HashMap<u32, Point> = nodes
+        let shifts: BTreeMap<u32, Point> = nodes
             .iter()
             .filter(|&&node| node < self.node_count)
-            .map(|&node| (node as u32, scale(self.home[node], -1.0)))
+            .map(|&node| (node as u32, -self.home[node]))
             .collect();
         let mut change = Change {
             homes: self.shifted_homes(&shifts),
@@ -870,7 +871,7 @@ impl Net {
     /// and the children of those resting away, so that [`Net::restore`] can tell them from new
     /// commits.
     pub fn rest_places(&self) -> impl Iterator<Item = RestPlace> + '_ {
-        let rest = |i: usize| add(self.layout_pos[i], self.home[i]);
+        let rest = |i: usize| self.layout_pos[i] + self.home[i];
         (0..self.node_count)
             .filter(|&i| {
                 self.moved_by_hand[i]
@@ -884,7 +885,7 @@ impl Net {
                     offset: self.home[i],
                     by_hand: self.moved_by_hand[i],
                     beside: (first != NO_NODE)
-                        .then(|| (first as usize, sub(rest(i), rest(first as usize)))),
+                        .then(|| (first as usize, rest(i) - rest(first as usize))),
                 }
             })
     }
@@ -934,9 +935,13 @@ impl Net {
             .collect();
         // Parents first (they lie farther along the flow), so that a node going back beside
         // its first parent finds it where it has gone.
-        let along_flow = |i: usize| dot(self.layout_pos[i], self.flow);
-        saved.sort_by(|a, b| along_flow(b.node).total_cmp(&along_flow(a.node)));
-        let mut shifts: HashMap<u32, Point> = HashMap::new();
+        let along_flow = |i: usize| self.layout_pos[i].dot(self.flow);
+        saved.sort_by(|a, b| {
+            along_flow(b.node)
+                .total_cmp(&along_flow(a.node))
+                .then(a.node.cmp(&b.node))
+        });
+        let mut shifts: BTreeMap<u32, Point> = BTreeMap::new();
         for s in &saved {
             let i = s.node;
             self.moved_by_hand[i] = s.by_hand;
@@ -949,14 +954,11 @@ impl Net {
                         && finite(apart) =>
                 {
                     let shift = shifts.get(&(parent as u32)).copied().unwrap_or_default();
-                    add(
-                        add(add(self.layout_pos[parent], self.home[parent]), shift),
-                        apart,
-                    )
+                    self.layout_pos[parent] + self.home[parent] + shift + apart
                 }
-                _ => add(self.layout_pos[i], s.offset),
+                _ => self.layout_pos[i] + s.offset,
             };
-            shifts.insert(i as u32, sub(sub(rest, self.layout_pos[i]), self.home[i]));
+            shifts.insert(i as u32, rest - self.layout_pos[i] - self.home[i]);
         }
         self.place_new_nodes(&mut shifts);
         if shifts.values().all(|&d| d == Point::default()) {
@@ -1078,17 +1080,17 @@ impl Net {
     /// Bends the edges at the nodes that moved from where they were heading at `start` along
     /// with them.
     fn bend_edges_along(&mut self, start: Vec<(u32, Point)>) {
-        let shifts: HashMap<u32, Point> = start
+        let shifts: BTreeMap<u32, Point> = start
             .into_iter()
-            .map(|(i, was)| (i, sub(self.target[i as usize], was)))
-            .filter(|&(_, d)| len(d) > REST_EPSILON)
+            .map(|(i, was)| (i, self.target[i as usize] - was))
+            .filter(|&(_, d)| d.length() > REST_EPSILON)
             .collect();
         let edges = self.edges_at(shifts.keys().copied());
         let bend_shifts = self.bend_shifts(&edges, |i| shifts.get(&i).copied().unwrap_or_default());
         for (p, shift) in bend_shifts {
             let p = p as usize;
             self.activate(p);
-            self.target[p] = add(self.target[p], shift);
+            self.target[p] += shift;
         }
     }
 
@@ -1102,17 +1104,17 @@ impl Net {
             let mut pushed = false;
             for pair in &near {
                 let (a, b) = (pair.a as usize, pair.b as usize);
-                let place = |i: usize| add(self.layout_pos[i], self.target[i]);
-                let d = sub(place(b), place(a));
-                let ext = add(self.half_size[a], self.half_size[b]);
+                let place = |i: usize| self.layout_pos[i] + self.target[i];
+                let d = place(b) - place(a);
+                let ext = self.half_size[a] + self.half_size[b];
                 if !boxes_overlap(d, ext) {
                     continue;
                 }
-                let apart = dot(d, along);
+                let apart = d.dot(along);
                 let last = if apart < 0.0 { a } else { b };
-                let short = dot(ext, along) + OVERLAP_MARGIN - apart.abs();
+                let short = ext.dot(along) + OVERLAP_MARGIN - apart.abs();
                 self.activate(last);
-                self.target[last] = add(self.target[last], scale(along, short));
+                self.target[last] += along * short;
                 pushed = true;
             }
             if !pushed {
@@ -1124,7 +1126,7 @@ impl Net {
     /// Nodes whose boxes overlap at rest, where at least one of the two rests away from the
     /// layout (the layout itself leaves none).
     fn overlapping(&self) -> Vec<u32> {
-        let pairs = self.overlapping_pairs(|i| add(self.layout_pos[i], self.home[i]));
+        let pairs = self.overlapping_pairs(|i| self.layout_pos[i] + self.home[i]);
         sorted_unique(
             pairs
                 .into_iter()
@@ -1143,22 +1145,16 @@ impl Net {
         let mut pairs = grid.candidate_pairs();
         pairs.retain(|&(a, b)| {
             let (a, b) = (a as usize, b as usize);
-            boxes_overlap(
-                sub(centre(b), centre(a)),
-                add(self.half_size[a], self.half_size[b]),
-            )
+            boxes_overlap(centre(b) - centre(a), self.half_size[a] + self.half_size[b])
         });
         pairs
     }
 
     /// Adds to `shifts`, which holds how far the saved nodes move, the new commits among the
     /// others (see [`Net::restore`]).
-    fn place_new_nodes(&self, shifts: &mut HashMap<u32, Point>) {
-        let rest = |shifts: &HashMap<u32, Point>, p: u32| {
-            add(
-                self.home[p as usize],
-                shifts.get(&p).copied().unwrap_or_default(),
-            )
+    fn place_new_nodes(&self, shifts: &mut BTreeMap<u32, Point>) {
+        let rest = |shifts: &BTreeMap<u32, Point>, p: u32| {
+            self.home[p as usize] + shifts.get(&p).copied().unwrap_or_default()
         };
         // The new commits: children of saved nodes that rest away, and their children in turn.
         let mut new_commits: Vec<u32> = Vec::new();
@@ -1177,7 +1173,7 @@ impl Net {
             }
         }
         // Parents first: they lie farther along the flow.
-        let along_flow = |p: u32| dot(self.layout_pos[p as usize], self.flow);
+        let along_flow = |p: u32| self.layout_pos[p as usize].dot(self.flow);
         new_commits.sort_unstable_by(|&a, &b| along_flow(b).total_cmp(&along_flow(a)));
         for c in new_commits {
             let ci = c as usize;
@@ -1189,29 +1185,29 @@ impl Net {
             };
             for p in self.parents(ci) {
                 let pi = p as usize;
-                let apart = dot(sub(self.layout_pos[pi], self.layout_pos[ci]), self.flow);
+                let apart = (self.layout_pos[pi] - self.layout_pos[ci]).dot(self.flow);
                 if apart <= 0.0 {
                     continue;
                 }
                 let needed = self.kept_flow_gap(ci, pi, apart);
-                let have = apart + dot(sub(rest(shifts, p), d), self.flow);
+                let have = apart + (rest(shifts, p) - d).dot(self.flow);
                 if have < needed {
-                    d = sub(d, scale(self.flow, needed - have));
+                    d -= self.flow * (needed - have);
                 }
             }
-            shifts.insert(c, sub(d, self.home[ci]));
+            shifts.insert(c, d - self.home[ci]);
         }
     }
 
     /// Rest positions after shifting nodes by `shifts`, with the bend points of their edges
     /// shifted in proportion: (particle, before, after).
-    fn shifted_homes(&self, shifts: &HashMap<u32, Point>) -> Vec<(u32, Point, Point)> {
+    fn shifted_homes(&self, shifts: &BTreeMap<u32, Point>) -> Vec<(u32, Point, Point)> {
         let mut out: Vec<(u32, Point, Point)> = shifts
             .iter()
             .filter(|&(_, &d)| d != Point::default())
             .map(|(&node, &d)| {
                 let h = self.home[node as usize];
-                (node, h, add(h, d))
+                (node, h, h + d)
             })
             .collect();
         let edges = self.edges_at(shifts.keys().copied());
@@ -1219,19 +1215,19 @@ impl Net {
         for (p, s) in self.bend_shifts(&edges, shift_of) {
             if s != Point::default() {
                 let h = self.home[p as usize];
-                out.push((p, h, add(h, s)));
+                out.push((p, h, h + s));
             }
         }
         out
     }
 
-    /// How far the bend points of `edges` move when their end nodes move by `shift_of`: each
-    /// edge's bend points share the movement of its ends in proportion to their distance along
-    /// the edge. A bend point shared by several bundled edges gets the average over all of
-    /// them.
-    fn bend_shifts(&self, edges: &[u32], shift_of: impl Fn(u32) -> Point) -> HashMap<u32, Point> {
+    /// How far the bend points of `edges` move when their end nodes move by `shift_of`, sorted
+    /// by bend point: each edge's bend points share the movement of its ends in proportion to
+    /// their distance along the edge. A bend point shared by several bundled edges gets the
+    /// average over all of them.
+    fn bend_shifts(&self, edges: &[u32], shift_of: impl Fn(u32) -> Point) -> Vec<(u32, Point)> {
         let n = self.node_count;
-        let mut out: HashMap<u32, Point> = HashMap::new();
+        let mut shares: Vec<(u32, Point)> = Vec::new();
         let rest = |p: u32| (self.layout_pos[p as usize], self.home[p as usize]);
         let mut rest_distance = Vec::new();
         for &e in edges {
@@ -1245,7 +1241,7 @@ impl Net {
             rest_distance.push(0.0f32);
             for w in chain.windows(2) {
                 let ((oa, ha), (ob, hb)) = (rest(w[0]), rest(w[1]));
-                let step = len(add(sub(ob, oa), sub(hb, ha)));
+                let step = (ob - oa + (hb - ha)).length();
                 rest_distance.push(rest_distance[rest_distance.len() - 1] + step);
             }
             let total = rest_distance[last];
@@ -1255,13 +1251,20 @@ impl Net {
                 } else {
                     k as f32 / last as f32
                 };
-                let s = add(scale(sa, 1.0 - t), scale(sb, t));
-                let share = scale(s, 1.0 / self.edges_through_bend[p as usize - n] as f32);
-                let slot = out.entry(p).or_default();
-                *slot = add(*slot, share);
+                let s = sa * (1.0 - t) + sb * t;
+                let share = s * (1.0 / self.edges_through_bend[p as usize - n] as f32);
+                shares.push((p, share));
             }
         }
-        out
+        shares.sort_by_key(|&(p, _)| p);
+        shares.dedup_by(|(p, share), (kept, sum)| {
+            let same = p == kept;
+            if same {
+                *sum += *share;
+            }
+            same
+        });
+        shares
     }
 
     fn activate(&mut self, p: usize) {
@@ -1348,13 +1351,13 @@ impl Net {
                 continue;
             }
             for _ in 0..FOLLOW_SUBSTEPS {
-                let pull = scale(sub(self.target[i], self.disp[i]), omega * omega);
-                let drag = scale(self.velocity[i], 2.0 * zeta * omega);
-                self.velocity[i] = add(self.velocity[i], scale(sub(pull, drag), h));
-                self.disp[i] = add(self.disp[i], scale(self.velocity[i], h));
+                let pull = (self.target[i] - self.disp[i]) * (omega * omega);
+                let drag = self.velocity[i] * (2.0 * zeta * omega);
+                self.velocity[i] += (pull - drag) * h;
+                self.disp[i] += self.velocity[i] * h;
             }
-            max_speed = max_speed.max(len(self.velocity[i]));
-            max_distance = max_distance.max(len(sub(self.target[i], self.disp[i])));
+            max_speed = max_speed.max(self.velocity[i].length());
+            max_distance = max_distance.max((self.target[i] - self.disp[i]).length());
         }
         self.awake = max_speed > MAX_SLEEP_SPEED || max_distance > MAX_SLEEP_DISTANCE;
         let settled = !self.awake && self.grab.is_none();
@@ -1365,7 +1368,7 @@ impl Net {
             .filter(|&i| {
                 let i = i as usize;
                 i < self.node_count
-                    && len(sub(self.disp[i], self.disp_in_obstacles[i])) > ROUTE_UPDATE_STEP
+                    && (self.disp[i] - self.disp_in_obstacles[i]).length() > ROUTE_UPDATE_STEP
             })
             .collect();
         if settled {
@@ -1399,7 +1402,7 @@ impl Net {
             return;
         }
         self.trunk_cache.clear();
-        let mut boxes = Vec::new();
+        let mut area: Option<(Point, Point)> = None;
         for &node in moved {
             let i = node as usize;
             let (centre, half_size) = (self.pos(i), self.half_size[i]);
@@ -1408,13 +1411,13 @@ impl Net {
             obstacles.place(i, centre, half_size);
             let now = obstacles.box_of(i);
             self.disp_in_obstacles[i] = self.disp[i];
-            boxes.extend([was, now].into_iter().flatten());
+            area = bounding_box(area.into_iter().chain(was).chain(now));
         }
         let mut edges: Vec<u32> = moved
             .iter()
             .flat_map(|&node| self.node_edges[node as usize].iter().copied())
             .collect();
-        if let Some((lo, hi)) = bounding_box(boxes) {
+        if let Some((lo, hi)) = area {
             for e in 0..self.own_routes.len() {
                 if self.own_routes[e].is_some() {
                     let (a, b) = self.span(e);
@@ -1471,8 +1474,8 @@ impl Net {
         let route = if self.turned[e] {
             // Keep the usual sides, and run round both boxes from just past the child to just
             // before the parent.
-            let a = add(a, scale(self.flow, route::TURN_LENGTH));
-            let b = sub(b, scale(self.flow, route::TURN_LENGTH));
+            let a = a + self.flow * route::TURN_LENGTH;
+            let b = b - self.flow * route::TURN_LENGTH;
             let ends = [route::NO_END; 2];
             let mut pts = vec![a];
             pts.extend(route::route(self.obstacles(), flows_vertically, a, b, ends));
@@ -1483,7 +1486,7 @@ impl Net {
             }
         } else {
             // A bundled edge joins its trunk at the first point far enough on from the child.
-            let ahead = |q: Point| dot(sub(q, a), self.flow) >= FLOW_GAP;
+            let ahead = |q: Point| (q - a).dot(self.flow) >= FLOW_GAP;
             let ends = [c as u32, route::NO_END];
             match trunk {
                 Some(Trunk::Layout) => {
@@ -1530,17 +1533,17 @@ impl Net {
         } else {
             STRETCH_LIMIT
         };
-        len(sub(self.disp[b], self.disp[a])) > limit
+        (self.disp[b] - self.disp[a]).length() > limit
     }
 
     /// Where edges leave node `i`: its side facing along the flow.
     fn exit(&self, i: usize) -> Point {
-        add(self.pos(i), scale(self.flow, self.half_depth(i)))
+        self.pos(i) + self.flow * self.half_depth(i)
     }
 
     /// Where edges enter node `i`: its side facing against the flow.
     fn entry(&self, i: usize) -> Point {
-        sub(self.pos(i), scale(self.flow, self.half_depth(i)))
+        self.pos(i) - self.flow * self.half_depth(i)
     }
 
     fn half_depth(&self, i: usize) -> f32 {
@@ -1559,7 +1562,7 @@ impl Net {
         let (first, last) = (trunk[0] as usize, trunk[trunk.len() - 1] as usize);
         let start = self.pos(first);
         let end = self.entry(p);
-        let state = if dot(sub(end, start), self.flow) < FLOW_GAP {
+        let state = if (end - start).dot(self.flow) < FLOW_GAP {
             Trunk::Broken
         } else {
             let pts: Vec<Point> = trunk
@@ -1590,7 +1593,7 @@ impl Net {
     }
 
     fn is_rearranged(&self, i: usize) -> bool {
-        self.moved_by_hand[i] || self.is_held[i] || len(self.disp[i]) > STRETCH_LIMIT
+        self.moved_by_hand[i] || self.is_held[i] || self.disp[i].length() > STRETCH_LIMIT
     }
 
     /// True if a rearranged node covers the layout route of edge `e`.
@@ -1615,7 +1618,7 @@ impl Net {
                     return;
                 }
                 let i = i as usize;
-                if !self.is_rearranged(i) || len(self.disp[i]) <= ROUTE_UPDATE_STEP {
+                if !self.is_rearranged(i) || self.disp[i].length() <= ROUTE_UPDATE_STEP {
                     return;
                 }
                 hit = self.segment_enters(w[0], w[1], i, GRAZE_TOLERANCE);
@@ -1666,14 +1669,14 @@ impl Net {
             }
         }
         for &(p, start) in &grab.held_starts {
-            self.target[p as usize] = add(start, grab.delta);
+            self.target[p as usize] = start + grab.delta;
         }
         let shifts = self.bend_shifts(&grab.stretched_edges, |node| {
-            sub(self.target[node as usize], self.home[node as usize])
+            self.target[node as usize] - self.home[node as usize]
         });
         for (p, s) in shifts {
             if !self.is_held[p as usize] {
-                self.target[p as usize] = add(self.home[p as usize], s);
+                self.target[p as usize] = self.home[p as usize] + s;
             }
         }
     }
@@ -1687,7 +1690,7 @@ impl Net {
             self.frame_start_target[i as usize] = self.target[i as usize];
         }
         for &(p, start) in &grab.held_starts {
-            self.target[p as usize] = add(start, grab.delta);
+            self.target[p as usize] = start + grab.delta;
         }
         let lambda = 0.3 + 0.6 * params.pull.clamp(0.0, 1.0);
         let push = params.push.clamp(0.0, 1.0);
@@ -1744,12 +1747,12 @@ impl Net {
         } else {
             forces.k_anchor * 0.5
         };
-        let mut num = scale(self.home[i], k_home);
+        let mut num = self.home[i] * k_home;
         let mut den = k_home;
         for &si in self.springs_at.get(i) {
             let s = &self.springs[si as usize];
             if let Some(want) = self.spring_want(s, i, target, forces.weft_reach) {
-                num = add(num, scale(want, s.stiffness));
+                num += want * s.stiffness;
                 den += s.stiffness;
             }
         }
@@ -1758,18 +1761,14 @@ impl Net {
                 let pair = &near[magnet.pair as usize];
                 let (gap, away) = self.gap(pair, target, 0.0);
                 if gap < magnet.kept_gap {
-                    let away = if pair.b as usize == i {
-                        away
-                    } else {
-                        scale(away, -1.0)
-                    };
-                    let want = add(target[i], scale(away, magnet.kept_gap - gap));
-                    num = add(num, scale(want, forces.k_magnet));
+                    let away = if pair.b as usize == i { away } else { -away };
+                    let want = target[i] + away * (magnet.kept_gap - gap);
+                    num += want * forces.k_magnet;
                     den += forces.k_magnet;
                 }
             }
         }
-        scale(num, 1.0 / den)
+        num * (1.0 / den)
     }
 
     /// Where spring `s` wants its end `i`, if it pulls at all.
@@ -1782,12 +1781,12 @@ impl Net {
     ) -> Option<Point> {
         let n = self.node_count;
         let (a, b) = (s.a as usize, s.b as usize);
-        let rest = sub(self.home[b], self.home[a]);
+        let rest = self.home[b] - self.home[a];
         if s.along_edge {
             return Some(if i == a {
-                sub(target[b], rest)
+                target[b] - rest
             } else {
-                add(target[a], rest)
+                target[a] + rest
             });
         }
         // The weft keeps edges from being pushed into each other or through nodes (the magnets
@@ -1795,32 +1794,32 @@ impl Net {
         if a < n && b < n {
             return None;
         }
-        let apart = add(s.layout_offset, rest);
-        let dist = len(apart);
+        let apart = s.layout_offset + rest;
+        let dist = apart.length();
         if dist == 0.0 {
             return None;
         }
-        let mut u = scale(apart, 1.0 / dist);
-        let ext = add(self.half_size[a], self.half_size[b]);
+        let mut u = apart * (1.0 / dist);
+        let ext = self.half_size[a] + self.half_size[b];
         let reach = u.x.abs() * ext.x + u.y.abs() * ext.y + weft_reach;
         // Keep them on the side they were on; once something has passed, it stays passed.
         let was = |p: usize| self.was_heading(p, target);
-        let passed = dot(add(s.layout_offset, sub(was(b), was(a))), u) < 0.0;
+        let passed = (s.layout_offset + (was(b) - was(a))).dot(u) < 0.0;
         let keep = if passed {
-            u = scale(u, -1.0);
+            u = -u;
             reach
         } else {
             dist.min(reach)
         };
-        let now = dot(add(s.layout_offset, sub(target[b], target[a])), u);
+        let now = (s.layout_offset + (target[b] - target[a])).dot(u);
         if now >= keep {
             return None;
         }
-        let push = scale(u, keep - now);
+        let push = u * (keep - now);
         Some(if i == a {
-            sub(target[a], push)
+            target[a] - push
         } else {
-            add(target[b], push)
+            target[b] + push
         })
     }
 
@@ -1838,10 +1837,10 @@ impl Net {
     /// the start of the frame.
     fn near_pairs(&mut self, pad: f32) -> Vec<Near> {
         let n = self.node_count;
-        let place = |i: usize| add(self.layout_pos[i], self.target[i]);
+        let place = |i: usize| self.layout_pos[i] + self.target[i];
         let moving = |i: usize| {
             self.is_held[i]
-                || len(sub(self.target[i], self.home[i])) > REST_EPSILON
+                || (self.target[i] - self.home[i]).length() > REST_EPSILON
                 || self.is_settling && self.home[i] != Point::default()
         };
         // Only nodes near a moving one: in the coarse cells that the moving boxes, grown by
@@ -1861,7 +1860,7 @@ impl Net {
         for &i in &self.active {
             let i = i as usize;
             if i < n && moving(i) {
-                let grown = add(self.half_size[i], Point::new(pad, pad));
+                let grown = self.half_size[i] + Point::new(pad, pad);
                 area.extend(cells_of(place(i), grown));
             }
         }
@@ -1871,10 +1870,7 @@ impl Net {
         let items: Vec<(u32, Point, Point)> = (0..n)
             .filter(|&i| cells_of(place(i), self.half_size[i]).any(|c| area.contains(&c)))
             .map(|i| {
-                let grown = Point::new(
-                    self.half_size[i].x + pad / 2.0,
-                    self.half_size[i].y + pad / 2.0,
-                );
+                let grown = self.half_size[i] + Point::new(pad / 2.0, pad / 2.0);
                 (i as u32, place(i), grown)
             })
             .collect();
@@ -1888,30 +1884,21 @@ impl Net {
                 if !moving(a) && !moving(b) {
                     return None;
                 }
-                let d = add(
-                    sub(self.layout_pos[b], self.layout_pos[a]),
-                    sub(self.target[b], self.target[a]),
-                );
-                let ext = add(self.half_size[a], self.half_size[b]);
+                let d = self.layout_pos[b] - self.layout_pos[a] + (self.target[b] - self.target[a]);
+                let ext = self.half_size[a] + self.half_size[b];
                 if d.x.abs() >= ext.x + pad || d.y.abs() >= ext.y + pad {
                     return None;
                 }
                 // Side by side in a row: they keep their order along it.
                 let was = |p: usize| self.was_heading(p, &self.target);
-                let d = add(
-                    sub(self.layout_pos[b], self.layout_pos[a]),
-                    sub(was(b), was(a)),
-                );
-                let in_row = dot(d, across).abs() < dot(ext, across);
-                let side = match (in_row, dot(d, along) < 0.0) {
+                let d = self.layout_pos[b] - self.layout_pos[a] + (was(b) - was(a));
+                let in_row = d.dot(across).abs() < ext.dot(across);
+                let side = match (in_row, d.dot(along) < 0.0) {
                     (false, _) => 0.0,
                     (true, true) => -1.0,
                     (true, false) => 1.0,
                 };
-                let rest = add(
-                    sub(self.layout_pos[b], self.layout_pos[a]),
-                    sub(self.home[b], self.home[a]),
-                );
+                let rest = self.layout_pos[b] - self.layout_pos[a] + (self.home[b] - self.home[a]);
                 // Settling clears overlaps left at rest too: they weren't left so by hand.
                 let rest_gap = box_gap(rest, ext).0;
                 Some(Near {
@@ -1942,15 +1929,12 @@ impl Net {
     /// along the row, in their order.
     fn gap(&self, pair: &Near, t: &[Point], margin: f32) -> (f32, Point) {
         let (a, b) = (pair.a as usize, pair.b as usize);
-        let d = add(sub(self.layout_pos[b], self.layout_pos[a]), sub(t[b], t[a]));
-        let ext = add(
-            add(self.half_size[a], self.half_size[b]),
-            Point::new(margin, margin),
-        );
+        let d = self.layout_pos[b] - self.layout_pos[a] + (t[b] - t[a]);
+        let ext = self.half_size[a] + self.half_size[b] + Point::new(margin, margin);
         if pair.side != 0.0 {
             let (along, _) = self.axes();
-            let gap = dot(d, along) * pair.side - dot(ext, along);
-            (gap, scale(along, pair.side))
+            let gap = d.dot(along) * pair.side - ext.dot(along);
+            (gap, along * pair.side)
         } else {
             box_gap(d, ext)
         }
@@ -2001,8 +1985,8 @@ impl Net {
             let (a, b) = (pair.a as usize, pair.b as usize);
             self.activate_heading(a, target[a]);
             self.activate_heading(b, target[b]);
-            let push = scale(away, -gap);
-            let (mut wa, mut wb) = (self.yields(a, scale(push, -1.0)), self.yields(b, push));
+            let push = away * -gap;
+            let (mut wa, mut wb) = (self.yields(a, -push), self.yields(b, push));
             if wa + wb == 0.0 && self.is_settling && self.is_held[a] && self.is_held[b] {
                 // Two nodes moved by hand, put back onto each other: both give way.
                 (wa, wb) = (1.0, 1.0);
@@ -2010,10 +1994,10 @@ impl Net {
             if wa + wb == 0.0 {
                 continue;
             }
-            let (da, db) = (scale(push, -wa / (wa + wb)), scale(push, wb / (wa + wb)));
+            let (da, db) = (push * (-wa / (wa + wb)), push * (wb / (wa + wb)));
             for (i, d) in [(a, da), (b, db)] {
-                target[i] = add(target[i], d);
-                let along = dot(d, self.flow);
+                target[i] += d;
+                let along = d.dot(self.flow);
                 if along > 0.0 {
                     self.separated[i] |= ALONG_FLOW;
                 } else if along < 0.0 {
@@ -2027,7 +2011,7 @@ impl Net {
     /// particles stay put, and so do those wedged against them that way, or the two would
     /// fight and the overlap would remain.
     fn yields(&self, i: usize, dir: Point) -> f32 {
-        let along = dot(dir, self.flow);
+        let along = dir.dot(self.flow);
         let wedged = self.wedged[i];
         let blocked = self.is_held[i]
             || (along > 0.0 && wedged & ALONG_FLOW != 0)
@@ -2043,8 +2027,7 @@ impl Net {
                 let s = &self.springs[si as usize];
                 // Each segment once: from its newer end, or its older end if the newer rests.
                 let from_here = s.a == i || (s.b == i && !self.is_active[s.a as usize]);
-                if from_here && s.along_edge && s.a != s.b && dot(s.layout_offset, self.flow) > 0.0
-                {
+                if from_here && s.along_edge && s.a != s.b && s.layout_offset.dot(self.flow) > 0.0 {
                     forward.push(si);
                 }
             }
@@ -2054,7 +2037,7 @@ impl Net {
                 .iter()
                 .map(|&si| {
                     let p = end(&self.springs[si as usize]) as usize;
-                    (sign * dot(self.layout_pos[p], self.flow), si)
+                    (sign * self.layout_pos[p].dot(self.flow), si)
                 })
                 .collect();
             keyed.sort_unstable_by(|x, y| x.0.total_cmp(&y.0));
@@ -2142,18 +2125,12 @@ impl Net {
     fn slack(&self, s: &Spring, target: &[Point]) -> Option<f32> {
         let (a, b) = (s.a as usize, s.b as usize);
         let flow = self.flow;
-        let rest = dot(add(s.layout_offset, sub(self.home[b], self.home[a])), flow);
-        if !s.along_edge || a == b || dot(s.layout_offset, flow) <= 0.0 || rest <= 0.0 {
+        let rest = (s.layout_offset + (self.home[b] - self.home[a])).dot(flow);
+        if !s.along_edge || a == b || s.layout_offset.dot(flow) <= 0.0 || rest <= 0.0 {
             return None;
         }
         let needed = self.kept_flow_gap(a, b, rest);
-        let have = dot(
-            sub(
-                add(self.layout_pos[b], target[b]),
-                add(self.layout_pos[a], target[a]),
-            ),
-            flow,
-        );
+        let have = (self.layout_pos[b] + target[b] - (self.layout_pos[a] + target[a])).dot(flow);
         Some(have - needed)
     }
 
@@ -2185,8 +2162,8 @@ impl Net {
             return true;
         }
         let was = target[end];
-        let push = scale(self.flow, if forward { -slack } else { slack });
-        target[end] = add(was, push);
+        let push = self.flow * (if forward { -slack } else { slack });
+        target[end] = was + push;
         self.activate_heading(end, was);
         false
     }
@@ -2399,7 +2376,7 @@ mod tests {
         net.grab(nodes[0], nodes, &[], params.model);
         for f in 1..=30 {
             let t = f as f32 / 30.0;
-            net.drag_to(add(start, scale(by, t)));
+            net.drag_to(start + by * t);
             net.step(1.0 / 60.0, params);
         }
         net.release(params);
@@ -2529,7 +2506,7 @@ mod tests {
         let by = Point::new(300.0, 0.0);
         drag(&mut net, &[0], by, &free());
         settle(&mut net, &free());
-        assert!(close(net.node_pos(0), add(l.nodes[0], by)));
+        assert!(close(net.node_pos(0), l.nodes[0] + by));
         for i in 1..4 {
             assert_eq!(net.node_pos(i), l.nodes[i], "node {i} stays");
         }
@@ -2575,7 +2552,7 @@ mod tests {
             .all(|i| {
                 let (c, h) = (net.node_pos(i), net.half_size[i]);
                 pts.windows(2)
-                    .all(|w| route::box_entry(w[0], w[1], sub(c, h), add(c, h)).is_none())
+                    .all(|w| route::box_entry(w[0], w[1], c - h, c + h).is_none())
             })
     }
 
@@ -2589,7 +2566,7 @@ mod tests {
             "the layout's routes at first"
         );
         assert_eq!(net.edge_points(long).count(), 4);
-        let beside_0 = sub(Point::new(l.nodes[0].x + 150.0, l.nodes[0].y), l.nodes[3]);
+        let beside_0 = Point::new(l.nodes[0].x + 150.0, l.nodes[0].y) - l.nodes[3];
         drag(&mut net, &[3], beside_0, &free());
         settle(&mut net, &free());
         assert!(net.is_rerouted(long));
@@ -2638,7 +2615,7 @@ mod tests {
             (l.nodes[0].x + l.nodes[1].x) / 2.0,
             (l.nodes[0].y + l.nodes[1].y) / 2.0,
         );
-        drag(&mut net, &[3], sub(middle, l.nodes[3]), &free());
+        drag(&mut net, &[3], middle - l.nodes[3], &free());
         settle(&mut net, &free());
         assert!(net.is_rerouted(0), "0 -> 1 is covered by 3");
         assert!(edge_is_clear(&net, 0));
@@ -2659,7 +2636,7 @@ mod tests {
         let l = layout::layout(&input, &opts);
         let mut net = Net::new(&l, &input.sizes);
         assert!((l.nodes[2].x - l.nodes[1].x).abs() > 300.0);
-        drag(&mut net, &[2], sub(l.nodes[1], l.nodes[2]), &free());
+        drag(&mut net, &[2], l.nodes[1] - l.nodes[2], &free());
         settle(&mut net, &free());
         assert!(net.is_rerouted(0), "0 -> 1 is covered by 2");
         // On the way back 2 leaves the edge's surroundings between two frames.
@@ -2680,7 +2657,7 @@ mod tests {
         let (l, mut net) = net_for(&input);
         let bend_beside_2 = l.edges[3][2];
         assert!((bend_beside_2.y - l.nodes[2].y).abs() < 1.0 && bend_beside_2.x > l.nodes[2].x);
-        drag(&mut net, &[4], sub(bend_beside_2, l.nodes[4]), &free());
+        drag(&mut net, &[4], bend_beside_2 - l.nodes[4], &free());
         settle(&mut net, &free());
         assert!(net.is_rerouted(3), "0 -> 3 is covered by 4");
         // On the way back 4 pushes the route of 0 -> 3 round the other side of the column,
@@ -2780,7 +2757,7 @@ mod tests {
     fn a_child_moved_past_the_trunk_takes_a_route_of_its_own() {
         let (l, mut net) = bundle_net();
         // Level with the trunk's only bend point.
-        let beside_3 = sub(Point::new(l.nodes[3].x + 150.0, l.nodes[3].y), l.nodes[5]);
+        let beside_3 = Point::new(l.nodes[3].x + 150.0, l.nodes[3].y) - l.nodes[5];
         drag(&mut net, &[5], beside_3, &free());
         settle(&mut net, &free());
         assert!(bundled(&net, &[2, 3]));
@@ -2794,15 +2771,12 @@ mod tests {
         let (l, mut net) = chain_net();
         let by = Point::new(120.0, 0.0);
         net.grab(1, &[1], &[0, 1], DragModel::Free);
-        net.drag_to(add(l.nodes[1], by));
+        net.drag_to(l.nodes[1] + by);
         net.step(1.0 / 60.0, &free());
         net.release(&free());
         settle(&mut net, &free());
         for i in [0, 1] {
-            assert!(
-                close(net.node_pos(i), add(l.nodes[i], by)),
-                "node {i} moves"
-            );
+            assert!(close(net.node_pos(i), l.nodes[i] + by), "node {i} moves");
         }
         assert!(
             net.moved_by_hand[1] && !net.moved_by_hand[0],
@@ -2818,7 +2792,7 @@ mod tests {
         drag(&mut net, &[1, 3], by, &free());
         settle(&mut net, &free());
         for i in [1, 3] {
-            assert!(close(net.node_pos(i), add(l.nodes[i], by)));
+            assert!(close(net.node_pos(i), l.nodes[i] + by));
         }
         for i in [0, 2, 4] {
             assert_eq!(net.node_pos(i), l.nodes[i]);
@@ -2889,7 +2863,7 @@ mod tests {
         net.grab(2, &[2], &[], DragModel::Adapt);
         assert!(!net.undo() && !net.redo());
         assert_eq!(net.grab.as_ref().map(|g| g.anchor), Some(2));
-        net.drag_to(add(l.nodes[2], Point::new(50.0, 0.0)));
+        net.drag_to(l.nodes[2] + Point::new(50.0, 0.0));
         net.step(1.0 / 60.0, &NetParams::default());
         assert!(net.node_pos(2).x > l.nodes[2].x + 49.0);
     }
@@ -3022,10 +2996,10 @@ mod tests {
         settle(&mut net, &free());
 
         let (l, fresh) = reload(&net, &new);
-        let from_1 = |i: usize| sub(fresh.node_pos(i), fresh.node_pos(1));
+        let from_1 = |i: usize| fresh.node_pos(i) - fresh.node_pos(1);
         for i in [4, 5] {
             assert!(
-                close(from_1(i), sub(l.nodes[i], l.nodes[1])),
+                close(from_1(i), l.nodes[i] - l.nodes[1]),
                 "node {i} keeps its place beside 1: {:?}",
                 from_1(i)
             );
@@ -3051,20 +3025,20 @@ mod tests {
         new.times.push(5);
         new.edges.extend([edge(4, 0), merge(4, 3)]);
         let (_, mut net) = net_for(&old);
-        let up = scale(net.flow, -400.0);
+        let up = net.flow * -400.0;
         drag(&mut net, &[3], up, &free());
         settle(&mut net, &free());
 
         let (l, fresh) = reload(&net, &new);
         let flow = fresh.flow;
         let above = |child: usize, parent: usize| {
-            dot(sub(fresh.node_pos(parent), fresh.node_pos(child)), flow)
+            (fresh.node_pos(parent) - fresh.node_pos(child)).dot(flow)
         };
         assert!(above(4, 3) >= 20.0 + FLOW_GAP - 0.5, "{}", above(4, 3));
         assert!(above(4, 0) > 0.0);
-        let across = sub(fresh.node_pos(4), l.nodes[4]);
+        let across = fresh.node_pos(4) - l.nodes[4];
         assert!(
-            dot(across, Point::new(flow.y, flow.x)).abs() < 0.5,
+            across.dot(Point::new(flow.y, flow.x)).abs() < 0.5,
             "only pushed up"
         );
         assert!(close(fresh.node_pos(0), l.nodes[0]), "old nodes stay");
@@ -3074,7 +3048,7 @@ mod tests {
     fn a_node_put_back_onto_another_pushes_it_aside() {
         let (l, mut net) = net_for(&two_chains());
         // Node 0 was moved by hand to where a changed layout now puts node 2.
-        let onto = sub(l.nodes[2], l.nodes[0]);
+        let onto = l.nodes[2] - l.nodes[0];
         let place = RestPlace {
             node: 0,
             offset: onto,
@@ -3088,7 +3062,7 @@ mod tests {
         assert_eq!(net.tidiness().overlaps, 0);
         let flow = net.flow;
         assert!(
-            dot(sub(net.node_pos(3), net.node_pos(2)), flow) > 0.0,
+            (net.node_pos(3) - net.node_pos(2)).dot(flow) > 0.0,
             "and stays above its parent"
         );
         assert!(net.is_displaced(2) && !net.moved_by_hand[2]);
@@ -3106,11 +3080,11 @@ mod tests {
         };
         let (_, mut net) = net_for(&two_chains());
         net.restore([place((1, apart))], &NetParams::default());
-        assert!(close(sub(net.node_pos(0), net.node_pos(1)), apart));
+        assert!(close(net.node_pos(0) - net.node_pos(1), apart));
         // Beside a node that is no longer its first parent: at its offset instead.
         let (l, mut net) = net_for(&two_chains());
         net.restore([place((3, apart))], &NetParams::default());
-        assert!(close(net.node_pos(0), add(l.nodes[0], offset)));
+        assert!(close(net.node_pos(0), l.nodes[0] + offset));
         let (l, mut net) = net_for(&two_chains());
         let rested_in_layout = RestPlace {
             offset: Point::default(),
@@ -3136,8 +3110,8 @@ mod tests {
             [place(0, 1, to_0), place(1, 2, to_1)],
             &NetParams::default(),
         );
-        assert!(close(sub(net.node_pos(1), net.node_pos(2)), to_1));
-        assert!(close(sub(net.node_pos(0), net.node_pos(1)), to_0));
+        assert!(close(net.node_pos(1) - net.node_pos(2), to_1));
+        assert!(close(net.node_pos(0) - net.node_pos(1), to_0));
     }
 
     #[test]
@@ -3157,16 +3131,16 @@ mod tests {
         let (_, mut net) = net_for(&old);
         drag(&mut net, &[1], Point::new(300.0, -40.0), &free());
         settle(&mut net, &free());
-        let beside = sub(net.node_pos(1), net.node_pos(2));
+        let beside = net.node_pos(1) - net.node_pos(2);
 
         let (_, fresh) = reload(&net, &new);
         assert!(
-            close(sub(fresh.node_pos(1), fresh.node_pos(2)), beside),
+            close(fresh.node_pos(1) - fresh.node_pos(2), beside),
             "the tip keeps its place beside its parent"
         );
         assert!(fresh.moved_by_hand[1] && !fresh.moved_by_hand[3]);
         let flow = fresh.flow;
-        assert!(dot(sub(fresh.node_pos(1), fresh.node_pos(3)), flow) > 0.0);
+        assert!((fresh.node_pos(1) - fresh.node_pos(3)).dot(flow) > 0.0);
         let tidiness = fresh.tidiness();
         assert_eq!(tidiness.overlaps, 0);
         assert_eq!(tidiness.edges_through_boxes, 0);

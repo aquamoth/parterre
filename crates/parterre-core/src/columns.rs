@@ -69,7 +69,7 @@ impl ColumnWidths {
     }
 
     /// Border `border` of `layout` dragged to `pointer`: sizes its column so that the border is
-    /// under the pointer, as far as leaves the column [`MIN_DRAGGED_WIDTH`] and the flexible
+    /// under the pointer, as far as that leaves the column a minimum width and the flexible
     /// column `flex_min`.
     pub fn drag(
         &mut self,

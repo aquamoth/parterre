@@ -15,6 +15,7 @@ mod keys;
 #[cfg(target_os = "macos")]
 mod macos;
 mod menu;
+mod notice;
 mod raster;
 mod record;
 mod render;
@@ -31,6 +32,7 @@ mod upstreams;
 mod usage;
 mod view;
 mod widgets;
+mod worker;
 
 // Run in build.rs; compiled here only for their tests.
 #[cfg(test)]

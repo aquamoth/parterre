@@ -1,24 +1,11 @@
+mod common;
+
+use common::Rng;
 use parterre_core::layout::{self, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking};
 use parterre_core::pattern::BranchPatterns;
 use parterre_core::revgraph::{self, GraphOptions, PullRequestHead, Simplification};
 use parterre_core::{Commit, CommitIx, GitRef, Head, Oid, RefKind, Repo};
 use std::collections::{HashMap, HashSet};
-
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn below(&mut self, n: u64) -> u64 {
-        if n == 0 { 0 } else { self.next() % n }
-    }
-    fn chance(&mut self, p: f64) -> bool {
-        (self.next() % 1_000_000) as f64 / 1e6 < p
-    }
-}
 
 fn oid(i: usize) -> Oid {
     Oid::from_hex(&format!("{:040x}", i + 1)).unwrap()

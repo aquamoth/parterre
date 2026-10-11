@@ -9,9 +9,8 @@ use parterre_core::clone::{self, Cloning};
 use parterre_forge::ForgeError;
 use parterre_forge::github::{self, Listed, Repositories};
 
-use super::branches::{folder_name_field, pick_folder, received, worker};
-use crate::file_dialog::Pending;
-use crate::{dialogs, widgets};
+use crate::file_dialog::{self, Pending};
+use crate::{dialogs, widgets, worker};
 
 const MIN_LIST_ROWS: usize = 4;
 const INITIAL_LIST_ROWS: usize = 6;
@@ -53,7 +52,7 @@ impl CloneDialog {
                 Ok(repos) => Github::Loaded(repos),
                 Err(e) => Github::Failed(e),
             },
-            None => Github::Loading(worker(ctx, github::repositories)),
+            None => Github::Loading(worker::spawn(ctx, github::repositories)),
         };
         let parent = parent
             .filter(|p| p.is_dir())
@@ -70,7 +69,7 @@ impl CloneDialog {
             github,
             scroll_to_picked: false,
             clipboard_url: clipboard
-                .then(|| worker(ctx, || clipboard_text().filter(|t| remote_url(t)))),
+                .then(|| worker::spawn(ctx, || clipboard_text().filter(|t| remote_url(t)))),
             opener,
             fresh: true,
         }
@@ -114,7 +113,7 @@ impl CloneDialog {
     fn receive(&mut self) {
         if let Github::Loading(rx) = &self.github {
             let stopped = || Err(ForgeError::Network("the request stopped".into()));
-            match received(rx, stopped) {
+            match worker::received(rx, stopped) {
                 Some(Ok(repos)) => self.github = Github::Loaded(repos),
                 Some(Err(e)) => self.github = Github::Failed(e),
                 None => {}
@@ -123,7 +122,7 @@ impl CloneDialog {
         let clipboard_url = self
             .clipboard_url
             .as_ref()
-            .and_then(|rx| received(rx, || None));
+            .and_then(|rx| worker::received(rx, || None));
         if let Some(url) = clipboard_url {
             self.clipboard_url = None;
             if let Some(url) = url
@@ -187,7 +186,7 @@ impl CloneDialog {
                 };
                 dialogs::command_box(ui, &commands);
                 let ready = is_url && error.is_none() && !busy;
-                dialogs::actions(ui, "Clone", ready, false, false)
+                dialogs::actions(ui, dialogs::Primary::new("Clone").enabled(ready))
             });
         let mut answer = shown.inner;
         if shown.should_close() && answer == dialogs::Answer::Open {
@@ -299,12 +298,16 @@ impl CloneDialog {
         let browsing = self.browse.is_some();
         let (_, browse) = widgets::folder_field(ui, &mut self.parent, "Folder", browsing);
         if browse {
-            self.browse = Some(pick_folder(ui.ctx(), "Parent folder", self.parent.trim()));
+            self.browse = Some(file_dialog::pick_folder(
+                ui.ctx(),
+                "Parent folder",
+                self.parent.trim(),
+            ));
         }
         ui.add_space(6.0);
         ui.label(RichText::new("Folder name").strong());
         let name = &mut self.folder_name;
-        if folder_name_field(ui, name, &mut self.folder_name_edited, "Follow the URL") {
+        if widgets::folder_name_field(ui, name, &mut self.folder_name_edited, "Follow the URL") {
             self.folder_name = self.followed_name();
         }
     }

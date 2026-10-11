@@ -1,7 +1,6 @@
 mod common;
 
-use common::TestRepo;
-use parterre_core::git::CommitNote;
+use common::{TestRepo, feature_merge};
 use parterre_core::revgraph::{self, GraphOptions, PullRequestHead, RevGraph, Simplification};
 use parterre_core::{CommitIx, Head, RefKind, Repo};
 
@@ -55,49 +54,6 @@ fn collapsed_subjects(repo: &Repo, g: &RevGraph, child: &str) -> Vec<String> {
         .position(|e| subject(g.nodes[e.child as usize].commit) == child)
         .unwrap();
     g.collapsed(e).iter().copied().map(subject).collect()
-}
-
-/// main: A - B - C ------- M
-///            \           /
-/// feature:    D ------- E
-fn feature_merge() -> TestRepo {
-    let mut r = TestRepo::new();
-    r.commit("A");
-    r.commit("B");
-    r.branch("feature");
-    r.commit("D");
-    r.commit("E");
-    r.checkout("main");
-    r.commit("C");
-    r.merge("feature", "M");
-    r
-}
-
-#[test]
-fn loads_commits_refs_and_head() {
-    let r = feature_merge();
-    r.git(&["tag", "-a", "-m", "annotated", "v1", "HEAD~1"]);
-    let repo = r.load();
-    assert_eq!(repo.commits.len(), 6);
-    assert!(
-        matches!(&repo.head, Head::Branch { name, target: Some(_) } if name == "refs/heads/main")
-    );
-    let names: Vec<(&str, RefKind, bool)> = repo
-        .refs
-        .iter()
-        .map(|r| (r.name.as_str(), r.kind, r.annotated))
-        .collect();
-    assert!(names.contains(&("main", RefKind::LocalBranch, false)));
-    assert!(names.contains(&("feature", RefKind::LocalBranch, false)));
-    assert!(names.contains(&("v1", RefKind::Tag, true)));
-    let merge = repo.head_commit().unwrap();
-    assert_eq!(repo.commit(merge).parents.len(), 2);
-    let tag = repo.refs.iter().find(|r| r.name == "v1").unwrap();
-    assert_eq!(
-        repo.commit(tag.target).subject,
-        "C",
-        "annotated tags are peeled"
-    );
 }
 
 #[test]
@@ -570,59 +526,6 @@ fn hidden_branches_vanish_only_as_leaves() {
 }
 
 #[test]
-fn reads_full_commit_messages_committers_and_notes() {
-    let mut r = TestRepo::new();
-    r.commit("Subject line\n\nBody paragraph\n\tsecond line\nNotes:");
-    // Amended by someone else, later: the author stays, the committer changes.
-    r.set_clock(5);
-    r.git(&["config", "user.name", "Other"]);
-    r.git(&["commit", "-q", "--amend", "--allow-empty", "--no-edit"]);
-    r.git(&["notes", "add", "-m", "First note", "-m", "  indented"]);
-    r.git(&["notes", "--ref=review", "add", "-m", "Looks good"]);
-    r.git(&["config", "notes.displayRef", "refs/notes/review"]);
-    let repo = r.load();
-    let c = repo.head_commit().unwrap();
-    assert_eq!(repo.commit(c).subject, "Subject line");
-    let d = parterre_core::git::Git::new(r.path())
-        .details(&repo.commit(c).oid)
-        .unwrap();
-    assert_eq!(
-        d.message,
-        "Subject line\n\nBody paragraph\n\tsecond line\nNotes:"
-    );
-    assert_eq!(d.author_date, "2023-11-14 22:14:20 +0000");
-    assert_eq!(d.committer_date, "2023-11-14 22:18:20 +0000");
-    assert_eq!(
-        (d.committer_name.as_str(), d.committer_email.as_str()),
-        ("Other", "test@example.com")
-    );
-    let note = |heading: &str, text: &str| CommitNote {
-        heading: heading.to_owned(),
-        text: text.to_owned(),
-    };
-    assert_eq!(
-        d.notes,
-        [
-            note("Notes", "First note\n\n  indented"),
-            note("Notes (review)", "Looks good")
-        ]
-    );
-}
-
-#[test]
-fn commits_without_notes_have_none() {
-    let mut r = TestRepo::new();
-    r.commit("Plain");
-    let repo = r.load();
-    let c = repo.head_commit().unwrap();
-    let d = parterre_core::git::Git::new(r.path())
-        .details(&repo.commit(c).oid)
-        .unwrap();
-    assert_eq!(d.message, "Plain");
-    assert!(d.notes.is_empty());
-}
-
-#[test]
 fn lists_commits_collapsed_into_an_edge() {
     let r = feature_merge();
     let repo = r.load();
@@ -661,76 +564,6 @@ fn an_edge_holds_both_sides_of_a_hidden_merge() {
     assert_eq!(hidden[0], "M");
     hidden.sort();
     assert_eq!(hidden, ["B", "C", "D", "M"]);
-}
-
-#[test]
-fn tags_of_tags_are_peeled_to_their_commit() {
-    let mut r = TestRepo::new();
-    r.commit("A");
-    r.git(&["tag", "-a", "-m", "one", "t1"]);
-    r.git(&["tag", "-a", "-m", "two", "t2", "t1"]);
-    r.commit("B");
-    let repo = r.load();
-    let t2 = repo
-        .refs
-        .iter()
-        .find(|r| r.name == "t2")
-        .expect("nested tag loaded");
-    assert_eq!(repo.commit(t2.target).subject, "A");
-    assert!(t2.annotated);
-}
-
-#[test]
-fn separator_characters_in_subjects_and_names_are_harmless() {
-    let mut r = TestRepo::new();
-    r.git(&["config", "user.name", "Wei\x1fZhang"]);
-    r.commit("subject with \x1e record and \x1f unit separators");
-    r.commit("second");
-    let repo = r.load();
-    assert_eq!(repo.commits.len(), 2);
-    let first = repo.commits.iter().find(|c| c.parents.is_empty()).unwrap();
-    assert_eq!(
-        first.subject,
-        "subject with \x1e record and \x1f unit separators"
-    );
-    assert_eq!(first.author_name, "Wei\x1fZhang");
-    assert!(first.commit_time > 0);
-}
-
-#[test]
-fn empty_repository_loads_without_commits() {
-    let r = TestRepo::new();
-    let repo = r.load();
-    assert!(repo.commits.is_empty());
-    assert!(matches!(repo.head, Head::Branch { target: None, .. }));
-    let g = revgraph::build(&repo, &GraphOptions::default());
-    assert!(g.nodes.is_empty());
-}
-
-#[test]
-fn loads_from_inside_the_git_directory() {
-    let mut r = TestRepo::new();
-    r.commit("A");
-    let repo = parterre_core::git::load_repo(&r.path().join(".git")).expect("load from .git");
-    assert_eq!(repo.commits.len(), 1);
-}
-
-#[test]
-fn notes_are_not_walked() {
-    let mut r = TestRepo::new();
-    r.commit("A");
-    r.git(&["notes", "add", "-m", "a note"]);
-    let repo = r.load();
-    assert_eq!(
-        repo.commits.len(),
-        1,
-        "the notes commit is not part of the history"
-    );
-    assert!(
-        repo.refs
-            .iter()
-            .all(|r| !r.full_name.starts_with("refs/notes/"))
-    );
 }
 
 /// main: A - B - C           origin/main at C

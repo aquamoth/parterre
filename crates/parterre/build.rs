@@ -5,6 +5,8 @@
 //! package` (from crates.io by `cargo install`, say), which has no `.git` but records its
 //! commit in `.cargo_vcs_info.json`.
 
+#[path = "src/notice.rs"]
+mod notice;
 #[path = "src/version.rs"]
 mod version;
 #[path = "src/win_resource.rs"]
@@ -77,9 +79,9 @@ fn main() {
 /// `ico` comes from `cargo run --release -p parterre-core --example icon_assets`. Cosmetic, so
 /// a missing resource compiler is skipped: `rc.exe` comes with the Windows SDK, and checking the
 /// `windows-gnu` target from Linux needs `x86_64-w64-mingw32-windres`.
-fn windows_resources(ico: &Path, notice: &Path, version: &str) {
+fn windows_resources(ico: &Path, notice_path: &Path, version: &str) {
     println!("cargo:rerun-if-changed={}", ico.display());
-    println!("cargo:rerun-if-changed={}", notice.display());
+    println!("cargo:rerun-if-changed={}", notice_path.display());
     let numbers = version.split(['-', ' ']).next().unwrap();
     let mut parts = numbers.split('.');
     let mut part = || {
@@ -88,13 +90,14 @@ fn windows_resources(ico: &Path, notice: &Path, version: &str) {
             .and_then(|number| number.parse().ok())
             .unwrap_or_else(|| panic!("{numbers} doesn't fit a Windows version number"))
     };
+    let notice_text = std::fs::read_to_string(notice_path)
+        .unwrap_or_else(|e| panic!("{}: {e}", notice_path.display()));
     let script = win_resource::script(&win_resource::Resources {
         icon_path: &ico.display().to_string(),
         numeric_version: [part(), part(), part()],
         version,
         description: &std::env::var("CARGO_PKG_DESCRIPTION").unwrap(),
-        notice: &std::fs::read_to_string(notice)
-            .unwrap_or_else(|e| panic!("{}: {e}", notice.display())),
+        copyright: notice::copyright_line(&notice_text),
     });
     let rc = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("parterre.rc");
     std::fs::write(&rc, script).unwrap();

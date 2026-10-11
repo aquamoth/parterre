@@ -9,7 +9,7 @@
 //!   repository is checked here: another fork's `main` is not ours.
 //! - **Signed in only:** with `gh auth token`'s token, or not at all.
 //! - **Within a budget:** once less than a tenth of the hour's points is left, as t3code keeps
-//!   in reserve, or GitHub says to wait, nothing is asked until the limit resets ([`pause`]).
+//!   in reserve, or GitHub says to wait, nothing is asked until the limit resets.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};

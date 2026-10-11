@@ -9,7 +9,10 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-use parterre_core::Repo;
+use parterre_core::blame::BlameSpec;
+use parterre_core::branches::{Action, Branches, Outcome, Report, Warning};
+use parterre_core::file_diff::Rev;
+use parterre_core::{CommitIx, Oid, Repo};
 use tempfile::TempDir;
 
 /// Unix seconds that [`git_at`]'s minutes count from.
@@ -50,13 +53,40 @@ pub fn git_at(dir: &Path, minutes: u32, args: &[&str]) -> String {
     succeeded(args, out)
 }
 
-fn succeeded(args: &[&str], out: Output) -> String {
+/// Runs git in `dir` where it must fail, as a merge that stops on conflicts does. An editor
+/// it opens instead exits at once.
+pub fn git_fails(dir: &Path, args: &[&str]) {
+    let out = git_command(dir)
+        .args(args)
+        .env("GIT_EDITOR", "true")
+        .output()
+        .expect("run git");
+    assert!(!out.status.success(), "git {args:?} succeeded");
+}
+
+/// Runs git in `dir` as parterre's own git does, with the system config: Git for Windows sets
+/// `core.autocrlf` there (#182). Returns its output untrimmed.
+pub fn git_with_system_config(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new(parterre_core::git::program())
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("run git");
+    stdout(args, out)
+}
+
+fn stdout(args: &[&str], out: Output) -> String {
     assert!(
         out.status.success(),
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn succeeded(args: &[&str], out: Output) -> String {
+    stdout(args, out).trim().to_owned()
 }
 
 /// Written to the repository's config file at once rather than with a `git config` call each.
@@ -199,5 +229,98 @@ impl TestRepo {
 
     pub fn load(&self) -> Repo {
         parterre_core::git::load_repo(self.path()).expect("load repo")
+    }
+}
+
+/// main: A - B - C ------- M
+///            \           /
+/// feature:    D ------- E
+pub fn feature_merge() -> TestRepo {
+    let mut r = TestRepo::new();
+    r.commit("A");
+    r.commit("B");
+    r.branch("feature");
+    r.commit("D");
+    r.commit("E");
+    r.checkout("main");
+    r.commit("C");
+    r.merge("feature", "M");
+    r
+}
+
+impl AsRef<Path> for TestRepo {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
+pub fn oid(hex: &str) -> Oid {
+    Oid::from_hex(hex).unwrap_or_else(|| panic!("not a hash: {hex:?}"))
+}
+
+pub fn rev(r: &TestRepo, rev: &str) -> Oid {
+    oid(&r.git(&["rev-parse", rev]))
+}
+
+pub fn blame_at(hash: &str, path: &str) -> BlameSpec {
+    BlameSpec {
+        rev: Rev::Commit(oid(hash)),
+        path: path.into(),
+    }
+}
+
+pub fn ix(repo: &Repo, hash: &str) -> CommitIx {
+    repo.lookup(&oid(hash)).expect("commit in snapshot")
+}
+
+pub fn execute(worktree: impl AsRef<Path>, action: Action, approval: Option<&Warning>) -> Outcome {
+    Branches::new(worktree.as_ref()).execute(action, approval, &Default::default())
+}
+
+pub fn done(outcome: Outcome) -> Report {
+    match outcome {
+        Outcome::Done(report) => report,
+        other => panic!("expected it done: {other:?}"),
+    }
+}
+
+pub fn warning(outcome: Outcome) -> Warning {
+    match outcome {
+        Outcome::Warning(warning) => warning,
+        other => panic!("expected a warning: {other:?}"),
+    }
+}
+
+pub fn failed(outcome: Outcome) -> String {
+    failed_with_report(outcome).0
+}
+
+pub fn failed_with_report(outcome: Outcome) -> (String, Report) {
+    match outcome {
+        Outcome::Failed { error, report } => (error.to_string(), report),
+        other => panic!("expected a failure: {other:?}"),
+    }
+}
+
+pub struct Rng(pub u64);
+
+impl Rng {
+    pub fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    pub fn below(&mut self, n: u64) -> u64 {
+        if n == 0 { 0 } else { self.next() % n }
+    }
+
+    pub fn chance(&mut self, p: f64) -> bool {
+        (self.next() % 1_000_000) as f64 / 1e6 < p
+    }
+
+    pub fn unit(&mut self) -> f32 {
+        (self.next() % 10_000) as f32 / 10_000.0
     }
 }

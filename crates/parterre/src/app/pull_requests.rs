@@ -20,8 +20,7 @@ use parterre_core::glyphs;
 use parterre_forge::github::{self, GithubRepo};
 use parterre_forge::{self as forge, ForgeError, PullRequests};
 
-use super::branches::{copy_button, received, worker};
-use crate::widgets;
+use crate::{widgets, worker};
 
 /// What a finished load brought, and whether the user asked for it ([`PullRequestLoader::ask`])
 /// rather than parterre loading by itself: only then is it worth telling them.
@@ -171,7 +170,7 @@ impl PullRequestLoader {
                 "loading them stopped unexpectedly".into(),
             ))
         };
-        let result = received(&job.rx, stopped)?;
+        let result = worker::received(&job.rx, stopped)?;
         let Job {
             path,
             user_asked: asked,
@@ -215,7 +214,7 @@ impl PullRequestLoader {
         };
         let git = Git::new(&path);
         let canned = self.canned_json.clone();
-        let rx = worker(ctx, move || match canned {
+        let rx = worker::spawn(ctx, move || match canned {
             Some(json) => github::load_canned(&git, &json),
             None => github::load(&git),
         });
@@ -270,11 +269,7 @@ pub fn dialog(ctx: &egui::Context, error: &ForgeError) -> DialogAnswer {
             }
             answer
         });
-    if shown.should_close() {
-        DialogAnswer::Close
-    } else {
-        shown.inner
-    }
+    shown.or_closed(DialogAnswer::Close)
 }
 
 /// A command to run in a terminal, in a field of its own, with a button copying it.
@@ -297,8 +292,8 @@ fn command_box(ui: &mut egui::Ui, command: &str) {
                 ui.label(egui::RichText::new(command).monospace().size(14.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let id = egui::Id::new("copied").with(command);
-                    let done = super::log_window::colors(ui).added;
-                    copy_button(ui, id, || command.to_owned(), "Copy the command", done);
+                    let done = super::table_style::colors(ui).added;
+                    widgets::copy_button(ui, id, || command.to_owned(), "Copy the command", done);
                 });
             });
         });

@@ -3,12 +3,13 @@
 
 use parterre_core::branches::{Action, Catalog};
 use parterre_core::remote::PushState;
+use parterre_core::text::capitalized;
 use parterre_core::{Oid, RefKind, Repo};
 
-use super::branches::{self, Request, Target, loading_reason};
+use super::ParterreApp;
+use super::branches::{self, Request, Target};
 use super::compare_window::CompareRequest;
-use super::menu_bar::{Command, Entry, Item, Submenu, case, case_with};
-use super::{ParterreApp, node_oid};
+use super::menu_bar::{Command, Entry, Item, Submenu, Why, case, case_with};
 use crate::keys::{self, Platform};
 
 struct Ctx<'a> {
@@ -21,8 +22,8 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    fn blocked(&self) -> Option<&'static str> {
-        (self.busy || self.catalog.is_none()).then(|| loading_reason(self.busy))
+    fn blocked(&self) -> Option<Why> {
+        (self.busy || self.catalog.is_none()).then(|| Why::waiting(self.busy))
     }
 
     /// `template` in the menus' case, the selected node's name for `{x}` and the current branch
@@ -63,11 +64,8 @@ fn fill(text: &str, x: &str, current: &str) -> String {
     out
 }
 
-fn grey(label: String, why: &str) -> Entry {
-    // Disabled, so the command never runs.
-    Item::new(label, Command::ShowLog)
-        .blocked(Some(why.to_owned()))
-        .into()
+fn grey(label: String, why: impl Into<Why>) -> Entry {
+    Item::disabled(label, why).into()
 }
 
 /// One item for a single target, a submenu for several. Targets blocked for the same reason
@@ -83,17 +81,17 @@ fn targets(
     let blocked = c.blocked();
     let item = |label: String, request: Request, reason: Option<String>| -> Entry {
         Item::new(label, Command::Git(request))
-            .blocked(reason.or(blocked.map(str::to_owned)))
+            .blocked(reason.map(Why::from).or_else(|| blocked.clone()))
             .into()
     };
     match targets.len() {
-        0 => grey(none_label, blocked.unwrap_or(why_none)),
+        0 => grey(none_label, blocked.unwrap_or_else(|| why_none.into())),
         1 => {
             let (name, request, reason) = targets.into_iter().next().expect("one");
             item(
                 single_label(&name),
                 request,
-                reason.map(|r| branches::capitalized(&r)),
+                reason.map(|r| capitalized(&r)),
             )
         }
         _ => {
@@ -106,13 +104,13 @@ fn targets(
                 targets
                     .into_iter()
                     .map(|(name, request, reason)| {
-                        item(name, request, reason.map(|r| branches::capitalized(&r)))
+                        item(name, request, reason.map(|r| capitalized(&r)))
                     })
                     .collect(),
             );
-            if let Some(reason) = same.or(blocked.map(str::to_owned)) {
+            if let Some(why) = same.map(|r| Why::from(capitalized(&r))).or(blocked) {
                 submenu.enabled = false;
-                submenu.why_disabled = Some(branches::capitalized(&reason));
+                submenu.why_disabled = Some(why);
             }
             submenu.into()
         }
@@ -126,8 +124,8 @@ impl ParterreApp {
         let scene = self.scene.as_ref();
         let group = &self.selection.nodes;
         let node = self.selection.current();
-        let commit = node.and_then(|n| Some(node_oid(scene?, n)));
-        let node_name = node.and_then(|n| scene.map(|s| node_label(s, n)));
+        let commit = node.zip(scene).map(|(n, s)| s.node_oid(n));
+        let node_name = node.zip(scene).map(|(n, s)| node_label(s, n));
         let current = catalog
             .and_then(|c| c.current.clone())
             .unwrap_or_else(|| "HEAD".to_owned());
@@ -147,7 +145,7 @@ impl ParterreApp {
                 grey_single_node_items(section);
             }
             if let (Some(scene), Some(catalog)) = (scene, catalog) {
-                let oids: Vec<Oid> = group.iter().map(|&n| node_oid(scene, n)).collect();
+                let oids: Vec<Oid> = group.iter().map(|&n| scene.node_oid(n)).collect();
                 let (worktrees, branches) = group_deletions(&scene.repo, catalog, &oids, c.busy);
                 for (section, all) in [(&mut worktree, worktrees), (&mut branch, branches)] {
                     if !all.is_empty() {
@@ -186,7 +184,7 @@ impl ParterreApp {
             ));
             return entries;
         };
-        let oid = |n: usize| node_oid(scene, n);
+        let oid = |n: usize| scene.node_oid(n);
         let head = scene.repo.head_commit().map(|h| scene.repo.commit(h).oid);
         let with_head = case(p, "Compare with HEAD");
         let compare = match *group {
@@ -273,27 +271,21 @@ impl ParterreApp {
         // The current branch's, wherever the selection is.
         let pull_label = case_with(p, "Pull {}", &[&c.current]);
         let pull = c.catalog.and_then(|catalog| {
-            let head = catalog.head?;
-            let branch = parterre_core::remote::pull_offered(catalog, head)?;
-            let stuck = catalog.stuck().map(|s| branches::capitalized(&s.reason()));
-            let request = Request::Run(Action::Pull(Box::new(parterre_core::remote::Pull {
-                branch: branch.name.clone(),
-                head,
-                how: None,
-            })));
+            let (branch, request) = super::remote::pull_at(catalog, catalog.head?)?;
+            let stuck = catalog.stuck().map(|s| capitalized(&s.reason()));
             let upstream = branch.upstream.clone().unwrap_or_default();
             Some(
                 Item::new(pull_label.clone(), Command::Git(request))
                     .tip(format!("From {upstream}"))
-                    .blocked(stuck.or(c.blocked().map(str::to_owned)))
+                    .blocked(stuck.map(Why::from).or_else(|| c.blocked()))
                     .into(),
             )
         });
         entries.push(pull.unwrap_or_else(|| {
-            grey(
-                pull_label,
-                c.blocked().unwrap_or("The current branch has no upstream"),
-            )
+            let why = c
+                .blocked()
+                .unwrap_or_else(|| "The current branch has no upstream".into());
+            grey(pull_label, why)
         }));
         // Every branch on the node to every remote. A force push ends in "…": it asks first.
         let pushes: Vec<Target> = match (c.catalog, commit, &self.repo) {
@@ -338,9 +330,12 @@ fn worktree_section(c: &Ctx, commit: Option<Oid>) -> Vec<Entry> {
     let p = c.p;
     let mut entries = vec![Entry::Heading(case(p, "Worktree"))];
     let (Some(catalog), Some(commit)) = (c.catalog, commit) else {
-        let why = c.blocked().unwrap_or("Select a node");
-        entries.push(grey(case(p, "Go to worktree"), why));
-        entries.push(grey(c.label("Add worktree at {x}…", "Add worktree…"), why));
+        let why = c.blocked().unwrap_or_else(|| "Select a node".into());
+        entries.push(grey(case(p, "Go to worktree"), why.clone()));
+        entries.push(grey(
+            c.label("Add worktree at {x}…", "Add worktree…"),
+            why.clone(),
+        ));
         entries.push(grey(case(p, "Delete worktree"), why));
         return entries;
     };
@@ -375,7 +370,7 @@ fn branch_section(c: &Ctx, app: &ParterreApp, commit: Option<Oid>) -> Vec<Entry>
     let p = c.p;
     let mut entries = vec![Entry::Heading(case(p, "Branch"))];
     let (Some(catalog), Some(commit), Some(repo)) = (c.catalog, commit, &app.repo) else {
-        let why = c.blocked().unwrap_or("Select a node");
+        let why = c.blocked().unwrap_or_else(|| "Select a node".into());
         for label in [
             c.label("Switch to {x}", "Switch to branch"),
             c.label("Set upstream of {x}…", "Set upstream…"),
@@ -383,7 +378,7 @@ fn branch_section(c: &Ctx, app: &ParterreApp, commit: Option<Oid>) -> Vec<Entry>
             c.label("Reset {current} to {x}…", "Reset {current}…"),
             c.label("Delete {x}", "Delete"),
         ] {
-            entries.push(grey(label, why));
+            entries.push(grey(label, why.clone()));
         }
         return entries;
     };
@@ -446,7 +441,7 @@ fn branch_section(c: &Ctx, app: &ParterreApp, commit: Option<Oid>) -> Vec<Entry>
         (Some(stuck), _) => {
             let branch = branches::stuck_branch(catalog);
             let label = c.label_on("Reset {current} to {x}…", "Reset {current}…", &branch);
-            grey(label, &stuck.reason())
+            grey(label, stuck.reason())
         }
         (None, Ok(branch)) => Item::new(
             c.label_on("Reset {current} to {x}…", "Reset {current}…", branch),
@@ -457,7 +452,7 @@ fn branch_section(c: &Ctx, app: &ParterreApp, commit: Option<Oid>) -> Vec<Entry>
         )
         .blocked(c.blocked())
         .into(),
-        (None, Err(why)) => grey(c.label("Reset {current} to {x}…", "Reset {current}…"), &why),
+        (None, Err(why)) => grey(c.label("Reset {current} to {x}…", "Reset {current}…"), why),
     };
     entries.push(reset);
     entries.push(delete_entry(c, app, commit));
@@ -469,7 +464,7 @@ fn delete_entry(c: &Ctx, app: &ParterreApp, commit: Oid) -> Entry {
     let (Some(catalog), Some(repo)) = (c.catalog, &app.repo) else {
         return grey(
             c.label("Delete {x}", "Delete"),
-            c.blocked().unwrap_or("Select a node"),
+            c.blocked().unwrap_or_else(|| "Select a node".into()),
         );
     };
     let mut found: Vec<Target> = branches::deletable_locals(repo, catalog, commit)
@@ -527,9 +522,9 @@ fn integrate_section(c: &Ctx, app: &ParterreApp, commit: Option<Oid>) -> Vec<Ent
     );
     let rebase_label = c.label("Rebase {current} onto {x}", "Rebase {current}");
     let (Some(catalog), Some(commit), Some(repo)) = (c.catalog, commit, &app.repo) else {
-        let why = c.blocked().unwrap_or("Select a node");
+        let why = c.blocked().unwrap_or_else(|| "Select a node".into());
         for label in [merge_label, merge_into_label, pick_label, rebase_label] {
-            entries.push(grey(label, why));
+            entries.push(grey(label, why.clone()));
         }
         return entries;
     };
@@ -562,12 +557,12 @@ fn integrate_section(c: &Ctx, app: &ParterreApp, commit: Option<Oid>) -> Vec<Ent
     entries.push(
         match branches::cherry_pick_offer(repo, commit, &refs, catalog) {
             Some((name, branch, request)) => {
-                let stuck = catalog.stuck().map(|s| branches::capitalized(&s.reason()));
+                let stuck = catalog.stuck().map(|s| capitalized(&s.reason()));
                 Item::new(
                     case_with(p, "Cherry-pick {} onto {}…", &[&name, &branch]),
                     Command::Git(request),
                 )
-                .blocked(stuck.or(c.blocked().map(str::to_owned)))
+                .blocked(stuck.map(Why::from).or_else(|| c.blocked()))
                 .into()
             }
             None => grey(pick_label, "No commit here to pick"),
@@ -589,10 +584,10 @@ fn integrate_section(c: &Ctx, app: &ParterreApp, commit: Option<Oid>) -> Vec<Ent
 
 /// Fetch and Pull act on no node: they stay.
 fn grey_single_node_items(section: &mut [Entry]) {
-    let why = || Some("Select one node".to_owned());
+    let why = || Some(Why::from("Select one node"));
     for entry in section {
         match entry {
-            Entry::Item(i) if matches!(i.command, Command::Fetch) || is_pull(i) => {}
+            Entry::Item(i) if matches!(i.command, Some(Command::Fetch)) || is_pull(i) => {}
             Entry::Item(i) => {
                 i.enabled = false;
                 i.why_disabled = why();
@@ -608,8 +603,10 @@ fn grey_single_node_items(section: &mut [Entry]) {
 
 /// *Pull ‹current branch›*, greyed out or not.
 pub(super) fn is_pull(item: &Item) -> bool {
-    matches!(&item.command, Command::Git(Request::Run(Action::Pull(_))))
-        || item.label.starts_with(&case(Platform::CURRENT, "Pull "))
+    matches!(
+        &item.command,
+        Some(Command::Git(Request::Run(Action::Pull(_))))
+    ) || item.label.starts_with(&case(Platform::CURRENT, "Pull "))
 }
 
 /// For deleting what every one of `oids` has, one item each: (worktrees, branches).
@@ -620,7 +617,7 @@ fn group_deletions(
     busy: bool,
 ) -> (Vec<Entry>, Vec<Entry>) {
     let p = Platform::CURRENT;
-    let blocked = busy.then(|| loading_reason(true));
+    let blocked = busy.then_some(Why::GitBusy);
     let all = |each: Vec<Vec<String>>, many: &str, action: Action| -> Option<Entry> {
         if each.iter().any(Vec::is_empty) {
             return None;
@@ -630,7 +627,7 @@ fn group_deletions(
         Some(
             Item::new(label, Command::Git(Request::Run(action)))
                 .tip(names.join(", "))
-                .blocked(blocked)
+                .blocked(blocked.clone())
                 .into(),
         )
     };

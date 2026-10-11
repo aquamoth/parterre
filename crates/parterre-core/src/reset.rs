@@ -6,11 +6,12 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::Oid;
-use crate::branches::{Catalog, Error, Report, io_error, lost_commits, run};
+use crate::branches::{Catalog, Error, Report, io_error, lost_commits};
 use crate::changed_files::{ChangedFile, FileStatus, compare_paths};
 use crate::file_diff::{DiffOptions, FileDiff, FileDiffSpec, Rev};
 use crate::git::{Git, GitError};
-use crate::merge::{last_output, plural, refuse_if_moved};
+use crate::operation::{refuse_if_moved, run_or_fail, verify_commit};
+use crate::text::{capitalized, plural};
 use parterre_util::CancelTree;
 
 /// Without `--merge`, which is for aborting a merge: that's left to the command line.
@@ -77,7 +78,7 @@ fn branch_and_head(catalog: &Catalog, target: Oid) -> Result<(&str, Oid), String
     if head == target {
         return Err(format!("Branch {branch} is already there."));
     }
-    if let Some(what) = catalog
+    if let Some(operation) = catalog
         .worktrees
         .iter()
         .find(|w| w.open)
@@ -85,7 +86,7 @@ fn branch_and_head(catalog: &Catalog, target: Oid) -> Result<(&str, Oid), String
     {
         return Err(format!(
             "{} is in progress. Finish or abort it first.",
-            capitalized(what)
+            capitalized(operation.name())
         ));
     }
     Ok((branch, head))
@@ -300,20 +301,8 @@ impl Preview {
         let (branch, head) = branch_and_head(catalog, target).map_err(Error::Invalid)?;
         let branch = branch.to_owned();
         let git = Git::new(&catalog.root);
+        verify_commit(&git, target)?;
         let (head_hex, target_hex) = (head.to_hex(), target.to_hex());
-        if git
-            .query(&[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("{target_hex}^{{commit}}"),
-            ])?
-            .is_none()
-        {
-            return Err(Error::Invalid(
-                "The commit is no longer in the repository. Reload and try again.".into(),
-            ));
-        }
         // Files only touched since git last looked count as changed to `--keep`, and to its dry
         // run: refresh first, as `git status` does.
         git.query(&["update-index", "-q", "--refresh"])?;
@@ -801,18 +790,7 @@ pub(crate) fn execute(
         ));
     }
     let git = Git::new(&catalog.root);
-    if !run(&git, command(reset.mode, reset.target), cancel, report)? {
-        return Err(Error::Failed(last_output(report)));
-    }
-    Ok(())
-}
-
-fn capitalized(s: &str) -> String {
-    let mut chars = s.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
+    run_or_fail(&git, command(reset.mode, reset.target), cancel, report)
 }
 
 #[cfg(test)]

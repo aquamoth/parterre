@@ -95,20 +95,21 @@ impl Comparison {
     }
 }
 
-/// Adds the conflicted files `git diff` left out for equalling the commit's.
+/// Adds the conflicted files `git diff` left out for equalling the commit's: the same on both
+/// sides, as `HEAD` has them.
 fn add_conflicted(files: &mut Vec<ChangedFile>, conflicts: &[Conflict]) {
     let listed = files.len();
     for c in conflicts {
         if files.iter().any(|f| f.path == c.path) {
             continue;
         }
-        let mode = |stage: usize| c.stages[stage].map_or(0, |e| e.mode);
+        let ours = c.stages[1].map_or(0, |e| e.mode);
         let lines = (!c.binary && !c.is_submodule()).then_some(0);
         files.push(ChangedFile {
             path: c.path.clone(),
             old_path: None,
             status: FileStatus::Unmerged,
-            modes: [mode(1), mode(2)],
+            modes: [ours; 2],
             added: lines,
             removed: lines,
         });

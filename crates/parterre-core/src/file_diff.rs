@@ -244,6 +244,23 @@ pub struct Row {
     pub new: Option<u32>,
 }
 
+impl Row {
+    /// The version whose line the unified form shows: for an unchanged line, the new one.
+    pub fn unified_side(self) -> Side {
+        if self.new.is_some() {
+            Side::New
+        } else {
+            Side::Old
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Side {
+    Old,
+    New,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Endings {
     Lf,
@@ -446,15 +463,10 @@ impl FileDiff {
         }
     }
 
-    /// `side`: `Some(true)` for the old line, `Some(false)` for the new one, `None` for the
-    /// unified form's, which for an unchanged line is its new version.
-    pub fn line(&self, row: Row, side: Option<bool>) -> Option<&DiffLine> {
-        let old = row.old.map(|i| &self.old[i as usize]);
-        let new = row.new.map(|i| &self.new[i as usize]);
+    pub fn line(&self, row: Row, side: Side) -> Option<&DiffLine> {
         match side {
-            Some(true) => old,
-            Some(false) => new,
-            None => new.or(old),
+            Side::Old => row.old.map(|i| &self.old[i as usize]),
+            Side::New => row.new.map(|i| &self.new[i as usize]),
         }
     }
 
@@ -869,7 +881,7 @@ pub fn fold_lines(rows: &[Row], hidden: &Range<usize>) -> Option<Range<u32>> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
     pub row: usize,
-    pub old: bool,
+    pub side: Side,
     pub columns: Range<usize>,
 }
 
@@ -879,33 +891,48 @@ impl crate::find::Place for Found {
     }
 }
 
-/// Finds in the lines as in the file, in reading order. Side by side, an unchanged line counts
-/// once, as its new version, unless its versions differ in whitespace that doesn't count.
-pub fn find(diff: &FileDiff, rows: &[Row], side_by_side: bool, query: &str) -> Vec<Found> {
+/// Finds in the side-by-side rows' lines as in the file, in reading order. An unchanged line
+/// counts once, as its new version, unless its versions differ in whitespace that doesn't count.
+pub fn find_side_by_side(diff: &FileDiff, query: &str) -> Vec<Found> {
     let mut lines = Vec::new();
-    for (r, &row) in rows.iter().enumerate() {
-        let old = diff.line(row, Some(true));
-        let new = diff.line(row, Some(false));
-        if side_by_side {
-            if let Some(o) = old
-                && !(o.kind == LineKind::Same && new.is_some_and(|n| n.raw == o.raw))
-            {
-                lines.push((r, true, o));
-            }
-            if let Some(n) = new {
-                lines.push((r, false, n));
-            }
-        } else if let Some(line) = new.or(old) {
-            lines.push((r, new.is_none(), line));
+    for (r, &row) in diff.side.iter().enumerate() {
+        let old = diff.line(row, Side::Old);
+        let new = diff.line(row, Side::New);
+        if let Some(o) = old
+            && !(o.kind == LineKind::Same && new.is_some_and(|n| n.raw == o.raw))
+        {
+            lines.push((r, Side::Old, o));
+        }
+        if let Some(n) = new {
+            lines.push((r, Side::New, n));
         }
     }
+    found_in(&lines, query)
+}
+
+/// Finds in the unified rows' lines as in the file, in reading order.
+pub fn find_unified(diff: &FileDiff, query: &str) -> Vec<Found> {
+    let lines: Vec<_> = diff
+        .unified
+        .iter()
+        .enumerate()
+        .filter_map(|(r, &row)| {
+            let side = row.unified_side();
+            Some((r, side, diff.line(row, side)?))
+        })
+        .collect();
+    found_in(&lines, query)
+}
+
+/// `lines`: each with its row and version.
+fn found_in(lines: &[(usize, Side, &DiffLine)], query: &str) -> Vec<Found> {
     crate::find::find(lines.iter().map(|(_, _, l)| &l.raw), query)
         .into_iter()
         .map(|m| {
-            let (row, old, line) = lines[m.line];
+            let (row, side, line) = lines[m.line];
             let columns =
                 display_column(&line.raw, m.range.start)..display_column(&line.raw, m.range.end);
-            Found { row, old, columns }
+            Found { row, side, columns }
         })
         .collect()
 }
@@ -1392,15 +1419,23 @@ mod tests {
     }
 
     fn places(d: &FileDiff, side_by_side: bool, query: &str) -> Vec<(usize, char, String)> {
-        let rows = if side_by_side { &d.side } else { &d.unified };
-        find(d, rows, side_by_side, query)
+        let (rows, found) = if side_by_side {
+            (&d.side, find_side_by_side(d, query))
+        } else {
+            (&d.unified, find_unified(d, query))
+        };
+        found
             .into_iter()
             .map(|f| {
-                let line = d.line(rows[f.row], Some(f.old)).unwrap();
+                let line = d.line(rows[f.row], f.side).unwrap();
                 let text = line.text.chars().collect::<Vec<_>>()[f.columns]
                     .iter()
                     .collect();
-                (f.row, if f.old { '-' } else { '+' }, text)
+                let sign = match f.side {
+                    Side::Old => '-',
+                    Side::New => '+',
+                };
+                (f.row, sign, text)
             })
             .collect()
     }
@@ -1420,7 +1455,7 @@ mod tests {
                 (2, '+', "Foo".into()),
             ]
         );
-        assert_eq!(find(&d, &d.side, true, "foo")[4].columns, 4..7);
+        assert_eq!(find_side_by_side(&d, "foo")[4].columns, 4..7);
         assert_eq!(
             places(&d, false, "foo"),
             [
@@ -1433,11 +1468,12 @@ mod tests {
         );
         // Found as in the file: a tab is a tab.
         assert_eq!(places(&d, true, "\tf"), [(2, '+', "    F".into())]);
-        assert!(find(&d, &d.side, true, "").is_empty());
+        assert!(find_side_by_side(&d, "").is_empty());
 
-        let found = find(&d, &d.side, true, "foo");
+        let found = find_side_by_side(&d, "foo");
         assert_eq!(crate::find::first_from(&found, 2), Some(4));
-        assert_eq!(crate::find::step(&found, None, false, 1), Some(0));
+        let previous = crate::find::Step::Previous;
+        assert_eq!(crate::find::step(&found, None, previous, 1), Some(0));
     }
 
     #[test]

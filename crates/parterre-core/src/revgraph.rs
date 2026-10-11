@@ -496,7 +496,7 @@ pub fn build_with_pull_requests(
         let mut refs = std::mem::take(&mut refs_on[c]);
         refs.sort_by(|&a, &b| crate::repo::cmp_refs_for_display(&repo.refs[a], &repo.refs[b]));
         nodes.push(RevNode {
-            commit: CommitIx(c as u32),
+            commit: CommitIx::new(c),
             refs,
             is_head: Some(c) == head,
             is_merge: kept_edges[c].len() > 1,
@@ -566,7 +566,7 @@ pub fn build_with_pull_requests(
         );
         for &(c, k) in &own {
             let e = start + origin.iter().position(|&o| o == Some(k)).unwrap_or(0);
-            edge_commits[e].push(CommitIx(c as u32));
+            edge_commits[e].push(CommitIx::new(c));
         }
         start += group.len();
     }

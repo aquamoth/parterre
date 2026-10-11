@@ -18,7 +18,7 @@ impl Recent {
     }
 
     pub fn remove(&mut self, path: &Path) {
-        self.0.retain(|p| !same_path(p, path));
+        self.0.retain(|p| !same_path_lexically(p, path));
     }
 
     pub fn clear(&mut self) {
@@ -40,9 +40,8 @@ fn normalize(path: &Path) -> PathBuf {
     path.components().collect()
 }
 
-/// As far as can be told without asking the file system: Windows paths ignore case and the
-/// kind of separator.
-pub fn same_path(a: &Path, b: &Path) -> bool {
+/// Windows paths ignore case and the kind of separator.
+pub fn same_path_lexically(a: &Path, b: &Path) -> bool {
     let (a, b) = (normalize(a), normalize(b));
     if cfg!(windows) {
         a.to_string_lossy()

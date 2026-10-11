@@ -2,36 +2,11 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use common::{TestRepo, git_in};
+use common::{TestRepo, done, execute, failed, git_fails, git_in, oid, read_text, rev, warning};
 use parterre_core::Oid;
-use parterre_core::branches::{Action, AddWorktree, Branches, Catalog, Checkout, Outcome, Warning};
-use parterre_util::CancelTree;
-
-fn oid(s: &str) -> Oid {
-    Oid::from_hex(s).unwrap()
-}
-
-fn execute(r: &TestRepo, a: Action, approval: Option<&Warning>) -> Outcome {
-    Branches::new(r.path()).execute(a, approval, &CancelTree::default())
-}
-
-fn done(out: Outcome) {
-    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
-}
-
-fn warning(out: Outcome) -> Warning {
-    match out {
-        Outcome::Warning(w) => w,
-        other => panic!("expected a warning: {other:?}"),
-    }
-}
-
-fn failed(out: Outcome) -> String {
-    match out {
-        Outcome::Failed { error, .. } => error.to_string(),
-        other => panic!("expected a failure: {other:?}"),
-    }
-}
+use parterre_core::branches::{
+    Action, AddWorktree, Branches, Catalog, Checkout, GitOperation, Outcome, Warning,
+};
 
 /// A repository with one file committed, and a folder outside it for worktrees.
 fn repository() -> (TestRepo, tempfile::TempDir, Oid) {
@@ -68,14 +43,7 @@ fn stopped_rebase(r: &mut TestRepo, others: &Path) -> (PathBuf, String) {
     std::fs::write(wt.join("file"), "side\n").unwrap();
     git_in(&wt, &["commit", "-qam", "side change"]);
     let side = git_in(&wt, &["rev-parse", "HEAD"]);
-    let rebase = common::git_command(&wt)
-        .args(["rebase", "main"])
-        .output()
-        .unwrap();
-    assert!(
-        !rebase.status.success(),
-        "the rebase should stop on its conflict"
-    );
+    git_fails(&wt, &["rebase", "main"]);
     (wt, side)
 }
 
@@ -176,7 +144,7 @@ fn the_catalogue_lists_every_worktree_with_its_state() {
     assert_eq!(main.branch.as_deref(), Some("main"));
     assert_eq!(by("locked").locked.as_deref(), Some("on a USB stick"));
     assert!(!by("locked").main && !by("locked").open);
-    assert_eq!(by("busy").in_progress, Some("a bisect"));
+    assert_eq!(by("busy").in_progress, Some(GitOperation::Bisect));
     assert!(by("gone").missing);
     assert_eq!(by("gone").branch, None);
 }
@@ -191,12 +159,12 @@ fn a_rebase_stopped_on_a_conflict_is_an_operation_in_progress() {
         .iter()
         .find(|w| w.name() == "rebasing")
         .unwrap();
-    assert_eq!(w.in_progress, Some("a rebase"));
+    assert_eq!(w.in_progress, Some(GitOperation::Rebase));
     // The branch being rebased still counts as checked out there.
     assert!(catalog.occupied.contains_key("side"));
     let rebasing = w.rebasing.clone().expect("the stopped rebase");
     assert_eq!(rebasing.branch.as_deref(), Some("side"));
-    assert_eq!(rebasing.onto, Some(oid(&r.git(&["rev-parse", "main"]))));
+    assert_eq!(rebasing.onto, Some(rev(&r, "main")));
     assert_eq!((rebasing.done, rebasing.total), (1, 1));
 }
 
@@ -237,7 +205,7 @@ fn adding_a_worktree_with_a_new_branch_starts_it_at_the_commit() {
     done(execute(&r, action, None));
     assert_eq!(git_in(&path, &["branch", "--show-current"]), "topic");
     assert_eq!(git_in(&path, &["rev-parse", "HEAD"]), base.to_hex());
-    assert_eq!(common::read_text(&path.join("file")), "base\n");
+    assert_eq!(read_text(&path.join("file")), "base\n");
     assert!(!r.git(&["config", "--list"]).contains("branch.topic."));
     assert_eq!(r.git(&["branch", "--show-current"]), "main");
 }
@@ -566,23 +534,23 @@ fn the_main_open_and_locked_worktrees_are_never_deleted() {
     let linked = worktree(&r, others.path(), "linked", &["-b", "linked"]);
     // From the linked worktree, the main one isn't the open one.
     let main = Catalog::load(&linked).unwrap().main;
-    let error = failed(Branches::new(&linked).execute(
+    let error = failed(execute(
+        &linked,
         Action::DeleteWorktrees {
             paths: vec![main],
             branches: false,
         },
         None,
-        &CancelTree::default(),
     ));
     assert!(error.contains("main worktree"), "{error}");
     let open = Catalog::load(&linked).unwrap().root;
-    let error = failed(Branches::new(&linked).execute(
+    let error = failed(execute(
+        &linked,
         Action::DeleteWorktrees {
             paths: vec![open],
             branches: false,
         },
         None,
-        &CancelTree::default(),
     ));
     assert!(error.contains("open worktree"), "{error}");
     r.git(&["worktree", "lock", &linked.to_string_lossy()]);

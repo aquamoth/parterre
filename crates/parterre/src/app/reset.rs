@@ -8,11 +8,11 @@ use eframe::egui::{self, Id, RichText, Ui, ViewportId, vec2};
 use parterre_core::branches::command_text;
 use parterre_core::file_diff::FileDiffSpec;
 use parterre_core::reset::{self, FileOutcome, Mode, Preview};
+use parterre_core::text::plural;
 use parterre_core::{Oid, Repo};
 
-use super::branches::{answer_of, commit_line, plural, radio_with_help};
 use super::file_table::{FileTable, StatusBadge, StatusBadges};
-use super::log_window::{self, Colors};
+use super::table_style::{self, Colors};
 use crate::{dialogs, widgets};
 
 const TABLE_INITIAL_WIDTH: f32 = 520.0;
@@ -174,7 +174,7 @@ impl ResetDialog {
                                 .max
                                 .y
                                 .max(side.response.rect.bottom() + dialogs::MARGIN);
-                            let c = log_window::colors(ui);
+                            let c = table_style::colors(ui);
                             let line = egui::Stroke::new(1.0, c.line);
                             ui.painter()
                                 .set(background[0], egui::Shape::rect_filled(pane, 0.0, c.pane));
@@ -194,7 +194,7 @@ impl ResetDialog {
             ctx.data_mut(|d| d.insert_persisted(files_shown_id(), !files_shown));
         }
         Asked {
-            answer: answer_of(shown),
+            answer: shown.answer(),
             log: state.log,
             diffs,
         }
@@ -251,7 +251,11 @@ impl ResetDialog {
                 )
                 .inner
                 .clicked();
-            dialogs::actions(ui, label, runs, loses, self.fresh && loses)
+            let primary = dialogs::Primary::new(label)
+                .enabled(runs)
+                .destructive(loses)
+                .focus_cancel(self.fresh && loses);
+            dialogs::actions(ui, primary)
         })
         .inner
     }
@@ -275,7 +279,7 @@ impl ResetDialog {
                 top + height + dialogs::MARGIN,
             ),
         );
-        let c = log_window::colors(ui);
+        let c = table_style::colors(ui);
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(pane)
@@ -310,14 +314,14 @@ impl ResetDialog {
 fn side_fields(ui: &mut Ui, preview: &Preview, repo: &Repo, state: &mut SideState) {
     let abbrev = repo.abbrev_len.max(7);
     dialogs::fields(ui, |ui| {
-        if commit_line(ui, repo, preview.target) {
+        if dialogs::commit_line(ui, repo, preview.target) {
             state.log = Some((vec![preview.target], false));
         }
         ui.label(preview.movement(abbrev));
         ui.add_space(4.0);
         for m in Mode::ALL {
             let help = preview.help(m, abbrev);
-            if radio_with_help(
+            if dialogs::radio_with_help(
                 ui,
                 state.mode == m,
                 m.name(),
@@ -390,7 +394,7 @@ mod tests {
     use parterre_core::Oid;
 
     use super::super::branches::Request;
-    use super::super::tool_harness::{Harness, collect, git, read, write};
+    use super::super::tool_harness::{Harness, git, menu, read, run_frame, write};
 
     /// main: base (a.txt, lib.txt) → tip (a.txt changed), the tip also on `pushed`.
     fn repository() -> tempfile::TempDir {
@@ -591,53 +595,42 @@ mod tests {
         let catalog = parterre_core::branches::Catalog::load(dir.path()).unwrap();
         let rev = |r| Oid::from_hex(&git(dir.path(), &["rev-parse", r])).unwrap();
         let item = |commit, busy| {
-            let ctx = egui::Context::default();
-            let mut texts = Vec::new();
-            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                super::super::branches::reset_item(ui, commit, Some(&catalog), busy);
-            });
-            output.textures_delta.clear();
-            for clipped in &output.shapes {
-                collect(&clipped.shape, &mut texts);
-            }
-            texts.into_iter().map(|(t, _)| t).collect::<Vec<_>>()
+            let reset = |ui: &mut egui::Ui| {
+                super::super::branches::reset_item(ui, commit, Some(&catalog), busy)
+            };
+            menu(reset, None).0
         };
         assert_eq!(item(rev("HEAD~1"), false), ["Reset main to here…"]);
         assert_eq!(item(rev("HEAD~1"), true), ["Reset main to here…"]);
         assert!(item(rev("HEAD"), false).is_empty());
         let repo = parterre_core::git::load_repo(dir.path()).unwrap();
-        let ctx = egui::Context::default();
-        let mut texts = Vec::new();
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let base = rev("HEAD~1");
+        let base = rev("HEAD~1");
+        let node_menu = |ui: &mut egui::Ui| {
+            let selection = [base];
             super::super::branches::row_node_menu(
                 ui,
                 &repo,
                 base,
-                &[base],
+                &selection,
                 Some(&catalog),
                 false,
                 false,
-            );
-        });
-        output.textures_delta.clear();
-        for clipped in &output.shapes {
-            collect(&clipped.shape, &mut texts);
-        }
+            )
+        };
+        let (texts, _) = menu(node_menu, None);
         assert!(
-            texts.iter().any(|(t, _)| t == "Reset main to here…"),
+            texts.iter().any(|t| t == "Reset main to here…"),
             "the node menu has it: {texts:?}"
         );
         git(dir.path(), &["switch", "-q", "--detach"]);
         let catalog = parterre_core::branches::Catalog::load(dir.path()).unwrap();
         let ctx = egui::Context::default();
         let mut offered = true;
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        run_frame(&ctx, egui::RawInput::default(), |ui| {
             offered = super::super::branches::reset_item(ui, rev("HEAD~1"), Some(&catalog), false)
                 .is_some()
                 || ui.min_rect().height() > 0.0;
         });
-        output.textures_delta.clear();
         assert!(!offered, "nothing for a detached HEAD");
     }
 }

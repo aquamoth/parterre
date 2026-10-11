@@ -11,7 +11,7 @@ use parterre_core::log::Found;
 use parterre_core::log_graph::{GraphRow, LogGraph};
 
 use super::column_borders::{self, Columns};
-use super::log_window::{
+use super::table_style::{
     BADGE_FONT_SIZE, BADGE_HEIGHT, BADGE_PAD, Badge, CELL_PAD, Colors, HEADING_HEIGHT, badge, cell,
     heading_background,
 };

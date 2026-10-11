@@ -110,7 +110,7 @@ pub fn paint_scene(
     if marks.show_upstreams {
         crate::upstreams::paint(painter, canvas, view, scene, palette, settings, marks);
     }
-    crate::upstreams::paint_in_progress(painter, canvas, view, scene, settings, palette, marks);
+    crate::upstreams::paint_in_progress(painter, canvas, view, scene, palette, settings, marks);
 
     let font = FontId::monospace(fixed(FONT_SIZE * zoom));
     let draw_text = FONT_SIZE * zoom >= MIN_DRAWN_TEXT_PX;

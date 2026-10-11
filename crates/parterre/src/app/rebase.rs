@@ -10,11 +10,12 @@ use parterre_core::log::{LogOptions, LogQuery};
 use parterre_core::log_graph::LogGraph;
 use parterre_core::rebase::{self, Preview, Todo};
 use parterre_core::revgraph::GraphOptions;
+use parterre_core::text::{capitalized, plural};
 use parterre_core::{CommitIx, Oid, Repo};
 
-use super::branches::{Asked, answer_of, capitalized, commit_line, plural};
+use super::branches::Asked;
 use super::commit_table::{CommitList, CommitTable, ROW_HEIGHT, Row, Select};
-use super::log_window::{self, HEADING_HEIGHT};
+use super::table_style::{self, HEADING_HEIGHT};
 use crate::theme::Palette;
 use crate::{dialogs, keys, menu, widgets};
 
@@ -118,7 +119,7 @@ impl ListedCommits {
         palette: &Palette,
         options: &GraphOptions,
     ) -> Option<Oid> {
-        let c = log_window::colors(ui);
+        let c = table_style::colors(ui);
         let Self {
             ref repo,
             id,
@@ -155,7 +156,7 @@ impl ListedCommits {
         mut menu: impl FnMut(&mut Ui, Oid),
         skipped: impl Fn(Oid) -> Option<&'static str>,
     ) -> Clicked {
-        let c = log_window::colors(ui);
+        let c = table_style::colors(ui);
         let Self {
             ref repo,
             id,
@@ -205,7 +206,7 @@ fn commit_row<'r>(
     let commit = repo.commit(ix);
     Row {
         hash: commit.oid.short(repo.abbrev_len),
-        refs: log_window::badges(repo, &refs[ix.ix()], Some(ix), options),
+        refs: table_style::badges(repo, &refs[ix.ix()], Some(ix), options),
         subject: &commit.subject,
         author: &commit.author_name,
         author_email: &commit.author_email,
@@ -377,7 +378,7 @@ impl RebaseDialog {
             .resizable()
             .show(ctx, |ui| {
                 // Only the commits scroll: everything else stays in view.
-                if commit_line(ui, self.listed.repo(), self.preview.onto) {
+                if dialogs::commit_line(ui, self.listed.repo(), self.preview.onto) {
                     show_in_log = Some(self.preview.onto);
                 }
                 if let Some(oid) = self.commits_table(ui, palette, options) {
@@ -392,11 +393,12 @@ impl RebaseDialog {
                     ui.colored_label(ui.visuals().error_fg_color, why);
                 }
                 dialogs::command_box(ui, &[command_text(&rebase::command(&self.rebase()))]);
-                dialogs::actions(ui, "Rebase", blocked.is_none() && !busy, false, false)
+                let primary = dialogs::Primary::new("Rebase").enabled(blocked.is_none() && !busy);
+                dialogs::actions(ui, primary)
             });
         self.fresh = false;
         Asked {
-            answer: answer_of(shown),
+            answer: shown.answer(),
             show_in_log,
         }
     }
@@ -518,16 +520,11 @@ impl RebaseDialog {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BannerClick {
-    /// *Compare with working tree*: HEAD against the working tree, as the graph's menu opens it.
-    Compare(Oid),
-}
-
 /// The banner across the graph while the open worktree is stuck: what it needs (its
 /// conflicted files, listed on hover, or what stopped), and *Compare with working tree*,
-/// where each file opens in the right tool. Call before the central panel.
-pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<BannerClick> {
+/// where each file opens in the right tool. Call before the central panel. Returns HEAD once
+/// that is clicked, to compare with the working tree as the graph's menu does.
+pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<Oid> {
     let stuck = catalog.stuck()?;
     let open = catalog.worktrees.iter().find(|w| w.open);
     let files = &catalog.conflicted;
@@ -618,7 +615,7 @@ pub fn banner(ui: &mut Ui, repo: &Repo, catalog: &Catalog) -> Option<BannerClick
                     if let Some(head) = catalog.head
                         && widgets::primary_button(ui, "Compare with working tree", 0.0).clicked()
                     {
-                        click = Some(BannerClick::Compare(head));
+                        click = Some(head);
                     }
                 });
             });
@@ -639,7 +636,7 @@ mod tests {
 
     use eframe::egui;
     use parterre_core::Oid;
-    use parterre_core::branches::Stuck;
+    use parterre_core::branches::{GitOperation, Stuck};
 
     use super::super::branches::{self, Request};
     use super::super::tool_harness::{
@@ -975,7 +972,10 @@ mod tests {
             .unwrap();
         assert!(!out.status.success(), "the rebase stops on its conflict");
         let (repo, catalog) = load(p);
-        assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a rebase")));
+        assert_eq!(
+            catalog.stuck(),
+            Some(Stuck::InProgress(GitOperation::Rebase))
+        );
 
         // Rebase and Switch to are shown, but clicking them asks for nothing.
         let node = |click: Option<&str>| {
@@ -1019,7 +1019,7 @@ mod tests {
         let head = Oid::from_hex(&git(dir.path(), &["rev-parse", "HEAD"])).unwrap();
         assert_eq!(
             banner_click(dir.path(), "Compare with working tree"),
-            Some(super::BannerClick::Compare(head))
+            Some(head)
         );
     }
 

@@ -45,11 +45,8 @@ impl Obstacles {
     }
 
     pub fn place(&mut self, i: usize, centre: Point, half_size: Point) {
-        let grow = Point::new(half_size.x + CLEARANCE, half_size.y + CLEARANCE);
-        let new = (
-            Point::new(centre.x - grow.x, centre.y - grow.y),
-            Point::new(centre.x + grow.x, centre.y + grow.y),
-        );
+        let grow = half_size + Point::new(CLEARANCE, CLEARANCE);
+        let new = (centre - grow, centre + grow);
         if let Some((lo, hi)) = self.boxes[i] {
             for cell in cells_of(lo, hi) {
                 if let Some(items) = self.cells.get_mut(&cell) {
@@ -129,7 +126,7 @@ impl Obstacles {
             };
             if strictly_inside(p, lo, hi) || strictly_inside(q, lo, hi) {
                 let c = Point::new(CLEARANCE, CLEARANCE);
-                (lo, hi) = (add(lo, c), sub(hi, c));
+                (lo, hi) = (lo + c, hi - c);
                 if strictly_inside(p, lo, hi) || strictly_inside(q, lo, hi) {
                     return;
                 }
@@ -383,8 +380,8 @@ fn funnel(portals: &[(Point, Point)]) -> Vec<Point> {
     while i < n {
         let (l, r) = portals[i];
         // Narrow the funnel from the right.
-        if cross(sub(right, apex), sub(r, apex)) >= 0.0 {
-            if coincide(apex, right) || cross(sub(left, apex), sub(r, apex)) < 0.0 {
+        if cross(right - apex, r - apex) >= 0.0 {
+            if coincide(apex, right) || cross(left - apex, r - apex) < 0.0 {
                 right = r;
                 right_at = i;
             } else {
@@ -397,8 +394,8 @@ fn funnel(portals: &[(Point, Point)]) -> Vec<Point> {
             }
         }
         // Narrow it from the left.
-        if cross(sub(left, apex), sub(l, apex)) <= 0.0 {
-            if coincide(apex, left) || cross(sub(right, apex), sub(l, apex)) > 0.0 {
+        if cross(left - apex, l - apex) <= 0.0 {
+            if coincide(apex, left) || cross(right - apex, l - apex) > 0.0 {
                 left = l;
                 left_at = i;
             } else {
@@ -447,11 +444,11 @@ fn detour_blocked(obstacles: &mut Obstacles, pts: &mut Vec<Point>, ends: &[u32])
 /// The corners by which the segment from `p` to `q` goes around the box `(lo, hi)` it runs
 /// into: those on the side of the segment that makes the shorter way round, in order.
 fn detour(p: Point, q: Point, (lo, hi): (Point, Point)) -> Vec<Point> {
-    let d = sub(q, p);
+    let d = q - p;
     let corners = [lo, Point::new(hi.x, lo.y), hi, Point::new(lo.x, hi.y)];
     let (mut left, mut right) = (Vec::new(), Vec::new());
     for c in corners {
-        let side = cross(d, sub(c, p));
+        let side = cross(d, c - p);
         if side >= 0.0 {
             left.push(c);
         }
@@ -459,7 +456,7 @@ fn detour(p: Point, q: Point, (lo, hi): (Point, Point)) -> Vec<Point> {
             right.push(c);
         }
     }
-    let along = |c: &Point| dot(sub(*c, p), d);
+    let along = |c: &Point| (*c - p).dot(d);
     for side in [&mut left, &mut right] {
         side.sort_by(|a, b| along(a).total_cmp(&along(b)));
     }
@@ -467,7 +464,7 @@ fn detour(p: Point, q: Point, (lo, hi): (Point, Point)) -> Vec<Point> {
         let mut at = p;
         let mut total = 0.0;
         for &c in side.iter().chain([&q]) {
-            total += len(sub(c, at));
+            total += (c - at).length();
             at = c;
         }
         total
@@ -560,7 +557,7 @@ fn cells_of(lo: Point, hi: Point) -> impl Iterator<Item = (i32, i32)> {
 fn cells_along(p: Point, q: Point, mut visit: impl FnMut((i32, i32))) {
     let (mut cx, mut cy) = cell_of(p);
     let (ex, ey) = cell_of(q);
-    let d = sub(q, p);
+    let d = q - p;
     let step = |v: f32| if v > 0.0 { 1 } else { -1 };
     let first = |a: f32, v: f32, c: i32| {
         if v > 0.0 {
@@ -598,28 +595,8 @@ fn cells_along(p: Point, q: Point, mut visit: impl FnMut((i32, i32))) {
     }
 }
 
-pub(crate) fn add(a: Point, b: Point) -> Point {
-    Point::new(a.x + b.x, a.y + b.y)
-}
-
-pub(crate) fn sub(a: Point, b: Point) -> Point {
-    Point::new(a.x - b.x, a.y - b.y)
-}
-
-pub(crate) fn scale(a: Point, s: f32) -> Point {
-    Point::new(a.x * s, a.y * s)
-}
-
-pub(crate) fn dot(a: Point, b: Point) -> f32 {
-    a.x * b.x + a.y * b.y
-}
-
 fn cross(a: Point, b: Point) -> f32 {
     a.x * b.y - a.y * b.x
-}
-
-pub(crate) fn len(a: Point) -> f32 {
-    dot(a, a).sqrt()
 }
 
 #[cfg(test)]
@@ -767,7 +744,7 @@ mod tests {
         cells_along(p, q, |c| walked.push(c));
         for k in 0..=1000 {
             let t = k as f32 / 1000.0;
-            let at = Point::new(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t);
+            let at = p + (q - p) * t;
             assert!(walked.contains(&cell_of(at)), "missed {:?}", cell_of(at));
         }
     }

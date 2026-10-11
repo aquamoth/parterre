@@ -2,15 +2,16 @@
 //! git's porcelain stays the final authority on checkout and deletion.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parterre_util::{CancelTree, StartError};
 
 use crate::git::{Config, Git, GitError, Listing};
+use crate::operation::{git_args, run, run_or_fail, verify_commit};
 use crate::repo::DEFAULT_ABBREV_LEN;
-use crate::worktree_folder::same_path;
+use crate::text::capitalized;
+use crate::worktree_folder::same_path_on_disk;
 use crate::{Oid, Repo};
 
 #[derive(Clone, Debug)]
@@ -42,8 +43,7 @@ pub struct Worktree {
     pub locked: Option<String>,
     /// Its folder is gone.
     pub missing: bool,
-    /// Such as "a rebase".
-    pub in_progress: Option<&'static str>,
+    pub in_progress: Option<GitOperation>,
     pub rebasing: Option<Rebasing>,
     /// `MERGE_HEAD`.
     pub merging: Option<Oid>,
@@ -52,11 +52,39 @@ pub struct Worktree {
     pub reverting: Option<Oid>,
 }
 
+/// What git started and left unfinished in a worktree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitOperation {
+    Rebase,
+    /// `git am`, which shares its folder with `git rebase --apply`.
+    Am,
+    Merge,
+    CherryPick,
+    Revert,
+    /// The sequencer's, when neither `CHERRY_PICK_HEAD` nor `REVERT_HEAD` says which.
+    CherryPickOrRevert,
+    Bisect,
+}
+
+impl GitOperation {
+    /// As a sentence names it: "a rebase".
+    pub fn name(self) -> &'static str {
+        match self {
+            GitOperation::Rebase => "a rebase",
+            GitOperation::Am => "git am",
+            GitOperation::Merge => "a merge",
+            GitOperation::CherryPick => "a cherry-pick",
+            GitOperation::Revert => "a revert",
+            GitOperation::CherryPickOrRevert => "a cherry-pick or revert",
+            GitOperation::Bisect => "a bisect",
+        }
+    }
+}
+
 /// Why the open worktree is stuck.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stuck {
-    /// Such as "a rebase".
-    InProgress(&'static str),
+    InProgress(GitOperation),
     /// With no operation in progress, as a stash that couldn't be put back cleanly leaves them.
     Conflicts,
 }
@@ -64,14 +92,10 @@ pub enum Stuck {
 impl Stuck {
     pub fn reason(self) -> String {
         match self {
-            Stuck::InProgress(what) => {
-                let mut chars = what.chars();
-                let what: String = chars
-                    .next()
-                    .map(|c| c.to_uppercase().chain(chars).collect())
-                    .unwrap_or_default();
-                format!("{what} is in progress in this worktree")
-            }
+            Stuck::InProgress(operation) => format!(
+                "{} is in progress in this worktree",
+                capitalized(operation.name())
+            ),
             Stuck::Conflicts => "This worktree has conflicted files".into(),
         }
     }
@@ -372,12 +396,12 @@ impl Catalog {
             }
             let admin = admins
                 .iter()
-                .find(|(folder, _)| same_path(folder, &path))
+                .find(|(folder, _)| same_path_on_disk(folder, &path))
                 .map(|(_, admin)| admin.as_path());
             let in_progress = admin.and_then(|a| in_progress(a, reftable));
             worktrees.push(Worktree {
                 main: path == main_folder,
-                open: same_path(&path, &root),
+                open: same_path_on_disk(&path, &root),
                 missing: !path.is_dir(),
                 rebasing: admin.and_then(rebasing),
                 merging: admin.and_then(|a| {
@@ -386,7 +410,7 @@ impl Catalog {
                 }),
                 picking: admin.and_then(|a| picking(git, a, reftable, head)),
                 reverting: admin
-                    .filter(|_| in_progress == Some("a revert"))
+                    .filter(|_| in_progress == Some(GitOperation::Revert))
                     .and_then(|a| pseudo_ref(a, reftable, "REVERT_HEAD")),
                 in_progress,
                 locked: listed.locked.clone(),
@@ -439,30 +463,13 @@ impl Catalog {
         }
     }
 
-    /// Fails unless the open worktree still has `branch` checked out at `head`, and isn't
-    /// stuck.
-    pub(crate) fn check_unmoved(&self, branch: &str, head: Oid) -> Result<(), Error> {
-        if !self.has_working_tree
-            || self.current.as_deref() != Some(branch)
-            || self.head != Some(head)
-        {
-            return Err(Error::Invalid(format!(
-                "Branch {branch} moved, or is no longer checked out here. Reload and try again."
-            )));
-        }
-        if let Some(stuck) = self.stuck() {
-            return Err(Error::Invalid(format!("{}.", stuck.reason())));
-        }
-        Ok(())
-    }
-
     /// A worktree other than the open one that has branch `name` checked out, or is rebasing
     /// or bisecting it. Git 2.34 moves such a branch without a word, leaving that worktree's
     /// index stale, and `git reset` never checks other worktrees in any version.
     pub fn in_use_elsewhere(&self, name: &str) -> Option<&Path> {
         self.uses
             .iter()
-            .find(|(n, p)| n == name && !same_path(p, &self.root))
+            .find(|(n, p)| n == name && !same_path_on_disk(p, &self.root))
             .map(|(_, p)| p.as_path())
     }
 
@@ -540,34 +547,34 @@ impl Catalog {
 /// The operation git left unfinished in a worktree, from its administrative folder. Rebases,
 /// merges and bisects always leave files; cherry-picks and reverts leave refs, which a reftable
 /// keeps out of the folder.
-fn in_progress(admin: &Path, reftable: bool) -> Option<&'static str> {
+fn in_progress(admin: &Path, reftable: bool) -> Option<GitOperation> {
     if admin.join("rebase-merge").is_dir() {
-        return Some("a rebase");
+        return Some(GitOperation::Rebase);
     }
     if admin.join("rebase-apply").is_dir() {
         return Some(if admin.join("rebase-apply/applying").exists() {
-            "git am"
+            GitOperation::Am
         } else {
-            "a rebase"
+            GitOperation::Rebase
         });
     }
     if admin.join("MERGE_HEAD").is_file() {
-        return Some("a merge");
+        return Some(GitOperation::Merge);
     }
     let pseudo = |name: &str| {
         admin.join(name).is_file() || reftable && reftable_pseudo_ref(admin, name).is_some()
     };
     if pseudo("CHERRY_PICK_HEAD") {
-        return Some("a cherry-pick");
+        return Some(GitOperation::CherryPick);
     }
     if pseudo("REVERT_HEAD") {
-        return Some("a revert");
+        return Some(GitOperation::Revert);
     }
     if admin.join("sequencer").is_dir() {
-        return Some("a cherry-pick or revert");
+        return Some(GitOperation::CherryPickOrRevert);
     }
     if admin.join("BISECT_START").is_file() {
-        return Some("a bisect");
+        return Some(GitOperation::Bisect);
     }
     None
 }
@@ -888,7 +895,7 @@ impl Action {
     }
 }
 
-fn folder_name(path: &Path) -> String {
+pub(crate) fn folder_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
@@ -953,24 +960,6 @@ pub struct Stashed {
 pub struct Attention {
     pub title: String,
     pub message: String,
-}
-
-impl Attention {
-    /// `operation` stopped, and is in progress: "Rebase stopped on conflicts in 2 files".
-    pub(crate) fn stopped(operation: &str, conflicted: usize) -> Attention {
-        Attention {
-            title: match conflicted {
-                0 => format!("{operation} stopped"),
-                n => format!("{operation} stopped on conflicts in {}", plural(n, "file")),
-            },
-            message: "Finish or abort it with git, or go to another worktree.".into(),
-        }
-    }
-}
-
-/// `1 file`, `2 files`.
-pub(crate) fn plural(n: usize, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
 }
 
 #[derive(Clone, Debug)]
@@ -1527,7 +1516,7 @@ impl Branches {
             let Some(into) = merged_into else {
                 return Err(Error::Failed(refusal));
             };
-            if is_ancestor(&git, b.tip, into)? {
+            if git.is_ancestor(b.tip, into)? {
                 return Err(Error::Failed(refusal));
             }
         }
@@ -1594,7 +1583,10 @@ impl Branches {
             )?;
             let output = report.last_output();
             let after = Catalog::load(&self.path)?;
-            let registered = after.worktrees.iter().any(|w| same_path(&w.path, &wt.path));
+            let registered = after
+                .worktrees
+                .iter()
+                .any(|w| same_path_on_disk(&w.path, &wt.path));
             if !registered {
                 if wt.path.exists() {
                     // Windows: a file in use stops the deletion halfway, after git has let go.
@@ -1765,7 +1757,11 @@ fn find_worktrees<'a>(catalog: &'a Catalog, paths: &[PathBuf]) -> Result<Vec<&'a
 
 /// The worktree at `path`, when it may be deleted.
 fn find_worktree<'a>(catalog: &'a Catalog, path: &Path) -> Result<&'a Worktree, Error> {
-    let Some(wt) = catalog.worktrees.iter().find(|w| same_path(&w.path, path)) else {
+    let Some(wt) = catalog
+        .worktrees
+        .iter()
+        .find(|w| same_path_on_disk(&w.path, path))
+    else {
         return Err(Error::Invalid(
             "The worktree is no longer there. Reload and try again.".into(),
         ));
@@ -1963,34 +1959,6 @@ fn track_commands(
     Ok(commands)
 }
 
-/// The commit `rev` names, if it names one.
-pub(crate) fn resolve_commit(git: &Git, rev: &str) -> Result<Option<Oid>, Error> {
-    Ok(git
-        .query(&[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{rev}^{{commit}}"),
-        ])?
-        .and_then(|s| Oid::from_hex(&s)))
-}
-
-fn verify_commit(git: &Git, oid: Oid) -> Result<(), Error> {
-    if resolve_commit(git, &oid.to_hex())?.is_none() {
-        return Err(Error::Invalid(
-            "The commit is no longer in the repository. Reload and try again.".into(),
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn is_ancestor(git: &Git, ancestor: Oid, of: Oid) -> Result<bool, Error> {
-    let (ancestor, of) = (ancestor.to_hex(), of.to_hex());
-    Ok(git
-        .query(&["merge-base", "--is-ancestor", &ancestor, &of])?
-        .is_some())
-}
-
 /// Uncommitted changes to files that aren't ignored, in the worktree at `path`: staged,
 /// modified and untracked.
 fn uncommitted_files(path: &Path) -> Result<Vec<String>, Error> {
@@ -2053,7 +2021,7 @@ pub(crate) fn lost_commits(
         catalog
             .worktree_heads
             .iter()
-            .filter(|(path, _)| !leaving.iter().any(|l| same_path(path, l)))
+            .filter(|(path, _)| !leaving.iter().any(|l| same_path_on_disk(path, l)))
             .map(|(_, oid)| *oid),
     );
     protected.extend(head_after);
@@ -2066,69 +2034,6 @@ pub(crate) fn lost_commits(
         .collect::<Result<Vec<_>, _>>()?;
     commits.sort_unstable();
     Ok(commits)
-}
-
-pub(crate) fn git_args(words: &[&str]) -> Vec<String> {
-    words.iter().map(|w| (*w).to_owned()).collect()
-}
-
-/// Runs an operation's git command, recording it in `report`: whether git succeeded.
-pub(crate) fn run(
-    git: &Git,
-    args: Vec<String>,
-    cancel: &CancelTree,
-    report: &mut Report,
-) -> Result<bool, Error> {
-    run_with(git, args, &[], cancel, report)
-}
-
-/// [`run`], failing with what git printed.
-pub(crate) fn run_or_fail(
-    git: &Git,
-    args: Vec<String>,
-    cancel: &CancelTree,
-    report: &mut Report,
-) -> Result<(), Error> {
-    if run(git, args, cancel, report)? {
-        Ok(())
-    } else {
-        Err(Error::Failed(report.last_output()))
-    }
-}
-
-/// [`run`], with `env` set for git.
-pub(crate) fn run_with(
-    git: &Git,
-    args: Vec<String>,
-    env: &[(&str, &str)],
-    cancel: &CancelTree,
-    report: &mut Report,
-) -> Result<bool, Error> {
-    let mut child = cancel.start(git.operation_command(&args).envs(env.iter().copied()))?;
-    let mut stdout = child.stdout.take().expect("stdout is piped");
-    let mut stderr = child.stderr.take().expect("stderr is piped");
-    let errors = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
-        buf
-    });
-    let mut output = Vec::new();
-    let read_result = stdout.read_to_end(&mut output);
-    let error = errors.join().unwrap_or_default();
-    let status = child.wait();
-    let cancelled = cancel.finish();
-    let status = status.map_err(GitError::Spawn)?;
-    output.extend(error);
-    report.steps.push(Step {
-        args,
-        output: String::from_utf8_lossy(&output).trim().to_owned(),
-        success: status.success(),
-    });
-    if cancelled {
-        return Err(Error::Cancelled);
-    }
-    read_result.map_err(GitError::Spawn)?;
-    Ok(status.success())
 }
 
 /// Display only: execution always passes an argument vector directly to Git.

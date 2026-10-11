@@ -5,13 +5,14 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::branches::{Attention, Catalog, Error, Report, Stuck, run};
+use crate::branches::{Catalog, Error, Report, Stuck};
 use crate::git::Git;
 use crate::log::is_ancestor;
-use crate::merge::{
-    FINISH_OR_ABORT, dirty, kept_stash, last_output, refuse_if_moved, refuse_if_stuck, stash_count,
-    stopped,
+use crate::operation::{
+    git_args, has_tracked_changes, in_progress, kept_stash, refuse_if_moved, refuse_if_stuck, run,
+    run_or_fail, stash_count, stopped,
 };
+use crate::repo::DEFAULT_ABBREV_LEN;
 use crate::{Oid, Repo};
 use parterre_util::CancelTree;
 
@@ -54,13 +55,11 @@ pub fn commands(pick: &CherryPick) -> Vec<Vec<String>> {
 }
 
 fn stash_push() -> Vec<String> {
-    ["stash", "push", "-m", STASH_MESSAGE]
-        .map(str::to_owned)
-        .to_vec()
+    git_args(&["stash", "push", "-m", STASH_MESSAGE])
 }
 
 fn stash_pop() -> Vec<String> {
-    ["stash", "pop"].map(str::to_owned).to_vec()
+    git_args(&["stash", "pop"])
 }
 
 /// Offered while the open worktree is stuck too, to be greyed out.
@@ -172,7 +171,7 @@ impl Preview {
             skipped,
             dropped: HashSet::new(),
             name,
-            dirty: dirty(&catalog.root)?,
+            dirty: has_tracked_changes(&git)?,
         })
     }
 
@@ -217,7 +216,7 @@ impl Preview {
         let commits = self.commits();
         let name = match (&self.name, commits.as_slice()) {
             (Some(name), _) => name.clone(),
-            (None, [one]) => one.short(7),
+            (None, [one]) => one.short(DEFAULT_ABBREV_LEN),
             (None, many) => format!("{} commits", many.len()),
         };
         CherryPick {
@@ -307,33 +306,23 @@ pub(crate) fn execute(
     // Only a stash entry made here is put back: with nothing to stash, git makes none.
     let stashed = if pick.stash {
         let before = stash_count(&git);
-        if !run(&git, stash_push(), cancel, report)? {
-            return Err(Error::Failed(last_output(report)));
-        }
+        run_or_fail(&git, stash_push(), cancel, report)?;
         stash_count(&git) > before
     } else {
         false
     };
     let ok = run(&git, command(pick), cancel, report)?;
-    let pick_output = last_output(report);
+    let pick_output = report.last_output();
     let after = Catalog::load(&catalog.root)?;
     if let Some(Stuck::InProgress(_)) = after.stuck() {
-        let n = after.conflicted.len();
-        let mut message = FINISH_OR_ABORT.to_owned();
+        let mut attention = in_progress(stopped("Cherry-pick", after.conflicted.len()));
         if stashed {
-            message.push_str(
+            attention.message.push_str(
                 " Your changes are kept in stash@{0}: put them back with git stash pop once \
                  it's done.",
             );
         }
-        report.attention = Some(Attention {
-            title: if n == 0 {
-                "Cherry-pick stopped".into()
-            } else {
-                stopped("Cherry-pick", n)
-            },
-            message,
-        });
+        report.attention = Some(attention);
         return Ok(());
     }
     let popped = !stashed || run(&git, stash_pop(), cancel, report)?;

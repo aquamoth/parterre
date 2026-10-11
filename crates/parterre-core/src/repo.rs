@@ -16,6 +16,10 @@ use crate::upstream::Upstream;
 pub struct CommitIx(pub u32);
 
 impl CommitIx {
+    pub fn new(ix: usize) -> CommitIx {
+        CommitIx(u32::try_from(ix).expect("fewer than 2^32 commits"))
+    }
+
     pub fn ix(self) -> usize {
         self.0 as usize
     }
@@ -155,7 +159,7 @@ impl Repo {
         let by_oid = commits
             .iter()
             .enumerate()
-            .map(|(i, c)| (c.oid, CommitIx(i as u32)))
+            .map(|(i, c)| (c.oid, CommitIx::new(i)))
             .collect();
         Repo::with_index(path, commits, by_oid, refs, head)
     }
@@ -232,7 +236,7 @@ impl Repo {
             .iter()
             .enumerate()
             .filter(|(_, c)| c.oid.to_hex().starts_with(&prefix))
-            .map(|(i, _)| CommitIx(i as u32))
+            .map(|(i, _)| CommitIx::new(i))
             .collect()
     }
 
