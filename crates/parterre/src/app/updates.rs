@@ -13,6 +13,12 @@ use crate::widgets;
 /// of the same one twice.
 pub const TOLD_KEY: &str = "parterre-release-told";
 
+/// The release told of, as [`ParterreApp::save`] stores it: an `Option`, so read as one. Read
+/// as a `String`, `Some("1.0.0")` didn't parse and every start told of it again (#382).
+pub fn told(storage: &dyn eframe::Storage) -> Option<String> {
+    eframe::get_value::<Option<String>>(storage, TOLD_KEY).flatten()
+}
+
 impl ParterreApp {
     /// Starts or stops asking GitHub as the setting says, once the first-run prompt is answered:
     /// nothing is sent before (#223). Scripted runs don't ask: their pictures would depend on
@@ -147,7 +153,8 @@ enum ReleaseAnswer {
 
 #[cfg(test)]
 mod tests {
-    use super::tells;
+    use super::{TOLD_KEY, tells, told};
+    use eframe::Storage as _;
 
     #[test]
     fn each_release_is_told_of_once() {
@@ -157,5 +164,34 @@ mod tests {
         // A still newer one is told of again.
         assert!(tells(&mut told, "0.9.0"));
         assert_eq!(told.as_deref(), Some("0.9.0"));
+    }
+
+    #[derive(Default)]
+    struct Memory(std::collections::HashMap<String, String>);
+
+    impl eframe::Storage for Memory {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn the_release_told_of_is_remembered_across_starts() {
+        let mut storage = Memory::default();
+        assert_eq!(told(&storage), None);
+        eframe::set_value(&mut storage, TOLD_KEY, &Some("1.0.0".to_owned()));
+        assert_eq!(told(&storage).as_deref(), Some("1.0.0"));
+        // As 1.0.0-rc1 stored it.
+        storage.set_string(TOLD_KEY, r#"Some("1.0.0")"#.to_owned());
+        assert_eq!(told(&storage).as_deref(), Some("1.0.0"));
+        eframe::set_value(&mut storage, TOLD_KEY, &None::<String>);
+        assert_eq!(told(&storage), None);
     }
 }
