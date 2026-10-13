@@ -555,10 +555,7 @@ impl ParterreApp {
             pull_requests_setting,
             pull_requests_error: None,
             update_check: None,
-            release_told: cc
-                .storage
-                .filter(|_| persist)
-                .and_then(|s| eframe::get_value(s, updates::TOLD_KEY)),
+            release_told: cc.storage.filter(|_| persist).and_then(updates::told),
             release_dialog: None,
             telemetry,
             system_theme: SystemTheme::watch(&cc.egui_ctx),
