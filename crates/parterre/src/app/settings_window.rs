@@ -952,32 +952,36 @@ fn branch_colours(ui: &mut Ui, rules: &mut Vec<BranchColor>) {
         group(ui, |rows| {
             for (i, rule) in rules.iter_mut().enumerate() {
                 rows.row("", "", |ui| {
-                    // Right to left.
-                    if widgets::mini_button(ui, parterre_core::glyphs::CLOSE)
-                        .on_hover_text("Remove")
-                        .clicked()
-                    {
-                        remove = Some(i);
-                    }
-                    let down = ui.add_enabled_ui(i + 1 < count, |ui| {
-                        widgets::mini_button(ui, parterre_core::glyphs::CHEVRON_DOWN)
+                    // Left to right, so that Tab visits the row in the order it reads.
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        egui::color_picker::color_edit_button_srgba(
+                            ui,
+                            &mut rule.color,
+                            egui::color_picker::Alpha::Opaque,
+                        );
+                        // What the three buttons after it leave.
+                        let spacing = ui.spacing().item_spacing.x;
+                        let width = ui.available_width() - 3.0 * (22.0 + spacing) - spacing;
+                        widgets::text_field(ui, &mut rule.patterns, "e.g. feature/*", width);
+                        let up = ui.add_enabled_ui(i > 0, |ui| {
+                            widgets::mini_button(ui, parterre_core::glyphs::CHEVRON_UP)
+                        });
+                        if up.inner.on_hover_text("Move up").clicked() {
+                            swap = Some(i - 1);
+                        }
+                        let down = ui.add_enabled_ui(i + 1 < count, |ui| {
+                            widgets::mini_button(ui, parterre_core::glyphs::CHEVRON_DOWN)
+                        });
+                        if down.inner.on_hover_text("Move down").clicked() {
+                            swap = Some(i);
+                        }
+                        if widgets::mini_button(ui, parterre_core::glyphs::CLOSE)
+                            .on_hover_text("Remove")
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
                     });
-                    if down.inner.on_hover_text("Move down").clicked() {
-                        swap = Some(i);
-                    }
-                    let up = ui.add_enabled_ui(i > 0, |ui| {
-                        widgets::mini_button(ui, parterre_core::glyphs::CHEVRON_UP)
-                    });
-                    if up.inner.on_hover_text("Move up").clicked() {
-                        swap = Some(i - 1);
-                    }
-                    let width = ui.available_width() - 44.0;
-                    widgets::text_field(ui, &mut rule.patterns, "e.g. feature/*", width);
-                    egui::color_picker::color_edit_button_srgba(
-                        ui,
-                        &mut rule.color,
-                        egui::color_picker::Alpha::Opaque,
-                    );
                 });
             }
         });

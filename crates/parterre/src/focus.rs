@@ -4,7 +4,7 @@
 //!
 //! - Which widget has the keyboard shows once the keyboard is used, as on Windows and in
 //!   browsers; a click hides it again ([`Cues`]).
-//! - parterre's widgets show it themselves ([`shown`], [`ring`]). Any other, such as egui's own
+//! - parterre's widgets show it themselves ([`shows_own`], [`ring`]). Any other, such as egui's own
 //!   buttons, gets a ring painted around it.
 //! - In a dialog, a click on a button gives it the keyboard, as on Windows and Linux
 //!   ([`take_on_click`]), but not on macOS, where a click never moves the keyboard to a button.

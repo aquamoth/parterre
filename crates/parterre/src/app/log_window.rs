@@ -764,33 +764,14 @@ impl LogWindow {
     fn header(&mut self, ui: &mut Ui, c: &Colors, env: &mut Env) {
         let Some(view) = &self.view else { return };
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+        // The tools go in after find, so that Tab reads them in order: placed by their width.
         let mut tools = ui.new_child(
             UiBuilder::new()
                 .max_rect(rect.shrink2(vec2(8.0, 0.0)))
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         tools.spacing_mut().item_spacing.x = 4.0;
-        layout_tools(&mut tools, env.settings);
-        tools.add_space(12.0);
-        tools.add_enabled_ui(view.exact.is_none(), |ui| {
-            walk_tools(ui, &mut env.settings.options)
-        });
-        if let (Some(&from), Some(&to)) = (view.query.exclude.first(), view.query.tips.first()) {
-            tools.add_space(8.0);
-            let compare = widgets::tip_explained(
-                widgets::text_button(&mut tools, "Compare files"),
-                "Compare files",
-                "",
-                "List the files that differ between the two ends of the range, and open their \
-                 diffs.",
-            );
-            if compare.clicked() {
-                let oid = |c: CommitIx| view.repo.commit(c).oid;
-                self.requests
-                    .push(CompareRequest::Compare(oid(from), oid(to)));
-            }
-        }
-        let tools_left = tools.min_rect().left();
+        let tools_left = rect.right() - 8.0 - widgets::trailing_width(&tools, "log-tools");
         let painter = ui.painter();
         painter.hline(
             rect.x_range(),
@@ -857,6 +838,30 @@ impl LogWindow {
         let layout = egui::Layout::left_to_right(egui::Align::Center);
         ui.scope_builder(UiBuilder::new().max_rect(at).layout(layout), |ui| {
             self.find_field(ui, width);
+        });
+        let Some(view) = &self.view else { return };
+        let requests = &mut self.requests;
+        widgets::trailing(&mut tools, "log-tools", |ui| {
+            if let (Some(&from), Some(&to)) = (view.query.exclude.first(), view.query.tips.first())
+            {
+                let compare = widgets::tip_explained(
+                    widgets::text_button(ui, "Compare files"),
+                    "Compare files",
+                    "",
+                    "List the files that differ between the two ends of the range, and open \
+                     their diffs.",
+                );
+                if compare.clicked() {
+                    let oid = |c: CommitIx| view.repo.commit(c).oid;
+                    requests.push(CompareRequest::Compare(oid(from), oid(to)));
+                }
+                ui.add_space(8.0);
+            }
+            ui.add_enabled_ui(view.exact.is_none(), |ui| {
+                walk_tools(ui, &mut env.settings.options)
+            });
+            ui.add_space(12.0);
+            layout_tools(ui, env.settings);
         });
     }
 
@@ -1465,8 +1470,11 @@ pub(super) fn divider(ui: &mut Ui, id: Id, bar: &Bar) -> Option<f32> {
     Some(pointer - grabbed)
 }
 
-/// The layout picker and the reset button, laid out right to left.
+/// The layout picker and the reset button.
 fn layout_tools(ui: &mut Ui, settings: &mut LogWindowSettings) {
+    if let Some(layout) = layout_picker(ui, settings.layout) {
+        settings.layout = layout;
+    }
     let current = settings.layout;
     let reset = ui.add_enabled_ui(!settings.dividers.is_default(current), |ui| {
         widgets::icon_button(ui, glyphs::RESET, false)
@@ -1480,14 +1488,12 @@ fn layout_tools(ui: &mut Ui, settings: &mut LogWindowSettings) {
     if reset.clicked() {
         settings.dividers.reset(current);
     }
-    if let Some(layout) = layout_picker(ui, current) {
-        settings.layout = layout;
-    }
 }
 
-/// Which commits the log lists and in what order, as toggles and order segments. In a
-/// right-to-left layout.
+/// Which commits the log lists and in what order, as toggles and order segments.
 fn walk_tools(ui: &mut Ui, options: &mut LogOptions) {
+    walk_toggles(ui, options);
+    ui.add_space(8.0);
     let order = [
         (LogOrder::Topological, glyphs::ORDER_TOPOLOGICAL),
         (LogOrder::Date, glyphs::ORDER_DATE),
@@ -1510,7 +1516,10 @@ fn walk_tools(ui: &mut Ui, options: &mut LogOptions) {
     if let Some(o) = chosen {
         options.order = o;
     }
-    ui.add_space(8.0);
+}
+
+/// The toggles of which commits the log lists.
+fn walk_toggles(ui: &mut Ui, options: &mut LogOptions) {
     let toggles = [
         (
             &mut options.branchings_only,
@@ -1540,7 +1549,7 @@ fn walk_tools(ui: &mut Ui, options: &mut LogOptions) {
              history the log was opened on.",
         ),
     ];
-    for (on, glyph, title, body) in toggles {
+    for (on, glyph, title, body) in toggles.into_iter().rev() {
         let response = widgets::icon_button(ui, glyph, *on);
         if widgets::tip_explained(response, title, "", body).clicked() {
             *on = !*on;

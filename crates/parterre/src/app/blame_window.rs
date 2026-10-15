@@ -1100,7 +1100,27 @@ impl BlameWindow {
             ui.label(RichText::new(text).size(12.0).color(weak));
         }
 
-        let find = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // Find, in the middle of what the history button on the right leaves, as in the main
+        // window.
+        let room = ui.available_width()
+            - widgets::trailing_width(ui, "blame-tools")
+            - ui.spacing().item_spacing.x;
+        let find = ui
+            .allocate_ui_with_layout(
+                vec2(room.max(0.0), widgets::BUTTON),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    // Narrow windows squeeze the field rather than the tools.
+                    let width = (room - 16.0).clamp(60.0, 380.0);
+                    ui.add_space(((room - width) / 2.0).max(0.0));
+                    let left = ui.cursor().left();
+                    self.find_field(ui, width);
+                    let rect = ui.min_rect();
+                    Rect::from_x_y_ranges(left..=rect.right(), rect.y_range())
+                },
+            )
+            .inner;
+        widgets::trailing(ui, "blame-tools", |ui| {
             let on = self.show_history;
             let title = if on {
                 "Hide the history pane"
@@ -1114,25 +1134,8 @@ impl BlameWindow {
                 self.show_history = !on;
                 settings.show_history = self.show_history;
             }
-
-            // Find, in the middle of what is left, as in the main window.
-            let room = ui.available_width();
-            ui.allocate_ui_with_layout(
-                vec2(room, widgets::BUTTON),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    // Narrow windows squeeze the field rather than the tools.
-                    let width = (room - 16.0).clamp(60.0, 380.0);
-                    ui.add_space(((room - width) / 2.0).max(0.0));
-                    let left = ui.cursor().left();
-                    self.find_field(ui, width);
-                    let rect = ui.min_rect();
-                    Rect::from_x_y_ranges(left..=rect.right(), rect.y_range())
-                },
-            )
-            .inner
         });
-        self.go_to_popup(ui, find.inner);
+        self.go_to_popup(ui, find);
     }
 
     /// The go-to-line popup, centred under `under` (where the find field is), while it is

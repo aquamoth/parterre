@@ -100,12 +100,40 @@ impl ParterreApp {
             popover(&response, RectAlign::BOTTOM_START)
                 .show(|ui| menu::fit_window(ui, |ui| self.filter_popover(ui)));
 
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // Right to left from here.
-                let response = widgets::popover_button(ui, Id::new(DRAG_ID), None, false);
-                let response = tip(response, "Dragging options", "");
+            // Find, in the middle of what the tools on the right leave.
+            let room = ui.available_width()
+                - widgets::trailing_width(ui, "toolbar")
+                - ui.spacing().item_spacing.x;
+            ui.allocate_ui_with_layout(
+                vec2(room.max(0.0), widgets::BUTTON),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    // Narrow windows squeeze the field rather than the tools.
+                    let width = (room - 16.0).clamp(60.0, 380.0);
+                    ui.add_space(((room - width) / 2.0).max(0.0));
+                    self.find_field(ui, width);
+                },
+            );
+
+            widgets::trailing(ui, "toolbar", |ui| {
+                let response =
+                    widgets::popover_button(ui, Id::new(ZOOM_ID), Some(glyphs::ZOOM), false);
+                let response = tip(response, "Zoom", "");
                 popover(&response, RectAlign::BOTTOM_END)
-                    .show(|ui| menu::fit_window(ui, |ui| self.drag_popover(ui)));
+                    .show(|ui| menu::fit_window(ui, |ui| self.zoom_popover(ui)));
+                let response = widgets::icon_button(ui, glyphs::HEAD, false);
+                if tip(response, "Go to HEAD", &keys::GO_TO_HEAD.label()).clicked() {
+                    usage::action(usage::Action::GoToHead);
+                    self.go_to_head();
+                }
+                let overview = self.settings.show_overview;
+                let verb = if overview { "Hide" } else { "Show" };
+                let response = widgets::icon_button(ui, glyphs::OVERVIEW, overview);
+                if tip(response, &format!("{verb} the overview map"), "").clicked() {
+                    self.settings.show_overview = !overview;
+                }
+                gap(ui);
+
                 let items = DRAG.map(|(m, glyph, _)| (m, glyph));
                 let drag = widgets::segmented(ui, self.settings.net.model, &items, |m, r| {
                     let key = DRAG.iter().find(|d| d.0 == m).map_or("", |d| d.2);
@@ -114,37 +142,10 @@ impl ParterreApp {
                 if let Some(m) = drag {
                     self.set_drag_model(m);
                 }
-                gap(ui);
-
-                let overview = self.settings.show_overview;
-                let verb = if overview { "Hide" } else { "Show" };
-                let response = widgets::icon_button(ui, glyphs::OVERVIEW, overview);
-                if tip(response, &format!("{verb} the overview map"), "").clicked() {
-                    self.settings.show_overview = !overview;
-                }
-                let response = widgets::icon_button(ui, glyphs::HEAD, false);
-                if tip(response, "Go to HEAD", &keys::GO_TO_HEAD.label()).clicked() {
-                    usage::action(usage::Action::GoToHead);
-                    self.go_to_head();
-                }
-                let response =
-                    widgets::popover_button(ui, Id::new(ZOOM_ID), Some(glyphs::ZOOM), false);
-                let response = tip(response, "Zoom", "");
+                let response = widgets::popover_button(ui, Id::new(DRAG_ID), None, false);
+                let response = tip(response, "Dragging options", "");
                 popover(&response, RectAlign::BOTTOM_END)
-                    .show(|ui| menu::fit_window(ui, |ui| self.zoom_popover(ui)));
-
-                // Find, in the middle of what is left.
-                let room = ui.available_width();
-                ui.allocate_ui_with_layout(
-                    vec2(room, widgets::BUTTON),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        // Narrow windows squeeze the field rather than the tools.
-                        let width = (room - 16.0).clamp(60.0, 380.0);
-                        ui.add_space(((room - width) / 2.0).max(0.0));
-                        self.find_field(ui, width);
-                    },
-                );
+                    .show(|ui| menu::fit_window(ui, |ui| self.drag_popover(ui)));
             });
         });
     }

@@ -506,6 +506,41 @@ pub fn tabs<T: PartialEq + Copy, R>(
         .inner
 }
 
+/// A row against the right edge of what is left of `ui`'s row, which `add` lays out left to
+/// right, so that Tab visits it in the order it reads (egui visits a right-to-left row
+/// backwards). It is placed by its width in the frame before ([`trailing_width`]); a frame in
+/// which that changed is laid out again before it is shown. `name` tells a window's rows apart.
+pub fn trailing<R>(ui: &mut Ui, name: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let id = trailing_id(ui, name);
+    let width = trailing_width(ui, name);
+    let room = ui.available_rect_before_wrap();
+    let room = room.with_min_x((room.right() - width).max(room.left()));
+    let mut row = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(room)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let inner = add(&mut row);
+    let laid = row.min_rect();
+    if (laid.width() - width).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(id, laid.width()));
+        ui.ctx().request_discard("a trailing row changed width");
+    }
+    ui.advance_cursor_after_rect(laid);
+    inner
+}
+
+/// How wide [`trailing`] row `name` was in the frame before: what goes before it has the rest.
+pub fn trailing_width(ui: &Ui, name: &str) -> f32 {
+    let id = trailing_id(ui, name);
+    ui.data(|d| d.get_temp(id)).unwrap_or(0.0)
+}
+
+/// Where a [`trailing`] row's width is kept: per window.
+fn trailing_id(ui: &Ui, name: &str) -> Id {
+    Id::new(("trailing", name)).with(ui.ctx().viewport_id())
+}
+
 /// How wide `text` is in `font`.
 fn text_width(ui: &Ui, text: &str, font: &egui::FontId) -> f32 {
     ui.painter()
@@ -988,6 +1023,44 @@ mod tests {
     ) {
         super::text_segmented(ui, theme, &[(0, "Light"), (1, "Dark"), (2, "System")]);
         button.set(ui.button("After").id);
+    }
+
+    /// A row against the right edge, as a right-to-left one, that Tab visits in the order it
+    /// reads.
+    #[test]
+    fn a_trailing_row_sits_at_the_right_edge_and_reads_left_to_right() {
+        let mut s = Screen::new();
+        let ids = std::cell::Cell::new([egui::Id::NULL; 3]);
+        let rects = std::cell::Cell::new([egui::Rect::NOTHING; 2]);
+        let edge = std::cell::Cell::new(0.0);
+        let show = |ui: &mut egui::Ui| {
+            ui.horizontal(|ui| {
+                let field = ui.button("Before");
+                super::trailing(ui, "tools", |ui| {
+                    let one = ui.button("One");
+                    let two = ui.button("Two");
+                    ids.set([field.id, one.id, two.id]);
+                    rects.set([one.rect, two.rect]);
+                });
+                edge.set(ui.max_rect().right());
+            });
+        };
+        s.frame(show);
+        s.frame(show);
+        let [one, two] = rects.get();
+        assert!(one.right() < two.left(), "One reads before Two");
+        assert!(
+            (two.right() - edge.get()).abs() < 1.0,
+            "{two:?} at {}",
+            edge.get()
+        );
+        let mut order = Vec::new();
+        for _ in 0..3 {
+            s.press(Key::Tab);
+            s.frame(show);
+            order.push(s.focused().unwrap());
+        }
+        assert_eq!(order, ids.get());
     }
 
     /// A segmented control is one stop for Tab, and Left and Right choose within it, up to
