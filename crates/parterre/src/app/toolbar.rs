@@ -149,7 +149,8 @@ impl ParterreApp {
         });
     }
 
-    /// Shows or hides open pull requests; greyed out unless `origin` is on GitHub.
+    /// Shows or hides open pull requests; greyed out unless `origin` is on GitHub or Azure
+    /// DevOps.
     fn pull_requests_button(&mut self, ui: &mut Ui) {
         let available = self.pull_requests.origin().is_some();
         let on = self.pull_requests_active();
@@ -389,11 +390,12 @@ pub(super) const HIDE_TIP: &str = "Leave out branches matching these comma-separ
     (* is any text, ? one character; origin/release/1 matches release/*), with the history only \
     they lead to. Branches that a shown branch's history contains stay, and so does the current \
     branch.";
-pub(super) const PULL_REQUESTS_TIP: &str = "Open pull requests of origin on GitHub, and a \
-    fork's into its parent, as labels on the commits they propose, where those have been \
-    fetched. Click one to open it. Asks GitHub only when gh is signed in (gh auth login).";
+pub(super) const PULL_REQUESTS_TIP: &str = "Open pull requests of origin on GitHub or Azure \
+    DevOps, and a GitHub fork's into its parent, as labels on the commits they propose, where \
+    those have been fetched. Click one to open it. Asks GitHub only when gh is signed in (gh auth \
+    login), and Azure DevOps with the sign-in git has for origin, never asking for one.";
 pub(super) const NO_PULL_REQUESTS_TIP: &str =
-    "Pull requests: only for repositories whose origin is on GitHub, for now.";
+    "Pull requests: only for repositories whose origin is on GitHub or Azure DevOps, for now.";
 pub(super) const WORKTREES_TIP: &str = "The repository's worktrees, marked with a folder: \
     the branches they have checked out, even where hidden, and other worktrees' detached \
     HEADs in a colour of their own. Right-click one to open it.";

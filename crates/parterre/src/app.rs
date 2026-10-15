@@ -367,7 +367,7 @@ pub struct ParterreApp {
     /// A reload the user asked for (F5), loading on a worker thread: the repository's path,
     /// and what came of it.
     reloading: Option<(PathBuf, std::sync::mpsc::Receiver<Result<Repo, String>>)>,
-    /// Open pull requests from GitHub, while they are shown.
+    /// Open pull requests from GitHub or Azure DevOps, while they are shown.
     pull_requests: pull_requests::PullRequestLoader,
     /// Whether pull requests were turned on in the last frame, to see the user turn them on.
     pull_requests_setting: bool,
@@ -1160,7 +1160,7 @@ impl ParterreApp {
             "legend" => self.show_legend = true,
             "first-run" => self.open_first_run_prompt(),
             "settings" => self.open_settings(self.settings_page),
-            "clone" => self.branches.clone_repository(ctx, egui::ViewportId::ROOT),
+            "clone" => self.clone_repository(ctx),
             "fetch" | "pull" => {
                 let repo = self.repo.clone().ok_or("no repository is open")?;
                 return self.open_branch_dialog(ctx, &repo, what, "");
@@ -1480,8 +1480,9 @@ impl ParterreApp {
                     (Some(repo), Some(list)) => list.heads(repo).len(),
                     _ => 0,
                 };
-                if asked {
-                    self.status = Some((pull_requests::loaded_status(count, here), false));
+                if let (true, Some(origin)) = (asked, loader.origin()) {
+                    let status = pull_requests::loaded_status(origin.forge(), count, here);
+                    self.status = Some((status, false));
                 }
                 // Lay out again, with them.
                 self.requested = None;
@@ -1500,15 +1501,15 @@ impl ParterreApp {
         }
     }
 
-    /// Pull requests are on, `origin` is on GitHub, and `gh` isn't known to be missing or
-    /// signed out: what the toolbar shows as on.
+    /// Pull requests are on, `origin` is on a forge, and its sign-in isn't known to be missing
+    /// (`gh` signed out, say): what the toolbar shows as on.
     pub(super) fn pull_requests_active(&self) -> bool {
         self.settings.graph.show_pull_requests
             && self.pull_requests.origin().is_some()
             && !self.pull_requests.needs_sign_in()
     }
 
-    /// Turns pull requests off if they are active, else on, asking GitHub now.
+    /// Turns pull requests off if they are active, else on, asking the forge now.
     pub(super) fn toggle_pull_requests(&mut self) {
         if self.pull_requests_active() {
             self.settings.graph.show_pull_requests = false;
@@ -1516,6 +1517,14 @@ impl ParterreApp {
             self.settings.graph.show_pull_requests = true;
             self.pull_requests.ask();
         }
+    }
+
+    /// Opens *Clone repository…* over the main window, or brings it forward. The repositories
+    /// opened before name the Azure DevOps organisations it lists.
+    pub(super) fn clone_repository(&mut self, ctx: &egui::Context) {
+        let known = self.recent.iter().map(Path::to_owned).collect();
+        self.branches
+            .clone_repository(ctx, egui::ViewportId::ROOT, known);
     }
 
     /// Why pull requests the user asked for couldn't be loaded, and what to do about it.
@@ -1872,8 +1881,7 @@ impl ParterreApp {
                         .on_hover_text("From GitHub, Azure DevOps or any URL git takes")
                         .clicked()
                     {
-                        self.branches
-                            .clone_repository(ui.ctx(), egui::ViewportId::ROOT);
+                        self.clone_repository(ui.ctx());
                     }
                 });
             });
@@ -2178,6 +2186,10 @@ impl ParterreApp {
         // Tooltip for the hovered pull request, or node.
         if let Some(i) = hovered_pull_request {
             let pr = &scene.pull_requests[i];
+            let forge = self
+                .pull_requests
+                .origin()
+                .map_or(parterre_forge::Forge::Github, parterre_forge::Origin::forge);
             response.clone().on_hover_ui_at_pointer(|ui| {
                 ui.label(RichText::new(format!("#{} {}", pr.number, pr.title)).strong());
                 // The author is missing if their account was deleted.
@@ -2192,7 +2204,7 @@ impl ParterreApp {
                         .monospace(),
                 );
                 ui.add_space(4.0);
-                ui.label(RichText::new("Click to open it on GitHub").weak());
+                ui.label(RichText::new(format!("Click to open it on {forge}")).weak());
             });
         } else if let (Some(node), None) = (self.hovered, self.drag) {
             let n = &scene.graph.nodes[node];
@@ -2447,7 +2459,7 @@ fn legend(
     for (fill, what) in [
         (
             palette.pull_request,
-            "Open pull request on GitHub (click to open)",
+            "Open pull request on GitHub or Azure DevOps (click to open)",
         ),
         (palette.draft_pull_request, "Draft pull request"),
     ] {
@@ -2588,7 +2600,7 @@ fn shortcut_rows() -> Vec<(String, &'static str)> {
         ("Click a node".into(), "Select it"),
         (
             "Click a pull request's number".into(),
-            "Open the pull request on GitHub",
+            "Open the pull request in the browser",
         ),
         (
             format!("{}, double-click a node", keys::SHOW_LOG.label()),

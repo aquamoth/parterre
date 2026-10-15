@@ -18,16 +18,16 @@
 //!   ([`pause`]). How often a repository is asked again is up to the caller:
 //!   [`super::fresh_for`] and [`super::retry_after`].
 
+#[cfg(feature = "github")]
 use std::fmt;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{ForgeError, PullRequest, PullRequests, Remote};
+use super::{Forge, ForgeError, Proposed, PullRequest, PullRequests, Remote, Token};
 use parterre_core::git::Git;
-use parterre_core::oid::Oid;
 
 mod repositories;
-pub use repositories::{Listed, Protocol, Repositories, repositories, repositories_canned};
+pub use repositories::{Protocol, repositories, repositories_canned};
 
 /// GitHub's GraphQL endpoint. Tokens are only ever sent here.
 #[cfg_attr(not(feature = "github"), allow(dead_code))]
@@ -134,38 +134,19 @@ pub fn load(git: &Git) -> Result<PullRequests, ForgeError> {
     })
 }
 
-/// Whether a branch about to be deleted on a remote is proposed by an open pull request (#318).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Proposed {
-    /// Its remote isn't on GitHub: there's nothing to ask.
-    NotOnGithub,
-    No,
-    Open(PullRequest),
-    /// GitHub couldn't be asked, and why.
-    Unknown(String),
-}
-
-/// For each remote branch, as `(remote, branch)`: whether an open pull request proposes it,
-/// into `origin`'s repository or the one it was forked from, from the repository its remote
-/// points at, a fork's too. Asks GitHub once, with pull requests shown or not, for the question
-/// before deleting them; `canned` is `--pull-requests-from`'s list, used instead. Run it on a
-/// worker thread.
-pub fn proposals(git: &Git, branches: &[(String, String)], canned: Option<&str>) -> Vec<Proposed> {
-    let urls = super::remote_urls(git).unwrap_or_default();
-    let repos: Vec<Option<GithubRepo>> = branches
-        .iter()
-        .map(|(remote, _)| {
-            let url = urls.iter().find(|(name, _)| name == remote)?;
-            GithubRepo::from_url(&url.1)
-        })
-        .collect();
-    if repos.iter().all(Option::is_none) {
-        return vec![Proposed::NotOnGithub; branches.len()];
-    }
+/// For each branch of a GitHub repository, as `(repository, branch)`: whether an open pull
+/// request proposes it, into `origin`'s repository or the one it was forked from, a fork's
+/// too. Asks GitHub once, about these branches only ([`super::proposals`]); `canned` is
+/// `--pull-requests-from`'s list, used instead.
+pub(crate) fn proposals(
+    git: &Git,
+    branches: &[(&GithubRepo, &str)],
+    canned: Option<&str>,
+) -> Vec<Proposed> {
     let found = match canned {
         Some(json) => load_canned(git, json).map(|p| p.list),
         None => {
-            let mut names: Vec<String> = branches.iter().map(|(_, b)| b.clone()).collect();
+            let mut names: Vec<String> = branches.iter().map(|(_, b)| (*b).to_owned()).collect();
             names.sort();
             names.dedup();
             origin(git).ok_or(ForgeError::NoForge).and_then(|origin| {
@@ -176,25 +157,7 @@ pub fn proposals(git: &Git, branches: &[(String, String)], canned: Option<&str>)
     };
     branches
         .iter()
-        .zip(repos)
-        .map(|((_, branch), repo)| {
-            let Some(repo) = repo else {
-                return Proposed::NotOnGithub;
-            };
-            let list = match &found {
-                Ok(list) => list,
-                Err(e) => return Proposed::Unknown(e.to_string()),
-            };
-            let repo = repo.full_name();
-            let proposing = list.iter().find(|pr| {
-                pr.head_branch == *branch
-                    && pr
-                        .head_repo
-                        .as_deref()
-                        .is_some_and(|r| r.eq_ignore_ascii_case(&repo))
-            });
-            proposing.map_or(Proposed::No, |pr| Proposed::Open(pr.clone()))
-        })
+        .map(|(repo, branch)| Proposed::among(&found, &repo.full_name(), branch))
         .collect()
 }
 
@@ -203,46 +166,11 @@ pub fn proposals(git: &Git, branches: &[(String, String)], canned: Option<&str>)
 /// "base"}`, where `head` and `base` are branches of `origin`, which must still point at
 /// GitHub. Each one is on the commit `origin/<head>` is at.
 pub fn load_canned(git: &Git, json: &str) -> Result<PullRequests, ForgeError> {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Canned {
-        number: u64,
-        title: String,
-        #[serde(default)]
-        author: String,
-        #[serde(default)]
-        draft: bool,
-        head: String,
-        base: String,
-    }
-    let canned: Vec<Canned> =
-        serde_json::from_str(json).map_err(|e| ForgeError::Canned(e.to_string()))?;
     pull_requests(git, |origin| {
         let name = origin.full_name();
-        let list = canned
-            .into_iter()
-            .map(|pr| {
-                let tip = format!("refs/remotes/origin/{}^{{commit}}", pr.head);
-                let head = git
-                    .query(&["rev-parse", "--verify", "--quiet", &tip])?
-                    .and_then(|hex| Oid::from_hex(&hex))
-                    .ok_or_else(|| {
-                        ForgeError::Canned(format!("origin has no branch {}", pr.head))
-                    })?;
-                Ok(PullRequest {
-                    url: format!("{WEB}{name}/pull/{}", pr.number),
-                    number: pr.number,
-                    title: pr.title,
-                    author: pr.author,
-                    draft: pr.draft,
-                    head,
-                    head_branch: pr.head,
-                    head_repo: Some(name.clone()),
-                    base_branch: pr.base,
-                    base_repo: name.clone(),
-                })
-            })
-            .collect::<Result<_, ForgeError>>()?;
+        let list = super::canned(git, json, &name, |number| {
+            format!("{WEB}{name}/pull/{number}")
+        })?;
         Ok(Found {
             name,
             list,
@@ -471,23 +399,25 @@ fn request(origin: &GithubRepo, branches: &[String]) -> String {
 /// The repository in an answer, or why there is none.
 fn repository(body: &str, origin: &GithubRepo) -> Result<json::Repository, ForgeError> {
     let answer: json::Answer =
-        serde_json::from_str(body).map_err(|e| ForgeError::Parse(e.to_string()))?;
+        serde_json::from_str(body).map_err(|e| ForgeError::Parse(Forge::Github, e.to_string()))?;
     if let Some(repo) = answer.data.and_then(|d| d.repository) {
         return Ok(repo);
     }
     let error = answer.errors.into_iter().next();
     Err(match error {
         Some(e) if e.kind.as_deref() == Some("NOT_FOUND") => ForgeError::NotFound {
+            forge: Forge::Github,
             repo: origin.full_name(),
         },
         Some(e) if e.kind.as_deref() == Some("RATE_LIMITED") => {
             ForgeError::RateLimited { minutes: 60 }
         }
         Some(e) => ForgeError::Status {
+            forge: Forge::Github,
             status: 200,
             message: e.message,
         },
-        None => ForgeError::Parse("no repository in the answer".into()),
+        None => ForgeError::Parse(Forge::Github, "no repository in the answer".into()),
     })
 }
 
@@ -595,16 +525,6 @@ mod json {
     }
 }
 
-/// A token for the API. Never printed: its `Debug` shows stars.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Token(String);
-
-impl fmt::Debug for Token {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Token(***)")
-    }
-}
-
 /// The token of a signed-in `gh` (`gh auth token`): [`ForgeError::NoGh`] if `gh` isn't
 /// installed, [`ForgeError::NotSignedIn`] if it isn't signed in to github.com or doesn't answer
 /// within a few seconds.
@@ -626,46 +546,20 @@ fn gh_token() -> Result<Token, ForgeError> {
 /// [`ForgeError::NotSignedIn`] if it fails or doesn't answer within a few seconds.
 #[cfg_attr(not(feature = "github"), allow(dead_code))]
 fn gh(args: &[&str]) -> Result<String, ForgeError> {
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
-
-    let mut cmd = Command::new("gh");
+    let mut cmd = std::process::Command::new("gh");
     parterre_core::shell_path::apply(&mut cmd)
         .args(args)
         .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        // As for git: no console window flashing up.
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        .env("NO_COLOR", "1");
+    match super::output_within(&mut cmd, "", Duration::from_secs(5)) {
+        Ok(Some(out)) => Ok(out),
+        Ok(None) => Err(ForgeError::NotSignedIn),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ForgeError::NoGh),
+        Err(e) => Err(ForgeError::Network(
+            Forge::Github,
+            format!("could not run gh: {e}"),
+        )),
     }
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(ForgeError::NoGh),
-        Err(e) => return Err(ForgeError::Network(format!("could not run gh: {e}"))),
-    };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(ForgeError::NotSignedIn);
-            }
-        }
-    }
-    let mut out = String::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        let _ = std::io::Read::read_to_string(&mut stdout, &mut out);
-    }
-    Ok(out)
 }
 
 /// Runs `calls` against the API, signed in with `gh`'s token; without one, or while the
@@ -683,7 +577,7 @@ fn with_api<T>(calls: impl Fn(&dyn Api) -> Result<T, ForgeError>) -> Result<T, F
 
 #[cfg(not(feature = "github"))]
 fn with_api<T>(_: impl Fn(&dyn Api) -> Result<T, ForgeError>) -> Result<T, ForgeError> {
-    Err(ForgeError::Unsupported)
+    Err(ForgeError::Unsupported(Forge::Github))
 }
 
 /// The API over HTTPS, with ureq.
@@ -696,21 +590,10 @@ struct Http {
 #[cfg(feature = "github")]
 impl Http {
     fn new(token: Token) -> Http {
-        use ureq::tls::{RootCerts, TlsConfig};
-        // The system's certificate authorities, including any a company adds.
-        let tls = TlsConfig::builder()
-            .root_certs(RootCerts::PlatformVerifier)
-            .build();
-        let agent = ureq::Agent::config_builder()
-            .tls_config(tls)
-            .timeout_global(Some(Duration::from_secs(30)))
-            // Error answers carry the reason, and the rate limit in their headers.
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .user_agent(concat!("parterre/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .into();
-        Http { agent, token }
+        Http {
+            agent: super::agent(),
+            token,
+        }
     }
 }
 
@@ -733,7 +616,7 @@ impl Api for Http {
             .header("Authorization", &format!("Bearer {token}"))
             .header("Content-Type", "application/json")
             .send(body)
-            .map_err(|e| ForgeError::Network(e.to_string()))?;
+            .map_err(|e| ForgeError::Network(Forge::Github, e.to_string()))?;
         let header = |name: &str| -> Option<u64> {
             response
                 .headers()
@@ -761,7 +644,7 @@ impl Api for Http {
             .with_config()
             .limit(64 * 1024 * 1024)
             .read_to_string()
-            .map_err(|e| ForgeError::Network(e.to_string()))?;
+            .map_err(|e| ForgeError::Network(Forge::Github, e.to_string()))?;
         match status {
             200..=299 => Ok(Answer { body, quota }),
             401 => Err(ForgeError::TokenRejected),
@@ -784,7 +667,11 @@ impl Api for Http {
                 let message = serde_json::from_str::<Message>(&body)
                     .map(|m| m.message)
                     .unwrap_or_else(|_| body.chars().take(200).collect());
-                Err(ForgeError::Status { status, message })
+                Err(ForgeError::Status {
+                    forge: Forge::Github,
+                    status,
+                    message,
+                })
             }
         }
     }
@@ -895,7 +782,7 @@ mod tests {
             self.answers
                 .borrow_mut()
                 .pop()
-                .ok_or_else(|| ForgeError::Network("no more answers".into()))
+                .ok_or_else(|| ForgeError::Network(Forge::Github, "no more answers".into()))
         }
     }
 
@@ -1027,7 +914,7 @@ mod tests {
             Err(ForgeError::NotFound { .. })
         ));
         let odd = open_pull_requests(&Fake::new(&["<html>"], None), &origin, &branches(1));
-        assert!(matches!(odd, Err(ForgeError::Parse(_))));
+        assert!(matches!(odd, Err(ForgeError::Parse(..))));
         let other = r#"{"errors":[{"type":"FORBIDDEN","message":"SAML enforcement"}]}"#;
         match open_pull_requests(&Fake::new(&[other], None), &origin, &branches(1)) {
             Err(e) => assert!(e.to_string().contains("SAML enforcement"), "{e}"),

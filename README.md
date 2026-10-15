@@ -56,6 +56,11 @@ request in your browser. The node's menu opens it too.
 parterre asks GitHub only about the branches you have fetched, at most once a minute per
 repository, and once more before deleting a remote branch, and keeps well inside your hourly
 API budget. Nothing is sent without signing in.
+
+When `origin` is on Azure DevOps, parterre shows its active pull requests the same way. It
+signs in as git does, with the sign-in git's credential helper (usually Git Credential Manager)
+already has for `origin`, and never asks for one.
+
 The update check, usage statistics and crash reports are in
 [What parterre sends](docs/privacy.md).
 
@@ -163,7 +168,8 @@ parterre ~/src/other --worktrees   # another one, with its worktrees shown
 
 In the window, *File › Open folder…* (or a folder dropped on it, except on Wayland) opens another repository, and
 *File › Clone repository…* clones one from any URL, or from your GitHub repositories when the
-GitHub CLI is signed in.
+GitHub CLI is signed in, and from your Azure DevOps organisations' when git has a sign-in for
+them.
 
 | Do | To |
 |---|---|

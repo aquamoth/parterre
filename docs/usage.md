@@ -40,11 +40,21 @@ drop a folder on parterre's Dock icon, choose parterre in Finder's *Open With*, 
 *Revision Graph* in the *Services* (or *Quick Actions*) of a folder's menu in Finder.
 
 *File › Clone repository…*, also on the start screen, clones a repository from any URL git
-takes (GitHub, Azure DevOps or any other host) into a new folder, and opens it. With the
-GitHub CLI signed in (`gh auth login`), the same field also searches your GitHub repositories
-and lists them for picking; their URLs are HTTPS or SSH as `gh config get git_protocol` says.
+takes (GitHub, Azure DevOps or any other host) into a new folder, and opens it. The URL is
+typed in its first tab. Each forge has a tab of its own, listing your repositories there to
+search and pick from (Ctrl+Tab goes to the next tab):
+
+- **GitHub**, with the GitHub CLI signed in (`gh auth login`). The URLs are HTTPS or SSH as
+  `gh config get git_protocol` says.
+- **Azure DevOps**, for the organisations git has a sign-in for: those Git Credential Manager
+  has settings for (`credential.azrepos:org/…`), and those of the remotes of repositories you
+  opened before. The URLs are HTTPS, as Azure DevOps gives them.
+
+Until its list has come, a forge's tab says it is loading; without a sign-in, it says how to
+sign in.
 Credentials come from git's credential helpers, as for fetching. A clone that fails or is
-cancelled leaves no folder behind.
+cancelled leaves no folder behind. If the clone's folder is there already, *Open* beside the
+message opens it instead.
 
 ## The graph
 
@@ -189,6 +199,12 @@ parterre asks GitHub about the fetched branches only, at most once a minute per 
 included, and never without signing in. A push or a fetch that moves a branch of `origin` is
 asked about once more a minute later, for the pull request opened just after the push. Once
 less than a tenth of your hourly API allowance is left, it waits for the next hour.
+
+When `origin` is on Azure DevOps (`dev.azure.com` or `visualstudio.com`, over HTTPS or SSH),
+its active pull requests show the same way, except those from forks. parterre signs in with the
+sign-in git's credential helper already has for `origin`'s HTTPS URL, as Git Credential
+Manager keeps it once git has fetched over HTTPS, and never asks for one: without it, turning
+pull requests on gives the command that signs in. One request lists them all.
 
 ## Upstreams
 

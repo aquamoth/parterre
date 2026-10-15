@@ -2,8 +2,8 @@
 
 parterre sends three things, each with its own switch in *Settings → Privacy*: the
 [update check](#update-check), [usage statistics](#usage-statistics) and
-[crash reports](#crash-reports). It also asks GitHub for [pull requests](#pull-requests) when
-you are signed in with `gh`.
+[crash reports](#crash-reports). It also asks GitHub or Azure DevOps for
+[pull requests](#pull-requests) when you have signed in to them.
 
 **Nothing is sent before the first-run prompt is answered.** At first start, parterre asks in a
 dialog, *Usage statistics and crash reports*, with *Usage statistics* ticked and *Crash
@@ -116,9 +116,20 @@ for the open pull requests of the branches you have fetched. That sends the repo
 and name, and those branch names, to GitHub, which hosts them. Nothing is asked without signing
 in. The toolbar's pull-request button turns it off ([user guide](usage.md#pull-requests)).
 
-Before you delete a branch on a remote that is on GitHub, parterre asks once more, with
-pull requests shown or not, whether an open pull request proposes that branch: it won't delete
-one that does. That sends the branch names being deleted.
+Before you delete a branch on a remote that is on GitHub or Azure DevOps, parterre asks that
+forge once more, with pull requests shown or not, whether an open pull request proposes that
+branch: it won't delete one that does. GitHub is sent the names of the branches being deleted
+on GitHub remotes, and never those of other remotes; Azure DevOps is asked for the active pull
+requests of the repositories they are deleted from.
+
+When `origin` is on Azure DevOps and git already has a sign-in for it, parterre asks Azure
+DevOps' API, with that sign-in, for the repository's active pull requests. That sends the
+organisation, project and repository names to Azure DevOps, which hosts them, and the sign-in
+only to the host git has it for. Nothing is asked without one, and parterre never asks you for
+one. The same toolbar button turns it off.
+
+*Clone repository…* asks each Azure DevOps organisation git has a sign-in for (see the [user
+guide](usage.md)) for its repositories, in the same way, sending the organisation's name.
 
 ## Who is responsible
 

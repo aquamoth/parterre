@@ -5,23 +5,13 @@
 
 use serde::Deserialize;
 
-use super::{Answer, Api, ForgeError, GithubRepo, Quota, WEB};
+use super::{Answer, Api, Forge, ForgeError, GithubRepo, Quota, WEB};
+use crate::repositories::{Listed, Repositories};
 
 /// Repositories asked for per request, GitHub's most.
 const PER_PAGE: usize = 100;
 /// Requests at most: the 1,000 most recently pushed are plenty to pick from.
 const PAGES: usize = 10;
-
-/// A repository the user can clone.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Listed {
-    /// `owner/name`.
-    pub name: String,
-    pub description: String,
-    pub private: bool,
-    pub fork: bool,
-    pub archived: bool,
-}
 
 /// How a repository is cloned: `gh`'s `git_protocol`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -31,53 +21,24 @@ pub enum Protocol {
     Ssh,
 }
 
-/// The user's repositories, and how they clone.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Repositories {
-    pub list: Vec<Listed>,
-    pub protocol: Protocol,
-}
-
-impl Repositories {
-    /// `listed`'s clone URL, as `gh repo clone` makes it.
-    pub fn url(&self, listed: &Listed) -> String {
-        match self.protocol {
-            Protocol::Https => format!("{WEB}{}.git", listed.name),
-            Protocol::Ssh => format!("git@github.com:{}.git", listed.name),
+impl Protocol {
+    /// The clone URL of `owner/name`, as `gh repo clone` makes it.
+    fn url(self, name: &str) -> String {
+        match self {
+            Protocol::Https => format!("{WEB}{name}.git"),
+            Protocol::Ssh => format!("git@github.com:{name}.git"),
         }
-    }
-
-    /// Those whose name or description has every word of `query`, in any case; all for none.
-    pub fn matching(&self, query: &str) -> Vec<&Listed> {
-        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-        self.list
-            .iter()
-            .filter(|l| {
-                let name = l.name.to_lowercase();
-                let description = l.description.to_lowercase();
-                words
-                    .iter()
-                    .all(|w| name.contains(w.as_str()) || description.contains(w.as_str()))
-            })
-            .collect()
-    }
-
-    /// The one `url` clones, if it's on github.com and listed.
-    pub fn find_url(&self, url: &str) -> Option<&Listed> {
-        let repo = GithubRepo::from_url(url)?.full_name();
-        self.list
-            .iter()
-            .find(|l| l.name.eq_ignore_ascii_case(&repo))
     }
 }
 
 /// Asks GitHub for the user's repositories, signed in with `gh`. Run it on a worker thread.
 pub fn repositories() -> Result<Repositories, ForgeError> {
-    let list = super::with_api(list)?;
-    Ok(Repositories {
-        list,
-        protocol: protocol(),
-    })
+    let mut list = super::with_api(list)?;
+    let protocol = protocol();
+    for listed in &mut list {
+        listed.url = protocol.url(&listed.name);
+    }
+    Ok(Repositories { list })
 }
 
 /// The repositories in `json` (`--github-repositories-from`) rather than GitHub's: an array of
@@ -104,6 +65,8 @@ pub fn repositories_canned(json: &str) -> Result<Repositories, ForgeError> {
             GithubRepo::from_full_name(&c.name)
                 .ok_or_else(|| ForgeError::Canned(format!("{}: not owner/name", c.name)))?;
             Ok(Listed {
+                forge: Forge::Github,
+                url: Protocol::Https.url(&c.name),
                 name: c.name,
                 description: c.description,
                 private: c.private,
@@ -112,10 +75,7 @@ pub fn repositories_canned(json: &str) -> Result<Repositories, ForgeError> {
             })
         })
         .collect::<Result<_, ForgeError>>()?;
-    Ok(Repositories {
-        list,
-        protocol: Protocol::Https,
-    })
+    Ok(Repositories { list })
 }
 
 /// `gh config get git_protocol`: HTTPS unless it says SSH, also when `gh` can't be asked.
@@ -126,7 +86,8 @@ fn protocol() -> Protocol {
     }
 }
 
-/// Every page of the list, up to [`PAGES`]; pauses asking when the budget runs low.
+/// Every page of the list, up to [`PAGES`], with no clone URLs yet; pauses asking when the
+/// budget runs low.
 fn list(api: &dyn Api) -> Result<Vec<Listed>, ForgeError> {
     let mut list = Vec::new();
     let mut after: Option<String> = None;
@@ -137,6 +98,8 @@ fn list(api: &dyn Api) -> Result<Vec<Listed>, ForgeError> {
         }
         let page = page(&body)?;
         list.extend(page.nodes.into_iter().map(|n| Listed {
+            forge: Forge::Github,
+            url: String::new(),
             name: n.name_with_owner,
             description: n.description.unwrap_or_default(),
             private: n.is_private,
@@ -170,7 +133,7 @@ fn request(after: Option<&str>) -> String {
 /// The page in an answer, or why there is none.
 fn page(body: &str) -> Result<Page, ForgeError> {
     let answer: PageAnswer =
-        serde_json::from_str(body).map_err(|e| ForgeError::Parse(e.to_string()))?;
+        serde_json::from_str(body).map_err(|e| ForgeError::Parse(Forge::Github, e.to_string()))?;
     if let Some(page) = answer.data.and_then(|d| d.viewer).map(|v| v.repositories) {
         return Ok(page);
     }
@@ -179,10 +142,11 @@ fn page(body: &str) -> Result<Page, ForgeError> {
             ForgeError::RateLimited { minutes: 60 }
         }
         Some(e) => ForgeError::Status {
+            forge: Forge::Github,
             status: 200,
             message: e.message,
         },
-        None => ForgeError::Parse("no repositories in the answer".into()),
+        None => ForgeError::Parse(Forge::Github, "no repositories in the answer".into()),
     })
 }
 
@@ -246,7 +210,7 @@ mod tests {
                 .push(serde_json::from_str(body).unwrap());
             let mut bodies = self.bodies.borrow_mut();
             if bodies.is_empty() {
-                return Err(ForgeError::Network("no more answers".into()));
+                return Err(ForgeError::Network(Forge::Github, "no more answers".into()));
             }
             Ok(Answer {
                 body: bodies.remove(0),
@@ -306,51 +270,16 @@ mod tests {
         assert!(matches!(list(&api), Err(ForgeError::Status { .. })));
     }
 
-    fn listed(name: &str, description: &str) -> Listed {
-        Listed {
-            name: name.into(),
-            description: description.into(),
-            private: false,
-            fork: false,
-            archived: false,
-        }
-    }
-
     #[test]
-    fn urls_follow_ghs_protocol_and_are_found_again() {
-        let mut repos = Repositories {
-            list: vec![listed("aquamoth/parterre", "")],
-            protocol: Protocol::Https,
-        };
-        let one = &repos.list[0].clone();
-        assert_eq!(repos.url(one), "https://github.com/aquamoth/parterre.git");
-        repos.protocol = Protocol::Ssh;
-        assert_eq!(repos.url(one), "git@github.com:aquamoth/parterre.git");
+    fn urls_follow_ghs_protocol() {
         assert_eq!(
-            repos.find_url("https://github.com/Aquamoth/Parterre"),
-            Some(one)
+            Protocol::Https.url("aquamoth/parterre"),
+            "https://github.com/aquamoth/parterre.git"
         );
         assert_eq!(
-            repos.find_url("https://example.com/aquamoth/parterre"),
-            None
+            Protocol::Ssh.url("aquamoth/parterre"),
+            "git@github.com:aquamoth/parterre.git"
         );
-    }
-
-    #[test]
-    fn every_word_must_match_the_name_or_description() {
-        let repos = Repositories {
-            list: vec![
-                listed("aquamoth/parterre", "Revision graph viewer"),
-                listed("aquamoth/worldclock", "Clocks"),
-            ],
-            protocol: Protocol::Https,
-        };
-        let names =
-            |q: &str| -> Vec<String> { repos.matching(q).iter().map(|l| l.name.clone()).collect() };
-        assert_eq!(names("").len(), 2);
-        assert_eq!(names("PART"), ["aquamoth/parterre"]);
-        assert_eq!(names("aquamoth graph"), ["aquamoth/parterre"]);
-        assert!(names("graph clocks").is_empty());
     }
 
     #[test]
@@ -361,6 +290,7 @@ mod tests {
         .unwrap();
         assert_eq!(repos.list.len(), 2);
         assert!(repos.list[0].private && repos.list[1].archived);
+        assert_eq!(repos.list[0].url, "https://github.com/me/a.git");
         assert!(repositories_canned(r#"[{"name":"nope"}]"#).is_err());
         assert!(repositories_canned(r#"[{"name":"a/b","stars":3}]"#).is_err());
     }
