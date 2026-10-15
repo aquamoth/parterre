@@ -214,6 +214,7 @@ impl CloneDialog {
             .raise(fresh)
             .resizable()
             .show(ctx, |ui| {
+                super::clone_tabs_prototype::switcher(ui);
                 let labels: Vec<(Tab, String)> = tabs()
                     .into_iter()
                     .map(|tab| match tab {
@@ -228,9 +229,13 @@ impl CloneDialog {
                 let mut chosen = None;
                 // A build that can ask no forge has the URL's page alone, with no tab.
                 if items.len() > 1 {
-                    widgets::tabs(ui, egui::Id::new("clone-tabs"), &mut tab, &items, |ui| {
-                        self.page(ui, &mut chosen)
-                    });
+                    super::clone_tabs_prototype::tabs(
+                        ui,
+                        egui::Id::new("clone-tabs"),
+                        &mut tab,
+                        &items,
+                        |ui| self.page(ui, &mut chosen),
+                    );
                 } else {
                     self.page(ui, &mut chosen);
                 }

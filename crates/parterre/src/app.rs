@@ -20,6 +20,7 @@ mod blame_window;
 mod branches;
 mod cherry_pick;
 mod clone;
+mod clone_tabs_prototype;
 mod column_borders;
 mod commands;
 mod commit_table;
