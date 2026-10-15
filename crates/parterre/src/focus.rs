@@ -136,24 +136,42 @@ pub fn ring(ui: &Ui, response: &Response, corner: u8) {
     }
 }
 
-/// A ring just outside `rect`, whose corners are rounded by `corner`.
+/// A ring against the outside of `rect`, whose corners are rounded by `corner`: with no gap, as
+/// Windows 11 draws it.
 fn paint_ring(painter: &Painter, rect: Rect, corner: u8, color: egui::Color32) {
-    painter.rect_stroke(
-        rect.expand(2.0),
-        corner + 2,
-        Stroke::new(2.0, color),
-        StrokeKind::Outside,
-    );
+    painter.rect_stroke(rect, corner, Stroke::new(2.0, color), StrokeKind::Outside);
 }
 
-/// While `response`'s widget has the keyboard, the keys `filter` names act on it rather than move
-/// the focus away (from the frame after it got the keyboard on). Call every frame.
+/// While `response`'s widget has the keyboard, the arrow keys `filter` names act on it rather
+/// than move the focus away. Call every frame.
 pub fn claim(response: &Response, filter: EventFilter) {
-    if response.has_focus() {
-        response
-            .ctx
-            .memory_mut(|m| m.set_focus_lock_filter(response.id, filter));
+    if !response.has_focus() {
+        return;
     }
+    let ctx = &response.ctx;
+    // egui applies the filter from the frame after the one the widget got the keyboard in, so
+    // until then an arrow key pressed at once would still move it away: that move is called off.
+    let claimed = ctx.input(|i| {
+        i.raw.events.iter().any(|e| match e {
+            Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } if !modifiers.any() => match key {
+                Key::ArrowLeft | Key::ArrowRight => filter.horizontal_arrows,
+                Key::ArrowUp | Key::ArrowDown => filter.vertical_arrows,
+                _ => false,
+            },
+            _ => false,
+        })
+    });
+    ctx.memory_mut(|m| {
+        m.set_focus_lock_filter(response.id, filter);
+        if claimed {
+            m.move_focus(egui::FocusDirection::None);
+        }
+    });
 }
 
 /// Whether a click on a button gives it the keyboard: on Windows and Linux, not on macOS.
@@ -378,6 +396,36 @@ pub mod tests {
         s.frame(|ui| two_buttons(ui, &mut rects, true));
         s.frame(|ui| two_buttons(ui, &mut rects, true));
         assert!(s.ringed(rects[0]));
+    }
+
+    /// Right after Tab gives it the keyboard, before egui applies its claim, a widget keeps the
+    /// arrow keys it claims too.
+    #[test]
+    fn a_widget_keeps_the_arrow_keys_it_claims_from_its_first_frame() {
+        let mut s = Screen::new();
+        let first = std::cell::Cell::new(egui::Id::NULL);
+        let show = |ui: &mut egui::Ui| {
+            ui.horizontal(|ui| {
+                let one = ui.button("One");
+                super::claim(
+                    &one,
+                    egui::EventFilter {
+                        horizontal_arrows: true,
+                        ..Default::default()
+                    },
+                );
+                first.set(one.id);
+                let _ = ui.button("Two");
+            });
+        };
+        s.frame(show);
+        s.press(Key::Tab);
+        s.frame(show);
+        assert_eq!(s.focused(), Some(first.get()));
+        s.press(Key::ArrowRight);
+        s.frame(show);
+        s.frame(show);
+        assert_eq!(s.focused(), Some(first.get()));
     }
 
     #[test]
