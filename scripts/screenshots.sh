@@ -112,6 +112,8 @@ cat >"$work/repositories.json" <<'JSON'
 ]
 JSON
 shot clone window $'open clone\nwait 0.5' --github-repositories-from "$work/repositories.json"
+shot clone-github window $'open clone\nclick "GitHub"\nwait 0.5' \
+  --github-repositories-from "$work/repositories.json"
 # Pushed, then reworded: pushing it again replaces the commit on origin.
 git -C "$repo" push -q origin feature/reports
 git -C "$repo" switch -q feature/reports

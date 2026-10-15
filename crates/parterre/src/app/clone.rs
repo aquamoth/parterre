@@ -1,6 +1,6 @@
-//! *Clone repository…* (#358): one field for the URL, which also filters the signed-in user's
-//! GitHub and Azure DevOps repositories listed under it, then the parent folder and the clone's
-//! folder name.
+//! *Clone repository…* (#358): a tab with a field for the URL, then a tab per forge the user
+//! is signed in to, GitHub and Azure DevOps, listing their repositories to pick from, and
+//! under the tabs the parent folder and the clone's folder name.
 //! The branch tool runs the clone like a fetch, and the app opens it once it's done.
 
 use std::path::{Path, PathBuf};
@@ -29,28 +29,53 @@ enum Listing {
 }
 
 impl Listing {
-    /// Takes in what the worker found; true if it came.
-    fn receive(&mut self, forge: Forge) -> bool {
+    /// Takes in what the worker found.
+    fn receive(&mut self, forge: Forge) {
         let Listing::Loading(rx) = self else {
-            return false;
+            return;
         };
         *self = match rx.try_recv() {
             Ok(Ok(repos)) => Listing::Loaded(repos),
             Ok(Err(e)) => Listing::Failed(e),
-            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
                 Listing::Failed(ForgeError::Network(forge, "the request stopped".into()))
             }
         };
-        true
     }
 
-    fn list(&self) -> &[Listed] {
+    /// Whether its forge gets a tab: once it has listed repositories, or failed for another
+    /// reason than a missing sign-in (or a build without it), which the tab then says.
+    fn has_tab(&self) -> bool {
         match self {
-            Listing::Loaded(repos) => &repos.list,
-            _ => &[],
+            Listing::Loading(_) => false,
+            Listing::Loaded(repos) => !repos.list.is_empty(),
+            Listing::Failed(e) => !e.needs_sign_in() && !matches!(e, ForgeError::Unsupported(_)),
         }
     }
+}
+
+/// A tab of the dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tab {
+    /// A URL typed.
+    Url,
+    /// A forge's repositories to pick from.
+    Forge(Forge),
+}
+
+/// The tabs for what `github` and `azure` have listed: the URL's, then a forge's for each one
+/// the user is signed in to.
+fn tabs(github: &Listing, azure: &Listing) -> Vec<Tab> {
+    let forges = [(github, Forge::Github), (azure, Forge::AzureDevops)];
+    std::iter::once(Tab::Url)
+        .chain(
+            forges
+                .into_iter()
+                .filter(|(listing, _)| listing.has_tab())
+                .map(|(_, forge)| Tab::Forge(forge)),
+        )
+        .collect()
 }
 
 #[derive(Debug)]
@@ -63,8 +88,11 @@ pub struct CloneDialog {
     browse: Option<Pending<()>>,
     github: Listing,
     azure: Listing,
-    /// What both have listed: GitHub's, then Azure DevOps'.
-    repos: Repositories,
+    tab: Tab,
+    /// The words a forge's tab looks for, the same in each.
+    query: String,
+    /// The tab's field takes the keyboard: the dialog opened, or the tab was picked.
+    focus: bool,
     /// The list scrolls to the repository picked, which may have been found by words.
     reveal: bool,
     /// A URL from the clipboard, for an empty field.
@@ -111,11 +139,11 @@ impl CloneDialog {
             name: String::new(),
             name_edited: false,
             browse: None,
-            repos: Repositories {
-                list: [github.list(), azure.list()].concat(),
-            },
             github,
             azure,
+            tab: Tab::Url,
+            query: String::new(),
+            focus: true,
             reveal: false,
             clipboard: clipboard
                 .then(|| worker(ctx, || clipboard_text().filter(|t| remote_url(t)))),
@@ -160,10 +188,8 @@ impl CloneDialog {
 
     /// Takes in what the workers found, and a folder picked with *Browse…*.
     fn receive(&mut self) {
-        let github = self.github.receive(Forge::Github);
-        if self.azure.receive(Forge::AzureDevops) || github {
-            self.repos.list = [self.github.list(), self.azure.list()].concat();
-        }
+        self.github.receive(Forge::Github);
+        self.azure.receive(Forge::AzureDevops);
         let clipboard = self.clipboard.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(text) => Some(text),
             Err(mpsc::TryRecvError::Empty) => None,
@@ -189,6 +215,7 @@ impl CloneDialog {
     pub fn show(&mut self, ctx: &egui::Context, busy: bool) -> dialogs::Answer {
         self.receive();
         let fresh = std::mem::take(&mut self.fresh);
+        self.focus |= fresh;
         let shown = dialogs::Dialog::new("clone", "Clone a repository")
             .screen(crate::usage::Screen::Clone)
             .width(520.0)
@@ -196,23 +223,16 @@ impl CloneDialog {
             .raise(fresh)
             .resizable()
             .show(ctx, |ui| {
-                ui.label(RichText::new("Repository URL").strong());
-                let mut url = self.url.clone();
-                let hint = if self.repos.list.is_empty() && !self.loading() {
-                    "https://…, git@…"
-                } else {
-                    "https://…, git@…, or search your repositories"
-                };
-                let response = widgets::text_field(ui, &mut url, hint, ui.available_width());
-                if fresh {
-                    response.request_focus();
+                let tabs = tabs(&self.github, &self.azure);
+                if !tabs.contains(&self.tab) {
+                    self.tab = Tab::Url;
                 }
-                if response.changed() {
-                    self.set_url(url);
-                }
-                ui.add_space(4.0);
+                self.tab_bar(ui, &tabs);
                 let mut chosen = None;
-                self.repository_list(ui, &mut chosen);
+                match self.tab {
+                    Tab::Url => self.url_tab(ui),
+                    Tab::Forge(forge) => self.forge_tab(ui, forge, &mut chosen),
+                }
                 if let Some((url, twice)) = chosen {
                     self.set_url(url);
                     if twice && self.cloning().error().is_none() && !busy {
@@ -251,55 +271,97 @@ impl CloneDialog {
             .any(|l| matches!(l, Listing::Loading(_)))
     }
 
-    /// The repositories the field matches, GitHub's then Azure DevOps', with a line while they
-    /// load, and one for each forge saying why it has none, if there's anything to say (not to
-    /// someone who doesn't use Azure DevOps). `chosen` gets the URL of the one clicked, and
-    /// whether it was double-clicked.
-    fn repository_list(&mut self, ui: &mut Ui, chosen: &mut Option<(String, bool)>) {
-        let weak = ui.visuals().weak_text_color();
-        if self.loading() {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.colored_label(weak, "Loading your repositories…");
-            });
-        }
-        for (listing, forge) in [
-            (&self.github, Forge::Github),
-            (&self.azure, Forge::AzureDevops),
-        ] {
-            match listing {
-                // A build without the forge has no list to speak of.
-                Listing::Loading(_)
-                | Listing::Loaded(_)
-                | Listing::Failed(ForgeError::Unsupported(_)) => {}
-                Listing::Failed(e) if e.needs_sign_in() && forge == Forge::Github => {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.colored_label(weak, "Sign in with ");
-                        ui.label(RichText::new("gh auth login").monospace());
-                        ui.colored_label(weak, " to pick from your GitHub repositories.");
-                    });
-                }
-                Listing::Failed(e) => {
-                    ui.colored_label(
-                        weak,
-                        format!("Couldn't list your {forge} repositories: {e}."),
-                    );
-                }
-            }
-        }
-        let repos = &self.repos;
-        if repos.list.is_empty() {
+    /// The tabs, if there's more than the URL's, and a line while the forges are asked.
+    fn tab_bar(&mut self, ui: &mut Ui, tabs: &[Tab]) {
+        let loading = self.loading();
+        if tabs.len() < 2 && !loading {
             return;
         }
-        // Words look for repositories; a URL shows them all, the one it names picked.
-        let url = self.url.trim();
-        let picked = repos.find_url(url);
-        let shown: Vec<&Listed> = if clone::is_url(url) {
-            repos.list.iter().collect()
-        } else {
-            repos.matching(url)
+        ui.horizontal(|ui| {
+            if tabs.len() > 1 {
+                let labels: Vec<(Tab, String)> = tabs
+                    .iter()
+                    .map(|&tab| match tab {
+                        Tab::Url => (tab, "URL".to_owned()),
+                        Tab::Forge(forge) => (tab, forge.to_string()),
+                    })
+                    .collect();
+                let items: Vec<(Tab, &str)> =
+                    labels.iter().map(|(t, l)| (*t, l.as_str())).collect();
+                let before = self.tab;
+                widgets::text_segmented(ui, &mut self.tab, &items);
+                self.focus |= self.tab != before;
+            }
+            if loading {
+                ui.add_space(6.0);
+                ui.spinner();
+                ui.colored_label(ui.visuals().weak_text_color(), "Loading your repositories…");
+            }
+        });
+        ui.add_space(8.0);
+    }
+
+    /// Gives the tab's field the keyboard, if it is to have it, until it has: a frame may be
+    /// laid out only to be discarded, as a new window's first is.
+    fn take_focus(&mut self, field: &egui::Response) {
+        if self.focus {
+            if field.has_focus() {
+                self.focus = false;
+            } else {
+                field.request_focus();
+            }
+        }
+    }
+
+    /// The field for the URL, and how to get GitHub's list if `gh` isn't signed in.
+    fn url_tab(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Repository URL").strong());
+        let mut url = self.url.clone();
+        let response = widgets::text_field(ui, &mut url, "https://…, git@…", ui.available_width());
+        self.take_focus(&response);
+        if response.changed() {
+            self.set_url(url);
+        }
+        if let Listing::Failed(e) = &self.github
+            && e.needs_sign_in()
+        {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let weak = ui.visuals().weak_text_color();
+                ui.colored_label(weak, "Sign in with ");
+                ui.label(RichText::new("gh auth login").monospace());
+                ui.colored_label(weak, " to pick from your GitHub repositories.");
+            });
+        }
+    }
+
+    /// `forge`'s repositories that the words looked for match, or why there are none. `chosen`
+    /// gets the URL of the one clicked, and whether it was double-clicked.
+    fn forge_tab(&mut self, ui: &mut Ui, forge: Forge, chosen: &mut Option<(String, bool)>) {
+        let weak = ui.visuals().weak_text_color();
+        ui.label(RichText::new("Repository").strong());
+        let hint = format!("Search your {forge} repositories");
+        let response = widgets::text_field(ui, &mut self.query, &hint, ui.available_width());
+        self.take_focus(&response);
+        ui.add_space(4.0);
+        let listing = match forge {
+            Forge::Github => &self.github,
+            Forge::AzureDevops => &self.azure,
         };
+        let repos = match listing {
+            Listing::Loaded(repos) => repos,
+            Listing::Failed(e) => {
+                ui.colored_label(
+                    weak,
+                    format!("Couldn't list your {forge} repositories: {e}."),
+                );
+                return;
+            }
+            Listing::Loading(_) => return,
+        };
+        let picked = repos.find_url(self.url.trim());
+        let shown = repos.matching(&self.query);
         let reveal = std::mem::take(&mut self.reveal)
             .then(|| shown.iter().position(|l| Some(*l) == picked))
             .flatten();
@@ -324,7 +386,7 @@ impl CloneDialog {
                         return;
                     }
                     let mut area = egui::ScrollArea::vertical()
-                        .id_salt("clone-github-list")
+                        .id_salt(("clone-list", forge))
                         .max_height(height)
                         .min_scrolled_height(height)
                         .auto_shrink([false, false]);
@@ -517,21 +579,66 @@ mod tests {
     }
 
     #[test]
-    fn words_filter_the_list_and_a_pick_fills_the_url_and_folder() {
+    fn a_forges_tab_finds_by_words_and_a_pick_fills_the_url_and_folder() {
         let (mut h, _parent) = open();
+        // The URL's tab first, then GitHub's, which has listed repositories; Azure DevOps',
+        // with no organisation signed in to, has none.
+        assert!(h.shows("URL") && h.shows("GitHub"));
+        assert!(!h.shows("Azure DevOps"), "{:?}", h.texts);
+        assert!(!h.shows("acme/payments"), "the URL's tab lists nothing");
+        h.click("GitHub");
         assert!(h.shows("mira/checkoutprivate") && h.shows("acme/payments"));
         h.type_text("graph");
         assert!(h.shows("mira/parterre"));
         assert!(!h.shows("acme/payments"), "{:?}", h.texts);
-        // The field's hint shows under its label: words name no folder.
+        // The field's hint shows under its label: nothing picked names no folder.
         let folder = |h: &Harness| h.texts.iter().filter(|(t, _)| t == "Folder name").count();
         assert_eq!(folder(&h), 2);
         h.click("mira/parterre");
-        assert!(h.shows("https://github.com/mira/parterre.git"));
         assert!(h.shows("parterre"), "the folder follows the URL");
         assert_eq!(folder(&h), 1);
-        // A URL shows them all again, the one it names picked.
-        assert!(h.shows("acme/payments"));
+        h.click("URL");
+        assert!(h.shows("https://github.com/mira/parterre.git"));
+    }
+
+    #[test]
+    fn a_forge_has_a_tab_only_once_signed_in() {
+        let loaded = |names: &[&str]| {
+            Listing::Loaded(Repositories {
+                list: names
+                    .iter()
+                    .map(|name| Listed {
+                        forge: Forge::AzureDevops,
+                        name: (*name).into(),
+                        description: String::new(),
+                        private: false,
+                        fork: false,
+                        archived: false,
+                        url: String::new(),
+                    })
+                    .collect(),
+            })
+        };
+        let (_tx, rx) = mpsc::channel();
+        let github = Listing::Failed(ForgeError::NotSignedIn);
+        assert_eq!(tabs(&github, &Listing::Loading(rx)), [Tab::Url]);
+        assert_eq!(tabs(&github, &loaded(&[])), [Tab::Url], "no organisation");
+        assert_eq!(
+            tabs(&github, &loaded(&["o/p/r"])),
+            [Tab::Url, Tab::Forge(Forge::AzureDevops)]
+        );
+        let unsupported = Listing::Failed(ForgeError::Unsupported(Forge::Github));
+        assert_eq!(tabs(&unsupported, &loaded(&[])), [Tab::Url]);
+        // Signed in, but GitHub couldn't be reached: the tab says so.
+        let unreachable = Listing::Failed(ForgeError::Network(Forge::Github, "down".into()));
+        assert_eq!(
+            tabs(&unreachable, &loaded(&["o/p/r"])),
+            [
+                Tab::Url,
+                Tab::Forge(Forge::Github),
+                Tab::Forge(Forge::AzureDevops)
+            ]
+        );
     }
 
     #[test]
