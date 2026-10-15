@@ -518,6 +518,22 @@ mod tests {
         });
     }
 
+    /// The commits are one stop for Tab: a click on one gives the table the keyboard, Down
+    /// moves in it, and Tab leaves it at once rather than row by row.
+    #[test]
+    fn the_commits_are_one_stop_for_tab() {
+        let mut h = Harness::new(repository());
+        open(&mut h);
+        let table = Some(egui::Id::new("cherry-pick-commits").with("stop"));
+        let focused = |h: &Harness| h.ctx.memory(|m| m.focused());
+        h.click("one");
+        assert_eq!(focused(&h), table);
+        h.key(egui::Key::ArrowDown);
+        assert_eq!(focused(&h), table, "Down stays in the table");
+        h.key(egui::Key::Tab);
+        assert!(focused(&h).is_some() && focused(&h) != table);
+    }
+
     #[test]
     fn dropped_commits_are_left_out_and_dropping_all_is_refused() {
         let dir = repository();

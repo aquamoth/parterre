@@ -12,6 +12,7 @@ mod dialogs;
 mod export;
 mod file_dialog;
 mod file_manager;
+mod focus;
 mod frame_pacing;
 mod icon;
 mod keys;

@@ -148,6 +148,8 @@ impl ParterreApp {
         }
         ctx.show_viewport_immediate(id, builder, |ui, class| {
             super::commands::window_begin(ui);
+            // As a dialog's, a switch or button clicked takes the keyboard.
+            crate::focus::take_on_click(ui.ctx());
             if class != egui::ViewportClass::EmbeddedWindow {
                 // Its own title bar, too, in parterre's theme.
                 if self.settings_window_theme != self.window_theme {

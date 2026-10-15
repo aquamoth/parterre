@@ -23,7 +23,7 @@ use parterre_core::text::{elide_start, thousands};
 
 use super::column_borders::{self, Columns};
 use super::log_window::{CELL_PAD, Colors, HEADING, cell, heading_background};
-use crate::widgets;
+use crate::{focus, widgets};
 
 /// Opening more diff windows than this at once asks first, as TortoiseGit does.
 const MANY_DIFFS: usize = 10;
@@ -44,6 +44,8 @@ pub struct FileTable {
     /// *Conflicts only* unchecked: every file is listed while the working tree has
     /// conflicts. Checked again once none is left, so that the next conflicts start filtered.
     all_files: bool,
+    /// How far the rows were scrolled, in the frame before.
+    scroll: f32,
 }
 
 /// A git-style status letter in the Status column: filled when staged, outlined when only on
@@ -353,142 +355,167 @@ impl FileTable {
         let text = ui.visuals().text_color();
         let mut click = None;
         let mut pick = None;
+        // The rows are one stop for Tab, which the keys move the selection in, from the row
+        // clicked last.
+        let stop = Id::new(("files", owner, "stop"));
+        let at = self
+            .selection
+            .anchor
+            .as_ref()
+            .and_then(|a| shown.iter().position(|&i| &files[i].path == a));
+        let height = ui.available_height();
+        let page = ((height / FILE_ROW).floor() as usize).saturating_sub(1);
+        let keys = widgets::list_keys(ui, stop, at, shown.len(), page);
+        let mut area = ScrollArea::vertical()
+            .id_salt(("files", owner))
+            .auto_shrink(false);
+        if let Some(row) = keys.select {
+            click = Some(FileClick::Select(row, Modifiers::NONE));
+            // Scrolled only as far as brings it in view.
+            let top = row as f32 * FILE_ROW;
+            let offset = self.scroll.max(top + FILE_ROW - height).min(top);
+            area = area.vertical_scroll_offset(offset.max(0.0));
+        }
+        let cue = focus::shows_own_by_id(ui.ctx(), stop).then(|| keys.select.or(at).unwrap_or(0));
+        let mut cued = false;
         let selection = &self.selection;
         let widths = &self.widths;
-        ScrollArea::vertical()
-            .id_salt(("files", owner))
-            .auto_shrink(false)
-            .show_rows(ui, FILE_ROW, shown.len(), |ui, range| {
-                for row in range {
-                    let file = &files[shown[row]];
-                    let (rect, response) = ui
-                        .allocate_exact_size(vec2(ui.available_width(), FILE_ROW), Sense::click());
-                    if response.double_clicked() {
-                        click = Some(FileClick::Open(row));
-                    } else if response.clicked() {
-                        click = Some(FileClick::Select(row, ui.input(|i| i.modifiers)));
-                    } else if response.secondary_clicked() {
-                        click = Some(FileClick::Menu(row));
+        let stop = widgets::list_stop(ui, stop, ui.available_rect_before_wrap());
+        let output = area.show_rows(ui, FILE_ROW, shown.len(), |ui, range| {
+            for row in range {
+                let file = &files[shown[row]];
+                // Not a stop of its own: the table is one.
+                let (rect, response) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), FILE_ROW), Sense::CLICK);
+                focus::click_row(&response, stop.id);
+                if response.double_clicked() {
+                    click = Some(FileClick::Open(row));
+                } else if response.clicked() {
+                    click = Some(FileClick::Select(row, ui.input(|i| i.modifiers)));
+                } else if response.secondary_clicked() {
+                    click = Some(FileClick::Menu(row));
+                }
+                if selection.paths.contains(&file.path) {
+                    ui.painter().rect_filled(rect, 0.0, c.selected_bg);
+                }
+                if response.hovered() {
+                    ui.painter().rect_filled(rect, 0.0, c.hover);
+                } else if row % 2 == 1 {
+                    ui.painter().rect_filled(rect, 0.0, c.stripe);
+                }
+                if cue == Some(row) {
+                    widgets::paint_list_cue(ui, rect);
+                    cued = true;
+                }
+                let Layout { x, w } = file_columns(widths, rect.width(), rect.left());
+                let y = rect.center().y;
+                let put = |g: Arc<Galley>, x: f32| {
+                    ui.painter().galley(pos2(x, y - g.size().y / 2.0), g, text);
+                };
+                let put_right = |g: Arc<Galley>, right: f32| {
+                    ui.painter()
+                        .galley(pos2(right - g.size().x, y - g.size().y / 2.0), g, text);
+                };
+                let pieces = path_pieces(file);
+                let (path, elided) =
+                    path_galley(ui, &pieces, &body, w[0] - 2.0 * CELL_PAD, text, weak);
+                put(path, x[0] + CELL_PAD);
+                put(
+                    cell(
+                        ui,
+                        file.extension(),
+                        body.clone(),
+                        weak,
+                        w[1] - 2.0 * CELL_PAD,
+                    ),
+                    x[1] + CELL_PAD,
+                );
+                let status_color = match file.status {
+                    FileStatus::Added => c.added,
+                    FileStatus::Deleted => c.removed,
+                    FileStatus::Renamed | FileStatus::Copied => c.renamed,
+                    _ => text,
+                };
+                let badged = badges.map(|b| &b[shown[row]]);
+                let conflict = tree.and_then(|t| t.conflict(&file.path));
+                match (badged, conflict) {
+                    (_, Some(conflict)) => {
+                        paint_conflict(ui, conflict, c, pos2(x[2] + CELL_PAD, y));
                     }
-                    if selection.paths.contains(&file.path) {
-                        ui.painter().rect_filled(rect, 0.0, c.selected_bg);
-                    }
-                    if response.hovered() {
-                        ui.painter().rect_filled(rect, 0.0, c.hover);
-                    } else if row % 2 == 1 {
-                        ui.painter().rect_filled(rect, 0.0, c.stripe);
-                    }
-                    let Layout { x, w } = file_columns(widths, rect.width(), rect.left());
-                    let y = rect.center().y;
-                    let put = |g: Arc<Galley>, x: f32| {
-                        ui.painter().galley(pos2(x, y - g.size().y / 2.0), g, text);
-                    };
-                    let put_right = |g: Arc<Galley>, right: f32| {
-                        ui.painter().galley(
-                            pos2(right - g.size().x, y - g.size().y / 2.0),
-                            g,
-                            text,
-                        );
-                    };
-                    let pieces = path_pieces(file);
-                    let (path, elided) =
-                        path_galley(ui, &pieces, &body, w[0] - 2.0 * CELL_PAD, text, weak);
-                    put(path, x[0] + CELL_PAD);
-                    put(
+                    (Some(b), None) => paint_badges(ui, &b.badges, pos2(x[2] + CELL_PAD, y)),
+                    (None, None) => put(
                         cell(
                             ui,
-                            file.extension(),
+                            file.status.name(),
                             body.clone(),
-                            weak,
-                            w[1] - 2.0 * CELL_PAD,
+                            status_color,
+                            w[2] - 2.0 * CELL_PAD,
                         ),
-                        x[1] + CELL_PAD,
-                    );
-                    let status_color = match file.status {
-                        FileStatus::Added => c.added,
-                        FileStatus::Deleted => c.removed,
-                        FileStatus::Renamed | FileStatus::Copied => c.renamed,
-                        _ => text,
-                    };
-                    let badged = badges.map(|b| &b[shown[row]]);
-                    let conflict = tree.and_then(|t| t.conflict(&file.path));
-                    match (badged, conflict) {
-                        (_, Some(conflict)) => {
-                            paint_conflict(ui, conflict, c, pos2(x[2] + CELL_PAD, y));
-                        }
-                        (Some(b), None) => paint_badges(ui, &b.badges, pos2(x[2] + CELL_PAD, y)),
-                        (None, None) => put(
-                            cell(
-                                ui,
-                                file.status.name(),
-                                body.clone(),
-                                status_color,
-                                w[2] - 2.0 * CELL_PAD,
-                            ),
-                            x[2] + CELL_PAD,
-                        ),
-                    }
-                    // Binary files have no line counts.
-                    let count = |n: Option<u32>, color| {
-                        let (s, color) = match n {
-                            Some(n) => (thousands(n as usize), color),
-                            None => ("–".to_owned(), weak),
-                        };
-                        ui.painter().layout_no_wrap(s, body.clone(), color)
-                    };
-                    put_right(count(file.added, c.added), x[3] + w[3] - CELL_PAD);
-                    put_right(count(file.removed, c.removed), x[4] + w[4] - CELL_PAD);
-                    let path_rect = Rect::from_x_y_ranges(x[0]..=x[0] + w[0], rect.y_range());
-                    let status_rect = Rect::from_x_y_ranges(x[2]..=x[2] + w[2], rect.y_range());
-                    let on_status = response
-                        .hover_pos()
-                        .is_some_and(|p| status_rect.contains(p));
-                    let response = match (badged, conflict) {
-                        (_, Some(conflict)) if on_status => {
-                            response.on_hover_text_at_pointer(capitalized(conflict.words()))
-                        }
-                        (Some(b), None) if on_status => response.on_hover_text_at_pointer(&b.words),
-                        _ => response,
-                    };
-                    let response =
-                        if elided && response.hover_pos().is_some_and(|p| path_rect.contains(p)) {
-                            response.on_hover_ui(|ui| {
-                                ui.label(path_job(&pieces, 0, &body, text, weak));
-                            })
-                        } else {
-                            response
-                        };
-                    egui::Popup::context_menu(&response)
-                        .style(crate::menu::style)
-                        .show(|ui| {
-                            crate::menu::fit_window(ui, |ui| {
-                                crate::usage::menu(ui.ctx(), crate::usage::Menu::File);
-                                ui.set_min_width(crate::menu::MIN_WIDTH);
-                                let chosen = selection.paths.len();
-                                let many = chosen > 1 && selection.paths.contains(&file.path);
-                                if let Some(p) =
-                                    row_menu(ui, row, file, many.then_some(chosen), tree)
-                                {
-                                    pick = Some(p);
-                                }
-                                if let Some(tree) = tree
-                                    && let Some(p) = working_tree_menu(ui, tree, file)
-                                {
-                                    pick = Some(MenuPick::Row(row, p));
-                                }
-                                crate::menu::separator(ui);
-                                if ui.button("Copy path").clicked() {
-                                    ui.ctx().copy_text(file.path.clone());
-                                    ui.close();
-                                }
-                            });
-                        });
+                        x[2] + CELL_PAD,
+                    ),
                 }
-            });
+                // Binary files have no line counts.
+                let count = |n: Option<u32>, color| {
+                    let (s, color) = match n {
+                        Some(n) => (thousands(n as usize), color),
+                        None => ("–".to_owned(), weak),
+                    };
+                    ui.painter().layout_no_wrap(s, body.clone(), color)
+                };
+                put_right(count(file.added, c.added), x[3] + w[3] - CELL_PAD);
+                put_right(count(file.removed, c.removed), x[4] + w[4] - CELL_PAD);
+                let path_rect = Rect::from_x_y_ranges(x[0]..=x[0] + w[0], rect.y_range());
+                let status_rect = Rect::from_x_y_ranges(x[2]..=x[2] + w[2], rect.y_range());
+                let on_status = response
+                    .hover_pos()
+                    .is_some_and(|p| status_rect.contains(p));
+                let response = match (badged, conflict) {
+                    (_, Some(conflict)) if on_status => {
+                        response.on_hover_text_at_pointer(capitalized(conflict.words()))
+                    }
+                    (Some(b), None) if on_status => response.on_hover_text_at_pointer(&b.words),
+                    _ => response,
+                };
+                let response =
+                    if elided && response.hover_pos().is_some_and(|p| path_rect.contains(p)) {
+                        response.on_hover_ui(|ui| {
+                            ui.label(path_job(&pieces, 0, &body, text, weak));
+                        })
+                    } else {
+                        response
+                    };
+                egui::Popup::context_menu(&response)
+                    .style(crate::menu::style)
+                    .show(|ui| {
+                        crate::menu::fit_window(ui, |ui| {
+                            crate::usage::menu(ui.ctx(), crate::usage::Menu::File);
+                            ui.set_min_width(crate::menu::MIN_WIDTH);
+                            let chosen = selection.paths.len();
+                            let many = chosen > 1 && selection.paths.contains(&file.path);
+                            if let Some(p) = row_menu(ui, row, file, many.then_some(chosen), tree) {
+                                pick = Some(p);
+                            }
+                            if let Some(tree) = tree
+                                && let Some(p) = working_tree_menu(ui, tree, file)
+                            {
+                                pick = Some(MenuPick::Row(row, p));
+                            }
+                            crate::menu::separator(ui);
+                            if ui.button("Copy path").clicked() {
+                                ui.ctx().copy_text(file.path.clone());
+                                ui.close();
+                            }
+                        });
+                    });
+            }
+        });
 
+        self.scroll = output.state.offset.y;
+        widgets::list_stop_ring(ui, &stop, cued);
         // Enter opens every selected file; a double-click opens one.
-        let enter = !ui.ctx().egui_wants_keyboard_input()
-            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+        let enter = keys.enter
+            || !ui.ctx().egui_wants_keyboard_input()
+                && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
         let sel = &mut self.selection;
         let mut open = Vec::new();
         let mut blame = None;

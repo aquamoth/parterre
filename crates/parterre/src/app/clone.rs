@@ -12,7 +12,7 @@ use parterre_core::clone::{self, Cloning};
 use parterre_forge::{Forge, ForgeError, Listed, Repositories, azure, github};
 
 use crate::file_dialog::Pending;
-use crate::{dialogs, widgets};
+use crate::{dialogs, focus, widgets};
 
 /// The list's rows, at least, while the dialog is resized.
 const MIN_ROWS: usize = 4;
@@ -79,10 +79,13 @@ pub struct CloneDialog {
     tab: Tab,
     /// The words a forge's tab looks for, the same in each.
     query: String,
-    /// The tab's field takes the keyboard: the dialog opened, or the tab was picked.
+    /// The tab's field takes the keyboard: the dialog opened, or another tab was picked (but
+    /// not by Left and Right on the tabs).
     focus: bool,
     /// The list scrolls to the repository picked, which may have been found by words.
     reveal: bool,
+    /// How far the list was scrolled, in the frame before.
+    scroll: f32,
     /// A URL from the clipboard, for an empty field.
     clipboard: Option<mpsc::Receiver<Option<String>>>,
     pub opener: ViewportId,
@@ -135,6 +138,7 @@ impl CloneDialog {
             query: String::new(),
             focus: true,
             reveal: false,
+            scroll: 0.0,
             clipboard: clipboard
                 .then(|| worker(ctx, || clipboard_text().filter(|t| remote_url(t)))),
             opener,
@@ -226,16 +230,20 @@ impl CloneDialog {
                 let before = self.tab;
                 let mut tab = self.tab;
                 let mut chosen = None;
+                let tabs_id = egui::Id::new("clone-tabs");
+                // Left and Right on the tabs leave them the keyboard; a click doesn't.
+                let on_tabs = ui.memory(|m| m.had_focus_last_frame(tabs_id))
+                    && !ui.input(|i| i.pointer.any_click());
                 // A build that can ask no forge has the URL's page alone, with no tab.
                 if items.len() > 1 {
-                    widgets::tabs(ui, egui::Id::new("clone-tabs"), &mut tab, &items, |ui| {
+                    widgets::tabs(ui, tabs_id, &mut tab, &items, |ui| {
                         self.page(ui, &mut chosen)
                     });
                 } else {
                     self.page(ui, &mut chosen);
                 }
                 self.tab = tab;
-                self.focus |= self.tab != before;
+                self.focus |= self.tab != before && !on_tabs;
                 if let Some((url, twice)) = chosen {
                     self.set_url(url);
                     if twice && self.cloning().error().is_none() && !busy {
@@ -394,6 +402,22 @@ impl CloneDialog {
             .flatten();
         let weak = ui.visuals().weak_text_color();
         let spacing = ui.spacing().item_spacing.y;
+        // One stop for Tab, which the keys move the pick in, as far as it shows.
+        let list = list_id(forge);
+        let at = picked.and_then(|p| shown.iter().position(|l| l.name == p.name));
+        let page = ((height + spacing) / (ROW + spacing)).floor() as usize;
+        let keys = widgets::list_keys(ui, list, at, shown.len(), page);
+        if let Some(i) = keys.select {
+            *chosen = Some((shown[i].url.clone(), false));
+        } else if keys.enter
+            && let Some(i) = at
+        {
+            *chosen = Some((shown[i].url.clone(), true));
+        }
+        let at = keys.select.or(at);
+        let cue = focus::shows_own_by_id(ui.ctx(), list).then(|| at.unwrap_or(0));
+        let mut cued = false;
+        let mut clicked = false;
         egui::Frame::new()
             .stroke(egui::Stroke::new(1.0, widgets::tones(ui).field_line))
             .corner_radius(7)
@@ -418,11 +442,25 @@ impl CloneDialog {
                 if let Some(ix) = reveal {
                     let offset = ix as f32 * (ROW + spacing) - (height - ROW) / 2.0;
                     area = area.vertical_scroll_offset(offset.max(0.0));
+                } else if let Some(ix) = keys.select {
+                    // Moved to by the keyboard: scrolled only as far as brings it in view.
+                    let top = ix as f32 * (ROW + spacing);
+                    let offset = self.scroll.max(top + ROW - height).min(top);
+                    area = area.vertical_scroll_offset(offset.max(0.0));
                 }
-                area.show_rows(ui, ROW, shown.len(), |ui, rows| {
-                    for listed in &shown[rows] {
-                        let selected = picked.is_some_and(|p| p.name == listed.name);
-                        let row = list_row(ui, listed, selected);
+                let room = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(ui.available_width(), height),
+                );
+                let stop = widgets::list_stop(ui, list, room);
+                let output = area.show_rows(ui, ROW, shown.len(), |ui, rows| {
+                    for (ix, listed) in shown.iter().enumerate().skip(rows.start).take(rows.len()) {
+                        let row = list_row(ui, listed, at == Some(ix));
+                        if cue == Some(ix) {
+                            widgets::paint_list_cue(ui, row.rect);
+                            cued = true;
+                        }
+                        focus::click_row(&row, list);
                         let row = if listed.description.is_empty() {
                             row
                         } else {
@@ -430,11 +468,14 @@ impl CloneDialog {
                         };
                         if row.clicked() || row.double_clicked() {
                             *chosen = Some((listed.url.clone(), row.double_clicked()));
+                            clicked = true;
                         }
                     }
                 });
+                self.scroll = output.state.offset.y;
+                widgets::list_stop_ring(ui, &stop, cued);
             });
-        if chosen.is_some() {
+        if clicked {
             self.reveal = true;
         }
     }
@@ -482,6 +523,11 @@ impl CloneDialog {
     }
 }
 
+/// The stop for Tab of `forge`'s list.
+fn list_id(forge: Forge) -> egui::Id {
+    egui::Id::new(("clone-list-stop", forge))
+}
+
 /// An area `height` tall with what `add` says, in weak text, at its top.
 fn note(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui)) {
     ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
@@ -492,10 +538,11 @@ fn note(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-/// A row of the list, as wide as it, highlighted when `selected` or hovered.
+/// A row of the list, as wide as it, highlighted when `selected` or hovered. Not a stop for Tab
+/// of its own: the list is one.
 fn list_row(ui: &mut Ui, listed: &Listed, selected: bool) -> egui::Response {
     let size = egui::vec2(ui.available_width(), ROW);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::CLICK);
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     let visuals = ui.visuals();
     let fill = if selected {
@@ -651,6 +698,112 @@ mod tests {
         assert_eq!(tab(&h), Tab::Forge(Forge::AzureDevops));
         press(&mut h, egui::Modifiers::CTRL);
         assert_eq!(tab(&h), Tab::Url);
+    }
+
+    fn focused(h: &Harness) -> Option<egui::Id> {
+        h.ctx.memory(|m| m.focused())
+    }
+
+    fn url(h: &Harness) -> String {
+        h.tool.clone.as_ref().expect("open").url.clone()
+    }
+
+    /// GitHub's repositories as its list shows them, with no words looked for.
+    fn listed(h: &Harness) -> Vec<String> {
+        let Listing::Loaded(repos) = &h.tool.clone.as_ref().expect("open").github else {
+            panic!("not loaded");
+        };
+        repos.matching("").iter().map(|l| l.url.clone()).collect()
+    }
+
+    /// Tab goes through the dialog as it reads, each control once: the tabs are one stop,
+    /// which Left and Right move within, and so is the list, with Up, Down, Home and End.
+    #[test]
+    fn tab_visits_each_control_once_in_reading_order() {
+        let (mut h, _parent) = open();
+        assert!(
+            h.ctx.text_edit_focused(),
+            "the URL's field has the keyboard"
+        );
+        h.modifiers = egui::Modifiers::SHIFT;
+        h.key(egui::Key::Tab);
+        h.modifiers = egui::Modifiers::NONE;
+        let tabs = egui::Id::new("clone-tabs");
+        assert_eq!(focused(&h), Some(tabs), "back from the field: the tabs");
+        h.key(egui::Key::ArrowRight);
+        assert_eq!(
+            h.tool.clone.as_ref().unwrap().tab,
+            Tab::Forge(Forge::Github)
+        );
+        assert_eq!(
+            focused(&h),
+            Some(tabs),
+            "Right leaves the keyboard with the tabs"
+        );
+        h.key(egui::Key::ArrowLeft);
+        h.key(egui::Key::ArrowLeft);
+        assert_eq!(
+            h.tool.clone.as_ref().unwrap().tab,
+            Tab::Url,
+            "and stops at the first"
+        );
+        h.key(egui::Key::ArrowRight);
+        h.key(egui::Key::Tab);
+        assert!(h.ctx.text_edit_focused(), "into the page: its search field");
+        h.key(egui::Key::Tab);
+        assert_eq!(focused(&h), Some(list_id(Forge::Github)), "then the list");
+        let urls = listed(&h);
+        h.key(egui::Key::ArrowDown);
+        assert_eq!(url(&h), urls[0], "Down picks the first");
+        h.key(egui::Key::ArrowDown);
+        assert_eq!(url(&h), urls[1]);
+        h.key(egui::Key::End);
+        assert_eq!(url(&h), urls[urls.len() - 1]);
+        h.key(egui::Key::Home);
+        assert_eq!(url(&h), urls[0]);
+        assert_eq!(
+            focused(&h),
+            Some(list_id(Forge::Github)),
+            "the list keeps the keyboard"
+        );
+        h.key(egui::Key::Tab);
+        assert!(
+            h.ctx.text_edit_focused(),
+            "past the rows: the parent folder"
+        );
+        h.key(egui::Key::Tab);
+        assert!(focus_on(&h, "Browse…"));
+        h.key(egui::Key::Tab);
+        assert!(h.ctx.text_edit_focused(), "the folder name");
+        // Its button to follow the URL again is greyed: not a stop.
+        h.key(egui::Key::Tab);
+        assert!(focus_on(&h, "Git command"));
+        h.key(egui::Key::Tab);
+        assert!(focus_on(&h, "Cancel"), "Cancel, then the button after it");
+        h.key(egui::Key::Tab);
+        assert!(focus_on(&h, "Clone"));
+    }
+
+    /// Whether the widget with the keyboard is the one showing `text`.
+    fn focus_on(h: &Harness, text: &str) -> bool {
+        let at = h.at(text);
+        focused(h)
+            .and_then(|id| h.ctx.read_response(id))
+            .is_some_and(|r| r.rect.contains(at))
+    }
+
+    /// A click on a tab gives the keyboard to its field; a click on a row, to the list.
+    #[test]
+    fn a_click_gives_the_keyboard_to_what_was_clicked() {
+        let (mut h, _parent) = open();
+        h.click("GitHub");
+        assert!(h.ctx.text_edit_focused(), "the tab's search field");
+        h.click("acme/payments");
+        assert_eq!(focused(&h), Some(list_id(Forge::Github)));
+        let urls = listed(&h);
+        let at = urls.iter().position(|u| *u == url(&h)).unwrap();
+        h.key(egui::Key::ArrowUp);
+        assert_eq!(url(&h), urls[at.saturating_sub(1)]);
     }
 
     /// Every tab is there from the start; one whose forge has no list says why, where the list

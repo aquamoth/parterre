@@ -336,7 +336,7 @@ fn side(ui: &mut Ui, preview: &Preview, repo: &Repo, mode: &mut Mode, asked: &mu
                 let help = ui.add(
                     egui::Label::new(RichText::new(preview.help(m, abbrev)).small().weak())
                         .wrap()
-                        .sense(egui::Sense::click()),
+                        .sense(egui::Sense::CLICK),
                 );
                 if radio.clicked() || help.clicked() {
                     *mode = m;

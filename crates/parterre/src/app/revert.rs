@@ -234,25 +234,24 @@ impl RestoreDialog {
 /// *Restore* and *Keep stashed*, as [`dialogs::actions`] lays them out.
 fn keep_stashed(ui: &mut egui::Ui, enabled: bool) -> dialogs::Answer {
     let mut answer = dialogs::Answer::Open;
-    let size = egui::vec2(ui.available_width(), 34.0);
-    ui.allocate_ui_with_layout(
-        size,
-        egui::Layout::right_to_left(egui::Align::Center),
-        |ui| {
-            let restore = ui
-                .add_enabled_ui(enabled, |ui| {
-                    crate::widgets::primary_button(ui, "Restore", 90.0)
-                })
-                .inner;
-            if restore.clicked() {
-                answer = dialogs::Answer::Primary;
-            }
-            let keep = crate::widgets::text_button(ui, "Keep stashed");
-            if keep.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                answer = dialogs::Answer::Cancel;
-            }
-        },
-    );
+    let widths = [
+        crate::widgets::text_button_width(ui, "Keep stashed"),
+        crate::widgets::filled_button_width(ui, "Restore", 90.0),
+    ];
+    dialogs::button_row(ui, &widths, |ui| {
+        let keep = crate::widgets::text_button(ui, "Keep stashed");
+        let restore = ui
+            .add_enabled_ui(enabled, |ui| {
+                crate::widgets::primary_button(ui, "Restore", 90.0)
+            })
+            .inner;
+        if restore.clicked() {
+            answer = dialogs::Answer::Primary;
+        }
+        if keep.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            answer = dialogs::Answer::Cancel;
+        }
+    });
     answer
 }
 

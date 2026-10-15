@@ -3,10 +3,13 @@
 //! [`parterre_core::glyphs`].
 
 use eframe::egui::{
-    self, Color32, CornerRadius, Id, Painter, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui,
-    Vec2, vec2,
+    self, Color32, CornerRadius, EventFilter, Id, Key, Modifiers, Painter, Rect, Response, Sense,
+    Shape, Stroke, StrokeKind, Ui, Vec2, vec2,
 };
 use parterre_core::glyphs::{self, Glyph, Part};
+use parterre_core::list_keys::{Move, target};
+
+use crate::focus;
 
 /// Size of an icon in a button.
 pub const ICON: f32 = 18.0;
@@ -175,6 +178,7 @@ pub fn icon_button(ui: &mut Ui, glyph: Glyph, on: bool) -> Response {
     paint_background(ui, rect, &response, on, false);
     let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
     paint_glyph(ui.painter(), icon, glyph, icon_color(ui, on));
+    focus::ring(ui, &response, 7);
     response
 }
 
@@ -195,12 +199,16 @@ pub fn syntax_button(ui: &mut Ui, on: &mut bool) {
     }
 }
 
+/// Side of a [`mini_button`].
+const MINI: f32 = 22.0;
+
 /// A small icon button, e.g. inside the find field.
 pub fn mini_button(ui: &mut Ui, glyph: Glyph) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(MINI), Sense::click());
     paint_background(ui, rect, &response, false, false);
     let icon = Rect::from_center_size(rect.center(), Vec2::splat(14.0));
     paint_glyph(ui.painter(), icon, glyph, icon_color(ui, false));
+    focus::ring(ui, &response, 7);
     response
 }
 
@@ -216,6 +224,7 @@ pub fn copy_button(ui: &mut Ui, copied: bool, done: Color32) -> Response {
         let color = ui.visuals().weak_text_color();
         paint_glyph(ui.painter(), icon, glyphs::COPY, color);
     }
+    focus::ring(ui, &response, 7);
     response
 }
 
@@ -242,7 +251,13 @@ pub fn text_button(ui: &mut Ui, text: &str) -> Response {
     ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, color);
+    focus::ring(ui, &response, 7);
     response
+}
+
+/// How wide a [`text_button`] showing `text` is.
+pub fn text_button_width(ui: &Ui, text: &str) -> f32 {
+    text_width(ui, text, &egui::TextStyle::Button.resolve(ui.style())) + 24.0
 }
 
 /// A [`text_button`] with `glyph` in `color` before the text.
@@ -276,30 +291,49 @@ pub fn icon_text_button(ui: &mut Ui, glyph: Glyph, color: Color32, text: &str) -
     paint_glyph(ui.painter(), icon_rect, glyph, color);
     let at = egui::pos2(left + icon + 6.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(at, galley, text_color);
+    focus::ring(ui, &response, 7);
     response
 }
 
 /// A dialog's main button: white text on the accent colour, at least `min_width` wide.
 pub fn primary_button(ui: &mut Ui, text: &str, min_width: f32) -> Response {
+    let accent = tones(ui).accent;
+    filled_button(ui, text, min_width, accent)
+}
+
+/// A dialog's main button for what loses work: white text on the error colour.
+pub fn danger_button(ui: &mut Ui, text: &str, min_width: f32) -> Response {
+    let error = ui.visuals().error_fg_color;
+    filled_button(ui, text, min_width, error)
+}
+
+/// How wide a [`primary_button`] or [`danger_button`] showing `text` is.
+pub fn filled_button_width(ui: &Ui, text: &str, min_width: f32) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    (text_width(ui, text, &font) + 32.0).max(min_width)
+}
+
+/// White text on `color`, at least `min_width` wide.
+fn filled_button(ui: &mut Ui, text: &str, min_width: f32, color: Color32) -> Response {
     let galley = ui.painter().layout_no_wrap(
         text.to_owned(),
         egui::TextStyle::Button.resolve(ui.style()),
         Color32::WHITE,
     );
-    let size = vec2((galley.size().x + 32.0).max(min_width), 30.0);
+    let size = vec2(filled_button_width(ui, text, min_width), 30.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let accent = tones(ui).accent;
     let fill = if response.is_pointer_button_down_on() {
-        accent.gamma_multiply(0.8)
+        color.gamma_multiply(0.8)
     } else if response.hovered() {
-        accent.gamma_multiply(0.9)
+        color.gamma_multiply(0.9)
     } else {
-        accent
+        color
     };
     ui.painter()
         .rect_filled(rect, CornerRadius::same(8), fill.to_opaque());
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    focus::ring(ui, &response, 8);
     response
 }
 
@@ -337,6 +371,7 @@ fn popover_button_area(ui: &mut Ui, id: Id, size: Vec2, on: bool) -> (Rect, Resp
     let response = ui.interact(rect, id, Sense::click());
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
     paint_background(ui, rect, &response, on, open);
+    focus::ring(ui, &response, 7);
     (rect, response)
 }
 
@@ -349,13 +384,15 @@ pub fn segmented<T: PartialEq + Copy>(
     tip: impl Fn(T, Response) -> Response,
 ) -> Option<T> {
     let widths = vec![BUTTON; items.len()];
-    segments(ui, &widths, |ui, i, rect, response| {
+    let selected = items.iter().position(|(v, _)| *v == current);
+    let chosen = segments(ui, &widths, selected, |ui, i, rect, response| {
         let (value, glyph) = items[i];
         paint_segment(ui, rect, &response, value == current);
         let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
         paint_glyph(ui.painter(), icon, glyph, icon_color(ui, false));
-        tip(value, response).clicked().then_some(value)
-    })
+        tip(value, response)
+    });
+    chosen.map(|i| items[i].0)
 }
 
 /// Tabs over the page they show, in one rounded card: the tabs in its header, the page that
@@ -363,6 +400,10 @@ pub fn segmented<T: PartialEq + Copy>(
 /// window go outside the card (Windows' tab guidelines). The selected tab is in strong text,
 /// underlined in the accent colour on the header's line; the others in weak text. Ctrl+Tab and
 /// Ctrl+Shift+Tab go to the next and the previous tab.
+///
+/// The tabs are one stop for Tab, `id`, shown by a dashed line under the selected tab's text:
+/// Left and Right then go to the tab before and after, and Tab on into the page. In a dialog,
+/// a click on a tab gives them the keyboard ([`focus::click_part`]).
 pub fn tabs<T: PartialEq + Copy, R>(
     ui: &mut Ui,
     id: Id,
@@ -379,11 +420,8 @@ pub fn tabs<T: PartialEq + Copy, R>(
     let pick = |i: usize, current: &mut T| *current = items[i].0;
     // With Shift first: a shortcut without it takes it too.
     let (previous, next) = ui.input_mut(|i| {
-        let previous = i.consume_key(
-            egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
-            egui::Key::Tab,
-        );
-        let next = !previous && i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab);
+        let previous = i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab);
+        let next = !previous && i.consume_key(Modifiers::CTRL, Key::Tab);
         (previous, next)
     });
     if next || previous {
@@ -400,6 +438,12 @@ pub fn tabs<T: PartialEq + Copy, R>(
             ui.spacing_mut().item_spacing.y = 0.0;
             let (header, _) =
                 ui.allocate_exact_size(vec2(ui.available_width(), HEADER), Sense::hover());
+            let control = ui.interact(header, id, Sense::focusable_noninteractive());
+            let at = items.iter().position(|(v, _)| v == current);
+            if let Some(i) = step(ui, &control, at, items.len()) {
+                pick(i, current);
+            }
+            let cue = focus::shows_own(&control);
             let top = CornerRadius {
                 nw: 8,
                 ne: 8,
@@ -415,7 +459,7 @@ pub fn tabs<T: PartialEq + Copy, R>(
                 let response = ui.interact(
                     rect.with_max_x(x + text_width(ui, label, &font) + 24.0),
                     id.with(i),
-                    Sense::click(),
+                    Sense::CLICK,
                 );
                 let rect = response.rect;
                 x = rect.right();
@@ -427,15 +471,25 @@ pub fn tabs<T: PartialEq + Copy, R>(
                 let galley = ui
                     .painter()
                     .layout_no_wrap(label.to_string(), font.clone(), color);
-                ui.painter()
-                    .galley(rect.center() - galley.size() / 2.0, galley, color);
+                let text = Rect::from_center_size(rect.center(), galley.size());
+                ui.painter().galley(text.min, galley, color);
                 if on {
                     let underline = Rect::from_min_max(
                         egui::pos2(rect.left() + 8.0, rect.bottom() - 2.5),
                         egui::pos2(rect.right() - 8.0, rect.bottom() + 0.5),
                     );
                     ui.painter().rect_filled(underline, 2, t.accent);
+                    if cue {
+                        let y = text.bottom() + 1.5;
+                        ui.painter().extend(Shape::dashed_line(
+                            &[egui::pos2(text.left(), y), egui::pos2(text.right(), y)],
+                            Stroke::new(1.0, color),
+                            2.0,
+                            2.0,
+                        ));
+                    }
                 }
+                focus::click_part(&response, id);
                 if response.clicked() && !on {
                     pick(i, current);
                 }
@@ -473,45 +527,77 @@ pub fn text_segmented<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, items: 
         .collect();
     let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + 18.0).collect();
     let selected = *current;
-    let clicked = segments(ui, &widths, |ui, i, rect, response| {
-        let value = items[i].0;
-        paint_segment(ui, rect, &response, value == selected);
+    let at = items.iter().position(|(v, _)| *v == selected);
+    let clicked = segments(ui, &widths, at, |ui, i, rect, response| {
+        paint_segment(ui, rect, &response, items[i].0 == selected);
         let galley = galleys[i].clone();
         ui.painter()
             .galley(rect.center() - galley.size() / 2.0, galley, color);
-        response.clicked().then_some(value)
+        response
     });
-    if let Some(value) = clicked {
-        *current = value;
+    if let Some(i) = clicked {
+        *current = items[i].0;
     }
 }
 
 /// Segments of the given widths on a shared background, laid out by hand so that they read
-/// left to right in any layout. `segment` paints one and says whether it was chosen.
-fn segments<T>(
+/// left to right in any layout. `segment` paints one; the one clicked is returned. The control
+/// is one stop for Tab: with the keyboard, Left and Right choose the segment before and after
+/// the `selected` one.
+fn segments(
     ui: &mut Ui,
     widths: &[f32],
-    mut segment: impl FnMut(&mut Ui, usize, Rect, Response) -> Option<T>,
-) -> Option<T> {
+    selected: Option<usize>,
+    mut segment: impl FnMut(&mut Ui, usize, Rect, Response) -> Response,
+) -> Option<usize> {
     const PAD: f32 = 2.0;
     let total = widths.iter().sum::<f32>() + PAD * (widths.len() + 1) as f32;
-    let (group, response) = ui.allocate_exact_size(vec2(total, BUTTON), Sense::hover());
+    let (group, response) =
+        ui.allocate_exact_size(vec2(total, BUTTON), Sense::focusable_noninteractive());
+    let mut chosen = step(ui, &response, selected, widths.len());
     ui.painter()
         .rect_filled(group, CornerRadius::same(9), tones(ui).seg_bg);
     let mut x = group.left() + PAD;
-    let mut chosen = None;
     for (i, &w) in widths.iter().enumerate() {
         let rect = Rect::from_min_size(
             egui::pos2(x, group.top() + PAD),
             vec2(w, BUTTON - 2.0 * PAD),
         );
-        let r = ui.interact(rect, response.id.with(i), Sense::click());
-        if let Some(value) = segment(ui, i, rect, r) {
-            chosen = Some(value);
+        let part = ui.interact(rect, response.id.with(i), Sense::CLICK);
+        let r = segment(ui, i, rect, part);
+        focus::click_part(&r, response.id);
+        if r.clicked() {
+            chosen = Some(i);
         }
         x += w + PAD;
     }
+    focus::ring(ui, &response, 9);
     chosen
+}
+
+/// Where Left or Right goes from `selected` of `len` items while `control` has the keyboard
+/// (which takes those keys): to the one before or after it, and nowhere past the ends.
+fn step(ui: &Ui, control: &Response, selected: Option<usize>, len: usize) -> Option<usize> {
+    focus::claim(
+        control,
+        EventFilter {
+            horizontal_arrows: true,
+            ..Default::default()
+        },
+    );
+    if !control.has_focus() || len == 0 {
+        return None;
+    }
+    let step = ui.input_mut(|i| {
+        if i.consume_key(Modifiers::NONE, Key::ArrowLeft) {
+            Some(Move::Back)
+        } else if i.consume_key(Modifiers::NONE, Key::ArrowRight) {
+            Some(Move::Forward)
+        } else {
+            None
+        }
+    });
+    step.and_then(|step| target(selected, len, step))
 }
 
 /// The selected segment is raised: lighter, with a thin shadow.
@@ -530,6 +616,79 @@ fn paint_segment(ui: &Ui, rect: Rect, response: &Response, selected: bool) {
     } else if response.hovered() {
         painter.rect_filled(rect, corner, t.hover);
     }
+}
+
+/// What the keyboard did to a list that is one stop for Tab.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ListKeys {
+    /// The row to select.
+    pub select: Option<usize>,
+    /// Enter was pressed: a double click on the selected row.
+    pub enter: bool,
+}
+
+/// While list `id` has the keyboard: Up and Down move the selection from the `selected` row of
+/// `len` by one, Page Up and Page Down by `page`, and Home and End to the first and the last;
+/// from none, any of them goes to the first. Read before the rows are laid out, so that they
+/// show where it went.
+pub fn list_keys(ui: &Ui, id: Id, selected: Option<usize>, len: usize, page: usize) -> ListKeys {
+    if len == 0 || !ui.memory(|m| m.has_focus(id)) {
+        return ListKeys::default();
+    }
+    ui.input_mut(|i| {
+        let moves = [
+            (Key::Home, Move::First),
+            (Key::End, Move::Last),
+            (Key::ArrowDown, Move::Forward),
+            (Key::ArrowUp, Move::Back),
+            (Key::PageDown, Move::PageForward(page)),
+            (Key::PageUp, Move::PageBack(page)),
+        ];
+        let step = moves
+            .into_iter()
+            .find(|(key, _)| i.consume_key(Modifiers::NONE, *key))
+            .map(|(_, step)| step);
+        ListKeys {
+            select: step.and_then(|step| target(selected, len, step)),
+            enter: i.consume_key(Modifiers::NONE, Key::Enter),
+        }
+    })
+}
+
+/// List `id`'s stop for Tab, over the `rect` its rows are then laid out in. They sense clicks
+/// but don't take the keyboard themselves ([`Sense::CLICK`]); a click on one gives it the list
+/// ([`focus::click_row`]), which is why the stop comes first: made after the click, egui would
+/// take the keyboard from it again for a click elsewhere. It keeps Up and Down ([`list_keys`])
+/// from egui.
+pub fn list_stop(ui: &mut Ui, id: Id, rect: Rect) -> Response {
+    let response = ui.interact(rect, id, Sense::focusable_noninteractive());
+    focus::claim(
+        &response,
+        EventFilter {
+            vertical_arrows: true,
+            ..Default::default()
+        },
+    );
+    response
+}
+
+/// Once the rows of list `stop` are laid out: while it has the keyboard, a row shows it
+/// ([`paint_list_cue`]); if none in view did (`cued`), a ring around the list does.
+pub fn list_stop_ring(ui: &Ui, stop: &Response, cued: bool) {
+    if !cued {
+        focus::ring(ui, stop, 5);
+    }
+}
+
+/// The row of a list that shows the list has the keyboard ([`focus::shows_own_by_id`]): a line
+/// inside it.
+pub fn paint_list_cue(ui: &Ui, row: Rect) {
+    ui.painter().rect_stroke(
+        row.shrink(1.0),
+        5,
+        Stroke::new(1.5, tones(ui).accent),
+        StrokeKind::Inside,
+    );
 }
 
 /// An on/off switch.
@@ -562,6 +721,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     let knob = egui::pos2(x, rect.center().y);
     painter.circle_filled(knob + vec2(0.0, 0.5), 8.0, Color32::from_black_alpha(60));
     painter.circle_filled(knob, 8.0, Color32::WHITE);
+    focus::ring(ui, &response, 10);
     response
 }
 
@@ -575,10 +735,11 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     )
 }
 
-/// A single-line text field in a rounded frame that shows on any background.
+/// A single-line text field in a rounded frame that shows on any background, its line in the
+/// accent colour while it has the keyboard, as the find field's.
 pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
     let t = tones(ui);
-    egui::Frame::new()
+    let shown = egui::Frame::new()
         .fill(t.field)
         .stroke(Stroke::new(1.0, t.field_line))
         .corner_radius(7)
@@ -590,8 +751,16 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
                     .hint_text(hint)
                     .desired_width(width - 16.0),
             )
-        })
-        .inner
+        });
+    if shown.inner.has_focus() {
+        ui.painter().rect_stroke(
+            shown.response.rect,
+            7,
+            Stroke::new(1.5, t.accent),
+            StrokeKind::Inside,
+        );
+    }
+    shown.inner
 }
 
 /// A folder's [`text_field`] with a *Browse…* [`text_button`] after it, as wide as the row, the
@@ -754,18 +923,26 @@ pub fn find_field(ui: &mut Ui, find: &Find, query: &mut String) -> Found {
                         });
                     return;
                 }
-                let [previous, next, clear] = find.keys;
-                let (previous, next, clear) = (previous.as_str(), next.as_str(), clear.as_str());
-                if tip(mini_button(ui, glyphs::CLOSE), "Clear", clear).clicked() {
-                    found.cleared = true;
-                }
-                if tip(mini_button(ui, glyphs::CHEVRON_DOWN), "Next", next).clicked() {
-                    found.next = true;
-                }
-                if tip(mini_button(ui, glyphs::CHEVRON_UP), "Previous", previous).clicked() {
-                    found.previous = true;
-                }
-                ui.label(egui::RichText::new(find.count).small().weak());
+                // Laid out left to right against the right edge, so that Tab visits the
+                // buttons in the order they read.
+                let small = egui::TextStyle::Small.resolve(ui.style());
+                let room = text_width(ui, find.count, &small) + 3.0 * (MINI + 2.0);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add_space((ui.available_width() - room).max(0.0));
+                    ui.label(egui::RichText::new(find.count).small().weak());
+                    let [previous, next, clear] = find.keys;
+                    let (previous, next, clear) =
+                        (previous.as_str(), next.as_str(), clear.as_str());
+                    if tip(mini_button(ui, glyphs::CHEVRON_UP), "Previous", previous).clicked() {
+                        found.previous = true;
+                    }
+                    if tip(mini_button(ui, glyphs::CHEVRON_DOWN), "Next", next).clicked() {
+                        found.next = true;
+                    }
+                    if tip(mini_button(ui, glyphs::CLOSE), "Clear", clear).clicked() {
+                        found.cleared = true;
+                    }
+                });
             });
         });
     found
@@ -795,4 +972,58 @@ pub fn tip_explained(response: Response, title: &str, key: &str, body: &str) -> 
         });
         ui.label(body);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{self, Key};
+
+    use crate::focus::tests::Screen;
+
+    /// Text segments, then a button: and which of them has the keyboard.
+    fn segments_then_a_button(
+        ui: &mut egui::Ui,
+        theme: &mut u8,
+        button: &std::cell::Cell<egui::Id>,
+    ) {
+        super::text_segmented(ui, theme, &[(0, "Light"), (1, "Dark"), (2, "System")]);
+        button.set(ui.button("After").id);
+    }
+
+    /// A segmented control is one stop for Tab, and Left and Right choose within it, up to
+    /// its ends.
+    #[test]
+    fn segments_are_one_stop_chosen_with_left_and_right() {
+        let mut s = Screen::new();
+        let mut theme = 0;
+        let button = std::cell::Cell::new(egui::Id::NULL);
+        let frames = |s: &mut Screen, theme: &mut u8| {
+            for _ in 0..2 {
+                s.frame(|ui| segments_then_a_button(ui, theme, &button));
+            }
+        };
+        frames(&mut s, &mut theme);
+        s.press(Key::Tab);
+        frames(&mut s, &mut theme);
+        let control = s.focused();
+        assert!(control.is_some() && control != Some(button.get()));
+        for (key, expected) in [
+            (Key::ArrowRight, 1),
+            (Key::ArrowRight, 2),
+            (Key::ArrowRight, 2),
+            (Key::ArrowLeft, 1),
+        ] {
+            s.press(key);
+            frames(&mut s, &mut theme);
+            assert_eq!(theme, expected, "after {key:?}");
+            assert_eq!(s.focused(), control, "the control keeps the keyboard");
+        }
+        s.press(Key::Tab);
+        frames(&mut s, &mut theme);
+        assert_eq!(
+            s.focused(),
+            Some(button.get()),
+            "Tab leaves it for what follows"
+        );
+    }
 }

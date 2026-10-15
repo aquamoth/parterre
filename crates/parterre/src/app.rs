@@ -472,6 +472,7 @@ impl ParterreApp {
         // Before the lock: a click on a locked window is the user's input too.
         cc.egui_ctx.add_plugin(privacy::UserInput::default());
         cc.egui_ctx.add_plugin(crate::dialogs::ModalLock::default());
+        cc.egui_ctx.add_plugin(crate::focus::Cues::default());
         // Automated runs are short and show one window (viewports are embedded), so they neither
         // freeze nor need their frame rate capped: they run as fast as they can.
         let frame_limiter = (!vsync && !automation.is_active()).then(FrameLimiter::default);

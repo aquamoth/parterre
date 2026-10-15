@@ -211,7 +211,7 @@ impl MergeDialog {
                                 .weak(),
                         )
                         .wrap()
-                        .sense(egui::Sense::click()),
+                        .sense(egui::Sense::CLICK),
                     );
                     if radio.clicked() || help.clicked() {
                         self.method = m;
