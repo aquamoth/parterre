@@ -2443,7 +2443,12 @@ impl Tool {
         let Some(mut dialog) = self.clone.take() else {
             return;
         };
-        match dialog.show(ctx, self.busy()) {
+        let answer = dialog.show(ctx, self.busy());
+        if let Some(existing) = dialog.opened.take() {
+            self.open = Some(existing);
+            return;
+        }
+        match answer {
             dialogs::Answer::Primary => {
                 let cloning = dialog.cloning();
                 self.clone_parent = Some(cloning.parent.clone());

@@ -53,7 +53,8 @@ search and pick from (Ctrl+Tab goes to the next tab):
 Until its list has come, a forge's tab says it is loading; without a sign-in, it says how to
 sign in.
 Credentials come from git's credential helpers, as for fetching. A clone that fails or is
-cancelled leaves no folder behind.
+cancelled leaves no folder behind. If the clone's folder is there already, *Open* beside the
+message opens it instead.
 
 ## The graph
 

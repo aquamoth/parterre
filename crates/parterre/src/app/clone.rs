@@ -87,6 +87,8 @@ pub struct CloneDialog {
     clipboard: Option<mpsc::Receiver<Option<String>>>,
     pub opener: ViewportId,
     fresh: bool,
+    /// The folder a clone would go in, there already, picked to open instead.
+    pub opened: Option<PathBuf>,
 }
 
 impl CloneDialog {
@@ -137,6 +139,7 @@ impl CloneDialog {
                 .then(|| worker(ctx, || clipboard_text().filter(|t| remote_url(t)))),
             opener,
             fresh: true,
+            opened: None,
         }
     }
 
@@ -246,7 +249,17 @@ impl CloneDialog {
                     .then(|| cloning.error())
                     .flatten();
                 if let Some(error) = &error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                        // Opened here, rather than looked for again in *Open folder…*.
+                        if let Some(existing) = cloning.existing()
+                            && widgets::text_button(ui, "Open")
+                                .on_hover_text("Open this folder instead")
+                                .clicked()
+                        {
+                            self.opened = Some(existing);
+                        }
+                    });
                 }
                 let commands: Vec<String> = if clone::is_url(&cloning.url) {
                     vec![command_text(&clone::command(&cloning))]
@@ -666,6 +679,21 @@ mod tests {
             "{:?}",
             h.texts
         );
+    }
+
+    /// The folder a clone would go in is there already: *Open* beside the error opens it, in
+    /// place of the clone.
+    #[test]
+    fn an_existing_folder_can_be_opened_instead() {
+        let (mut h, parent) = open();
+        let url = h.path().to_string_lossy().into_owned();
+        let existing = parent.path().join(clone::folder_name(&url));
+        std::fs::create_dir(&existing).unwrap();
+        h.type_text(&url);
+        assert!(h.shows_part("already exists"), "{:?}", h.texts);
+        h.click("Open");
+        assert_eq!(h.tool.open.as_deref(), Some(existing.as_path()));
+        assert!(h.tool.clone.is_none(), "the dialog closes");
     }
 
     #[test]

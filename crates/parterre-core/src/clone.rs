@@ -28,6 +28,22 @@ impl Cloning {
 
     /// Why it can't start, if it can't: said under the dialog's fields.
     pub fn error(&self) -> Option<String> {
+        if let Some(error) = self.input_error() {
+            return Some(error);
+        }
+        self.existing()
+            .map(|path| format!("{} already exists.", path.display()))
+    }
+
+    /// The folder the clone would go in, if it is there already and is all that's in the way:
+    /// what the dialog offers to open instead.
+    pub fn existing(&self) -> Option<PathBuf> {
+        let path = self.path();
+        (self.input_error().is_none() && path.exists()).then_some(path)
+    }
+
+    /// What's wrong with the URL, the parent folder or the folder name, if anything.
+    fn input_error(&self) -> Option<String> {
         if !is_url(&self.url) {
             return Some("Enter the repository's URL.".into());
         }
@@ -37,9 +53,6 @@ impl Cloning {
         let name = self.name.trim();
         if name.is_empty() || name == "." || name == ".." {
             return Some("Enter a folder name.".into());
-        }
-        if self.path().exists() {
-            return Some(format!("{} already exists.", self.path().display()));
         }
         None
     }
