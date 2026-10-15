@@ -1,6 +1,6 @@
-//! *Clone repository…* (#358): a tab with a field for the URL, then a tab per forge the user
-//! is signed in to, GitHub and Azure DevOps, listing their repositories to pick from, and
-//! under the tabs the parent folder and the clone's folder name.
+//! *Clone repository…* (#358): a tab with a field for the URL, then a tab per forge, GitHub and
+//! Azure DevOps, listing the user's repositories there to pick from, or why it can't; under the
+//! tabs, for all of them, the parent folder and the clone's folder name.
 //! The branch tool runs the clone like a fetch, and the app opens it once it's done.
 
 use std::path::{Path, PathBuf};
@@ -43,16 +43,6 @@ impl Listing {
             }
         };
     }
-
-    /// Whether its forge gets a tab: once it has listed repositories, or failed for another
-    /// reason than a missing sign-in (or a build without it), which the tab then says.
-    fn has_tab(&self) -> bool {
-        match self {
-            Listing::Loading(_) => false,
-            Listing::Loaded(repos) => !repos.list.is_empty(),
-            Listing::Failed(e) => !e.needs_sign_in() && !matches!(e, ForgeError::Unsupported(_)),
-        }
-    }
 }
 
 /// A tab of the dialog.
@@ -64,16 +54,14 @@ enum Tab {
     Forge(Forge),
 }
 
-/// The tabs for what `github` and `azure` have listed: the URL's, then a forge's for each one
-/// the user is signed in to.
-fn tabs(github: &Listing, azure: &Listing) -> Vec<Tab> {
-    let forges = [(github, Forge::Github), (azure, Forge::AzureDevops)];
+/// The tabs, there from the start: the URL's, then one for each forge this build can ask.
+fn tabs() -> Vec<Tab> {
     std::iter::once(Tab::Url)
         .chain(
-            forges
+            [Forge::Github, Forge::AzureDevops]
                 .into_iter()
-                .filter(|(listing, _)| listing.has_tab())
-                .map(|(_, forge)| Tab::Forge(forge)),
+                .filter(|forge| forge.supported())
+                .map(Tab::Forge),
         )
         .collect()
 }
@@ -223,16 +211,28 @@ impl CloneDialog {
             .raise(fresh)
             .resizable()
             .show(ctx, |ui| {
-                let tabs = tabs(&self.github, &self.azure);
-                if !tabs.contains(&self.tab) {
-                    self.tab = Tab::Url;
-                }
-                self.tab_bar(ui, &tabs);
+                let labels: Vec<(Tab, String)> = tabs()
+                    .into_iter()
+                    .map(|tab| match tab {
+                        Tab::Url => (tab, "URL".to_owned()),
+                        Tab::Forge(forge) => (tab, forge.to_string()),
+                    })
+                    .collect();
+                let items: Vec<(Tab, &str)> =
+                    labels.iter().map(|(t, l)| (*t, l.as_str())).collect();
+                let before = self.tab;
+                let mut tab = self.tab;
                 let mut chosen = None;
-                match self.tab {
-                    Tab::Url => self.url_tab(ui),
-                    Tab::Forge(forge) => self.forge_tab(ui, forge, &mut chosen),
+                // A build that can ask no forge has the URL's page alone, with no tab.
+                if items.len() > 1 {
+                    widgets::tabs(ui, egui::Id::new("clone-tabs"), &mut tab, &items, |ui| {
+                        self.page(ui, &mut chosen)
+                    });
+                } else {
+                    self.page(ui, &mut chosen);
                 }
+                self.tab = tab;
+                self.focus |= self.tab != before;
                 if let Some((url, twice)) = chosen {
                     self.set_url(url);
                     if twice && self.cloning().error().is_none() && !busy {
@@ -264,43 +264,6 @@ impl CloneDialog {
         answer
     }
 
-    /// A forge is still being asked.
-    fn loading(&self) -> bool {
-        [&self.github, &self.azure]
-            .iter()
-            .any(|l| matches!(l, Listing::Loading(_)))
-    }
-
-    /// The tabs, if there's more than the URL's, and a line while the forges are asked.
-    fn tab_bar(&mut self, ui: &mut Ui, tabs: &[Tab]) {
-        let loading = self.loading();
-        if tabs.len() < 2 && !loading {
-            return;
-        }
-        ui.horizontal(|ui| {
-            if tabs.len() > 1 {
-                let labels: Vec<(Tab, String)> = tabs
-                    .iter()
-                    .map(|&tab| match tab {
-                        Tab::Url => (tab, "URL".to_owned()),
-                        Tab::Forge(forge) => (tab, forge.to_string()),
-                    })
-                    .collect();
-                let items: Vec<(Tab, &str)> =
-                    labels.iter().map(|(t, l)| (*t, l.as_str())).collect();
-                let before = self.tab;
-                widgets::text_segmented(ui, &mut self.tab, &items);
-                self.focus |= self.tab != before;
-            }
-            if loading {
-                ui.add_space(6.0);
-                ui.spinner();
-                ui.colored_label(ui.visuals().weak_text_color(), "Loading your repositories…");
-            }
-        });
-        ui.add_space(8.0);
-    }
-
     /// Gives the tab's field the keyboard, if it is to have it, until it has: a frame may be
     /// laid out only to be discarded, as a new window's first is.
     fn take_focus(&mut self, field: &egui::Response) {
@@ -313,104 +276,151 @@ impl CloneDialog {
         }
     }
 
-    /// The field for the URL, and how to get GitHub's list if `gh` isn't signed in.
-    fn url_tab(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Repository URL").strong());
-        let mut url = self.url.clone();
-        let response = widgets::text_field(ui, &mut url, "https://…, git@…", ui.available_width());
-        self.take_focus(&response);
-        if response.changed() {
-            self.set_url(url);
-        }
-        if let Listing::Failed(e) = &self.github
-            && e.needs_sign_in()
-        {
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                let weak = ui.visuals().weak_text_color();
-                ui.colored_label(weak, "Sign in with ");
-                ui.label(RichText::new("gh auth login").monospace());
-                ui.colored_label(weak, " to pick from your GitHub repositories.");
-            });
-        }
+    /// The selected tab's page: its field, and under it an area as tall in every tab, so that
+    /// the dialog keeps its size. `chosen` gets the URL of a repository clicked, and whether it
+    /// was double-clicked.
+    fn page(&mut self, ui: &mut Ui, chosen: &mut Option<(String, bool)>) {
+        let width = ui.available_width();
+        let field = match self.tab {
+            Tab::Url => {
+                let mut url = self.url.clone();
+                let response = widgets::text_field(ui, &mut url, "https://…, git@…", width);
+                if response.changed() {
+                    self.set_url(url);
+                }
+                response
+            }
+            Tab::Forge(forge) => {
+                let hint = format!("Search your {forge} repositories");
+                widgets::text_field(ui, &mut self.query, &hint, width)
+            }
+        };
+        self.take_focus(&field);
+        ui.add_space(4.0);
+        // Rows and the frame around them: its margins and line.
+        let spacing = ui.spacing().item_spacing.y;
+        let frame = 2.0 * 4.0 + 2.0;
+        let rows = |n: usize| n as f32 * (ROW + spacing) - spacing + frame;
+        dialogs::growing(ui, rows(MIN_ROWS), |ui, height| {
+            let height = height.unwrap_or(rows(SHOWN_ROWS));
+            match self.tab {
+                Tab::Url => note(ui, height, |ui| {
+                    ui.label(
+                        "Any URL git clones from: GitHub, Azure DevOps or any other host, over \
+                         HTTPS or SSH. git signs in with its credential helpers, as for a fetch.",
+                    );
+                }),
+                Tab::Forge(forge) => self.forge_area(ui, forge, height - frame, chosen),
+            }
+            ((), rows(SHOWN_ROWS))
+        });
     }
 
-    /// `forge`'s repositories that the words looked for match, or why there are none. `chosen`
-    /// gets the URL of the one clicked, and whether it was double-clicked.
-    fn forge_tab(&mut self, ui: &mut Ui, forge: Forge, chosen: &mut Option<(String, bool)>) {
-        let weak = ui.visuals().weak_text_color();
-        ui.label(RichText::new("Repository").strong());
-        let hint = format!("Search your {forge} repositories");
-        let response = widgets::text_field(ui, &mut self.query, &hint, ui.available_width());
-        self.take_focus(&response);
-        ui.add_space(4.0);
+    /// `forge`'s repositories that the words looked for match, in a list `height` tall inside
+    /// its frame, or why there are none.
+    fn forge_area(
+        &mut self,
+        ui: &mut Ui,
+        forge: Forge,
+        height: f32,
+        chosen: &mut Option<(String, bool)>,
+    ) {
+        let frame = 2.0 * 4.0 + 2.0;
         let listing = match forge {
             Forge::Github => &self.github,
             Forge::AzureDevops => &self.azure,
         };
         let repos = match listing {
-            Listing::Loaded(repos) => repos,
-            Listing::Failed(e) => {
-                ui.colored_label(
-                    weak,
-                    format!("Couldn't list your {forge} repositories: {e}."),
-                );
-                return;
+            Listing::Loading(_) => {
+                return note(ui, height + frame, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!("Loading your {forge} repositories…"));
+                    });
+                });
             }
-            Listing::Loading(_) => return,
+            Listing::Failed(e) if e.needs_sign_in() && forge == Forge::Github => {
+                return note(ui, height + frame, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label("Sign in with ");
+                        ui.label(RichText::new("gh auth login").monospace());
+                        ui.label(
+                            " in a terminal, and your GitHub repositories are listed here the \
+                             next time.",
+                        );
+                    });
+                });
+            }
+            Listing::Failed(e) => {
+                let e = e.to_string();
+                return note(ui, height + frame, |ui| {
+                    ui.label(format!("Couldn't list your {forge} repositories: {e}."));
+                });
+            }
+            Listing::Loaded(repos) if repos.list.is_empty() => {
+                return note(ui, height + frame, |ui| match forge {
+                    Forge::Github => {
+                        ui.label("Your GitHub account has no repositories.");
+                    }
+                    Forge::AzureDevops => {
+                        ui.label(
+                            "No Azure DevOps organisation that git has a sign-in for was found. \
+                             Clone one of its repositories by its URL, signing in when git asks, \
+                             and the organisation's repositories are listed here the next time.",
+                        );
+                    }
+                });
+            }
+            Listing::Loaded(repos) => repos,
         };
         let picked = repos.find_url(self.url.trim());
         let shown = repos.matching(&self.query);
         let reveal = std::mem::take(&mut self.reveal)
             .then(|| shown.iter().position(|l| Some(*l) == picked))
             .flatten();
-        // Rows and the frame around them: its margins and line. The box keeps its height
-        // whatever is found, at most the dialog's.
+        let weak = ui.visuals().weak_text_color();
         let spacing = ui.spacing().item_spacing.y;
-        let frame = 2.0 * 4.0 + 2.0;
-        let rows = |n: usize| n as f32 * (ROW + spacing) - spacing + frame;
-        dialogs::growing(ui, rows(MIN_ROWS), |ui, height| {
-            let height = height.unwrap_or(rows(SHOWN_ROWS)) - frame;
-            egui::Frame::new()
-                .stroke(egui::Stroke::new(1.0, widgets::tones(ui).field_line))
-                .corner_radius(7)
-                .inner_margin(4)
-                .show(ui, |ui| {
-                    if shown.is_empty() {
-                        ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
-                            ui.set_min_size(egui::vec2(ui.available_width(), height));
-                            ui.add_space(4.0);
-                            ui.colored_label(weak, "  None of your repositories match.");
-                        });
-                        return;
-                    }
-                    let mut area = egui::ScrollArea::vertical()
-                        .id_salt(("clone-list", forge))
-                        .max_height(height)
-                        .min_scrolled_height(height)
-                        .auto_shrink([false, false]);
-                    if let Some(ix) = reveal {
-                        let offset = ix as f32 * (ROW + spacing) - (height - ROW) / 2.0;
-                        area = area.vertical_scroll_offset(offset.max(0.0));
-                    }
-                    area.show_rows(ui, ROW, shown.len(), |ui, rows| {
-                        for listed in &shown[rows] {
-                            let selected = picked.is_some_and(|p| p.name == listed.name);
-                            let row = list_row(ui, listed, selected);
-                            let row = if listed.description.is_empty() {
-                                row
-                            } else {
-                                row.on_hover_text(&listed.description)
-                            };
-                            if row.clicked() || row.double_clicked() {
-                                *chosen = Some((listed.url.clone(), row.double_clicked()));
-                            }
-                        }
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(1.0, widgets::tones(ui).field_line))
+            .corner_radius(7)
+            .inner_margin(4)
+            .show(ui, |ui| {
+                if shown.is_empty() {
+                    ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
+                        ui.set_min_size(egui::vec2(ui.available_width(), height));
+                        ui.add_space(4.0);
+                        ui.colored_label(
+                            weak,
+                            format!("  None of your {forge} repositories match."),
+                        );
                     });
+                    return;
+                }
+                let mut area = egui::ScrollArea::vertical()
+                    .id_salt(("clone-list", forge))
+                    .max_height(height)
+                    .min_scrolled_height(height)
+                    .auto_shrink([false, false]);
+                if let Some(ix) = reveal {
+                    let offset = ix as f32 * (ROW + spacing) - (height - ROW) / 2.0;
+                    area = area.vertical_scroll_offset(offset.max(0.0));
+                }
+                area.show_rows(ui, ROW, shown.len(), |ui, rows| {
+                    for listed in &shown[rows] {
+                        let selected = picked.is_some_and(|p| p.name == listed.name);
+                        let row = list_row(ui, listed, selected);
+                        let row = if listed.description.is_empty() {
+                            row
+                        } else {
+                            row.on_hover_text(&listed.description)
+                        };
+                        if row.clicked() || row.double_clicked() {
+                            *chosen = Some((listed.url.clone(), row.double_clicked()));
+                        }
+                    }
                 });
-            ((), rows(SHOWN_ROWS))
-        });
+            });
         if chosen.is_some() {
             self.reveal = true;
         }
@@ -457,6 +467,16 @@ impl CloneDialog {
             }
         });
     }
+}
+
+/// An area `height` tall with what `add` says, in weak text, at its top.
+fn note(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui)) {
+    ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
+        ui.set_min_size(egui::vec2(ui.available_width(), height));
+        ui.visuals_mut().override_text_color = Some(ui.visuals().weak_text_color());
+        ui.add_space(4.0);
+        add(ui);
+    });
 }
 
 /// A row of the list, as wide as it, highlighted when `selected` or hovered.
@@ -581,10 +601,8 @@ mod tests {
     #[test]
     fn a_forges_tab_finds_by_words_and_a_pick_fills_the_url_and_folder() {
         let (mut h, _parent) = open();
-        // The URL's tab first, then GitHub's, which has listed repositories; Azure DevOps',
-        // with no organisation signed in to, has none.
-        assert!(h.shows("URL") && h.shows("GitHub"));
-        assert!(!h.shows("Azure DevOps"), "{:?}", h.texts);
+        // The URL's tab first, then a forge's.
+        assert!(h.shows("URL") && h.shows("GitHub") && h.shows("Azure DevOps"));
         assert!(!h.shows("acme/payments"), "the URL's tab lists nothing");
         h.click("GitHub");
         assert!(h.shows("mira/checkoutprivate") && h.shows("acme/payments"));
@@ -601,43 +619,31 @@ mod tests {
         assert!(h.shows("https://github.com/mira/parterre.git"));
     }
 
+    /// Every tab is there from the start; one whose forge has no list says why, where the list
+    /// would be.
     #[test]
-    fn a_forge_has_a_tab_only_once_signed_in() {
-        let loaded = |names: &[&str]| {
-            Listing::Loaded(Repositories {
-                list: names
-                    .iter()
-                    .map(|name| Listed {
-                        forge: Forge::AzureDevops,
-                        name: (*name).into(),
-                        description: String::new(),
-                        private: false,
-                        fork: false,
-                        archived: false,
-                        url: String::new(),
-                    })
-                    .collect(),
-            })
-        };
+    fn every_tab_is_there_at_once_and_says_why_it_lists_nothing() {
+        let (mut h, _parent) = open();
+        let dialog = h.tool.clone.as_mut().expect("open");
         let (_tx, rx) = mpsc::channel();
-        let github = Listing::Failed(ForgeError::NotSignedIn);
-        assert_eq!(tabs(&github, &Listing::Loading(rx)), [Tab::Url]);
-        assert_eq!(tabs(&github, &loaded(&[])), [Tab::Url], "no organisation");
-        assert_eq!(
-            tabs(&github, &loaded(&["o/p/r"])),
-            [Tab::Url, Tab::Forge(Forge::AzureDevops)]
+        dialog.github = Listing::Loading(rx);
+        dialog.azure = Listing::Loaded(Repositories::default());
+        h.frame();
+        assert!(h.shows("URL") && h.shows("GitHub") && h.shows("Azure DevOps"));
+        h.click("GitHub");
+        assert!(
+            h.shows("Loading your GitHub repositories…"),
+            "{:?}",
+            h.texts
         );
-        let unsupported = Listing::Failed(ForgeError::Unsupported(Forge::Github));
-        assert_eq!(tabs(&unsupported, &loaded(&[])), [Tab::Url]);
-        // Signed in, but GitHub couldn't be reached: the tab says so.
-        let unreachable = Listing::Failed(ForgeError::Network(Forge::Github, "down".into()));
-        assert_eq!(
-            tabs(&unreachable, &loaded(&["o/p/r"])),
-            [
-                Tab::Url,
-                Tab::Forge(Forge::Github),
-                Tab::Forge(Forge::AzureDevops)
-            ]
+        h.tool.clone.as_mut().expect("open").github = Listing::Failed(ForgeError::NotSignedIn);
+        h.frame();
+        assert!(h.shows("gh auth login"), "{:?}", h.texts);
+        h.click("Azure DevOps");
+        assert!(
+            h.shows_part("No Azure DevOps organisation"),
+            "{:?}",
+            h.texts
         );
     }
 

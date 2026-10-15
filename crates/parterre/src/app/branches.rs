@@ -1748,7 +1748,7 @@ pub struct Tool {
     /// A worktree to make the open one.
     pub go_to: Option<PathBuf>,
     /// *Clone repository…*, while it's open.
-    clone: Option<CloneDialog>,
+    pub(super) clone: Option<CloneDialog>,
     /// The parent folder the last clone went in, remembered across runs.
     pub clone_parent: Option<PathBuf>,
     /// A repository just cloned, for the app to open.

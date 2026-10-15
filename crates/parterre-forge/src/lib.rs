@@ -277,6 +277,14 @@ pub enum Forge {
 }
 
 impl Forge {
+    /// Whether this build of parterre can ask it: was built with its feature.
+    pub fn supported(self) -> bool {
+        match self {
+            Forge::Github => cfg!(feature = "github"),
+            Forge::AzureDevops => cfg!(feature = "azure-devops"),
+        }
+    }
+
     /// Whose sign-in parterre asks with, as an error message names it.
     fn account(self) -> &'static str {
         match self {

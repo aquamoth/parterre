@@ -41,8 +41,8 @@ drop a folder on parterre's Dock icon, choose parterre in Finder's *Open With*, 
 
 *File › Clone repository…*, also on the start screen, clones a repository from any URL git
 takes (GitHub, Azure DevOps or any other host) into a new folder, and opens it. The URL is
-typed in its first tab. Each forge you are signed in to gets a tab of its own, listing your
-repositories there to search and pick from:
+typed in its first tab. Each forge has a tab of its own, listing your repositories there to
+search and pick from (Ctrl+Tab goes to the next tab):
 
 - **GitHub**, with the GitHub CLI signed in (`gh auth login`). The URLs are HTTPS or SSH as
   `gh config get git_protocol` says.
@@ -50,7 +50,8 @@ repositories there to search and pick from:
   has settings for (`credential.azrepos:org/…`), and those of the remotes of repositories you
   opened before. The URLs are HTTPS, as Azure DevOps gives them.
 
-A forge's tab appears once its list has come; without a sign-in it has none.
+Until its list has come, a forge's tab says it is loading; without a sign-in, it says how to
+sign in.
 Credentials come from git's credential helpers, as for fetching. A clone that fails or is
 cancelled leaves no folder behind.
 
