@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use super::{Forge, ForgeError, Listed, PullRequest, PullRequests, Remote, Repositories, Token};
+use super::{
+    Forge, ForgeError, Listed, Proposed, PullRequest, PullRequests, Remote, Repositories, Token,
+};
 use parterre_core::git::Git;
 use parterre_core::oid::Oid;
 
@@ -36,6 +38,41 @@ pub fn load(git: &Git) -> Result<PullRequests, ForgeError> {
             |api| active_pull_requests(api, origin),
         )
     })
+}
+
+/// For each branch of an Azure DevOps repository, as `(remote URL, repository, branch)`:
+/// whether an active pull request proposes it. Asks each repository once, for its active pull
+/// requests, signed in as git is there ([`super::proposals`]); `canned` is
+/// `--pull-requests-from`'s list, used instead.
+pub(crate) fn proposals(
+    git: &Git,
+    branches: &[(&str, &AzureRepo, &str)],
+    canned: Option<&str>,
+) -> Vec<Proposed> {
+    let mut asked: Vec<(String, Result<Vec<PullRequest>, ForgeError>)> = Vec::new();
+    branches
+        .iter()
+        .map(|(url, repo, branch)| {
+            let name = repo.full_name();
+            let i = match asked
+                .iter()
+                .position(|(n, _)| n.eq_ignore_ascii_case(&name))
+            {
+                Some(i) => i,
+                None => {
+                    let found = match canned {
+                        Some(json) => load_canned(git, json).map(|p| p.list),
+                        None => signed_in(Some(git.dir()), sign_in_urls(url, repo), &name, |api| {
+                            active_pull_requests(api, repo)
+                        }),
+                    };
+                    asked.push((name.clone(), found));
+                    asked.len() - 1
+                }
+            };
+            Proposed::among(&asked[i].1, &name, branch)
+        })
+        .collect()
 }
 
 /// The repositories to clone of the organisations git knows of ([`organisations`]), with

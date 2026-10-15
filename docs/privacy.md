@@ -116,9 +116,11 @@ for the open pull requests of the branches you have fetched. That sends the repo
 and name, and those branch names, to GitHub, which hosts them. Nothing is asked without signing
 in. The toolbar's pull-request button turns it off ([user guide](usage.md#pull-requests)).
 
-Before you delete a branch on a remote that is on GitHub, parterre asks once more, with
-pull requests shown or not, whether an open pull request proposes that branch: it won't delete
-one that does. That sends the branch names being deleted.
+Before you delete a branch on a remote that is on GitHub or Azure DevOps, parterre asks that
+forge once more, with pull requests shown or not, whether an open pull request proposes that
+branch: it won't delete one that does. GitHub is sent the names of the branches being deleted
+on GitHub remotes, and never those of other remotes; Azure DevOps is asked for the active pull
+requests of the repositories they are deleted from.
 
 When `origin` is on Azure DevOps and git already has a sign-in for it, parterre asks Azure
 DevOps' API, with that sign-in, for the repository's active pull requests. That sends the

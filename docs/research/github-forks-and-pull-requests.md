@@ -708,8 +708,10 @@ percent-decoded.
 - **Limits:** Azure DevOps throttles by "TSTUs" rather than an hourly count
   **(unverified)**. Each answer carried `X-RateLimit-Cost`; a 429 or 503 with `Retry-After`
   waits that long (`ForgeError::Throttled`), on top of the app's usual back-off.
-- **Not built:** the question before deleting a remote branch (`github::proposals`) still asks
-  GitHub only.
+- **Before deleting a remote branch** (`forge::proposals`), each forge is asked about its own
+  remotes' branches only: GitHub about GitHub's (before, a batch on several remotes sent GitHub
+  every branch's name), and each Azure DevOps repository for its active pull requests, once,
+  matched by source branch **(tested 2026-10-15** against `cosmojpn/Apps`**)**.
 - **Listing repositories to clone** (asked for and built 2026-10-15): with the token GCM gives for
   `https://dev.azure.com/cosmojpn`, `GET https://dev.azure.com/cosmojpn/_apis/git/repositories?api-version=7.1`
   listed the organisation's 20 repositories across its 3 projects, with `name`,

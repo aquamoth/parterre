@@ -23,7 +23,7 @@ use std::fmt;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{Forge, ForgeError, PullRequest, PullRequests, Remote, Token};
+use super::{Forge, ForgeError, Proposed, PullRequest, PullRequests, Remote, Token};
 use parterre_core::git::Git;
 
 mod repositories;
@@ -134,38 +134,19 @@ pub fn load(git: &Git) -> Result<PullRequests, ForgeError> {
     })
 }
 
-/// Whether a branch about to be deleted on a remote is proposed by an open pull request (#318).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Proposed {
-    /// Its remote isn't on GitHub: there's nothing to ask.
-    NotOnGithub,
-    No,
-    Open(PullRequest),
-    /// GitHub couldn't be asked, and why.
-    Unknown(String),
-}
-
-/// For each remote branch, as `(remote, branch)`: whether an open pull request proposes it,
-/// into `origin`'s repository or the one it was forked from, from the repository its remote
-/// points at, a fork's too. Asks GitHub once, with pull requests shown or not, for the question
-/// before deleting them; `canned` is `--pull-requests-from`'s list, used instead. Run it on a
-/// worker thread.
-pub fn proposals(git: &Git, branches: &[(String, String)], canned: Option<&str>) -> Vec<Proposed> {
-    let urls = super::remote_urls(git).unwrap_or_default();
-    let repos: Vec<Option<GithubRepo>> = branches
-        .iter()
-        .map(|(remote, _)| {
-            let url = urls.iter().find(|(name, _)| name == remote)?;
-            GithubRepo::from_url(&url.1)
-        })
-        .collect();
-    if repos.iter().all(Option::is_none) {
-        return vec![Proposed::NotOnGithub; branches.len()];
-    }
+/// For each branch of a GitHub repository, as `(repository, branch)`: whether an open pull
+/// request proposes it, into `origin`'s repository or the one it was forked from, a fork's
+/// too. Asks GitHub once, about these branches only ([`super::proposals`]); `canned` is
+/// `--pull-requests-from`'s list, used instead.
+pub(crate) fn proposals(
+    git: &Git,
+    branches: &[(&GithubRepo, &str)],
+    canned: Option<&str>,
+) -> Vec<Proposed> {
     let found = match canned {
         Some(json) => load_canned(git, json).map(|p| p.list),
         None => {
-            let mut names: Vec<String> = branches.iter().map(|(_, b)| b.clone()).collect();
+            let mut names: Vec<String> = branches.iter().map(|(_, b)| (*b).to_owned()).collect();
             names.sort();
             names.dedup();
             origin(git).ok_or(ForgeError::NoForge).and_then(|origin| {
@@ -176,25 +157,7 @@ pub fn proposals(git: &Git, branches: &[(String, String)], canned: Option<&str>)
     };
     branches
         .iter()
-        .zip(repos)
-        .map(|((_, branch), repo)| {
-            let Some(repo) = repo else {
-                return Proposed::NotOnGithub;
-            };
-            let list = match &found {
-                Ok(list) => list,
-                Err(e) => return Proposed::Unknown(e.to_string()),
-            };
-            let repo = repo.full_name();
-            let proposing = list.iter().find(|pr| {
-                pr.head_branch == *branch
-                    && pr
-                        .head_repo
-                        .as_deref()
-                        .is_some_and(|r| r.eq_ignore_ascii_case(&repo))
-            });
-            proposing.map_or(Proposed::No, |pr| Proposed::Open(pr.clone()))
-        })
+        .map(|(repo, branch)| Proposed::among(&found, &repo.full_name(), branch))
         .collect()
 }
 

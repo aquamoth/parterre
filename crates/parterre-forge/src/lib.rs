@@ -110,6 +110,78 @@ impl Origin {
     }
 }
 
+/// Whether a branch about to be deleted on a remote is proposed by an open pull request (#318).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Proposed {
+    /// Its remote is on no forge parterre knows: there's nothing to ask.
+    NotOnForge,
+    No,
+    Open(PullRequest),
+    /// The forge couldn't be asked, and why.
+    Unknown(String),
+}
+
+impl Proposed {
+    /// Whether one of `found`, a forge's open pull requests, proposes `branch` of the
+    /// repository `repo`.
+    fn among(found: &Result<Vec<PullRequest>, ForgeError>, repo: &str, branch: &str) -> Proposed {
+        let list = match found {
+            Ok(list) => list,
+            Err(e) => return Proposed::Unknown(e.to_string()),
+        };
+        let proposing = list.iter().find(|pr| {
+            pr.head_branch == branch
+                && pr
+                    .head_repo
+                    .as_deref()
+                    .is_some_and(|r| r.eq_ignore_ascii_case(repo))
+        });
+        proposing.map_or(Proposed::No, |pr| Proposed::Open(pr.clone()))
+    }
+}
+
+/// For each remote branch, as `(remote, branch)`: whether an open pull request proposes it, on
+/// the forge its remote is on, for the question before deleting them, with pull requests shown
+/// or not. Each forge is asked about its own remotes' branches only, once: GitHub
+/// ([`github::proposals`]), and each Azure DevOps repository ([`azure::proposals`]); nothing
+/// for other remotes. `canned` is `--pull-requests-from`'s list, used instead. Run it on a
+/// worker thread.
+pub fn proposals(git: &Git, branches: &[(String, String)], canned: Option<&str>) -> Vec<Proposed> {
+    let urls = remote_urls(git).unwrap_or_default();
+    let on: Vec<Option<(&str, Origin)>> = branches
+        .iter()
+        .map(|(remote, _)| {
+            let (_, url) = urls.iter().find(|(name, _)| name == remote)?;
+            Some((url.as_str(), Origin::from_url(url)?))
+        })
+        .collect();
+    let mut found = vec![Proposed::NotOnForge; branches.len()];
+    let mut github = Vec::new();
+    let mut azure = Vec::new();
+    for (i, (on, (_, branch))) in on.iter().zip(branches).enumerate() {
+        match on {
+            Some((_, Origin::Github(repo))) => github.push((i, (repo, branch.as_str()))),
+            Some((url, Origin::AzureDevops(repo))) => {
+                azure.push((i, (*url, repo, branch.as_str())))
+            }
+            None => {}
+        }
+    }
+    if !github.is_empty() {
+        let asked: Vec<_> = github.iter().map(|(_, b)| *b).collect();
+        for ((i, _), proposed) in github.iter().zip(github::proposals(git, &asked, canned)) {
+            found[*i] = proposed;
+        }
+    }
+    if !azure.is_empty() {
+        let asked: Vec<_> = azure.iter().map(|(_, b)| *b).collect();
+        for ((i, _), proposed) in azure.iter().zip(azure::proposals(git, &asked, canned)) {
+            found[*i] = proposed;
+        }
+    }
+    found
+}
+
 /// The forge repository `origin` points at, if any. Asks git only, not the forge.
 pub fn origin(git: &Git) -> Option<Origin> {
     let url = git.query(&["remote", "get-url", "origin"]).ok()??;
@@ -198,7 +270,7 @@ fn remote_branch<'a>(remotes: &[Remote], full_name: &'a str) -> Option<(String, 
 }
 
 /// A forge parterre asks for pull requests.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Forge {
     Github,
     AzureDevops,

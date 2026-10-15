@@ -302,7 +302,7 @@ fn a_remote_branch_proposed_by_an_open_pull_request_is_found_before_deleting_it(
     r.git(&["update-ref", "refs/remotes/origin/feature", &tip]);
     let canned = r#"[{"number": 12, "title": "Add feature", "head": "feature", "base": "main"}]"#;
     let branch = |remote: &str, branch: &str| (remote.to_owned(), branch.to_owned());
-    let found = github::proposals(
+    let found = forge::proposals(
         &Git::new(r.path()),
         &[
             branch("origin", "feature"),
@@ -312,19 +312,63 @@ fn a_remote_branch_proposed_by_an_open_pull_request_is_found_before_deleting_it(
         ],
         Some(canned),
     );
-    let github::Proposed::Open(pr) = &found[0] else {
+    let forge::Proposed::Open(pr) = &found[0] else {
         panic!("open: {found:?}")
     };
     assert_eq!((pr.number, pr.title.as_str()), (12, "Add feature"));
-    assert_eq!(found[1], github::Proposed::No);
+    assert_eq!(found[1], forge::Proposed::No);
     // The canned list's pull requests are all origin's own.
-    assert_eq!(found[2], github::Proposed::No);
-    assert_eq!(found[3], github::Proposed::NotOnGithub);
-    // Nothing on GitHub: nothing asked.
+    assert_eq!(found[2], forge::Proposed::No);
+    assert_eq!(found[3], forge::Proposed::NotOnForge);
+    // Nothing on a forge: nothing asked.
     assert_eq!(
-        github::proposals(&Git::new(r.path()), &[branch("elsewhere", "x")], None),
-        [github::Proposed::NotOnGithub]
+        forge::proposals(&Git::new(r.path()), &[branch("elsewhere", "x")], None),
+        [forge::Proposed::NotOnForge]
     );
+}
+
+/// The same before deleting a branch of an Azure DevOps remote: its repository's active pull
+/// requests are looked through, whatever form its remote's URL has.
+#[test]
+fn an_azure_devops_branch_proposed_by_an_active_pull_request_is_found_before_deleting_it() {
+    let mut r = TestRepo::new();
+    let tip = r.commit("A");
+    r.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://o@dev.azure.com/o/My%20Project/_git/r",
+    ]);
+    r.git(&[
+        "remote",
+        "add",
+        "ssh",
+        "git@ssh.dev.azure.com:v3/o/My%20Project/r",
+    ]);
+    r.git(&["remote", "add", "elsewhere", "/srv/git/r"]);
+    r.git(&["update-ref", "refs/remotes/origin/feature", &tip]);
+    let canned = r#"[{"number": 7, "title": "Add feature", "head": "feature", "base": "main"}]"#;
+    let branch = |remote: &str, branch: &str| (remote.to_owned(), branch.to_owned());
+    let found = forge::proposals(
+        &Git::new(r.path()),
+        &[
+            branch("origin", "feature"),
+            branch("origin", "main"),
+            branch("ssh", "feature"),
+            branch("elsewhere", "feature"),
+        ],
+        Some(canned),
+    );
+    let forge::Proposed::Open(pr) = &found[0] else {
+        panic!("open: {found:?}")
+    };
+    assert_eq!(
+        pr.url,
+        "https://dev.azure.com/o/My%20Project/_git/r/pullrequest/7"
+    );
+    assert_eq!(found[1], forge::Proposed::No);
+    assert_eq!(found[2], found[0], "the same repository over SSH");
+    assert_eq!(found[3], forge::Proposed::NotOnForge);
 }
 
 /// An Azure DevOps origin, as its SSH remote names it, and another remote of the same
@@ -408,4 +452,13 @@ fn loads_pull_requests_from_azure_devops() {
         assert_eq!(pr.head.to_hex().len(), 40);
     }
     eprintln!("{} active pull requests", prs.list.len());
+    // Before deleting its branch, an active pull request is found again.
+    if let Some(pr) = prs.list.first() {
+        let found = forge::proposals(
+            &Git::new(r.path()),
+            &[("origin".to_owned(), pr.head_branch.clone())],
+            None,
+        );
+        assert_eq!(found, [forge::Proposed::Open(pr.clone())]);
+    }
 }
