@@ -358,11 +358,12 @@ pub fn segmented<T: PartialEq + Copy>(
     })
 }
 
-/// Tabs over the page they show, which `page` lays out in a frame: the page the controls of
-/// one tab are in, while those of the whole window go outside it (Windows' tab guidelines).
-/// The selected tab is joined to the page, sharing its fill and border, in strong text under an
-/// accent line; the others are plain text. Picking another fades its page in, so that what
-/// changed is seen. Ctrl+Tab and Ctrl+Shift+Tab go to the next and the previous tab.
+/// Tabs over the page they show, in one rounded card: the tabs in its header, the page that
+/// `page` lays out under them. The page holds the controls of one tab, while those of the whole
+/// window go outside the card (Windows' tab guidelines). The selected tab is in strong text,
+/// underlined in the accent colour on the header's line; the others in weak text. Picking
+/// another fades its page in, so that what changed is seen. Ctrl+Tab and Ctrl+Shift+Tab go to
+/// the next and the previous tab.
 pub fn tabs<T: PartialEq + Copy, R>(
     ui: &mut Ui,
     id: Id,
@@ -370,7 +371,8 @@ pub fn tabs<T: PartialEq + Copy, R>(
     items: &[(T, &str)],
     page: impl FnOnce(&mut Ui) -> R,
 ) -> R {
-    const FADE: f64 = 0.15;
+    const FADE: f64 = 0.25;
+    const HEADER: f32 = 34.0;
     let t = tones(ui);
     let font = egui::TextStyle::Button.resolve(ui.style());
     let strong = ui.visuals().strong_text_color();
@@ -381,96 +383,95 @@ pub fn tabs<T: PartialEq + Copy, R>(
         let now = ui.input(|i| i.time);
         ui.data_mut(|d| d.insert_temp(id.with("picked"), now));
     };
-    let (next, previous) = ui.input_mut(|i| {
-        let next = i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab);
+    // With Shift first: a shortcut without it takes it too.
+    let (previous, next) = ui.input_mut(|i| {
         let previous = i.consume_key(
             egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
             egui::Key::Tab,
         );
-        (next, previous)
+        let next = !previous && i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab);
+        (previous, next)
     });
     if next || previous {
         let step = if next { 1 } else { items.len() - 1 };
         pick(ui, (selected + step) % items.len(), current);
     }
-    let outer_spacing = ui.spacing().item_spacing;
-    ui.spacing_mut().item_spacing.y = 0.0;
-    // The tabs, from a little in from the page's rounded corner.
-    let height = 28.0;
-    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-    let mut x = row.left() + 8.0;
-    let mut joined = None;
-    for (i, (value, label)) in items.iter().enumerate() {
-        let on = value == current;
-        let galley = ui.painter().layout_no_wrap(
-            label.to_string(),
-            font.clone(),
-            if on { strong } else { weak },
-        );
-        let rect = Rect::from_min_size(
-            egui::pos2(x, row.top()),
-            vec2(galley.size().x + 24.0, height),
-        );
-        x = rect.right() + 2.0;
-        let response = ui
-            .interact(rect, id.with(i), Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
-        let top = CornerRadius {
-            nw: 7,
-            ne: 7,
-            sw: 0,
-            se: 0,
-        };
-        if on {
-            ui.painter().rect(
-                rect,
-                top,
-                t.group,
-                Stroke::new(1.0, t.field_line),
-                StrokeKind::Inside,
-            );
-            let accent =
-                Rect::from_min_size(rect.min + vec2(6.0, 0.0), vec2(rect.width() - 12.0, 2.0));
-            ui.painter().rect_filled(accent, 1, t.accent);
-            joined = Some(rect);
-        } else if response.hovered() {
-            ui.painter().rect_filled(
-                rect.shrink2(vec2(0.0, 3.0)).translate(vec2(0.0, 3.0)),
-                top,
-                t.hover,
-            );
-        }
-        ui.painter()
-            .galley(rect.center() - galley.size() / 2.0, galley, strong);
-        if response.clicked() && !on {
-            pick(ui, i, current);
-        }
-    }
     let picked_at: Option<f64> = ui.data(|d| d.get_temp(id.with("picked")));
     let since = picked_at.map_or(FADE, |at| ui.input(|i| i.time) - at);
-    let shown = egui::Frame::new()
+    let line = Stroke::new(1.0, t.field_line);
+    egui::Frame::new()
         .fill(t.group)
-        .stroke(Stroke::new(1.0, t.field_line))
+        .stroke(line)
         .corner_radius(9)
-        .inner_margin(10)
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = outer_spacing;
-            if since < FADE {
-                ui.multiply_opacity((since / FADE) as f32);
-                ui.ctx().request_repaint();
+            let outer_spacing = ui.spacing().item_spacing;
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let (header, _) =
+                ui.allocate_exact_size(vec2(ui.available_width(), HEADER), Sense::hover());
+            let top = CornerRadius {
+                nw: 8,
+                ne: 8,
+                sw: 0,
+                se: 0,
+            };
+            ui.painter().rect_filled(header, top, t.seg_bg);
+            ui.painter().hline(header.x_range(), header.bottom(), line);
+            let mut x = header.left() + 6.0;
+            for (i, (value, label)) in items.iter().enumerate() {
+                let on = value == current;
+                let rect = Rect::from_min_size(egui::pos2(x, header.top()), vec2(0.0, HEADER));
+                let response = ui.interact(
+                    rect.with_max_x(x + text_width(ui, label, &font) + 24.0),
+                    id.with(i),
+                    Sense::click(),
+                );
+                let rect = response.rect;
+                x = rect.right();
+                let color = if on || response.hovered() {
+                    strong
+                } else {
+                    weak
+                };
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(label.to_string(), font.clone(), color);
+                ui.painter()
+                    .galley(rect.center() - galley.size() / 2.0, galley, color);
+                if on {
+                    let underline = Rect::from_min_max(
+                        egui::pos2(rect.left() + 8.0, rect.bottom() - 2.5),
+                        egui::pos2(rect.right() - 8.0, rect.bottom() + 0.5),
+                    );
+                    ui.painter().rect_filled(underline, 2, t.accent);
+                }
+                if response.clicked() && !on {
+                    pick(ui, i, current);
+                }
+                response.on_hover_cursor(egui::CursorIcon::PointingHand);
             }
-            page(ui)
-        });
-    // The selected tab opens into the page: no line between them.
-    if let Some(tab) = joined {
-        let gap = Rect::from_min_max(
-            egui::pos2(tab.left() + 1.0, tab.bottom() - 1.0),
-            egui::pos2(tab.right() - 1.0, tab.bottom() + 1.0),
-        );
-        ui.painter().rect_filled(gap, 0, t.group);
-    }
-    ui.spacing_mut().item_spacing = outer_spacing;
-    shown.inner
+            egui::Frame::new()
+                .inner_margin(10)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = outer_spacing;
+                    if since < FADE {
+                        // Eased out: quick at first, settling.
+                        let x = (since / FADE) as f32;
+                        ui.multiply_opacity(1.0 - (1.0 - x).powi(3));
+                        ui.ctx().request_repaint();
+                    }
+                    page(ui)
+                })
+                .inner
+        })
+        .inner
+}
+
+/// How wide `text` is in `font`.
+fn text_width(ui: &Ui, text: &str, font: &egui::FontId) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
+        .size()
+        .x
 }
 
 /// Text segments of which one is selected, e.g. the theme in the settings.

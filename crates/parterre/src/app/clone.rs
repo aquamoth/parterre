@@ -619,6 +619,27 @@ mod tests {
         assert!(h.shows("https://github.com/mira/parterre.git"));
     }
 
+    /// Ctrl+Tab goes to the next tab, Ctrl+Shift+Tab to the previous, round from either end.
+    #[test]
+    fn ctrl_tab_goes_both_ways() {
+        let (mut h, _parent) = open();
+        let tab = |h: &Harness| h.tool.clone.as_ref().expect("open").tab;
+        let press = |h: &mut Harness, modifiers: egui::Modifiers| {
+            h.modifiers = modifiers;
+            h.key(egui::Key::Tab);
+            h.modifiers = egui::Modifiers::NONE;
+        };
+        let back = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+        press(&mut h, egui::Modifiers::CTRL);
+        assert_eq!(tab(&h), Tab::Forge(Forge::Github));
+        press(&mut h, back);
+        assert_eq!(tab(&h), Tab::Url);
+        press(&mut h, back);
+        assert_eq!(tab(&h), Tab::Forge(Forge::AzureDevops));
+        press(&mut h, egui::Modifiers::CTRL);
+        assert_eq!(tab(&h), Tab::Url);
+    }
+
     /// Every tab is there from the start; one whose forge has no list says why, where the list
     /// would be.
     #[test]
