@@ -713,6 +713,10 @@ impl LogWindow {
         if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A)) {
             view.list.select_all(n);
         }
+        // The list the arrow keys move in has the context-menu key too.
+        if ui.input_mut(|i| keys::CONTEXT_MENU.consume(i)) {
+            view.list.menu = true;
+        }
         let page = view.list.page();
         let target = ui.input_mut(|i| {
             let mut key = |k: Key| i.consume_key(Modifiers::NONE, k);
@@ -1440,7 +1444,7 @@ pub(super) fn divider(ui: &mut Ui, id: Id, bar: &Bar) -> Option<f32> {
     } else {
         CursorIcon::ResizeVertical
     };
-    let response = ui.interact(rect, id, Sense::drag()).on_hover_cursor(cursor);
+    let response = ui.interact(rect, id, Sense::DRAG).on_hover_cursor(cursor);
     let active = response.hovered() || response.dragged();
     let painter = ui.painter();
     let fill = if active {
@@ -2270,6 +2274,26 @@ mod tests {
         frame(&ctx, &mut w, vec![typed("3AAA")]);
         assert_eq!(w.find.matches, [3]);
         assert_eq!(selected(&w), Some(3));
+    }
+
+    /// With nothing else having the keyboard, the context-menu key (Shift+F10) opens the menu
+    /// of the commit the arrow keys move; Esc closes the menu, and only then the window.
+    #[test]
+    fn the_context_menu_key_opens_the_selected_commits_menu() {
+        let ctx = egui::Context::default();
+        ctx.add_plugin(crate::menu::ContextMenus);
+        let mut w = window(&["one", "two"]);
+        frame(&ctx, &mut w, Vec::new());
+        click_row(&ctx, &mut w, 1, Modifiers::NONE);
+        assert!(!egui::Popup::is_any_open(&ctx));
+        frame(&ctx, &mut w, vec![key_with(Key::F10, Modifiers::SHIFT)]);
+        frame(&ctx, &mut w, Vec::new());
+        assert!(egui::Popup::is_any_open(&ctx), "the menu is open");
+        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        assert!(!egui::Popup::is_any_open(&ctx), "Esc closes the menu");
+        assert!(w.is_open(), "but not the window");
+        frame(&ctx, &mut w, vec![key(Key::Escape)]);
+        assert!(!w.is_open());
     }
 
     #[test]

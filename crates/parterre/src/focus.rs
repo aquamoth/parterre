@@ -79,6 +79,13 @@ impl egui::Plugin for Cues {
     }
 }
 
+/// Senses clicks and drags, as egui's `Sense::click_and_drag`, without being a stop for Tab: for
+/// what works by the pointer alone, such as a text view's lines, the graph, a scroll bar or a
+/// divider. The window's own keys act on those.
+pub fn pointer_only() -> egui::Sense {
+    egui::Sense::CLICK | egui::Sense::DRAG
+}
+
 /// The keys that move around: they show where the keyboard is.
 fn moves(key: Key) -> bool {
     matches!(
@@ -92,6 +99,8 @@ fn moves(key: Key) -> bool {
             | Key::End
             | Key::PageUp
             | Key::PageDown
+            // The context menu's key, as Shift+F10 (`context_key`).
+            | Key::F10
     )
 }
 
@@ -242,6 +251,7 @@ pub mod tests {
         pub fn new() -> Screen {
             let ctx = egui::Context::default();
             ctx.add_plugin(Cues::default());
+            ctx.add_plugin(crate::menu::ContextMenus);
             Screen {
                 ctx,
                 time: 0.0,

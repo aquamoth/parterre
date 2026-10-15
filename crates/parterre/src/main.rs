@@ -8,6 +8,7 @@ mod app;
 mod automation;
 mod browser;
 mod console;
+mod context_key;
 mod dialogs;
 mod export;
 mod file_dialog;

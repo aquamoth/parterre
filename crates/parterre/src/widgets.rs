@@ -660,12 +660,14 @@ pub struct ListKeys {
     pub select: Option<usize>,
     /// Enter was pressed: a double click on the selected row.
     pub enter: bool,
+    /// The context-menu key was pressed: the selected row's menu.
+    pub menu: bool,
 }
 
 /// While list `id` has the keyboard: Up and Down move the selection from the `selected` row of
 /// `len` by one, Page Up and Page Down by `page`, and Home and End to the first and the last;
-/// from none, any of them goes to the first. Read before the rows are laid out, so that they
-/// show where it went.
+/// from none, any of them goes to the first. Enter and the context-menu key act on it. Read
+/// before the rows are laid out, so that they show where it went.
 pub fn list_keys(ui: &Ui, id: Id, selected: Option<usize>, len: usize, page: usize) -> ListKeys {
     if len == 0 || !ui.memory(|m| m.has_focus(id)) {
         return ListKeys::default();
@@ -686,6 +688,7 @@ pub fn list_keys(ui: &Ui, id: Id, selected: Option<usize>, len: usize, page: usi
         ListKeys {
             select: step.and_then(|step| target(selected, len, step)),
             enter: i.consume_key(Modifiers::NONE, Key::Enter),
+            menu: crate::keys::CONTEXT_MENU.consume(i),
         }
     })
 }

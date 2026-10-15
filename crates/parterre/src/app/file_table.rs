@@ -377,6 +377,8 @@ impl FileTable {
             area = area.vertical_scroll_offset(offset.max(0.0));
         }
         let cue = focus::shows_own_by_id(ui.ctx(), stop).then(|| keys.select.or(at).unwrap_or(0));
+        // The context-menu key opens the menu of the row clicked last.
+        let menu_row = keys.select.or(at).filter(|_| keys.menu);
         let mut cued = false;
         let selection = &self.selection;
         let widths = &self.widths;
@@ -484,7 +486,8 @@ impl FileTable {
                     } else {
                         response
                     };
-                egui::Popup::context_menu(&response)
+                let at = pos2(rect.left() + CELL_PAD, rect.bottom());
+                crate::menu::context_menu(&response, menu_row == Some(row), at)
                     .style(crate::menu::style)
                     .show(|ui| {
                         crate::menu::fit_window(ui, |ui| {

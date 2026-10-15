@@ -157,7 +157,10 @@ crates/parterre        the binary (eframe/egui)
                        the setting, which is egui's zoom factor for every window
   theme.rs             TortoiseGit colours (light, and dark via lightness inversion)
   system_theme.rs      light or dark desktop preference on Linux (XDG portal)
-  menu.rs              the look of menus and popovers, menu items
+  menu.rs              the look of menus and popovers, menu items, right-click menus that
+                       the keyboard opens too
+  context_key.rs       the context-menu key (Windows), which egui doesn't know, handed to
+                       the window in front as Shift+F10
   browser.rs           opens github.com and dev.azure.com pages with the platform's opener
   file_manager.rs      opens a worktree's folder in the platform's file manager, or a
                        terminal there

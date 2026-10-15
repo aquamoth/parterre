@@ -57,6 +57,8 @@ pub struct CommitList {
     pub many: BTreeSet<usize>,
     /// Scroll the selected row into view in the next frame (only if it is out of view).
     pub reveal: bool,
+    /// Open the selected row's menu in the next frame, as the context-menu key asks.
+    pub menu: bool,
     /// The scroll offset and the height of the rows in the last frame, for keeping the
     /// selection in view and for paging.
     pub scroll: f32,
@@ -278,6 +280,10 @@ impl CommitTable<'_> {
         if keys.enter {
             clicks.double_clicked = list.selected;
         }
+        if keys.menu {
+            list.menu = true;
+            list.reveal = true;
+        }
         let cue = focus::shows_own_by_id(ui.ctx(), stop).then(|| list.selected.unwrap_or(0));
         let mut cued = false;
         // As short as one row, not egui's default: a dialog's list of one commit is that tall.
@@ -457,7 +463,9 @@ impl CommitTable<'_> {
                 if response.double_clicked() && !over_icon {
                     clicks.double_clicked = Some(i);
                 }
-                egui::Popup::context_menu(&response)
+                let by_key = list.menu && list.selected == Some(i);
+                let at = pos2(rect.left() + gutter + 8.0, rect.bottom());
+                crate::menu::context_menu(&response, by_key, at)
                     .style(crate::menu::style)
                     .show(|ui| {
                         crate::menu::fit_window(ui, |ui| {
@@ -468,6 +476,7 @@ impl CommitTable<'_> {
                     });
             }
         });
+        list.menu = false;
         list.scroll = output.state.offset.y;
         list.height = output.inner_rect.height();
         widgets::list_stop_ring(ui, &stop, cued);

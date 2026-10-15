@@ -1224,7 +1224,7 @@ impl DiffWindow {
             for i in range {
                 let (rect, response) = ui.allocate_exact_size(
                     vec2(ui.available_width(), row_h),
-                    Sense::click_and_drag(),
+                    crate::focus::pointer_only(),
                 );
                 let r = match &shown[i] {
                     Shown::Fold(hidden) => {
@@ -1973,7 +1973,7 @@ pub(super) fn overview_scroll(
     row_h: f32,
     (_, height, content): (f32, f32, f32),
 ) -> Option<f32> {
-    let response = ui.interact(strip, id, Sense::click_and_drag());
+    let response = ui.interact(strip, id, crate::focus::pointer_only());
     let p = response.interact_pointer_pos()?;
     if !(response.clicked() || response.dragged()) || content <= height {
         return None;
@@ -2010,7 +2010,7 @@ pub(super) fn hscrollbar(
     let room = (track.width() - thumb_w).max(1.0);
     let x = track.left() + room * (*hoff / hmax);
     let thumb = Rect::from_min_size(pos2(x, track.top() + 2.0), vec2(thumb_w, SCROLLBAR - 4.0));
-    let response = ui.interact(track, id, Sense::click_and_drag());
+    let response = ui.interact(track, id, crate::focus::pointer_only());
     if response.dragged() {
         *hoff = (*hoff + response.drag_delta().x * hmax / room).clamp(0.0, hmax);
     } else if response.clicked()

@@ -435,6 +435,8 @@ struct BlameWindow {
     engine: Engine,
     /// The history pane's selected row and scroll position.
     list: CommitList,
+    /// Open the first chosen line's menu in the next frame, as the context-menu key asks.
+    line_menu: bool,
     /// The whole messages of the history pane's commits, fetched from git the first time a
     /// row's subject is hovered.
     details: Details,
@@ -499,6 +501,7 @@ impl BlameWindow {
             cancel: Cancel::new(),
             colour: Cancel::new(),
             list: CommitList::default(),
+            line_menu: false,
             details: Details::default(),
             show_history: settings.show_history,
             history_height: settings.history_height,
@@ -954,6 +957,15 @@ impl BlameWindow {
         if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A)) {
             self.select_all();
         }
+        // The context-menu key: the menu of the history's selected row while the arrow keys
+        // move in it, else of the first line chosen.
+        if ui.input_mut(|i| keys::CONTEXT_MENU.consume(i)) {
+            if self.show_history && self.history().is_some() {
+                self.list.menu = true;
+            } else {
+                self.line_menu = true;
+            }
+        }
         if self.show_history && self.history().is_some() {
             let step = ui.input_mut(|i| {
                 if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
@@ -1390,6 +1402,9 @@ impl BlameWindow {
         self.hoff = self.hoff.clamp(0.0, hmax);
 
         let selection = self.selection;
+        let menu_line = std::mem::take(&mut self.line_menu)
+            .then(|| selection.map(|s| s.span().0))
+            .flatten();
         let highlighted = self.chosen;
         let (matches, current) = (&self.find.matches, self.find.current);
         let pointer = ui.input(|i| i.pointer.interact_pos());
@@ -1414,7 +1429,7 @@ impl BlameWindow {
                 last = Some(i);
                 let (rect, response) = ui.allocate_exact_size(
                     vec2(ui.available_width(), row_h),
-                    Sense::click_and_drag(),
+                    crate::focus::pointer_only(),
                 );
                 let line = &blame.lines[i];
                 let origin = &blame.origins[line.origin];
@@ -1557,7 +1572,8 @@ impl BlameWindow {
                 } else {
                     response
                 };
-                egui::Popup::context_menu(&response)
+                let at = pos2(text_x, rect.bottom());
+                crate::menu::context_menu(&response, menu_line == Some(i), at)
                     .style(crate::menu::style)
                     .show(|ui| {
                         crate::menu::fit_window(ui, |ui| {
