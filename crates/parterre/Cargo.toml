@@ -24,7 +24,8 @@ syntax = ["parterre-highlight/syntax"]
 # Open pull requests from GitHub, shown on their head commits, and the user's repositories to
 # clone.
 github = ["parterre-forge/github"]
-# Active pull requests from Azure DevOps, shown as GitHub's are.
+# Active pull requests from Azure DevOps, shown as GitHub's are, and the repositories of the
+# user's organisations to clone.
 azure-devops = ["parterre-forge/azure-devops"]
 # The update check (#258), and whatever else parterre asks or sends over the network: off, it
 # makes no requests of its own. The switch for packagers (docs/building.md#features).

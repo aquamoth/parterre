@@ -15,8 +15,8 @@ readme = "README.md"
 # Open pull requests and the user's repositories from GitHub's API (`github`): the HTTPS client.
 # Without it, loading them fails.
 github = ["dep:ureq"]
-# Active pull requests from Azure DevOps' API (`azure-devops`), with the same client. Without
-# it, loading them fails.
+# Active pull requests and repositories from Azure DevOps' API (`azure-devops`), with the same
+# client. Without it, loading them fails.
 azure-devops = ["dep:ureq"]
 
 [dependencies]

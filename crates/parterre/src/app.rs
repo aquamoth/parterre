@@ -1160,7 +1160,7 @@ impl ParterreApp {
             "legend" => self.show_legend = true,
             "first-run" => self.open_first_run_prompt(),
             "settings" => self.open_settings(self.settings_page),
-            "clone" => self.branches.clone_repository(ctx, egui::ViewportId::ROOT),
+            "clone" => self.clone_repository(ctx),
             "fetch" | "pull" => {
                 let repo = self.repo.clone().ok_or("no repository is open")?;
                 return self.open_branch_dialog(ctx, &repo, what, "");
@@ -1519,6 +1519,14 @@ impl ParterreApp {
         }
     }
 
+    /// Opens *Clone repository…* over the main window, or brings it forward. The repositories
+    /// opened before name the Azure DevOps organisations it lists.
+    pub(super) fn clone_repository(&mut self, ctx: &egui::Context) {
+        let known = self.recent.iter().map(Path::to_owned).collect();
+        self.branches
+            .clone_repository(ctx, egui::ViewportId::ROOT, known);
+    }
+
     /// Why pull requests the user asked for couldn't be loaded, and what to do about it.
     fn pull_requests_dialog(&mut self, ctx: &egui::Context) {
         let Some(error) = &self.pull_requests_error else {
@@ -1873,8 +1881,7 @@ impl ParterreApp {
                         .on_hover_text("From GitHub, Azure DevOps or any URL git takes")
                         .clicked()
                     {
-                        self.branches
-                            .clone_repository(ui.ctx(), egui::ViewportId::ROOT);
+                        self.clone_repository(ui.ctx());
                     }
                 });
             });

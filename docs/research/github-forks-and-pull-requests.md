@@ -710,7 +710,7 @@ percent-decoded.
   waits that long (`ForgeError::Throttled`), on top of the app's usual back-off.
 - **Not built:** the question before deleting a remote branch (`github::proposals`) still asks
   GitHub only.
-- **Listing repositories to clone** (asked for on 2026-10-15): with the token GCM gives for
+- **Listing repositories to clone** (asked for and built 2026-10-15): with the token GCM gives for
   `https://dev.azure.com/cosmojpn`, `GET https://dev.azure.com/cosmojpn/_apis/git/repositories?api-version=7.1`
   listed the organisation's 20 repositories across its 3 projects, with `name`,
   `project.name`, `remoteUrl` (`https://{org}@dev.azure.com/…`), `sshUrl`, `webUrl`,
@@ -718,4 +718,9 @@ percent-decoded.
   harder: `GET https://app.vssps.visualstudio.com/_apis/profile/profiles/me` answered 401 to
   that token (a personal access token for one organisation can't see the profile). What a
   machine shows without asking: GCM's `credential.azrepos:org/{org}.*` settings, and the
-  organisations of the Azure DevOps remotes of repositories opened before.
+  organisations of the Azure DevOps remotes of repositories opened before. *Clone repository…*
+  lists those organisations' repositories, each signed in with `git credential fill` for
+  `https://{org}@dev.azure.com/{org}` (tested: GCM found the organisation from the user part
+  alone), and clones from `https://{org}@dev.azure.com/{org}/{project}/_git/{repo}`, the form
+  Azure DevOps gives. No setting for organisations was needed here; one may be, for a machine
+  with neither.

@@ -168,7 +168,8 @@ parterre ~/src/other --worktrees   # another one, with its worktrees shown
 
 In the window, *File › Open folder…* (or a folder dropped on it, except on Wayland) opens another repository, and
 *File › Clone repository…* clones one from any URL, or from your GitHub repositories when the
-GitHub CLI is signed in.
+GitHub CLI is signed in, and from your Azure DevOps organisations' when git has a sign-in for
+them.
 
 | Do | To |
 |---|---|

@@ -243,7 +243,7 @@ request goes. A mistake in the file, or a `head` that `origin` has no branch for
 ## Repositories to clone without GitHub
 
 `--github-repositories-from FILE` lists the repositories in FILE in *Clone repository…*
-instead of asking GitHub, with HTTPS URLs. FILE is a JSON array, most recently pushed first:
+instead of asking GitHub, with HTTPS URLs. Azure DevOps isn't asked either. FILE is a JSON array, most recently pushed first:
 
 ```json
 [

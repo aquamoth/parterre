@@ -18,6 +18,9 @@ use parterre_core::revgraph::PullRequestHead;
 
 pub mod azure;
 pub mod github;
+mod repositories;
+
+pub use repositories::{Listed, Repositories};
 
 use azure::AzureRepo;
 use github::GithubRepo;
@@ -78,6 +81,14 @@ impl Origin {
         match self {
             Origin::Github(_) => Forge::Github,
             Origin::AzureDevops(_) => Forge::AzureDevops,
+        }
+    }
+
+    /// `owner/name` on GitHub, `org/project/name` on Azure DevOps.
+    pub fn full_name(&self) -> String {
+        match self {
+            Origin::Github(repo) => repo.full_name(),
+            Origin::AzureDevops(repo) => repo.full_name(),
         }
     }
 

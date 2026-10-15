@@ -1,5 +1,6 @@
 //! *Clone repository…* (#358): one field for the URL, which also filters the signed-in user's
-//! GitHub repositories listed under it, then the parent folder and the clone's folder name.
+//! GitHub and Azure DevOps repositories listed under it, then the parent folder and the clone's
+//! folder name.
 //! The branch tool runs the clone like a fetch, and the app opens it once it's done.
 
 use std::path::{Path, PathBuf};
@@ -8,8 +9,7 @@ use std::sync::{Arc, mpsc};
 use eframe::egui::{self, RichText, Ui, ViewportId};
 use parterre_core::branches::{Action, command_text};
 use parterre_core::clone::{self, Cloning};
-use parterre_forge::github::{self, Listed, Repositories};
-use parterre_forge::{Forge, ForgeError};
+use parterre_forge::{Forge, ForgeError, Listed, Repositories, azure, github};
 
 use crate::file_dialog::Pending;
 use crate::{dialogs, widgets};
@@ -20,12 +20,37 @@ const MIN_ROWS: usize = 4;
 const SHOWN_ROWS: usize = 6;
 const ROW: f32 = 24.0;
 
-/// The user's GitHub repositories, as far as they've come.
+/// The user's repositories on a forge, as far as they've come.
 #[derive(Debug)]
-enum Github {
+enum Listing {
     Loading(mpsc::Receiver<Result<Repositories, ForgeError>>),
     Loaded(Repositories),
     Failed(ForgeError),
+}
+
+impl Listing {
+    /// Takes in what the worker found; true if it came.
+    fn receive(&mut self, forge: Forge) -> bool {
+        let Listing::Loading(rx) = self else {
+            return false;
+        };
+        *self = match rx.try_recv() {
+            Ok(Ok(repos)) => Listing::Loaded(repos),
+            Ok(Err(e)) => Listing::Failed(e),
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Listing::Failed(ForgeError::Network(forge, "the request stopped".into()))
+            }
+        };
+        true
+    }
+
+    fn list(&self) -> &[Listed] {
+        match self {
+            Listing::Loaded(repos) => &repos.list,
+            _ => &[],
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -36,7 +61,10 @@ pub struct CloneDialog {
     /// The folder name was typed, so it no longer follows the URL.
     name_edited: bool,
     browse: Option<Pending<()>>,
-    github: Github,
+    github: Listing,
+    azure: Listing,
+    /// What both have listed: GitHub's, then Azure DevOps'.
+    repos: Repositories,
     /// The list scrolls to the repository picked, which may have been found by words.
     reveal: bool,
     /// A URL from the clipboard, for an empty field.
@@ -46,21 +74,30 @@ pub struct CloneDialog {
 }
 
 impl CloneDialog {
-    /// Starts asking GitHub for the list, or reads `canned` (`--github-repositories-from`),
-    /// and the clipboard if `clipboard`. `parent` is the parent folder used last.
+    /// Starts asking GitHub and Azure DevOps for the lists, or reads `canned`
+    /// (`--github-repositories-from`) and asks neither, and the clipboard if `clipboard`.
+    /// `parent` is the parent folder used last; `known` the repositories opened before, whose
+    /// remotes name Azure DevOps organisations.
     pub fn new(
         ctx: &egui::Context,
         parent: Option<&Path>,
         canned: Option<Arc<str>>,
+        known: Vec<PathBuf>,
         clipboard: bool,
         opener: ViewportId,
     ) -> Self {
-        let github = match canned {
-            Some(json) => match github::repositories_canned(&json) {
-                Ok(repos) => Github::Loaded(repos),
-                Err(e) => Github::Failed(e),
-            },
-            None => Github::Loading(worker(ctx, github::repositories)),
+        let (github, azure) = match canned {
+            Some(json) => (
+                match github::repositories_canned(&json) {
+                    Ok(repos) => Listing::Loaded(repos),
+                    Err(e) => Listing::Failed(e),
+                },
+                Listing::Loaded(Repositories::default()),
+            ),
+            None => (
+                Listing::Loading(worker(ctx, github::repositories)),
+                Listing::Loading(worker(ctx, move || azure::repositories(&known))),
+            ),
         };
         let parent = parent
             .filter(|p| p.is_dir())
@@ -74,7 +111,11 @@ impl CloneDialog {
             name: String::new(),
             name_edited: false,
             browse: None,
+            repos: Repositories {
+                list: [github.list(), azure.list()].concat(),
+            },
             github,
+            azure,
             reveal: false,
             clipboard: clipboard
                 .then(|| worker(ctx, || clipboard_text().filter(|t| remote_url(t)))),
@@ -119,18 +160,9 @@ impl CloneDialog {
 
     /// Takes in what the workers found, and a folder picked with *Browse…*.
     fn receive(&mut self) {
-        if let Github::Loading(rx) = &self.github {
-            match rx.try_recv() {
-                Ok(Ok(repos)) => self.github = Github::Loaded(repos),
-                Ok(Err(e)) => self.github = Github::Failed(e),
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.github = Github::Failed(ForgeError::Network(
-                        Forge::Github,
-                        "the request stopped".into(),
-                    ))
-                }
-            }
+        let github = self.github.receive(Forge::Github);
+        if self.azure.receive(Forge::AzureDevops) || github {
+            self.repos.list = [self.github.list(), self.azure.list()].concat();
         }
         let clipboard = self.clipboard.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(text) => Some(text),
@@ -166,9 +198,10 @@ impl CloneDialog {
             .show(ctx, |ui| {
                 ui.label(RichText::new("Repository URL").strong());
                 let mut url = self.url.clone();
-                let hint = match &self.github {
-                    Github::Failed(_) => "https://…, git@…",
-                    _ => "https://…, git@…, or search your GitHub repositories",
+                let hint = if self.repos.list.is_empty() && !self.loading() {
+                    "https://…, git@…"
+                } else {
+                    "https://…, git@…, or search your repositories"
                 };
                 let response = widgets::text_field(ui, &mut url, hint, ui.available_width());
                 if fresh {
@@ -179,7 +212,7 @@ impl CloneDialog {
                 }
                 ui.add_space(4.0);
                 let mut chosen = None;
-                self.github_list(ui, &mut chosen);
+                self.repository_list(ui, &mut chosen);
                 if let Some((url, twice)) = chosen {
                     self.set_url(url);
                     if twice && self.cloning().error().is_none() && !busy {
@@ -211,38 +244,51 @@ impl CloneDialog {
         answer
     }
 
-    /// The GitHub repositories the field matches, or a line saying why there are none.
-    /// `chosen` gets the URL of the one clicked, and whether it was double-clicked.
-    fn github_list(&mut self, ui: &mut Ui, chosen: &mut Option<(String, bool)>) {
+    /// A forge is still being asked.
+    fn loading(&self) -> bool {
+        [&self.github, &self.azure]
+            .iter()
+            .any(|l| matches!(l, Listing::Loading(_)))
+    }
+
+    /// The repositories the field matches, GitHub's then Azure DevOps', with a line while they
+    /// load, and one for each forge saying why it has none, if there's anything to say (not to
+    /// someone who doesn't use Azure DevOps). `chosen` gets the URL of the one clicked, and
+    /// whether it was double-clicked.
+    fn repository_list(&mut self, ui: &mut Ui, chosen: &mut Option<(String, bool)>) {
         let weak = ui.visuals().weak_text_color();
-        let repos = match &self.github {
-            Github::Loading(_) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.colored_label(weak, "Loading your GitHub repositories…");
-                });
-                return;
+        if self.loading() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.colored_label(weak, "Loading your repositories…");
+            });
+        }
+        for (listing, forge) in [
+            (&self.github, Forge::Github),
+            (&self.azure, Forge::AzureDevops),
+        ] {
+            match listing {
+                // A build without the forge has no list to speak of.
+                Listing::Loading(_)
+                | Listing::Loaded(_)
+                | Listing::Failed(ForgeError::Unsupported(_)) => {}
+                Listing::Failed(e) if e.needs_sign_in() && forge == Forge::Github => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.colored_label(weak, "Sign in with ");
+                        ui.label(RichText::new("gh auth login").monospace());
+                        ui.colored_label(weak, " to pick from your GitHub repositories.");
+                    });
+                }
+                Listing::Failed(e) => {
+                    ui.colored_label(
+                        weak,
+                        format!("Couldn't list your {forge} repositories: {e}."),
+                    );
+                }
             }
-            // A build without GitHub has no list to speak of.
-            Github::Failed(ForgeError::Unsupported(_)) => return,
-            Github::Failed(e) if e.needs_sign_in() => {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.colored_label(weak, "Sign in with ");
-                    ui.label(RichText::new("gh auth login").monospace());
-                    ui.colored_label(weak, " to pick from your GitHub repositories.");
-                });
-                return;
-            }
-            Github::Failed(e) => {
-                ui.colored_label(
-                    weak,
-                    format!("Couldn't list your GitHub repositories: {e}."),
-                );
-                return;
-            }
-            Github::Loaded(repos) => repos,
-        };
+        }
+        let repos = &self.repos;
         if repos.list.is_empty() {
             return;
         }
@@ -273,7 +319,7 @@ impl CloneDialog {
                         ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
                             ui.set_min_size(egui::vec2(ui.available_width(), height));
                             ui.add_space(4.0);
-                            ui.colored_label(weak, "  None of your GitHub repositories match.");
+                            ui.colored_label(weak, "  None of your repositories match.");
                         });
                         return;
                     }
@@ -296,7 +342,7 @@ impl CloneDialog {
                                 row.on_hover_text(&listed.description)
                             };
                             if row.clicked() || row.double_clicked() {
-                                *chosen = Some((repos.url(listed), row.double_clicked()));
+                                *chosen = Some((listed.url.clone(), row.double_clicked()));
                             }
                         }
                     });
@@ -462,7 +508,7 @@ mod tests {
         h.tool.canned_repositories = Some(Arc::from(REPOS));
         h.tool.clone_parent = Some(parent.path().to_owned());
         let ctx = h.ctx.clone();
-        h.tool.clone_repository(&ctx, ViewportId::ROOT);
+        h.tool.clone_repository(&ctx, ViewportId::ROOT, Vec::new());
         h.until("the dialog opens", |h| h.shows("Clone a repository"));
         for _ in 0..5 {
             h.frame();

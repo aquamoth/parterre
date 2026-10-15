@@ -127,9 +127,9 @@ struct Cli {
     #[arg(long, value_name = "FILE", hide = true)]
     pull_requests_from: Option<PathBuf>,
 
-    /// List the GitHub repositories in FILE to clone from instead of asking GitHub, for
-    /// screenshots and demos: a JSON array of {"name", "description", "private", "fork",
-    /// "archived"}, name being owner/name (see docs/automation.md).
+    /// List the GitHub repositories in FILE to clone from instead of asking GitHub (or Azure
+    /// DevOps), for screenshots and demos: a JSON array of {"name", "description", "private",
+    /// "fork", "archived"}, name being owner/name (see docs/automation.md).
     #[arg(long, value_name = "FILE", hide = true)]
     github_repositories_from: Option<PathBuf>,
 

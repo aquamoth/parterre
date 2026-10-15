@@ -10,13 +10,16 @@
 //!   tried), and it would be a second program to rely on. Research:
 //!   `docs/research/github-forks-and-pull-requests.md` §15.
 //! - **Forks:** pull requests from forks are left out; forks are rare on Azure DevOps.
+//!
+//! Also the repositories of the organisations git knows of, to clone one ([`repositories`]).
 
 #[cfg(feature = "azure-devops")]
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use super::{Forge, ForgeError, PullRequest, PullRequests, Remote, Token};
+use super::{Forge, ForgeError, Listed, PullRequest, PullRequests, Remote, Repositories, Token};
 use parterre_core::git::Git;
 use parterre_core::oid::Oid;
 
@@ -26,8 +29,127 @@ const WEB: &str = "https://dev.azure.com/";
 /// one request per 500, signed in as git is. Run it on a worker thread.
 pub fn load(git: &Git) -> Result<PullRequests, ForgeError> {
     pull_requests(git, |url, origin| {
-        with_api(git, url, origin, |api| active_pull_requests(api, origin))
+        signed_in(
+            Some(git.dir()),
+            sign_in_urls(url, origin),
+            &origin.full_name(),
+            |api| active_pull_requests(api, origin),
+        )
     })
+}
+
+/// The repositories to clone of the organisations git knows of ([`organisations`]), with
+/// those of `known` repositories' remotes: each organisation's, signed in as git is there, by
+/// name. One without a sign-in, or that Azure DevOps doesn't find, is left out quietly: it may
+/// be named only by an SSH remote, or long gone. Another failure is the answer only if no
+/// organisation listed any. Without an organisation, Azure DevOps isn't asked. Run it on a
+/// worker thread.
+pub fn repositories(known: &[PathBuf]) -> Result<Repositories, ForgeError> {
+    if !cfg!(feature = "azure-devops") {
+        return Err(ForgeError::Unsupported(Forge::AzureDevops));
+    }
+    let mut list = Vec::new();
+    let mut failed = None;
+    for org in organisations(known) {
+        let root = format!("{WEB}{org}");
+        // Named as the user too, so that Git Credential Manager finds the organisation without
+        // `credential.useHttpPath`.
+        let url = format!("https://{org}@dev.azure.com/{org}");
+        match signed_in(None, vec![(url, root)], &org, |api| {
+            org_repositories(api, &org)
+        }) {
+            Ok(repositories) => list.extend(repositories),
+            Err(e) if e.needs_sign_in() || matches!(e, ForgeError::NotFound { .. }) => {}
+            Err(e) => {
+                failed.get_or_insert(e);
+            }
+        }
+    }
+    match failed {
+        Some(e) if list.is_empty() => Err(e),
+        _ => Ok(Repositories { list }),
+    }
+}
+
+/// The organisations git knows of: those Git Credential Manager has settings for
+/// (`credential.azrepos:org/{org}.*`, which `git credential-manager azure-repos bind` writes),
+/// then those of the Azure DevOps remotes of `known` repositories. Azure DevOps can't be asked
+/// which a user belongs to: a personal access token for one organisation can't see the
+/// profile (research §15).
+fn organisations(known: &[PathBuf]) -> Vec<String> {
+    let mut cmd = Command::new(parterre_core::git::program());
+    parterre_core::shell_path::apply(&mut cmd)
+        .args(["config", "--get-regexp", r"^credential\.azrepos:org/"])
+        // The user's and the system's settings, not those of a repository parterre was
+        // started in.
+        .current_dir(std::env::temp_dir());
+    // None set is an exit code of 1.
+    let config = super::output_within(&mut cmd, "", Duration::from_secs(5))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let remotes: Vec<String> = known
+        .iter()
+        .flat_map(|dir| super::remote_urls(&Git::new(dir)).unwrap_or_default())
+        .map(|(_, url)| url)
+        .collect();
+    let remotes: Vec<&str> = remotes.iter().map(String::as_str).collect();
+    organisations_from(&config, &remotes)
+}
+
+/// [`organisations`] from `git config --get-regexp`'s lines and remote URLs: each once,
+/// whatever its case, as first named.
+fn organisations_from(config: &str, remotes: &[&str]) -> Vec<String> {
+    let bound = config.lines().filter_map(|line| {
+        let key = line.split_once(' ').map_or(line, |(key, _)| key);
+        let (org, _) = key
+            .strip_prefix("credential.azrepos:org/")?
+            .rsplit_once('.')?;
+        (!org.is_empty() && org.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+            .then(|| org.to_owned())
+    });
+    let remotes = remotes
+        .iter()
+        .filter_map(|url| Some(AzureRepo::from_url(url)?.org));
+    let mut orgs: Vec<String> = Vec::new();
+    for org in bound.chain(remotes) {
+        if !orgs.iter().any(|o| o.eq_ignore_ascii_case(&org)) {
+            orgs.push(org);
+        }
+    }
+    orgs
+}
+
+/// The repositories of the organisation `org` that can be cloned (not disabled), by name, with
+/// their HTTPS clone URLs as Azure DevOps gives them, naming the organisation as the user.
+pub(crate) fn org_repositories(api: &dyn Api, org: &str) -> Result<Vec<Listed>, ForgeError> {
+    let answer: json::List<json::Repository> =
+        serde_json::from_str(&api.get("/_apis/git/repositories?api-version=7.1")?)
+            .map_err(|e| ForgeError::Parse(Forge::AzureDevops, e.to_string()))?;
+    let mut list: Vec<Listed> = answer
+        .value
+        .into_iter()
+        .filter(|r| !r.is_disabled)
+        .map(|r| {
+            let repo = AzureRepo {
+                org: org.to_owned(),
+                project: r.project.name,
+                name: r.name,
+                host: Host::DevAzure,
+            };
+            Listed {
+                forge: Forge::AzureDevops,
+                name: repo.full_name(),
+                description: String::new(),
+                private: r.project.visibility != "public",
+                fork: r.is_fork,
+                archived: false,
+                url: repo.clone_url(),
+            }
+        })
+        .collect();
+    list.sort_by_key(|l| l.name.to_lowercase());
+    Ok(list)
 }
 
 /// Pull requests from `json` instead of Azure DevOps (`--pull-requests-from`), as
@@ -71,9 +193,9 @@ fn pull_requests(
 }
 
 /// Where to ask git for a sign-in to `repo`, whose remote URL is `url`, in order, each with the
-/// root of the API that sign-in is sent to: the HTTPS URL git fetches from, then the same
-/// repository on `dev.azure.com`, which Git Credential Manager may know instead of
-/// `{org}.visualstudio.com` (it did where this was tried).
+/// root of the API that sign-in is sent to: the HTTPS URL git fetches from, then the URL Azure
+/// DevOps gives to clone it, which Git Credential Manager may know instead of
+/// `{org}.visualstudio.com` (it did where this was tried), or of a URL with no user.
 #[cfg_attr(not(feature = "azure-devops"), allow(dead_code))]
 fn sign_in_urls(url: &str, repo: &AzureRepo) -> Vec<(String, String)> {
     let mut urls = Vec::new();
@@ -88,7 +210,7 @@ fn sign_in_urls(url: &str, repo: &AzureRepo) -> Vec<(String, String)> {
         };
         urls.push((url.to_owned(), root));
     }
-    let canonical = repo.web_url();
+    let canonical = repo.clone_url();
     if urls
         .iter()
         .all(|(u, _)| u.trim_end_matches('/') != canonical)
@@ -122,13 +244,17 @@ impl Credential {
 /// The sign-in git's credential helpers have for `url`, as git would fetch with it, without
 /// ever asking the user: [`ForgeError::NoGitSignIn`] if there is none, or it isn't given within
 /// 20 s (Git Credential Manager may renew it over the network).
+/// `dir` is the repository whose settings count too, if any.
 #[cfg_attr(not(feature = "azure-devops"), allow(dead_code))]
-pub(crate) fn sign_in(git: &Git, url: &str) -> Result<Credential, ForgeError> {
+pub(crate) fn sign_in(dir: Option<&Path>, url: &str) -> Result<Credential, ForgeError> {
     let mut cmd = Command::new(parterre_core::git::program());
-    parterre_core::shell_path::apply(&mut cmd)
-        .arg("-C")
-        .arg(git.dir())
-        .args(["-c", "credential.interactive=false", "credential", "fill"])
+    parterre_core::shell_path::apply(&mut cmd);
+    match dir {
+        Some(dir) => cmd.arg("-C").arg(dir),
+        // Not wherever parterre was started, whose repository's settings would count.
+        None => cmd.current_dir(std::env::temp_dir()),
+    };
+    cmd.args(["-c", "credential.interactive=false", "credential", "fill"])
         // No prompt in a terminal, and no askpass program (an empty one stops git from falling
         // back to `core.askPass` and `SSH_ASKPASS`).
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -171,24 +297,26 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
-/// Runs `calls` against the API, signed in with the first sign-in git has of
-/// [`sign_in_urls`] that Azure DevOps takes; without one, Azure DevOps is not asked.
+/// Runs `calls` against the API, signed in with the first sign-in git has of `urls` that
+/// Azure DevOps takes, each sent only to the API root it is paired with; without one, Azure
+/// DevOps is not asked. `dir` is the repository asked about, if any, and `what` names what is
+/// asked about, should Azure DevOps not find it.
 #[cfg(feature = "azure-devops")]
-fn with_api<T>(
-    git: &Git,
-    url: &str,
-    repo: &AzureRepo,
+fn signed_in<T>(
+    dir: Option<&Path>,
+    urls: Vec<(String, String)>,
+    what: &str,
     calls: impl Fn(&dyn Api) -> Result<T, ForgeError>,
 ) -> Result<T, ForgeError> {
     let mut failed = None;
-    for (url, root) in sign_in_urls(url, repo) {
-        let answer = sign_in(git, &url).and_then(|credential| {
+    for (url, root) in urls {
+        let answer = sign_in(dir, &url).and_then(|credential| {
             calls(&Http {
                 agent: super::agent(),
                 root,
                 authorization: Token(credential.authorization()),
                 url,
-                repo: repo.full_name(),
+                what: what.to_owned(),
             })
         });
         match answer {
@@ -202,10 +330,10 @@ fn with_api<T>(
 }
 
 #[cfg(not(feature = "azure-devops"))]
-fn with_api<T>(
-    _: &Git,
+fn signed_in<T>(
+    _: Option<&Path>,
+    _: Vec<(String, String)>,
     _: &str,
-    _: &AzureRepo,
     _: impl Fn(&dyn Api) -> Result<T, ForgeError>,
 ) -> Result<T, ForgeError> {
     Err(ForgeError::Unsupported(Forge::AzureDevops))
@@ -218,9 +346,9 @@ struct Http {
     /// `https://dev.azure.com/{org}` or `https://{org}.visualstudio.com`.
     root: String,
     authorization: Token,
-    /// What the sign-in is git's for, and the repository asked about: for errors.
+    /// What the sign-in is git's for, and what is asked about: for errors.
     url: String,
-    repo: String,
+    what: String,
 }
 
 #[cfg(feature = "azure-devops")]
@@ -267,7 +395,7 @@ impl Api for Http {
             }),
             404 => Err(ForgeError::NotFound {
                 forge: Forge::AzureDevops,
-                repo: self.repo.clone(),
+                repo: self.what.clone(),
             }),
             // A minute if it doesn't say how long, or says it as a date.
             429 => Err(ForgeError::Throttled {
@@ -393,6 +521,25 @@ mod json {
 
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
+    pub struct Repository {
+        pub name: String,
+        pub project: Project,
+        #[serde(default)]
+        pub is_disabled: bool,
+        #[serde(default)]
+        pub is_fork: bool,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct Project {
+        pub name: String,
+        /// `private` or `public`.
+        #[serde(default)]
+        pub visibility: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct Identity {
         pub display_name: String,
     }
@@ -505,6 +652,17 @@ impl AzureRepo {
             self.org,
             encoded(&self.project),
             encoded(&self.name)
+        )
+    }
+
+    /// The HTTPS URL to clone it from, as Azure DevOps gives it: on `dev.azure.com`, with the
+    /// organisation as the user.
+    pub fn clone_url(&self) -> String {
+        format!(
+            "https://{org}@dev.azure.com/{org}/{}/_git/{}",
+            encoded(&self.project),
+            encoded(&self.name),
+            org = self.org,
         )
     }
 }
@@ -801,7 +959,7 @@ mod tests {
         let dir = with_helper(Some(
             "!f() { test \"$1\" = get && echo username=me && echo password=secret-pat; }; f",
         ));
-        let credential = sign_in(&Git::new(dir.path()), URL).unwrap();
+        let credential = sign_in(Some(dir.path()), URL).unwrap();
         // A personal access token goes as a password, with no user name.
         assert_eq!(credential.authorization(), "Basic OnNlY3JldC1wYXQ=");
         assert!(!format!("{credential:?}").contains("secret"));
@@ -812,14 +970,14 @@ mod tests {
         let dir = with_helper(Some(
             "!f() { echo username=me; echo password=eyJ0eXAi.eyJhdWQi.c2ln; }; f",
         ));
-        let credential = sign_in(&Git::new(dir.path()), URL).unwrap();
+        let credential = sign_in(Some(dir.path()), URL).unwrap();
         assert_eq!(credential.authorization(), "Bearer eyJ0eXAi.eyJhdWQi.c2ln");
     }
 
     #[test]
     fn without_a_sign_in_git_isnt_left_asking() {
         let dir = with_helper(None);
-        match sign_in(&Git::new(dir.path()), URL) {
+        match sign_in(Some(dir.path()), URL) {
             Err(ForgeError::NoGitSignIn { url }) => assert_eq!(url, URL),
             other => panic!("{other:?}"),
         }
@@ -836,20 +994,92 @@ mod tests {
                     "https://o.visualstudio.com".to_owned()
                 ),
                 (
-                    "https://dev.azure.com/o/My%20Project/_git/r".to_owned(),
+                    "https://o@dev.azure.com/o/My%20Project/_git/r".to_owned(),
                     "https://dev.azure.com/o".to_owned()
                 ),
             ]
         );
+        // The clone URL Azure DevOps gives names the organisation as the user, so Git
+        // Credential Manager finds it without `credential.useHttpPath`.
+        let cloned = "https://o@dev.azure.com/o/p/_git/r";
         assert_eq!(
-            urls(URL),
-            [(URL.to_owned(), "https://dev.azure.com/o".to_owned())]
+            urls(cloned),
+            [(cloned.to_owned(), "https://dev.azure.com/o".to_owned())]
         );
+        assert_eq!(urls(&format!("{cloned}/")).len(), 1);
         // Over SSH git signs in to nothing; HTTPS is asked as the clone over it would be.
         assert_eq!(
             urls("git@ssh.dev.azure.com:v3/o/p/r"),
-            [(URL.to_owned(), "https://dev.azure.com/o".to_owned())]
+            [(cloned.to_owned(), "https://dev.azure.com/o".to_owned())]
         );
+    }
+
+    #[test]
+    fn organisations_are_those_git_knows_of() {
+        // `git config --get-regexp`: Git Credential Manager's settings per organisation.
+        let config = "credential.azrepos:org/cosmojpn.username me@cosmo.example\n\
+                      credential.azrepos:org/cosmojpn.azureauthority https://login.example/x\n\
+                      credential.azrepos:org/Other-Org.username them\n";
+        let remotes = [
+            "https://dev.azure.com/third/p/_git/r",
+            "https://github.com/o/r",
+            "git@ssh.dev.azure.com:v3/COSMOJPN/p/r",
+            "https://other-org.visualstudio.com/p/_git/r",
+        ];
+        assert_eq!(
+            organisations_from(config, &remotes),
+            ["cosmojpn", "Other-Org", "third"]
+        );
+        assert!(organisations_from("", &[]).is_empty());
+    }
+
+    #[test]
+    fn lists_an_organisations_repositories_to_clone() {
+        let api = Fake::new(vec![Ok(r#"{"count":4,"value":[
+            {"name":"Keycloak","project":{"name":"CJP Work","visibility":"public"},
+                "isDisabled":false,"size":10},
+            {"name":"apps","project":{"name":"Apps","visibility":"private"},"isDisabled":false},
+            {"name":"old","project":{"name":"Apps"},"isDisabled":true},
+            {"name":"Copy","project":{"name":"Apps"},"isFork":true}
+        ]}"#
+        .into())]);
+        let list = org_repositories(&api, "o").unwrap();
+        assert_eq!(
+            *api.asked.borrow(),
+            ["/_apis/git/repositories?api-version=7.1"]
+        );
+        let got: Vec<(&str, &str, bool, bool)> = list
+            .iter()
+            .map(|l| (l.name.as_str(), l.url.as_str(), l.fork, l.private))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    "o/Apps/apps",
+                    "https://o@dev.azure.com/o/Apps/_git/apps",
+                    false,
+                    true
+                ),
+                (
+                    "o/Apps/Copy",
+                    "https://o@dev.azure.com/o/Apps/_git/Copy",
+                    true,
+                    true
+                ),
+                (
+                    "o/CJP Work/Keycloak",
+                    "https://o@dev.azure.com/o/CJP%20Work/_git/Keycloak",
+                    false,
+                    false
+                ),
+            ],
+            "by name, a disabled one left out, private unless its project is public"
+        );
+        assert!(list.iter().all(|l| l.forge == Forge::AzureDevops));
+        // What it clones is found again.
+        let repos = crate::Repositories { list };
+        assert!(repos.find_url(&repos.list[2].url).is_some());
     }
 
     #[test]

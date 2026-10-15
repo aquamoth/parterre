@@ -43,6 +43,9 @@ drop a folder on parterre's Dock icon, choose parterre in Finder's *Open With*, 
 takes (GitHub, Azure DevOps or any other host) into a new folder, and opens it. With the
 GitHub CLI signed in (`gh auth login`), the same field also searches your GitHub repositories
 and lists them for picking; their URLs are HTTPS or SSH as `gh config get git_protocol` says.
+It lists the repositories of the Azure DevOps organisations git has a sign-in for as well:
+those Git Credential Manager has settings for (`credential.azrepos:org/…`), and those of the
+remotes of repositories you opened before, over HTTPS as Azure DevOps gives them.
 Credentials come from git's credential helpers, as for fetching. A clone that fails or is
 cancelled leaves no folder behind.
 

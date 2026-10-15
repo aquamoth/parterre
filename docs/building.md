@@ -19,7 +19,7 @@ All four are on by default. Leave one out with `--no-default-features --features
 
 | Feature | Brings |
 |---|---|
-| `azure-devops` | active pull requests from Azure DevOps (`parterre-forge`) |
+| `azure-devops` | active pull requests from Azure DevOps, and your organisations' repositories to clone (`parterre-forge`) |
 | `github` | open pull requests from GitHub, and your GitHub repositories to clone (`parterre-forge`) |
 | `send` | the update check, the usage statistics and crash reports sent to PostHog, and anything else parterre asks or sends over the network (`parterre-telemetry`) |
 | `syntax` | syntax colour in the diff and blame windows (`parterre-highlight`) |
@@ -29,7 +29,7 @@ it has no update check, so it never tells users of your package about releases y
 packaged yet, and sends no usage statistics or crash reports, so it doesn't ask about them at
 first start either. Settings › Privacy shows those switches greyed out. Pull requests from
 GitHub (`github`) and Azure DevOps (`azure-devops`) are asked for only when the user shows
-them, and GitHub repositories only when they open *Clone repository…*. Without `send`, neither
+them, and their repositories only when they open *Clone repository…*. Without `send`, neither
 PostHog's SDK nor its HTTP client (reqwest) is built.
 
 Debug builds never send usage statistics or crash reports, `send` or not.

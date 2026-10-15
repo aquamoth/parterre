@@ -126,6 +126,9 @@ organisation, project and repository names to Azure DevOps, which hosts them, an
 only to the host git has it for. Nothing is asked without one, and parterre never asks you for
 one. The same toolbar button turns it off.
 
+*Clone repository…* asks each Azure DevOps organisation git has a sign-in for (see the [user
+guide](usage.md)) for its repositories, in the same way, sending the organisation's name.
+
 ## Who is responsible
 
 Trustfall AB, Yachtvägen 35, 749 48 Enköping, Sweden, is the controller of the usage

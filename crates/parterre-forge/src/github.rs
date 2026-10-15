@@ -27,7 +27,7 @@ use super::{Forge, ForgeError, PullRequest, PullRequests, Remote, Token};
 use parterre_core::git::Git;
 
 mod repositories;
-pub use repositories::{Listed, Protocol, Repositories, repositories, repositories_canned};
+pub use repositories::{Protocol, repositories, repositories_canned};
 
 /// GitHub's GraphQL endpoint. Tokens are only ever sent here.
 #[cfg_attr(not(feature = "github"), allow(dead_code))]

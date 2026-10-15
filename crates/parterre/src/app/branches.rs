@@ -2416,7 +2416,14 @@ impl Tool {
     }
 
     /// Opens *Clone repository…* over `opener`, or brings it forward if it's open.
-    pub fn clone_repository(&mut self, ctx: &egui::Context, opener: ViewportId) {
+    /// `known` are the repositories opened before, whose remotes name Azure DevOps
+    /// organisations to list.
+    pub fn clone_repository(
+        &mut self,
+        ctx: &egui::Context,
+        opener: ViewportId,
+        known: Vec<PathBuf>,
+    ) {
         match &mut self.clone {
             Some(dialog) => dialog.raise(),
             None => {
@@ -2424,6 +2431,7 @@ impl Tool {
                     ctx,
                     self.clone_parent.as_deref(),
                     self.canned_repositories.clone(),
+                    known,
                     self.read_clipboard,
                     opener,
                 ));

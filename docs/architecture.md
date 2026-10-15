@@ -64,7 +64,9 @@ crates/parterre-forge  open pull requests, on core's types
                        rate-limit budget; HTTPS through ureq behind the `github` feature
   azure.rs             Azure DevOps remotes; one REST request per 500 active pull requests,
                        signed in with what `git credential fill` gives for origin's HTTPS
-                       URL; HTTPS through ureq behind the `azure-devops` feature
+                       URL; each known organisation's repositories, to clone; HTTPS through
+                       ureq behind the `azure-devops` feature
+  repositories.rs      repositories to clone, from either forge, found again by URL
 
 crates/parterre-highlight
                        syntax colour for the diff and blame windows (#209)
