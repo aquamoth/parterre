@@ -361,9 +361,8 @@ pub fn segmented<T: PartialEq + Copy>(
 /// Tabs over the page they show, in one rounded card: the tabs in its header, the page that
 /// `page` lays out under them. The page holds the controls of one tab, while those of the whole
 /// window go outside the card (Windows' tab guidelines). The selected tab is in strong text,
-/// underlined in the accent colour on the header's line; the others in weak text. Picking
-/// another fades its page in, so that what changed is seen. Ctrl+Tab and Ctrl+Shift+Tab go to
-/// the next and the previous tab.
+/// underlined in the accent colour on the header's line; the others in weak text. Ctrl+Tab and
+/// Ctrl+Shift+Tab go to the next and the previous tab.
 pub fn tabs<T: PartialEq + Copy, R>(
     ui: &mut Ui,
     id: Id,
@@ -371,18 +370,13 @@ pub fn tabs<T: PartialEq + Copy, R>(
     items: &[(T, &str)],
     page: impl FnOnce(&mut Ui) -> R,
 ) -> R {
-    const FADE: f64 = 0.25;
     const HEADER: f32 = 34.0;
     let t = tones(ui);
     let font = egui::TextStyle::Button.resolve(ui.style());
     let strong = ui.visuals().strong_text_color();
     let weak = ui.visuals().weak_text_color();
     let selected = items.iter().position(|(v, _)| v == current).unwrap_or(0);
-    let pick = |ui: &Ui, i: usize, current: &mut T| {
-        *current = items[i].0;
-        let now = ui.input(|i| i.time);
-        ui.data_mut(|d| d.insert_temp(id.with("picked"), now));
-    };
+    let pick = |i: usize, current: &mut T| *current = items[i].0;
     // With Shift first: a shortcut without it takes it too.
     let (previous, next) = ui.input_mut(|i| {
         let previous = i.consume_key(
@@ -394,10 +388,8 @@ pub fn tabs<T: PartialEq + Copy, R>(
     });
     if next || previous {
         let step = if next { 1 } else { items.len() - 1 };
-        pick(ui, (selected + step) % items.len(), current);
+        pick((selected + step) % items.len(), current);
     }
-    let picked_at: Option<f64> = ui.data(|d| d.get_temp(id.with("picked")));
-    let since = picked_at.map_or(FADE, |at| ui.input(|i| i.time) - at);
     let line = Stroke::new(1.0, t.field_line);
     egui::Frame::new()
         .fill(t.group)
@@ -445,7 +437,7 @@ pub fn tabs<T: PartialEq + Copy, R>(
                     ui.painter().rect_filled(underline, 2, t.accent);
                 }
                 if response.clicked() && !on {
-                    pick(ui, i, current);
+                    pick(i, current);
                 }
                 response.on_hover_cursor(egui::CursorIcon::PointingHand);
             }
@@ -453,12 +445,6 @@ pub fn tabs<T: PartialEq + Copy, R>(
                 .inner_margin(10)
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = outer_spacing;
-                    if since < FADE {
-                        // Eased out: quick at first, settling.
-                        let x = (since / FADE) as f32;
-                        ui.multiply_opacity(1.0 - (1.0 - x).powi(3));
-                        ui.ctx().request_repaint();
-                    }
                     page(ui)
                 })
                 .inner
