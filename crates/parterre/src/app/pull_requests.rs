@@ -1,9 +1,9 @@
-//! Open pull requests from GitHub, loaded on a worker thread while they are shown. Not in
-//! TortoiseGit.
+//! Open pull requests from GitHub or Azure DevOps, loaded on a worker thread while they are
+//! shown. Not in TortoiseGit.
 //!
-//! Whether `origin` is on GitHub is asked of git alone, when a repository is opened. Here,
-//! GitHub itself is asked only while pull requests are shown (the question before deleting a
-//! remote branch asks once more, shown or not: `app::remote`) and `gh` is signed in, and as t3code
+//! Whether `origin` is on a forge is asked of git alone, when a repository is opened. Here, the
+//! forge itself is asked only while pull requests are shown (the question before deleting a
+//! remote branch asks GitHub once more, shown or not: `app::remote`) and signed in, and as t3code
 //! does: a repository's list is kept for a minute (five if it had none) and asked for again
 //! only after that, when the repository is opened again, reloaded (F5) or its refs change; a
 //! change while it is kept is loaded once it isn't. A push or a fetch that moves `origin`'s
@@ -22,8 +22,7 @@ use std::time::Instant;
 use eframe::egui;
 use parterre_core::git::Git;
 use parterre_core::glyphs;
-use parterre_forge::github::{self, GithubRepo};
-use parterre_forge::{self as forge, ForgeError, PullRequests};
+use parterre_forge::{self as forge, Forge, ForgeError, Origin, PullRequests};
 
 use crate::widgets;
 
@@ -47,13 +46,13 @@ pub enum Loaded {
 struct Entry {
     /// The last list loaded, kept when a later load fails.
     list: Option<Arc<PullRequests>>,
-    /// When to ask GitHub again, at the earliest (turning them on aside).
+    /// When to ask the forge again, at the earliest (turning them on aside).
     next: Instant,
     /// Failed loads in a row.
     failures: u32,
     /// Why the last load failed, if it did.
     error: Option<String>,
-    /// The last load failed for want of a signed-in `gh`.
+    /// The last load failed for want of a sign-in.
     needs_sign_in: bool,
 }
 
@@ -71,8 +70,8 @@ struct Job {
 pub struct PullRequestLoader {
     /// The repository shown.
     path: Option<PathBuf>,
-    /// The GitHub repository its `origin` points at, if any.
-    origin: Option<GithubRepo>,
+    /// The forge repository its `origin` points at, if any.
+    origin: Option<Origin>,
     /// Every repository asked about in this run.
     cache: HashMap<PathBuf, Entry>,
     /// The load running.
@@ -87,13 +86,13 @@ pub struct PullRequestLoader {
     force: bool,
     /// The user asked for pull requests: say how it went.
     asked: bool,
-    /// Pull requests to show instead of asking GitHub (`--pull-requests-from`), as JSON.
+    /// Pull requests to show instead of asking the forge (`--pull-requests-from`), as JSON.
     canned: Option<Arc<str>>,
 }
 
 impl PullRequestLoader {
-    /// A loader that shows the pull requests in `json` instead of asking GitHub
-    /// ([`github::load_canned`]).
+    /// A loader that shows the pull requests in `json` instead of asking the forge
+    /// ([`Origin::load_canned`]).
     pub fn canned(json: &str) -> PullRequestLoader {
         PullRequestLoader {
             canned: Some(json.into()),
@@ -101,7 +100,7 @@ impl PullRequestLoader {
         }
     }
 
-    /// The pull requests come from a file, not from GitHub.
+    /// The pull requests come from a file, not from the forge.
     pub fn is_canned(&self) -> bool {
         self.canned.is_some()
     }
@@ -112,14 +111,14 @@ impl PullRequestLoader {
             return;
         }
         self.path = path.map(Path::to_owned);
-        self.origin = path.and_then(|p| github::origin(&Git::new(p)));
+        self.origin = path.and_then(|p| forge::origin(&Git::new(p)));
         self.due = true;
         self.recheck = None;
     }
 
-    /// The GitHub repository `origin` points at: pull requests can be shown only if there is
+    /// The forge repository `origin` points at: pull requests can be shown only if there is
     /// one.
-    pub fn origin(&self) -> Option<&GithubRepo> {
+    pub fn origin(&self) -> Option<&Origin> {
         self.origin.as_ref()
     }
 
@@ -137,7 +136,7 @@ impl PullRequestLoader {
         self.entry()?.error.as_deref()
     }
 
-    /// The shown repository's last load failed for want of a signed-in `gh`.
+    /// The shown repository's last load failed for want of a sign-in.
     pub fn needs_sign_in(&self) -> bool {
         self.entry().is_some_and(|e| e.needs_sign_in)
     }
@@ -200,6 +199,7 @@ impl PullRequestLoader {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => Err(ForgeError::Network(
+                self.origin.as_ref().map_or(Forge::Github, Origin::forge),
                 "loading them stopped unexpectedly".into(),
             )),
         };
@@ -237,7 +237,7 @@ impl PullRequestLoader {
     }
 
     fn load(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.path.clone() else {
+        let (Some(path), Some(origin)) = (self.path.clone(), self.origin.clone()) else {
             return;
         };
         let (tx, rx) = std::sync::mpsc::channel();
@@ -246,8 +246,8 @@ impl PullRequestLoader {
         let canned = self.canned.clone();
         std::thread::spawn(move || {
             let loaded = match canned {
-                Some(json) => github::load_canned(&git, &json),
-                None => github::load(&git),
+                Some(json) => origin.load_canned(&git, &json),
+                None => origin.load(&git),
             };
             let _ = tx.send(loaded);
             ctx.request_repaint();
@@ -275,7 +275,7 @@ pub fn dialog(ctx: &egui::Context, error: &ForgeError) -> DialogAnswer {
     use egui::{Align, Layout};
 
     let explanation = error.explain();
-    let shown = crate::dialogs::Dialog::new("pull-requests-error", explanation.title)
+    let shown = crate::dialogs::Dialog::new("pull-requests-error", &explanation.title)
         .screen(crate::usage::Screen::PullRequestsError)
         .icon(glyphs::PULL_REQUEST, false)
         .width(380.0)
@@ -284,7 +284,7 @@ pub fn dialog(ctx: &egui::Context, error: &ForgeError) -> DialogAnswer {
         .show(ctx, |ui| {
             let mut answer = DialogAnswer::Open;
             crate::dialogs::fields(ui, |ui| ui.label(&explanation.body));
-            if let Some(command) = explanation.command {
+            if let Some(command) = &explanation.command {
                 command_box(ui, command);
             }
             ui.add_space(4.0);
@@ -352,13 +352,13 @@ fn command_box(ui: &mut egui::Ui, command: &str) {
         });
 }
 
-/// What the status bar says once `count` open pull requests have loaded, of which `here` have
-/// their head in the repository.
-pub fn loaded_status(count: usize, here: usize) -> String {
+/// What the status bar says once `count` open pull requests have loaded from `forge`, of which
+/// `here` have their head in the repository.
+pub fn loaded_status(forge: Forge, count: usize, here: usize) -> String {
     let open = match count {
-        0 => return "No open pull requests on GitHub".to_owned(),
-        1 => "1 open pull request on GitHub".to_owned(),
-        n => format!("{n} open pull requests on GitHub"),
+        0 => return format!("No open pull requests on {forge}"),
+        1 => format!("1 open pull request on {forge}"),
+        n => format!("{n} open pull requests on {forge}"),
     };
     match (count, count.saturating_sub(here)) {
         (_, 0) => open,
@@ -476,20 +476,33 @@ mod tests {
 
     #[test]
     fn status_counts_what_can_be_shown() {
-        assert_eq!(loaded_status(0, 0), "No open pull requests on GitHub");
-        assert_eq!(loaded_status(1, 1), "1 open pull request on GitHub");
+        let status = |count, here| loaded_status(Forge::Github, count, here);
+        assert_eq!(status(0, 0), "No open pull requests on GitHub");
+        assert_eq!(status(1, 1), "1 open pull request on GitHub");
         assert_eq!(
-            loaded_status(1, 0),
+            status(1, 0),
             "1 open pull request on GitHub, on a commit not fetched here"
         );
-        assert_eq!(loaded_status(5, 5), "5 open pull requests on GitHub");
+        assert_eq!(status(5, 5), "5 open pull requests on GitHub");
         assert_eq!(
-            loaded_status(5, 4),
+            status(5, 4),
             "5 open pull requests on GitHub, 1 on a commit not fetched here"
         );
         assert_eq!(
-            loaded_status(63, 25),
+            status(63, 25),
             "63 open pull requests on GitHub, 38 on commits not fetched here"
+        );
+    }
+
+    #[test]
+    fn status_names_azure_devops() {
+        assert_eq!(
+            loaded_status(Forge::AzureDevops, 0, 0),
+            "No open pull requests on Azure DevOps"
+        );
+        assert_eq!(
+            loaded_status(Forge::AzureDevops, 2, 1),
+            "2 open pull requests on Azure DevOps, 1 on a commit not fetched here"
         );
     }
 }

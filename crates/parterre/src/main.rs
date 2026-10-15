@@ -115,12 +115,13 @@ struct Cli {
     #[arg(long)]
     no_tags: bool,
 
-    /// Show open pull requests from GitHub on the commits they propose, even if turned off in
-    /// the settings (needs a signed-in gh; not with --export).
+    /// Show open pull requests from GitHub or Azure DevOps on the commits they propose, even if
+    /// turned off in the settings (needs a signed-in gh for GitHub, a sign-in git has for Azure
+    /// DevOps; not with --export).
     #[arg(long)]
     pull_requests: bool,
 
-    /// Show the pull requests in FILE instead of asking GitHub, for screenshots and demos:
+    /// Show the pull requests in FILE instead of asking the forge, for screenshots and demos:
     /// a JSON array of {"number", "title", "author", "draft", "head", "base"}, head and base
     /// being branches of origin (see docs/automation.md). Implies --pull-requests.
     #[arg(long, value_name = "FILE", hide = true)]

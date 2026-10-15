@@ -8,8 +8,8 @@ use std::sync::{Arc, mpsc};
 use eframe::egui::{self, RichText, Ui, ViewportId};
 use parterre_core::branches::{Action, command_text};
 use parterre_core::clone::{self, Cloning};
-use parterre_forge::ForgeError;
 use parterre_forge::github::{self, Listed, Repositories};
+use parterre_forge::{Forge, ForgeError};
 
 use crate::file_dialog::Pending;
 use crate::{dialogs, widgets};
@@ -125,7 +125,10 @@ impl CloneDialog {
                 Ok(Err(e)) => self.github = Github::Failed(e),
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    self.github = Github::Failed(ForgeError::Network("the request stopped".into()))
+                    self.github = Github::Failed(ForgeError::Network(
+                        Forge::Github,
+                        "the request stopped".into(),
+                    ))
                 }
             }
         }
@@ -221,7 +224,7 @@ impl CloneDialog {
                 return;
             }
             // A build without GitHub has no list to speak of.
-            Github::Failed(ForgeError::Unsupported) => return,
+            Github::Failed(ForgeError::Unsupported(_)) => return,
             Github::Failed(e) if e.needs_sign_in() => {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;

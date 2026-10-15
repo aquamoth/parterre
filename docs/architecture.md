@@ -58,10 +58,13 @@ crates/parterre-core   GUI-free; everything testable lives here
 
 crates/parterre-forge  open pull requests, on core's types
   lib.rs               the model, where each is shown (head commit and base-branch refs),
-                       remotes and upstreams from git
+                       remotes and upstreams from git; which forge origin is on (`Origin`)
   github.rs            github.com remotes; one GraphQL request per 100 fetched branches of
                        origin (and its parent), signed in with `gh auth token`, within a
                        rate-limit budget; HTTPS through ureq behind the `github` feature
+  azure.rs             Azure DevOps remotes; one REST request per 500 active pull requests,
+                       signed in with what `git credential fill` gives for origin's HTTPS
+                       URL; HTTPS through ureq behind the `azure-devops` feature
 
 crates/parterre-highlight
                        syntax colour for the diff and blame windows (#209)
@@ -151,7 +154,7 @@ crates/parterre        the binary (eframe/egui)
   theme.rs             TortoiseGit colours (light, and dark via lightness inversion)
   system_theme.rs      light or dark desktop preference on Linux (XDG portal)
   menu.rs              the look of menus and popovers, menu items
-  browser.rs           opens github.com pages with the platform's opener
+  browser.rs           opens github.com and dev.azure.com pages with the platform's opener
   file_manager.rs      opens a worktree's folder in the platform's file manager, or a
                        terminal there
   widgets.rs           icon buttons, segmented buttons, switches, text fields
@@ -181,7 +184,7 @@ crates/parterre        the binary (eframe/egui)
      vanishes only if no shown branch contains it.
    - Open pull requests, while shown, label their head commits the same way: they never
      start history, and show only where one of their base branch's refs is shown. As labels
-     they make their heads nodes, like tags. They are loaded from GitHub on a worker thread
+     they make their heads nodes, like tags. They are loaded from origin's forge on a worker thread
      (`forge`), separately from the snapshot, which stays what git has.
    - Worktrees, while shown: a branch another worktree has checked out is shown even where
      the local-branch switch or the hide list would leave it out, and starts history. A

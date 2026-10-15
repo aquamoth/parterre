@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use super::{Answer, Api, ForgeError, GithubRepo, Quota, WEB};
+use super::{Answer, Api, Forge, ForgeError, GithubRepo, Quota, WEB};
 
 /// Repositories asked for per request, GitHub's most.
 const PER_PAGE: usize = 100;
@@ -170,7 +170,7 @@ fn request(after: Option<&str>) -> String {
 /// The page in an answer, or why there is none.
 fn page(body: &str) -> Result<Page, ForgeError> {
     let answer: PageAnswer =
-        serde_json::from_str(body).map_err(|e| ForgeError::Parse(e.to_string()))?;
+        serde_json::from_str(body).map_err(|e| ForgeError::Parse(Forge::Github, e.to_string()))?;
     if let Some(page) = answer.data.and_then(|d| d.viewer).map(|v| v.repositories) {
         return Ok(page);
     }
@@ -179,10 +179,11 @@ fn page(body: &str) -> Result<Page, ForgeError> {
             ForgeError::RateLimited { minutes: 60 }
         }
         Some(e) => ForgeError::Status {
+            forge: Forge::Github,
             status: 200,
             message: e.message,
         },
-        None => ForgeError::Parse("no repositories in the answer".into()),
+        None => ForgeError::Parse(Forge::Github, "no repositories in the answer".into()),
     })
 }
 
@@ -246,7 +247,7 @@ mod tests {
                 .push(serde_json::from_str(body).unwrap());
             let mut bodies = self.bodies.borrow_mut();
             if bodies.is_empty() {
-                return Err(ForgeError::Network("no more answers".into()));
+                return Err(ForgeError::Network(Forge::Github, "no more answers".into()));
             }
             Ok(Answer {
                 body: bodies.remove(0),

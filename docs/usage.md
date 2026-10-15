@@ -190,6 +190,12 @@ included, and never without signing in. A push or a fetch that moves a branch of
 asked about once more a minute later, for the pull request opened just after the push. Once
 less than a tenth of your hourly API allowance is left, it waits for the next hour.
 
+When `origin` is on Azure DevOps (`dev.azure.com` or `visualstudio.com`, over HTTPS or SSH),
+its active pull requests show the same way, except those from forks. parterre signs in with the
+sign-in git's credential helper already has for `origin`'s HTTPS URL, as Git Credential
+Manager keeps it once git has fetched over HTTPS, and never asks for one: without it, turning
+pull requests on gives the command that signs in. One request lists them all.
+
 ## Upstreams
 
 Hover or select a branch (or its upstream) and the commits between the two are coloured: green

@@ -656,54 +656,66 @@ label. It is not a new line and not a new node. Clicking the tag opens the PR in
   `lastMergeSourceCommit` **(unverified)**.
 
 
-## 15. Azure DevOps origins (findings, 2026-09-26; not built)
+## 15. Azure DevOps origins (findings 2026-09-26; built and tested 2026-10-15)
 
-Parked until someone asks for it ([#102](https://github.com/aquamoth/parterre/issues/102)). What
-was found while estimating it:
+Built for [#102](https://github.com/aquamoth/parterre/issues/102) in
+`crates/parterre-forge/src/azure.rs`, behind the `azure-devops` feature. What it reuses, as
+estimated: the model (`forge::PullRequest`, `Remote`, `PullRequests::heads`), the labels,
+clicking and the node menu, the HTTP client (ureq), and the app's cache, back-off and error
+dialog. `PullRequest::base_repo` and `Remote::repo` hold `org/project/repo`, the project
+percent-decoded.
 
-- **Reusable as is:** the model (`forge::PullRequest`, `Remote`, `PullRequests::heads`, which
-  places pull requests on commits and finds their base refs by remote and branch name), the
-  labels, clicking and the node menu, the HTTP client (ureq), and the app's cache, back-off
-  and error dialog (`app/pull_requests.rs`). `PullRequest::base_repo` and `Remote::repo` are
-  plain strings; for ADO they would hold `org/project/repo`.
-- **Needed:**
-  1. **Recognising the remote.** Forms: `https://dev.azure.com/{org}/{project}/_git/{repo}`
-     (also with `{org}@` before the host, as the human's Apps remote has),
-     `https://{org}.visualstudio.com/[DefaultCollection/]{project}/_git/{repo}`,
-     `git@ssh.dev.azure.com:v3/{org}/{project}/{repo}` and
-     `{org}@vs-ssh.visualstudio.com:v3/{org}/{project}/{repo}`. Project names can hold spaces,
-     percent-encoded in URLs **(unverified)**.
-  2. **A `Forge` choice** where `github::load` is called today: detect the forge from
-     `origin`'s URL, and name it in the wording ("on GitHub" in the status text, the
-     tooltips, the dialog, the legend).
-  3. **Asking ADO.** No GraphQL. `GET https://dev.azure.com/{org}/{project}/_apis/git/
-     repositories/{repo}/pullrequests?searchCriteria.status=active&api-version=7.1` (§8)
-     lists active pull requests with `pullRequestId`, `title`, `isDraft`, `createdBy`,
-     `sourceRefName`, `targetRefName` and `lastMergeSourceCommit.commitId` (the head).
-     `searchCriteria.sourceRefName` narrows it to one branch **(unverified)**, but the Apps
-     repository has about 160 branches, and ADO repositories tend to have few active pull
-     requests, so one listing call (with `$top`) is cheaper than a call per branch, unlike on
-     GitHub. The page to open is `https://dev.azure.com/{org}/{project}/_git/{repo}/
-     pullrequest/{id}` **(unverified)**; the browser's allow list (`browser.rs`) would take
-     `https://dev.azure.com/` and `https://{org}.visualstudio.com/` too.
-  4. **Signing in.** There is no `gh` for ADO. Two ways, both on the human's machine:
-     - **`git credential fill`** for `https://dev.azure.com/{org}/{project}/_git/{repo}`,
-       non-interactive as in §6 (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`). It reuses
-       Git Credential Manager, configured there for dev.azure.com with
-       `credential.https://dev.azure.com.usehttppath=true`, so the path must be passed. It is
-       git, so no new program (rule 1 of the roadmap). Whether ADO wants the token GCM hands
-       back as `Bearer` (an Entra ID token) or in Basic auth (a PAT) is **unverified**:
-       probably Bearer; a token starting `eyJ` is a JWT.
-     - **`az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798`**
-       (Azure DevOps's resource id) **(unverified here)**; `az` is installed there too, but
-       it would be a second program to rely on.
-  5. **Forks:** ADO has forks (`forkSource` in the list), but they are rare there; leave
-     them out, as the GitHub slice 1 leaves out other people's forks.
-- **Limits:** ADO throttles by "TSTUs" per user rather than a fixed hourly count
-  **(unverified)**; it sends `Retry-After` and `X-RateLimit-*` headers when it does, which the
-  budget code already understands for GitHub.
-- **Trying it:** the human's `Cosmo/Apps` has `origin` on dev.azure.com, and Git Credential
-  Manager and `az` are set up. A live test uses the human's own token against their own
-  organisation; ask first.
-- **Size:** about the core half of the GitHub slice (URL parsing, one REST call, JSON, sign-in,
-  tests), plus wording; no new crates.
+- **Recognising the remote.** `https://[{org}@]dev.azure.com/{org}/{project}/_git/{repo}`,
+  `https://{org}.visualstudio.com/[DefaultCollection/]{project}/_git/{repo}`, both with
+  `_git/{repo}` alone for a repository named as its project,
+  `git@ssh.dev.azure.com:v3/{org}/{project}/{repo}` and
+  `{org}@vs-ssh.visualstudio.com:v3/{org}/{project}/{repo}`. Project names do hold spaces,
+  percent-encoded in URLs (tested: the cosmojpn organisation has a project `CJP Work`).
+- **Asking.** One listing per 500 pull requests:
+  `GET {root}/{project}/_apis/git/repositories/{repo}/pullrequests?searchCriteria.status=active&$top=500&$skip=N&api-version=7.1`.
+  **(tested 2026-10-15)** It answered with `pullRequestId`, `title`, `isDraft`,
+  `createdBy.displayName`, `sourceRefName`, `targetRefName` (`refs/heads/…`) and
+  `lastMergeSourceCommit.commitId` (40 hex digits) on every one of the 35 active pull requests
+  of `cosmojpn/Apps`, none with `forkSource`. A missing project or repository answers 404, a
+  rejected sign-in 401 with `X-TFS-FedAuthRedirect: Suppress` (without it, a redirect to the
+  sign-in page). The page is `https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}`;
+  the browser's allow list (`browser.rs`) takes `https://dev.azure.com/` only, and pages are
+  built there whatever host the remote names.
+- **Signing in** (all tested 2026-10-15 on the human's machine, with Git Credential Manager
+  2.7.3 and `credential.https://dev.azure.com.usehttppath=true` in the system config):
+  - **`git credential fill`** with `url=<origin's HTTPS URL>`, `GIT_TERMINAL_PROMPT=0`,
+    `GCM_INTERACTIVE=never`, `GIT_ASKPASS=` (empty, so git doesn't fall back to
+    `core.askPass` or `SSH_ASKPASS`) and `-c credential.interactive=false`: 0.25 s. GCM
+    answered with the user name it is bound to (`credential.azrepos:org/cosmojpn.username`)
+    and an 84-character personal access token, not a JWT. Azure DevOps took it as `Bearer`, as
+    `Basic user:token` and as `Basic :token`. parterre sends a JWT (`eyJ…`, a Microsoft Entra
+    token, which GCM gives when set to OAuth) as `Bearer`, anything else as `Basic :token`.
+  - With no sign-in (an organisation GCM doesn't know), it fails in about 1 s with "Cannot
+    prompt because user interactivity has been disabled". `https://dev.azure.com` alone, with
+    no organisation in the path, fails: GCM needs the organisation.
+    `https://cosmojpn.visualstudio.com/…` failed too, where `https://dev.azure.com/cosmojpn/…`
+    worked, so parterre asks for `origin`'s HTTPS URL first and then the same repository on
+    `dev.azure.com`, sending the token only to the host it was given for. For an SSH origin only
+    the `dev.azure.com` URL is asked.
+  - **`az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798`** gave a
+    token (0.6 s), but for `az`'s own account, which on that machine is another one, in another
+    tenant: Azure DevOps answered 401. So `az` is not used: its account need not be git's, and
+    it would be a second program to rely on.
+  - With no sign-in, the error dialog offers `git ls-remote <https URL>`, which GCM signs in
+    for (interactively, in a terminal) and which changes nothing; `git fetch origin` would not
+    help an SSH origin.
+- **Forks:** left out (`forkSource`), as GitHub's other forks are.
+- **Limits:** Azure DevOps throttles by "TSTUs" rather than an hourly count
+  **(unverified)**. Each answer carried `X-RateLimit-Cost`; a 429 or 503 with `Retry-After`
+  waits that long (`ForgeError::Throttled`), on top of the app's usual back-off.
+- **Not built:** the question before deleting a remote branch (`github::proposals`) still asks
+  GitHub only.
+- **Listing repositories to clone** (asked for on 2026-10-15): with the token GCM gives for
+  `https://dev.azure.com/cosmojpn`, `GET https://dev.azure.com/cosmojpn/_apis/git/repositories?api-version=7.1`
+  listed the organisation's 20 repositories across its 3 projects, with `name`,
+  `project.name`, `remoteUrl` (`https://{org}@dev.azure.com/…`), `sshUrl`, `webUrl`,
+  `isDisabled` and `size` **(tested 2026-10-15)**. Which organisations a user belongs to is
+  harder: `GET https://app.vssps.visualstudio.com/_apis/profile/profiles/me` answered 401 to
+  that token (a personal access token for one organisation can't see the profile). What a
+  machine shows without asking: GCM's `credential.azrepos:org/{org}.*` settings, and the
+  organisations of the Azure DevOps remotes of repositories opened before.

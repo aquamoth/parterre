@@ -326,3 +326,86 @@ fn a_remote_branch_proposed_by_an_open_pull_request_is_found_before_deleting_it(
         [github::Proposed::NotOnGithub]
     );
 }
+
+/// An Azure DevOps origin, as its SSH remote names it, and another remote of the same
+/// repository over HTTPS: both are the repository the pull requests belong to, so `upstream`'s
+/// branches are bases too.
+#[test]
+fn azure_devops_origins_have_pull_requests_on_their_heads() {
+    let mut r = TestRepo::new();
+    r.commit("A");
+    let pushed = r.commit("B");
+    let git = Git::new(r.path());
+    r.git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@ssh.dev.azure.com:v3/o/My%20Project/r",
+    ]);
+    r.git(&[
+        "remote",
+        "add",
+        "upstream",
+        "https://o@dev.azure.com/o/My%20Project/_git/r",
+    ]);
+    r.git(&["update-ref", "refs/remotes/origin/main", &pushed]);
+    r.git(&["update-ref", "refs/remotes/origin/topic", &pushed]);
+    let origin = forge::origin(&git).expect("origin is on Azure DevOps");
+    assert_eq!(origin.forge(), forge::Forge::AzureDevops);
+
+    let json = r#"[{"number": 7, "title": "Seven", "head": "topic", "base": "main"}]"#;
+    let prs = origin.load_canned(&git, json).unwrap();
+    let repo = "o/My Project/r";
+    assert_eq!(
+        prs.list,
+        [PullRequest {
+            number: 7,
+            title: "Seven".into(),
+            author: String::new(),
+            draft: false,
+            head: parterre_core::Oid::from_hex(&pushed).unwrap(),
+            head_branch: "topic".into(),
+            head_repo: Some(repo.into()),
+            base_branch: "main".into(),
+            base_repo: repo.into(),
+            url: "https://dev.azure.com/o/My%20Project/_git/r/pullrequest/7".into(),
+        }]
+    );
+    assert_eq!(
+        prs.remotes,
+        [
+            Remote {
+                name: "origin".into(),
+                repo: repo.into(),
+            },
+            Remote {
+                name: "upstream".into(),
+                repo: repo.into(),
+            },
+        ]
+    );
+    let repo = r.load();
+    let heads = prs.heads(&repo);
+    assert_eq!(heads.len(), 1);
+    assert!(heads[0].0.head.is_some(), "origin/topic is its head branch");
+}
+
+/// Asks Azure DevOps for the active pull requests of the repository `PARTERRE_AZURE_REPO`
+/// names (a remote URL), signed in as git is there. Needs the network and a sign-in, so only
+/// on request: `PARTERRE_AZURE_REPO=https://dev.azure.com/o/p/_git/r cargo test -p
+/// parterre-forge --features azure-devops --test forge -- --ignored azure`.
+#[cfg(feature = "azure-devops")]
+#[test]
+#[ignore = "needs the network and a sign-in to Azure DevOps"]
+fn loads_pull_requests_from_azure_devops() {
+    let url = std::env::var("PARTERRE_AZURE_REPO").expect("PARTERRE_AZURE_REPO is set");
+    let mut r = TestRepo::new();
+    r.commit("A");
+    r.git(&["remote", "add", "origin", &url]);
+    let prs = forge::azure::load(&Git::new(r.path())).expect("Azure DevOps answers");
+    for pr in &prs.list {
+        assert!(pr.url.starts_with("https://dev.azure.com/"), "{}", pr.url);
+        assert_eq!(pr.head.to_hex().len(), 40);
+    }
+    eprintln!("{} active pull requests", prs.list.len());
+}

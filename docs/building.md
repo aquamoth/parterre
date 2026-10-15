@@ -15,10 +15,11 @@ are present on any desktop.
 
 ## Features
 
-All three are on by default. Leave one out with `--no-default-features --features …`.
+All four are on by default. Leave one out with `--no-default-features --features …`.
 
 | Feature | Brings |
 |---|---|
+| `azure-devops` | active pull requests from Azure DevOps (`parterre-forge`) |
 | `github` | open pull requests from GitHub, and your GitHub repositories to clone (`parterre-forge`) |
 | `send` | the update check, the usage statistics and crash reports sent to PostHog, and anything else parterre asks or sends over the network (`parterre-telemetry`) |
 | `syntax` | syntax colour in the diff and blame windows (`parterre-highlight`) |
@@ -27,14 +28,14 @@ All three are on by default. Leave one out with `--no-default-features --feature
 it has no update check, so it never tells users of your package about releases you haven't
 packaged yet, and sends no usage statistics or crash reports, so it doesn't ask about them at
 first start either. Settings › Privacy shows those switches greyed out. Pull requests from
-GitHub (`github`) are asked for only when the user shows them, and their repositories only
-when they open *Clone repository…*. Without `send`, neither
+GitHub (`github`) and Azure DevOps (`azure-devops`) are asked for only when the user shows
+them, and GitHub repositories only when they open *Clone repository…*. Without `send`, neither
 PostHog's SDK nor its HTTP client (reqwest) is built.
 
 Debug builds never send usage statistics or crash reports, `send` or not.
 
 ```sh
-cargo build --release --locked --no-default-features --features github,syntax
+cargo build --release --locked --no-default-features --features azure-devops,github,syntax
 ```
 
 A release build stamps where it is published in `PARTERRE_CHANNEL` (`msi`, `zip`, `tarball`,
@@ -87,9 +88,9 @@ tools. Its bundled `dlltool` needs an assembler (`as.exe`) that the toolchain do
 `windows-link` always uses `raw-dylib`, so the build fails with
 `error calling dlltool` / `CreateProcess` unless a full MinGW-w64 is on `PATH`.
 
-Cross-checking from Linux works without extra tools once the `github` and `send` features are
-left out: their TLS library, ring, compiles C for the target, which needs MinGW-w64's headers
-(`sudo apt install mingw-w64` for a check with it).
+Cross-checking from Linux works without extra tools once the `azure-devops`, `github` and `send`
+features are left out: their TLS library, ring, compiles C for the target, which needs
+MinGW-w64's headers (`sudo apt install mingw-w64` for a check with it).
 
 ```sh
 rustup target add x86_64-pc-windows-gnu

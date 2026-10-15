@@ -7,17 +7,18 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// The only pages parterre opens.
-const ALLOWED: &str = "https://github.com/";
+/// The only pages parterre opens: GitHub's, and Azure DevOps' (pull requests, #102).
+const ALLOWED: [&str; 2] = ["https://github.com/", "https://dev.azure.com/"];
 /// And parterre's contact address (#351), in the mail app.
 const MAIL: &str = crate::about::MAIL;
 
-/// Opens `url` in the default browser. Only github.com pages and [`MAIL`] are opened; anything
-/// else is an error, as is an opener that can't be started.
+/// Opens `url` in the default browser. Only [`ALLOWED`] pages and [`MAIL`] are opened;
+/// anything else is an error, as is an opener that can't be started.
 pub fn open(url: &str) -> Result<(), String> {
     if !is_allowed(url) {
         return Err(format!(
-            "not opening {url}: only {ALLOWED} pages are opened"
+            "not opening {url}: only {} pages are opened",
+            ALLOWED.join(" and ")
         ));
     }
     spawn(opener(url)).map_err(|e| format!("could not open {url}: {e}"))
@@ -41,11 +42,11 @@ pub fn spawn(mut cmd: Command) -> std::io::Result<()> {
     Ok(())
 }
 
-/// A github.com page, with nothing in it that an opener or a browser could take for more
-/// than a URL.
+/// A github.com or dev.azure.com page, with nothing in it that an opener or a browser could
+/// take for more than a URL.
 fn is_allowed(url: &str) -> bool {
     url == MAIL
-        || url.starts_with(ALLOWED)
+        || ALLOWED.iter().any(|allowed| url.starts_with(allowed))
             && url
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"-._~/:?#=&%".contains(&b))
@@ -82,16 +83,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_plain_github_pages_and_the_contact_address_are_opened() {
+    fn only_plain_forge_pages_and_the_contact_address_are_opened() {
         assert!(is_allowed("https://github.com/aquamoth/parterre/pull/12"));
         assert!(is_allowed(
             "https://github.com/my-org/some.repo_name/pull/3"
+        ));
+        assert!(is_allowed(
+            "https://dev.azure.com/cosmojpn/CJP%20Work/_git/Apps/pullrequest/7"
         ));
         assert!(is_allowed(MAIL));
         for url in [
             "http://github.com/aquamoth/parterre/pull/12",
             "https://github.com.evil.example/x",
             "https://gist.github.com/x",
+            "https://dev.azure.com.evil.example/x",
+            "https://cosmojpn.visualstudio.com/Apps/_git/Apps/pullrequest/7",
+            "https://dev.azure.com/o/My Project/_git/r/pullrequest/1",
             "file:///etc/passwd",
             "mailto:someone@example.com",
             "mailto:parterre@trustfall.se?subject=x",
