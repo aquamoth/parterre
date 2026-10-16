@@ -3,7 +3,7 @@
 //! [`ColumnWidths`]; the table lays its columns out again after [`drag`], so that the headings
 //! and rows follow the pointer in the same frame, then [`paint`]s the borders.
 
-use eframe::egui::{CursorIcon, Id, Rect, Sense, Stroke, Ui};
+use eframe::egui::{CursorIcon, Id, Rect, Stroke, Ui};
 use parterre_core::columns::{ColumnWidths, Layout};
 
 use super::log_window::Colors;
@@ -42,7 +42,7 @@ pub fn drag(
         let rect = Rect::from_x_y_ranges(x - 4.0..=x + 4.0, head.y_range());
         let id = id.with(("column-border", border));
         let response = ui
-            .interact(rect, id, Sense::click_and_drag())
+            .interact(rect, id, crate::focus::pointer_only())
             .on_hover_cursor(CursorIcon::ResizeHorizontal);
         let response = widgets::tip(response, "Drag to resize", "Double-click resets");
         if response.hovered() || response.dragged() {

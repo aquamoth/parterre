@@ -86,6 +86,7 @@ look around.
 | Click a pull request's number | Open the pull request on GitHub |
 | The *Git* menu | On the selected node: show log; compare with HEAD, the working tree or the upstream (with two nodes, with each other); go to, add or delete a worktree; switch to it, set an upstream, create, reset to or delete a branch; merge, cherry-pick or rebase; fetch, pull or push. With several nodes, delete the worktrees, local or remote branches they all have |
 | Right-click a node | What the *Git* menu offers for it, under the same headings, without what doesn't apply (pull only on the current branch), and *Mark for comparison*; *Actions* › copy its hash, ref names or folder, open its pull requests or its worktree's folder; select its subtree, return it to the layout, centre the view on it. With several nodes, what acts on them all |
+| `Shift+F10`, the Menu key (Windows) | The right-click menu of what has the keyboard: the selected node, or a list's selected row, in any window |
 | `Esc` | Clear the selection |
 | `F5`, `Ctrl+R` (`⌘R` on macOS) | Reload the repository (it also reloads by itself when branches, tags or HEAD change), in every window that reloads |
 | `Ctrl+F5` (`⇧⌘F` on macOS) | Fetch every remote, from any window |

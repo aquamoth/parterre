@@ -272,8 +272,6 @@ pub enum DialogAnswer {
 /// The dialog saying why pull requests the user turned on can't be shown: a modal over the main
 /// window, with the command that helps, if one does, ready to copy.
 pub fn dialog(ctx: &egui::Context, error: &ForgeError) -> DialogAnswer {
-    use egui::{Align, Layout};
-
     let explanation = error.explain();
     let shown = crate::dialogs::Dialog::new("pull-requests-error", &explanation.title)
         .screen(crate::usage::Screen::PullRequestsError)
@@ -288,15 +286,18 @@ pub fn dialog(ctx: &egui::Context, error: &ForgeError) -> DialogAnswer {
                 command_box(ui, command);
             }
             ui.add_space(4.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
+            const INSTALL: &str = "Install the GitHub CLI…";
+            let install = matches!(error, ForgeError::NoGh);
+            let mut widths = vec![widgets::filled_button_width(ui, "OK", 80.0)];
+            if install {
+                widths.push(widgets::text_button_width(ui, INSTALL));
+            }
+            crate::dialogs::button_row(ui, &widths, |ui| {
+                if install && widgets::text_button(ui, INSTALL).clicked() {
+                    answer = DialogAnswer::Install;
+                }
                 if widgets::primary_button(ui, "OK", 80.0).clicked() {
                     answer = DialogAnswer::Close;
-                }
-                if matches!(error, ForgeError::NoGh)
-                    && widgets::text_button(ui, "Install the GitHub CLI…").clicked()
-                {
-                    answer = DialogAnswer::Install;
                 }
             });
             if ui.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) {

@@ -19,7 +19,7 @@ use parterre_core::log_graph::{GraphRow, LogGraph};
 use super::column_borders::{self, Columns};
 use super::log_window::{Badge, CELL_PAD, Colors, HEADING, badge, cell, heading_background};
 use crate::theme::Palette;
-use crate::widgets;
+use crate::{focus, widgets};
 
 /// Height of a commit row.
 pub const ROW: f32 = 24.0;
@@ -57,6 +57,8 @@ pub struct CommitList {
     pub many: BTreeSet<usize>,
     /// Scroll the selected row into view in the next frame (only if it is out of view).
     pub reveal: bool,
+    /// Open the selected row's menu in the next frame, as the context-menu key asks.
+    pub menu: bool,
     /// The scroll offset and the height of the rows in the last frame, for keeping the
     /// selection in view and for paging.
     pub scroll: f32,
@@ -267,6 +269,23 @@ impl CommitTable<'_> {
         }
 
         ui.spacing_mut().item_spacing.y = 0.0;
+        // The rows are one stop for Tab, which the keys move the selection in.
+        let stop = self.id.with("stop");
+        let mut clicks = Clicks::default();
+        let keys = widgets::list_keys(ui, stop, list.selected, self.rows, list.page());
+        if let Some(i) = keys.select {
+            list.select(Some(i));
+            clicks.clicked = Some(i);
+        }
+        if keys.enter {
+            clicks.double_clicked = list.selected;
+        }
+        if keys.menu {
+            list.menu = true;
+            list.reveal = true;
+        }
+        let cue = focus::shows_own_by_id(ui.ctx(), stop).then(|| list.selected.unwrap_or(0));
+        let mut cued = false;
         // As short as one row, not egui's default: a dialog's list of one commit is that tall.
         let mut area = ScrollArea::vertical()
             .id_salt(self.id)
@@ -290,14 +309,16 @@ impl CommitTable<'_> {
                 area = area.vertical_scroll_offset(top + ROW - height);
             }
         }
-        let mut clicks = Clicks::default();
         let modifiers = ui.input(|i| i.modifiers);
+        let stop = widgets::list_stop(ui, stop, ui.available_rect_before_wrap());
         let output = area.show_rows(ui, ROW, self.rows, |ui, range| {
             let graph = self.graph.rows(range.clone());
             for (i, graph) in range.zip(&graph) {
                 let r = row(i);
+                // Not a stop of its own: the table is one.
                 let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+                    ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::CLICK);
+                focus::click_row(&response, stop.id);
                 let selected = list.is_selected(i);
                 let bg = if selected {
                     Some(c.selected_bg)
@@ -310,6 +331,10 @@ impl CommitTable<'_> {
                 };
                 if let Some(bg) = bg {
                     ui.painter().rect_filled(rect, 0.0, bg);
+                }
+                if cue == Some(i) {
+                    widgets::paint_list_cue(ui, rect);
+                    cued = true;
                 }
                 let (fg, fg_weak) = match (selected, r.greyed) {
                     (true, false) => (c.selected_fg, c.selected_fg),
@@ -438,7 +463,9 @@ impl CommitTable<'_> {
                 if response.double_clicked() && !over_icon {
                     clicks.double_clicked = Some(i);
                 }
-                egui::Popup::context_menu(&response)
+                let by_key = list.menu && list.selected == Some(i);
+                let at = pos2(rect.left() + gutter + 8.0, rect.bottom());
+                crate::menu::context_menu(&response, by_key, at)
                     .style(crate::menu::style)
                     .show(|ui| {
                         crate::menu::fit_window(ui, |ui| {
@@ -449,8 +476,10 @@ impl CommitTable<'_> {
                     });
             }
         });
+        list.menu = false;
         list.scroll = output.state.offset.y;
         list.height = output.inner_rect.height();
+        widgets::list_stop_ring(ui, &stop, cued);
         clicks
     }
 

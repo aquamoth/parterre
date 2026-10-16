@@ -126,6 +126,9 @@ pub const RELOAD_F5: Shortcut = Shortcut::plain(Key::F5);
 pub const ZOOM_TO_FIT: Shortcut = Shortcut::plain(Key::F);
 pub const GO_TO_HEAD: Shortcut = Shortcut::plain(Key::H);
 pub const SHOW_LOG: Shortcut = Shortcut::plain(Key::L);
+/// Opens the context menu of what has the keyboard, as the context-menu key does
+/// ([`crate::context_key`]).
+pub const CONTEXT_MENU: Shortcut = Shortcut::new(Modifiers::SHIFT, Key::F10);
 /// The drag modes Adapt, Free and Subtree.
 pub const DRAG: [Shortcut; 3] = [
     Shortcut::plain(Key::Num1),

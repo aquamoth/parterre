@@ -66,15 +66,16 @@ impl ParterreApp {
                     }
                 });
                 ui.separator();
-                let row = egui::vec2(ui.available_width(), 34.0);
-                let layout = egui::Layout::right_to_left(egui::Align::Center);
-                ui.allocate_ui_with_layout(row, layout, |ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if widgets::primary_button(ui, "Download", 90.0).clicked() {
-                        answer = ReleaseAnswer::Download;
-                    }
+                let widths = [
+                    widgets::text_button_width(ui, "Close"),
+                    widgets::filled_button_width(ui, "Download", 90.0),
+                ];
+                crate::dialogs::button_row(ui, &widths, |ui| {
                     if widgets::text_button(ui, "Close").clicked() {
                         answer = ReleaseAnswer::Close;
+                    }
+                    if widgets::primary_button(ui, "Download", 90.0).clicked() {
+                        answer = ReleaseAnswer::Download;
                     }
                 });
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {

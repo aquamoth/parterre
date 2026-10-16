@@ -80,8 +80,12 @@ pub struct Harness {
 impl Harness {
     pub fn new(dir: tempfile::TempDir) -> Harness {
         let repo = Arc::new(parterre_core::git::load_repo(dir.path()).unwrap());
+        // The plugins that change what keys do, as the app has them.
+        let ctx = egui::Context::default();
+        ctx.add_plugin(crate::focus::Cues::default());
+        ctx.add_plugin(crate::menu::ContextMenus);
         let mut h = Harness {
-            ctx: egui::Context::default(),
+            ctx,
             tool: Tool::default(),
             repo,
             dir,

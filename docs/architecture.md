@@ -22,6 +22,8 @@ crates/parterre-core   GUI-free; everything testable lives here
                        the log window's file filter and column sort
   columns.rs           tables' column widths: one column takes what the others leave, the
                        others as the layout says until the user drags their border
+  list_keys.rs         where the arrow keys, Page Up/Down, Home and End move the selection
+                       of a list, tabs or segments that are one stop for Tab (#387)
   compare.rs           comparing two commits, or a commit and the working tree: which goes
                        left, and the files between them (`git diff-tree A B`, `git diff A`,
                        or from `git merge-base`)
@@ -155,11 +157,18 @@ crates/parterre        the binary (eframe/egui)
                        the setting, which is egui's zoom factor for every window
   theme.rs             TortoiseGit colours (light, and dark via lightness inversion)
   system_theme.rs      light or dark desktop preference on Linux (XDG portal)
-  menu.rs              the look of menus and popovers, menu items
+  menu.rs              the look of menus and popovers, menu items, right-click menus that
+                       the keyboard opens too
+  context_key.rs       the context-menu key (Windows), which egui doesn't know, handed to
+                       the window in front as Shift+F10
   browser.rs           opens github.com and dev.azure.com pages with the platform's opener
   file_manager.rs      opens a worktree's folder in the platform's file manager, or a
                        terminal there
-  widgets.rs           icon buttons, segmented buttons, switches, text fields
+  widgets.rs           icon buttons, segmented buttons, switches, text fields, tabs, and
+                       lists that are one stop for Tab
+  focus.rs             keyboard focus as desktop GUIs show it (#387): a ring once the
+                       keyboard is used, a click giving a dialog's button the keyboard (not
+                       on macOS), controls of several parts claiming their arrow keys
   settings.rs          persisted settings, each repository's (the filters), and the
                        Classic/Modern looks; apart from them, what is sent to PostHog (the
                        first-run prompt's answer and the install ID), never exported or reset

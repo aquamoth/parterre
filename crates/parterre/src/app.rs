@@ -315,6 +315,9 @@ pub struct ParterreApp {
     /// the roots they were computed from.
     preview: Option<(Vec<usize>, Vec<usize>)>,
     context_node: Option<usize>,
+    /// Open the context menu of the selected node (or of the graph) in the next frame, as the
+    /// context-menu key asks.
+    menu_by_key: bool,
     /// Commits to select once the scene has been rebuilt (after a reload).
     pending_select: Vec<Oid>,
     drag: Option<Drag>,
@@ -472,6 +475,10 @@ impl ParterreApp {
         // Before the lock: a click on a locked window is the user's input too.
         cc.egui_ctx.add_plugin(privacy::UserInput::default());
         cc.egui_ctx.add_plugin(crate::dialogs::ModalLock::default());
+        cc.egui_ctx.add_plugin(crate::focus::Cues::default());
+        crate::context_key::install(&cc.egui_ctx);
+        cc.egui_ctx.add_plugin(crate::context_key::ContextKey);
+        cc.egui_ctx.add_plugin(crate::menu::ContextMenus);
         // Automated runs are short and show one window (viewports are embedded), so they neither
         // freeze nor need their frame rate capped: they run as fast as they can.
         let frame_limiter = (!vsync && !automation.is_active()).then(FrameLimiter::default);
@@ -516,6 +523,7 @@ impl ParterreApp {
                 tool
             },
             context_node: None,
+            menu_by_key: false,
             pending_select: Vec::new(),
             drag: None,
             search: Search::default(),
@@ -1741,6 +1749,9 @@ impl ParterreApp {
             self.selection.set(None);
             self.selected_edge = None;
         }
+        if pressed(keys::CONTEXT_MENU) {
+            self.menu_by_key = true;
+        }
         let step = 60.0;
         let page = self.canvas.height() * 0.8;
         let pan = [
@@ -1924,7 +1935,7 @@ impl ParterreApp {
 
     fn canvas(&mut self, ui: &mut Ui) {
         let (canvas, response) =
-            ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+            ui.allocate_exact_size(ui.available_size(), crate::focus::pointer_only());
         self.canvas = canvas;
         // The overview map, drawn over the graph, counts as the graph.
         self.graph_hovered = ui.rect_contains_pointer(canvas);
@@ -2306,9 +2317,19 @@ impl ParterreApp {
             });
         }
 
-        // Context menu: built only while open, as it asks the Git menu.
-        let popup = egui::Popup::context_menu(&response);
-        let open = response.secondary_clicked()
+        // Context menu: built only while open, as it asks the Git menu. The context-menu key
+        // opens the selected node's at the node, else the graph's in the middle.
+        let by_key = std::mem::take(&mut self.menu_by_key);
+        let mut at = canvas.center();
+        if by_key {
+            self.context_node = self.selection.current();
+            if let (Some(node), Some(scene)) = (self.context_node, &self.scene) {
+                at = self.view.to_screen(canvas, scene.node_center(node));
+            }
+        }
+        let popup = crate::menu::context_menu(&response, by_key, at);
+        let open = by_key
+            || response.secondary_clicked()
             || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
         let menu = match self.context_node {
             _ if !open => Vec::new(),
@@ -2363,7 +2384,11 @@ impl ParterreApp {
             &palette,
             self.selected_edge,
         );
-        let resp = ui.interact(rect, egui::Id::new("overview"), Sense::click_and_drag());
+        let resp = ui.interact(
+            rect,
+            egui::Id::new("overview"),
+            crate::focus::pointer_only(),
+        );
         if (resp.clicked() || resp.dragged())
             && let Some(p) = resp.interact_pointer_pos()
         {
@@ -2681,6 +2706,15 @@ fn shortcut_rows() -> Vec<(String, &'static str)> {
             "Show log, compare (with HEAD, the working tree, two nodes, or the commit marked \
              for comparison), open its pull requests, copy hash or refs, select its subtree, \
              return it to the layout",
+        ),
+        (
+            if keys::Platform::CURRENT == keys::Platform::Windows {
+                format!("{}, the Menu key", keys::CONTEXT_MENU.label())
+            } else {
+                keys::CONTEXT_MENU.label()
+            },
+            "The right-click menu of what has the keyboard: the selected node, or a list's \
+             selected row",
         ),
     ]
 }
