@@ -592,16 +592,24 @@ struct RemoteUrl<'a> {
 
 impl RemoteUrl<'_> {
     fn parse(url: &str) -> Option<RemoteUrl<'_>> {
-        fn without_user(authority: &str) -> &str {
-            authority
-                .rsplit_once('@')
-                .map_or(authority, |(_, host)| host)
+        /// Git ends the host at `?` or `#` too, and takes the user up to the first `@`: an
+        /// authority such as `github.com?@dev.azure.com` would have git hand over github.com's
+        /// sign-in for a request to Azure DevOps. Such remotes are on no forge.
+        fn without_user(authority: &str) -> Option<&str> {
+            if authority.contains(['?', '#', '\\']) || authority.matches('@').count() > 1 {
+                return None;
+            }
+            Some(
+                authority
+                    .split_once('@')
+                    .map_or(authority, |(_, host)| host),
+            )
         }
         let url = url.trim();
         match url.split_once("://") {
             Some((scheme, rest)) => {
                 let (authority, path) = rest.split_once('/')?;
-                let host = without_user(authority);
+                let host = without_user(authority)?;
                 let host = host.split_once(':').map_or(host, |(host, _)| host);
                 Some(RemoteUrl {
                     scheme: Some(scheme.to_ascii_lowercase()),
@@ -617,7 +625,7 @@ impl RemoteUrl<'_> {
                 }
                 Some(RemoteUrl {
                     scheme: None,
-                    host: without_user(authority).to_ascii_lowercase(),
+                    host: without_user(authority)?.to_ascii_lowercase(),
                     path,
                 })
             }
@@ -914,6 +922,21 @@ mod tests {
         let waits: Vec<u64> = (1..=8).map(|n| retry_after(n).as_secs()).collect();
         assert_eq!(waits, [20, 40, 80, 160, 320, 640, 900, 900]);
         assert_eq!(retry_after(0).as_secs(), 20);
+    }
+
+    #[test]
+    fn remotes_whose_host_git_reads_otherwise_are_on_no_forge() {
+        for url in [
+            "https://github.com?@dev.azure.com/attacker/p/_git/r",
+            "https://github.com#@dev.azure.com/attacker/p/_git/r",
+            "https://github.com\\@attacker.visualstudio.com/p/_git/r",
+            "https://me@github.com@dev.azure.com/attacker/p/_git/r",
+            "me@github.com@ssh.dev.azure.com:v3/attacker/p/r",
+        ] {
+            assert_eq!(Origin::from_url(url), None, "{url}");
+        }
+        assert!(Origin::from_url("https://org@dev.azure.com/org/p/_git/r").is_some());
+        assert!(Origin::from_url("git@github.com:o/r.git").is_some());
     }
 
     #[test]

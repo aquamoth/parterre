@@ -27,12 +27,17 @@ impl Repositories {
     /// Those whose name or description has every word of `query`, in any case; all for none.
     pub fn matching(&self, query: &str) -> Vec<&Listed> {
         let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        if words.is_empty() {
+            return self.list.iter().collect();
+        }
         self.list
             .iter()
             .filter(|l| {
-                words.iter().all(|w| {
-                    contains_lowercase(&l.name, w) || contains_lowercase(&l.description, w)
-                })
+                let name = Searched::new(&l.name);
+                let description = Searched::new(&l.description);
+                words
+                    .iter()
+                    .all(|w| name.contains(w) || description.contains(w))
             })
             .collect()
     }
@@ -47,15 +52,33 @@ impl Repositories {
     }
 }
 
-/// Asked every frame of the whole list, so ASCII text, as names nearly always are, is compared
-/// without lowercasing a copy.
-fn contains_lowercase(text: &str, lowercase_word: &str) -> bool {
-    if text.is_ascii() {
-        text.as_bytes()
-            .windows(lowercase_word.len())
-            .any(|w| w.eq_ignore_ascii_case(lowercase_word.as_bytes()))
-    } else {
-        text.to_lowercase().contains(lowercase_word)
+/// Text looked through every frame, for the whole list: ASCII text, as names nearly always
+/// are, is compared without lowercasing a copy of it.
+enum Searched<'a> {
+    Ascii(&'a str),
+    Lowercased(String),
+}
+
+impl<'a> Searched<'a> {
+    fn new(text: &'a str) -> Self {
+        if text.is_ascii() {
+            Searched::Ascii(text)
+        } else {
+            Searched::Lowercased(text.to_lowercase())
+        }
+    }
+
+    fn contains(&self, lowercase_word: &str) -> bool {
+        match self {
+            Searched::Ascii(text) => {
+                lowercase_word.is_empty()
+                    || text
+                        .as_bytes()
+                        .windows(lowercase_word.len())
+                        .any(|w| w.eq_ignore_ascii_case(lowercase_word.as_bytes()))
+            }
+            Searched::Lowercased(text) => text.contains(lowercase_word),
+        }
     }
 }
 

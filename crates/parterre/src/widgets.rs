@@ -248,9 +248,12 @@ pub fn copy_icon_button(ui: &mut Ui, copied: bool, done: Color32) -> Response {
     response
 }
 
-fn button_galley(ui: &Ui, text: &str, color: Color32) -> Arc<Galley> {
+/// In [`Color32::PLACEHOLDER`], for the painter to colour: measured and painted, a button's
+/// text is laid out once.
+fn button_galley(ui: &Ui, text: &str) -> Arc<Galley> {
     let font = egui::TextStyle::Button.resolve(ui.style());
-    ui.painter().layout_no_wrap(text.to_owned(), font, color)
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER)
 }
 
 const TEXT_BUTTON_HEIGHT: f32 = 28.0;
@@ -273,7 +276,7 @@ fn text_button_frame(ui: &mut Ui, width: f32) -> (Rect, Response) {
 /// A text button on a light fill, e.g. "Reset" in the zoom popover.
 pub fn text_button(ui: &mut Ui, text: &str) -> Response {
     let color = foreground(ui, false);
-    let galley = button_galley(ui, text, color);
+    let galley = button_galley(ui, text);
     let (rect, response) = text_button_frame(ui, galley.size().x);
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, color);
@@ -282,7 +285,7 @@ pub fn text_button(ui: &mut Ui, text: &str) -> Response {
 }
 
 pub fn text_button_width(ui: &Ui, text: &str) -> f32 {
-    button_galley(ui, text, Color32::PLACEHOLDER).size().x + 2.0 * TEXT_BUTTON_PADDING
+    button_galley(ui, text).size().x + 2.0 * TEXT_BUTTON_PADDING
 }
 
 /// A [`text_button`] with `glyph` in `color` before the text.
@@ -291,7 +294,7 @@ pub fn icon_text_button(ui: &mut Ui, glyph: Glyph, color: Color32, text: &str) -
     const GLYPH_GAP: f32 = 6.0;
     let text_color = foreground(ui, false);
     let color = if ui.is_enabled() { color } else { text_color };
-    let galley = button_galley(ui, text, text_color);
+    let galley = button_galley(ui, text);
     let (rect, response) = text_button_frame(ui, GLYPH_SIZE + GLYPH_GAP + galley.size().x);
     let left = rect.left() + TEXT_BUTTON_PADDING;
     let icon = Rect::from_min_size(
@@ -326,7 +329,7 @@ const FILLED_BUTTON_CORNER: u8 = 8;
 
 /// How wide a [`primary_button`] or [`danger_button`] showing `text` is.
 pub fn filled_button_width(ui: &Ui, text: &str, min_width: f32) -> f32 {
-    let galley = button_galley(ui, text, Color32::WHITE);
+    let galley = button_galley(ui, text);
     filled_width(&galley, min_width)
 }
 
@@ -335,7 +338,7 @@ fn filled_width(galley: &Galley, min_width: f32) -> f32 {
 }
 
 fn filled_button(ui: &mut Ui, text: &str, min_width: f32, color: Color32) -> Response {
-    let galley = button_galley(ui, text, Color32::WHITE);
+    let galley = button_galley(ui, text);
     let size = vec2(filled_width(&galley, min_width), FILLED_BUTTON_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let fill = if response.is_pointer_button_down_on() {

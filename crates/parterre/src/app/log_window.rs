@@ -615,7 +615,7 @@ impl LogWindow {
         });
         if view.pinned {
             label.from = None;
-            label.to = format!("{} at risk", plural(view.commits.len(), "commit"));
+            label.to = plural(view.commits.len(), "commit") + " at risk";
         }
         let font = FontId::proportional(13.5);
         let weak = ui.visuals().weak_text_color();

@@ -178,7 +178,6 @@ fn base64(bytes: &[u8]) -> String {
 }
 
 /// One organisation's API, the only place its sign-in is sent.
-#[derive(Debug)]
 struct Http<'a> {
     agent: ureq::Agent,
     /// `https://dev.azure.com/{org}` or `https://{org}.visualstudio.com`.
@@ -186,6 +185,16 @@ struct Http<'a> {
     authorization: Token,
     sign_in_url: String,
     asked_about: &'a str,
+}
+
+/// Without the sign-in URL, which may carry a password.
+impl std::fmt::Debug for Http<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Http")
+            .field("api_root", &self.api_root)
+            .field("authorization", &self.authorization)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Api for Http<'_> {

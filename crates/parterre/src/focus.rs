@@ -229,10 +229,12 @@ pub fn take_on_part_click(part: &Response, control: Id) {
 /// In a window that [`take_on_click`]s, a click on `row` gives the keyboard to `list`, on any
 /// platform. Elsewhere the keyboard stays where it was, and the window's own keys with it.
 pub fn take_on_row_click(row: &Response, list: Id) {
+    if !row.clicked() {
+        return;
+    }
     let ctx = &row.ctx;
     let taking_pass = taking_pass_id(ctx);
-    let pass = ctx.cumulative_pass_nr();
-    if row.clicked() && ctx.data(|d| d.get_temp::<u64>(taking_pass)) == Some(pass) {
+    if ctx.data(|d| d.get_temp::<u64>(taking_pass)) == Some(ctx.cumulative_pass_nr()) {
         ctx.memory_mut(|m| m.request_focus(list));
     }
 }
