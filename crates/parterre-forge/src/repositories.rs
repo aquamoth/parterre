@@ -30,11 +30,9 @@ impl Repositories {
         self.list
             .iter()
             .filter(|l| {
-                let name = l.name.to_lowercase();
-                let description = l.description.to_lowercase();
-                words
-                    .iter()
-                    .all(|w| name.contains(w.as_str()) || description.contains(w.as_str()))
+                words.iter().all(|w| {
+                    contains_lowercase(&l.name, w) || contains_lowercase(&l.description, w)
+                })
             })
             .collect()
     }
@@ -46,6 +44,18 @@ impl Repositories {
         self.list
             .iter()
             .find(|l| l.forge == forge && l.name.eq_ignore_ascii_case(&name))
+    }
+}
+
+/// Asked every frame of the whole list, so ASCII text, as names nearly always are, is compared
+/// without lowercasing a copy.
+fn contains_lowercase(text: &str, lowercase_word: &str) -> bool {
+    if text.is_ascii() {
+        text.as_bytes()
+            .windows(lowercase_word.len())
+            .any(|w| w.eq_ignore_ascii_case(lowercase_word.as_bytes()))
+    } else {
+        text.to_lowercase().contains(lowercase_word)
     }
 }
 
@@ -105,5 +115,21 @@ mod tests {
         assert_eq!(names("PART"), ["aquamoth/parterre"]);
         assert_eq!(names("aquamoth graph"), ["aquamoth/parterre"]);
         assert!(names("graph clocks").is_empty());
+    }
+
+    #[test]
+    fn words_match_in_any_case_in_unicode_text_too() {
+        let repos = Repositories {
+            list: vec![
+                listed(Forge::Github, "mira/översikt", "Rapporter för året"),
+                listed(Forge::Github, "mira/checkout", "The shop's checkout"),
+            ],
+        };
+        let names =
+            |q: &str| -> Vec<String> { repos.matching(q).iter().map(|l| l.name.clone()).collect() };
+        assert_eq!(names("ÖVERSIKT"), ["mira/översikt"]);
+        assert_eq!(names("FÖR"), ["mira/översikt"]);
+        assert_eq!(names("SHOP'S"), ["mira/checkout"]);
+        assert!(names("ö checkout").is_empty());
     }
 }

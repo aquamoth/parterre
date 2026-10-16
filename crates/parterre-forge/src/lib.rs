@@ -271,6 +271,13 @@ pub enum Forge {
 }
 
 impl Forge {
+    pub fn name(self) -> &'static str {
+        match self {
+            Forge::Github => "GitHub",
+            Forge::AzureDevops => "Azure DevOps",
+        }
+    }
+
     /// Whether this build of parterre has its feature.
     pub fn supported(self) -> bool {
         match self {
@@ -290,10 +297,7 @@ impl Forge {
 
 impl fmt::Display for Forge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Forge::Github => "GitHub",
-            Forge::AzureDevops => "Azure DevOps",
-        })
+        f.write_str(self.name())
     }
 }
 

@@ -106,8 +106,7 @@ impl ParterreApp {
                 vec2(room.max(0.0), widgets::BUTTON_SIZE),
                 Layout::left_to_right(Align::Center),
                 |ui| {
-                    // Narrow windows squeeze the field rather than the tools.
-                    let width = (room - 16.0).clamp(60.0, 380.0);
+                    let width = super::text_view::find_field_width(room);
                     ui.add_space(((room - width) / 2.0).max(0.0));
                     self.find_field(ui, width);
                 },

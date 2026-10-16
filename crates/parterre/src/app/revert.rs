@@ -211,17 +211,16 @@ impl RestoreDialog {
 
 /// *Restore* and *Keep stashed*, as [`dialogs::actions`] lays them out.
 fn restore_or_keep(ui: &mut Ui, enabled: bool) -> dialogs::Answer {
-    const RESTORE_MIN_WIDTH: f32 = 90.0;
     let mut answer = dialogs::Answer::Open;
     let widths = [
         widgets::text_button_width(ui, "Keep stashed"),
-        widgets::filled_button_width(ui, "Restore", RESTORE_MIN_WIDTH),
+        widgets::filled_button_width(ui, "Restore", dialogs::PRIMARY_MIN_WIDTH),
     ];
     dialogs::button_row(ui, &widths, |ui| {
         let keep = widgets::text_button(ui, "Keep stashed");
         let restore = ui
             .add_enabled_ui(enabled, |ui| {
-                widgets::primary_button(ui, "Restore", RESTORE_MIN_WIDTH)
+                widgets::primary_button(ui, "Restore", dialogs::PRIMARY_MIN_WIDTH)
             })
             .inner;
         if restore.clicked() {

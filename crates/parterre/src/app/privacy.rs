@@ -9,7 +9,7 @@ use parterre_telemetry::{Build, Choices, Context, Lifecycle, Properties, Usage};
 
 use super::ParterreApp;
 use crate::settings::{Privacy, PrivacyAnswer};
-use crate::widgets;
+use crate::{dialogs, widgets};
 
 pub(super) const USAGE_LABEL: &str = "Usage statistics";
 pub(super) const USAGE_TEXT: &str = "Installs, launches and which features are used, with a \
@@ -228,7 +228,7 @@ impl Telemetry {
         let Some(choices) = &mut self.prompt else {
             return false;
         };
-        let shown = crate::dialogs::Dialog::new("first-run", "Usage statistics and crash reports")
+        let shown = dialogs::Dialog::new("first-run", "Usage statistics and crash reports")
             .width(430.0)
             .modal()
             .undismissable()
@@ -242,7 +242,7 @@ impl Telemetry {
                 ui.separator();
                 let row = vec2(ui.available_width(), 34.0);
                 ui.allocate_ui_with_layout(row, Layout::right_to_left(Align::Center), |ui| {
-                    widgets::primary_button(ui, "Continue", 90.0).clicked()
+                    widgets::primary_button(ui, "Continue", dialogs::PRIMARY_MIN_WIDTH).clicked()
                 })
                 .inner
             });

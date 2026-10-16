@@ -66,8 +66,7 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Tab::Url => "URL",
-            Tab::Forge(Forge::Github) => "GitHub",
-            Tab::Forge(Forge::AzureDevops) => "Azure DevOps",
+            Tab::Forge(forge) => forge.name(),
         }
     }
 }
