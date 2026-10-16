@@ -11,9 +11,12 @@ use parterre_core::oid::Oid;
 use parterre_core::repo::{RefKind, Repo};
 use parterre_core::revgraph::PullRequestHead;
 use parterre_core::text::capitalized;
+use serde::de::DeserializeOwned;
 
 pub mod azure;
 pub mod github;
+#[cfg(any(feature = "github", feature = "azure-devops"))]
+mod http;
 mod repositories;
 
 pub use repositories::{Listed, Repositories};
@@ -29,10 +32,10 @@ pub struct PullRequest {
     pub draft: bool,
     pub head: Oid,
     pub head_branch: String,
-    /// `owner/name`; `None` once that repository is deleted.
+    /// As [`Origin::full_name`] names it; `None` once that repository is deleted.
     pub head_repo: Option<String>,
     pub base_branch: String,
-    /// `owner/name`: the repository the pull request belongs to.
+    /// The repository the pull request belongs to, as [`Origin::full_name`] names it.
     pub base_repo: String,
     pub url: String,
 }
@@ -131,38 +134,53 @@ impl Proposed {
 /// `--pull-requests-from`'s list, is used instead if given. Blocks: run it on a worker thread.
 pub fn proposals(git: &Git, branches: &[(String, String)], canned: Option<&str>) -> Vec<Proposed> {
     let urls = remote_urls(git).unwrap_or_default();
-    let on: Vec<Option<(&str, Origin)>> = branches
+    let forge_repos: Vec<Option<(&str, Origin)>> = branches
         .iter()
         .map(|(remote, _)| {
             let (_, url) = urls.iter().find(|(name, _)| name == remote)?;
             Some((url.as_str(), Origin::from_url(url)?))
         })
         .collect();
-    let mut found = vec![Proposed::NotOnForge; branches.len()];
-    let mut github = Vec::new();
-    let mut azure = Vec::new();
-    for (i, (on, (_, branch))) in on.iter().zip(branches).enumerate() {
-        match on {
-            Some((_, Origin::Github(repo))) => github.push((i, (repo, branch.as_str()))),
-            Some((url, Origin::AzureDevops(repo))) => {
-                azure.push((i, (*url, repo, branch.as_str())))
-            }
+    let mut on_github = Vec::new();
+    let mut on_azure = Vec::new();
+    for (i, (forge_repo, (_, branch))) in forge_repos.iter().zip(branches).enumerate() {
+        match forge_repo {
+            Some((_, Origin::Github(repo))) => on_github.push((i, (repo, branch.as_str()))),
+            Some((url, Origin::AzureDevops(repo))) => on_azure.push((
+                i,
+                azure::RemoteBranch {
+                    remote_url: url,
+                    repo,
+                    name: branch,
+                },
+            )),
             None => {}
         }
     }
-    if !github.is_empty() {
-        let asked: Vec<_> = github.iter().map(|(_, b)| *b).collect();
-        for ((i, _), proposed) in github.iter().zip(github::proposals(git, &asked, canned)) {
-            found[*i] = proposed;
-        }
-    }
-    if !azure.is_empty() {
-        let asked: Vec<_> = azure.iter().map(|(_, b)| *b).collect();
-        for ((i, _), proposed) in azure.iter().zip(azure::proposals(git, &asked, canned)) {
-            found[*i] = proposed;
-        }
-    }
+    let mut found = vec![Proposed::NotOnForge; branches.len()];
+    ask_once(&mut found, &on_github, |asked| {
+        github::proposals(git, asked, canned)
+    });
+    ask_once(&mut found, &on_azure, |asked| {
+        azure::proposals(git, asked, canned)
+    });
     found
+}
+
+/// Asks `ask` about all `branches` at once, if there are any, and puts each answer at its
+/// branch's index in `found`.
+fn ask_once<B: Copy>(
+    found: &mut [Proposed],
+    branches: &[(usize, B)],
+    ask: impl FnOnce(&[B]) -> Vec<Proposed>,
+) {
+    if branches.is_empty() {
+        return;
+    }
+    let asked: Vec<B> = branches.iter().map(|&(_, branch)| branch).collect();
+    for (&(i, _), proposed) in branches.iter().zip(ask(&asked)) {
+        found[i] = proposed;
+    }
 }
 
 /// Asks git only, not the forge.
@@ -232,7 +250,7 @@ impl PullRequests {
     }
 }
 
-/// The forge repository (`owner/name`, lowercase) and branch of `refs/remotes/<remote>/<branch>`.
+/// The forge repository, in lower case, and branch of `refs/remotes/<remote>/<branch>`.
 /// Remote names may contain slashes: the longest remote that fits wins.
 fn remote_branch<'a>(remotes: &[Remote], full_name: &'a str) -> Option<(String, &'a str)> {
     let rest = full_name.strip_prefix("refs/remotes/")?;
@@ -341,7 +359,7 @@ impl ForgeError {
     }
 
     pub fn explain(&self) -> Explanation {
-        let sign_in = || Some("gh auth login".to_owned());
+        let gh_sign_in = || Some("gh auth login".to_owned());
         // Asked for its refs, git signs in to the repository, with Git Credential Manager
         // keeping the sign-in, and changes nothing. Over HTTPS also for an SSH origin.
         let git_sign_in = |url: &str| Some(format!("git ls-remote {url}"));
@@ -352,7 +370,7 @@ impl ForgeError {
                  isn't installed. Install it, sign in with this command in a terminal, and \
                  turn pull requests on again."
                     .to_owned(),
-                sign_in(),
+                gh_sign_in(),
             ),
             ForgeError::NotSignedIn => (
                 "Not signed in to GitHub".to_owned(),
@@ -360,14 +378,14 @@ impl ForgeError {
                  isn't signed in. Sign in with this command in a terminal, and turn pull \
                  requests on again."
                     .to_owned(),
-                sign_in(),
+                gh_sign_in(),
             ),
             ForgeError::TokenRejected => (
                 "GitHub didn't accept the sign-in".to_owned(),
                 "The GitHub CLI's sign-in may have expired. Sign in again with this command in \
                  a terminal, and turn pull requests on again."
                     .to_owned(),
-                sign_in(),
+                gh_sign_in(),
             ),
             ForgeError::NoGitSignIn { url } => (
                 "Not signed in to Azure DevOps".to_owned(),
@@ -455,15 +473,7 @@ pub struct Explanation {
     pub command: Option<String>,
 }
 
-/// Never printed: its `Debug` shows stars.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Token(String);
-
-impl fmt::Debug for Token {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Token(***)")
-    }
-}
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// What `cmd` prints with `input` on its stdin, if it succeeds within `timeout`: `Ok(None)` if
 /// it fails, or takes longer and is stopped. Errs if it can't be started. Its errors are
@@ -506,7 +516,7 @@ pub(crate) fn output_within(
                 let left = deadline.saturating_duration_since(Instant::now());
                 return Ok(rx.recv_timeout(left).ok());
             }
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -516,33 +526,12 @@ pub(crate) fn output_within(
     }
 }
 
-#[cfg(any(feature = "github", feature = "azure-devops"))]
-const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
-
-#[cfg(any(feature = "github", feature = "azure-devops"))]
-fn agent() -> ureq::Agent {
-    use ureq::tls::{RootCerts, TlsConfig};
-    // The system's certificate authorities, including any a company adds.
-    let tls = TlsConfig::builder()
-        .root_certs(RootCerts::PlatformVerifier)
-        .build();
-    ureq::Agent::config_builder()
-        .tls_config(tls)
-        .timeout_global(Some(Duration::from_secs(30)))
-        // Error answers carry the reason, and the rate limit in their headers.
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .user_agent(concat!("parterre/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into()
-}
-
-/// How long a loaded list is used before GitHub is asked again, as in t3code.
+/// How long a loaded list is used before the forge is asked again, as in t3code.
 pub fn fresh_for(found_any: bool) -> Duration {
     Duration::from_secs(if found_any { 60 } else { 5 * 60 })
 }
 
-/// How long after [`origin_moved`] GitHub is asked once more, however fresh the list: a pull
+/// How long after [`origin_moved`] the forge is asked once more, however fresh the list: a pull
 /// request is usually opened seconds after its branch is pushed, after the load the push
 /// started (#294).
 pub const RECHECK_AFTER_PUSH: Duration = Duration::from_secs(60);
@@ -553,8 +542,8 @@ pub fn retry_after(failures: u32) -> Duration {
     Duration::from_secs((20u64 << doublings).min(15 * 60))
 }
 
-/// Whether `origin`'s branches differ between two snapshots: they are what GitHub is asked
-/// about.
+/// Whether `origin`'s branches differ between two snapshots: the pull requests shown are those
+/// proposing them.
 pub fn origin_moved(old: &Repo, new: &Repo) -> bool {
     fn branches(repo: &Repo) -> Vec<(&str, Oid)> {
         let mut branches: Vec<_> = repo
@@ -585,6 +574,55 @@ fn parse_remote_urls(out: &str) -> Vec<(String, String)> {
             Some((name.to_owned(), url.to_owned()))
         })
         .collect()
+}
+
+/// `scheme://[user@]host[:port]/path`, or git's scp-like `[user@]host:path`, which has no
+/// scheme.
+struct RemoteUrl<'a> {
+    /// In lower case.
+    scheme: Option<String>,
+    /// In lower case.
+    host: String,
+    path: &'a str,
+}
+
+impl RemoteUrl<'_> {
+    fn parse(url: &str) -> Option<RemoteUrl<'_>> {
+        fn without_user(authority: &str) -> &str {
+            authority
+                .rsplit_once('@')
+                .map_or(authority, |(_, host)| host)
+        }
+        let url = url.trim();
+        match url.split_once("://") {
+            Some((scheme, rest)) => {
+                let (authority, path) = rest.split_once('/')?;
+                let host = without_user(authority);
+                let host = host.split_once(':').map_or(host, |(host, _)| host);
+                Some(RemoteUrl {
+                    scheme: Some(scheme.to_ascii_lowercase()),
+                    host: host.to_ascii_lowercase(),
+                    path,
+                })
+            }
+            None => {
+                let (authority, path) = url.split_once(':')?;
+                // As git reads it: scp-like only with no slash before the colon.
+                if authority.contains('/') {
+                    return None;
+                }
+                Some(RemoteUrl {
+                    scheme: None,
+                    host: without_user(authority).to_ascii_lowercase(),
+                    path,
+                })
+            }
+        }
+    }
+}
+
+fn parse_answer<T: DeserializeOwned>(forge: Forge, body: &str) -> Result<T, ForgeError> {
+    serde_json::from_str(body).map_err(|e| ForgeError::Parse(forge, e.to_string()))
 }
 
 /// Pull requests from `json` (`--pull-requests-from`), for screenshots and demos without the
@@ -648,6 +686,39 @@ pub fn upstreams(git: &Git) -> Result<HashMap<String, String>, GitError> {
             (!upstream.is_empty()).then(|| (branch.to_owned(), upstream.to_owned()))
         })
         .collect())
+}
+
+#[cfg(test)]
+mod fake {
+    use std::cell::RefCell;
+
+    use super::{Forge, ForgeError};
+
+    /// Answers each request with the next of its answers, and keeps the requests.
+    #[derive(Debug)]
+    pub(crate) struct Fake<A> {
+        answers: RefCell<Vec<Result<A, ForgeError>>>,
+        pub asked: RefCell<Vec<String>>,
+    }
+
+    impl<A> Fake<A> {
+        pub fn new(answers: impl IntoIterator<Item = Result<A, ForgeError>>) -> Fake<A> {
+            let mut answers: Vec<_> = answers.into_iter().collect();
+            answers.reverse();
+            Fake {
+                answers: RefCell::new(answers),
+                asked: RefCell::default(),
+            }
+        }
+
+        pub fn answer(&self, forge: Forge, request: &str) -> Result<A, ForgeError> {
+            self.asked.borrow_mut().push(request.to_owned());
+            self.answers
+                .borrow_mut()
+                .pop()
+                .unwrap_or_else(|| Err(ForgeError::Network(forge, "no more answers".into())))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -830,13 +901,6 @@ mod tests {
         assert!(e.body.starts_with("Connection refused. "), "{}", e.body);
         let e = ForgeError::Parse(Forge::Github, "bad JSON".into()).explain();
         assert_eq!(e.body, "Unexpected answer from GitHub: bad JSON.");
-    }
-
-    #[test]
-    fn tokens_are_not_printed() {
-        let token = Token("gho_secret".into());
-        assert_eq!(format!("{token:?}"), "Token(***)");
-        assert!(!format!("{:?}", Some(token)).contains("secret"));
     }
 
     #[test]

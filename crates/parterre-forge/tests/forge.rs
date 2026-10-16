@@ -276,6 +276,10 @@ fn github_is_not_asked_without_fetched_branches() {
     assert!(prs.list.is_empty());
 }
 
+fn remote_branch(remote: &str, branch: &str) -> (String, String) {
+    (remote.to_owned(), branch.to_owned())
+}
+
 #[test]
 fn a_remote_branch_proposed_by_an_open_pull_request_is_found_before_deleting_it() {
     let mut r = TestRepo::new();
@@ -285,14 +289,13 @@ fn a_remote_branch_proposed_by_an_open_pull_request_is_found_before_deleting_it(
     r.git(&["remote", "add", "elsewhere", "/srv/git/r"]);
     r.git(&["update-ref", "refs/remotes/origin/feature", &tip]);
     let canned = r#"[{"number": 12, "title": "Add feature", "head": "feature", "base": "main"}]"#;
-    let branch = |remote: &str, branch: &str| (remote.to_owned(), branch.to_owned());
     let found = forge::proposals(
         &Git::new(r.path()),
         &[
-            branch("origin", "feature"),
-            branch("origin", "main"),
-            branch("fork", "feature"),
-            branch("elsewhere", "feature"),
+            remote_branch("origin", "feature"),
+            remote_branch("origin", "main"),
+            remote_branch("fork", "feature"),
+            remote_branch("elsewhere", "feature"),
         ],
         Some(canned),
     );
@@ -306,7 +309,11 @@ fn a_remote_branch_proposed_by_an_open_pull_request_is_found_before_deleting_it(
     assert_eq!(found[3], forge::Proposed::NotOnForge);
     // Nothing on a forge: nothing asked.
     assert_eq!(
-        forge::proposals(&Git::new(r.path()), &[branch("elsewhere", "x")], None),
+        forge::proposals(
+            &Git::new(r.path()),
+            &[remote_branch("elsewhere", "x")],
+            None
+        ),
         [forge::Proposed::NotOnForge]
     );
 }
@@ -332,14 +339,13 @@ fn an_azure_devops_branch_proposed_by_an_active_pull_request_is_found_before_del
     r.git(&["remote", "add", "elsewhere", "/srv/git/r"]);
     r.git(&["update-ref", "refs/remotes/origin/feature", &tip]);
     let canned = r#"[{"number": 7, "title": "Add feature", "head": "feature", "base": "main"}]"#;
-    let branch = |remote: &str, branch: &str| (remote.to_owned(), branch.to_owned());
     let found = forge::proposals(
         &Git::new(r.path()),
         &[
-            branch("origin", "feature"),
-            branch("origin", "main"),
-            branch("ssh", "feature"),
-            branch("elsewhere", "feature"),
+            remote_branch("origin", "feature"),
+            remote_branch("origin", "main"),
+            remote_branch("ssh", "feature"),
+            remote_branch("elsewhere", "feature"),
         ],
         Some(canned),
     );
@@ -383,7 +389,7 @@ fn azure_devops_origins_have_pull_requests_on_their_heads() {
 
     let json = r#"[{"number": 7, "title": "Seven", "head": "topic", "base": "main"}]"#;
     let prs = origin.load_canned(&git, json).unwrap();
-    let repo = "o/My Project/r";
+    let repo_name = "o/My Project/r";
     assert_eq!(
         prs.list,
         [PullRequest {
@@ -393,9 +399,9 @@ fn azure_devops_origins_have_pull_requests_on_their_heads() {
             draft: false,
             head: parterre_core::Oid::from_hex(&pushed).unwrap(),
             head_branch: "topic".into(),
-            head_repo: Some(repo.into()),
+            head_repo: Some(repo_name.into()),
             base_branch: "main".into(),
-            base_repo: repo.into(),
+            base_repo: repo_name.into(),
             url: "https://dev.azure.com/o/My%20Project/_git/r/pullrequest/7".into(),
         }]
     );
@@ -404,11 +410,11 @@ fn azure_devops_origins_have_pull_requests_on_their_heads() {
         [
             Remote {
                 name: "origin".into(),
-                repo: repo.into(),
+                repo: repo_name.into(),
             },
             Remote {
                 name: "upstream".into(),
-                repo: repo.into(),
+                repo: repo_name.into(),
             },
         ]
     );

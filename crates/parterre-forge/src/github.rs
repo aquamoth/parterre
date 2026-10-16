@@ -15,9 +15,9 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use super::{Forge, ForgeError, Proposed, PullRequest, PullRequests, Remote, RemoteUrl};
 #[cfg(feature = "github")]
-use super::Token;
-use super::{Forge, ForgeError, Proposed, PullRequest, PullRequests, Remote};
+use crate::http::{self, Token};
 use parterre_core::git::{Git, GitError};
 
 mod repositories;
@@ -40,37 +40,20 @@ impl GithubRepo {
     /// The repository a remote URL points at, if it is on github.com: `https://github.com/o/r`,
     /// `git@github.com:o/r.git`, `ssh://git@ssh.github.com:443/o/r` and the like.
     pub fn from_url(url: &str) -> Option<GithubRepo> {
-        let url = url.trim();
-        let (host, path) = match url.split_once("://") {
-            Some((scheme, rest)) => {
-                let scheme = scheme.to_ascii_lowercase();
-                let scheme = scheme.strip_prefix("git+").unwrap_or(&scheme);
-                if !matches!(scheme, "https" | "http" | "ssh" | "git") {
-                    return None;
-                }
-                let (authority, path) = rest.split_once('/')?;
-                let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-                let host = host.split_once(':').map_or(host, |(h, _)| h);
-                (host, path)
+        let url = RemoteUrl::parse(url)?;
+        if let Some(scheme) = &url.scheme {
+            let scheme = scheme.strip_prefix("git+").unwrap_or(scheme);
+            if !matches!(scheme, "https" | "http" | "ssh" | "git") {
+                return None;
             }
-            // scp-like: [user@]host:path, with no slash before the colon.
-            None => {
-                let (authority, path) = url.split_once(':')?;
-                if authority.contains('/') {
-                    return None;
-                }
-                let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-                (host, path)
-            }
-        };
-        let host = host.to_ascii_lowercase();
+        }
         if !matches!(
-            host.as_str(),
+            url.host.as_str(),
             "github.com" | "www.github.com" | "ssh.github.com"
         ) {
             return None;
         }
-        let path = path.trim_matches('/');
+        let path = url.path.trim_matches('/');
         let path = path.strip_suffix(".git").unwrap_or(path);
         let (owner, name) = path.split_once('/')?;
         // Enterprise Managed Users' logins end in `_shortcode`.
@@ -358,7 +341,7 @@ fn request(origin: &GithubRepo, branches: &[String]) -> String {
 }
 
 fn repository(body: &str, origin: &GithubRepo) -> Result<json::Repository, ForgeError> {
-    let answer: json::Answer<json::Data> = json::parse(body)?;
+    let answer: json::Answer<json::Data> = super::parse_answer(Forge::Github, body)?;
     if let Some(repo) = answer.data.and_then(|d| d.repository) {
         return Ok(repo);
     }
@@ -376,14 +359,9 @@ mod json {
     use std::collections::HashMap;
 
     use serde::Deserialize;
-    use serde::de::DeserializeOwned;
 
     use super::{Forge, ForgeError, GithubRepo, WEB};
     use parterre_core::oid::Oid;
-
-    pub fn parse<T: DeserializeOwned>(body: &str) -> Result<T, ForgeError> {
-        serde_json::from_str(body).map_err(|e| ForgeError::Parse(Forge::Github, e.to_string()))
-    }
 
     #[derive(Debug, Deserialize)]
     pub struct Answer<D> {
@@ -575,7 +553,7 @@ struct Http {
 impl Http {
     fn new(token: Token) -> Http {
         Http {
-            agent: super::agent(),
+            agent: http::agent(),
             token,
         }
     }
@@ -591,14 +569,8 @@ impl Api for Http {
             .header("Authorization", &format!("Bearer {token}"))
             .header("Content-Type", "application/json")
             .send(body)
-            .map_err(|e| ForgeError::Network(Forge::Github, e.to_string()))?;
-        let header = |name: &str| -> Option<u64> {
-            response
-                .headers()
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse().ok())
-        };
+            .map_err(http::network_error(Forge::Github))?;
+        let header = |name| http::number_header(&response, name);
         let quota = match (
             header("x-ratelimit-remaining"),
             header("x-ratelimit-limit"),
@@ -614,12 +586,7 @@ impl Api for Http {
         // GitHub's secondary limits say how long to wait.
         let retry_after = header("retry-after");
         let status = response.status().as_u16();
-        let body = response
-            .body_mut()
-            .with_config()
-            .limit(super::MAX_RESPONSE_BYTES)
-            .read_to_string()
-            .map_err(|e| ForgeError::Network(Forge::Github, e.to_string()))?;
+        let body = http::read_body(&mut response, Forge::Github)?;
         match status {
             200..=299 => Ok(Response { body, quota }),
             401 => Err(ForgeError::TokenRejected),
@@ -634,29 +601,15 @@ impl Api for Http {
                     minutes: until.saturating_sub(unix_now()).div_ceil(60),
                 })
             }
-            _ => {
-                #[derive(serde::Deserialize)]
-                struct Message {
-                    message: String,
-                }
-                let message = serde_json::from_str::<Message>(&body)
-                    .map(|m| m.message)
-                    .unwrap_or_else(|_| body.chars().take(200).collect());
-                Err(ForgeError::Status {
-                    forge: Forge::Github,
-                    status,
-                    message,
-                })
-            }
+            _ => Err(http::status_error(Forge::Github, status, &body)),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-
     use super::*;
+    use crate::fake::Fake;
 
     fn repo(owner: &str, name: &str) -> Option<GithubRepo> {
         Some(GithubRepo {
@@ -720,40 +673,28 @@ mod tests {
         }
     }
 
-    /// Answers each request with the next of `bodies`, and keeps the requests.
-    pub(super) struct Fake {
-        responses: RefCell<Vec<Response>>,
-        pub asked: RefCell<Vec<serde_json::Value>>,
-    }
-
-    impl Fake {
-        pub fn new(bodies: &[&str], quota: Option<Quota>) -> Fake {
-            Fake {
-                responses: RefCell::new(
-                    bodies
-                        .iter()
-                        .rev()
-                        .map(|b| Response {
-                            body: (*b).to_owned(),
-                            quota,
-                        })
-                        .collect(),
-                ),
-                asked: RefCell::new(Vec::new()),
-            }
-        }
-    }
-
-    impl Api for Fake {
+    impl Api for Fake<Response> {
         fn post(&self, body: &str) -> Result<Response, ForgeError> {
-            self.asked
-                .borrow_mut()
-                .push(serde_json::from_str(body).expect("requests are JSON"));
-            self.responses
-                .borrow_mut()
-                .pop()
-                .ok_or_else(|| ForgeError::Network(Forge::Github, "no more answers".into()))
+            self.answer(Forge::Github, body)
         }
+    }
+
+    /// Answers each request with the next of `bodies`.
+    pub(super) fn fake(bodies: &[&str], quota: Option<Quota>) -> Fake<Response> {
+        Fake::new(bodies.iter().map(|body| {
+            Ok(Response {
+                body: (*body).to_owned(),
+                quota,
+            })
+        }))
+    }
+
+    pub(super) fn requests(api: &Fake<Response>) -> Vec<serde_json::Value> {
+        api.asked
+            .borrow()
+            .iter()
+            .map(|request| serde_json::from_str(request).expect("requests are JSON"))
+            .collect()
     }
 
     fn pr(number: u64, head_repo: Option<&str>, head: char) -> String {
@@ -802,7 +743,7 @@ mod tests {
             pr(39, Some("me/fork"), 'd'),
             pr(3, None, 'e'),
         );
-        let api = Fake::new(&[&body], None);
+        let api = fake(&[&body], None);
         let origin = repo("me", "fork").unwrap();
         let found = origins_own(&api, &origin, &["topic".into(), "a\"b".into()]).unwrap();
         assert_eq!(found.name, "Me/Fork");
@@ -820,7 +761,7 @@ mod tests {
         );
         assert_eq!(found.list[0].head.to_hex(), "a".repeat(40));
         assert_eq!(found.pause_until, None);
-        let asked = &api.asked.borrow()[0];
+        let asked = &requests(&api)[0];
         assert_eq!(asked["variables"]["owner"], "me");
         assert_eq!(asked["variables"]["b1"], "a\"b");
         let query = asked["query"].as_str().unwrap();
@@ -836,7 +777,7 @@ mod tests {
             pr(7, Some("o/r"), 'a'),
             pr(8, Some("someone/fork"), 'b'),
         );
-        let api = Fake::new(&[&body], None);
+        let api = fake(&[&body], None);
         let origin = repo("o", "r").unwrap();
         let found =
             open_pull_requests(&api, &origin, &["topic".into()], HeadsFrom::AnyRepository).unwrap();
@@ -847,11 +788,9 @@ mod tests {
     #[test]
     fn asks_about_a_hundred_branches_at_a_time() {
         let empty = r#"{"data":{"repository":{"nameWithOwner":"o/r","parent":null}}}"#;
-        let api = Fake::new(&[empty, empty, empty], None);
+        let api = fake(&[empty, empty, empty], None);
         origins_own(&api, &repo("o", "r").unwrap(), &branches(250)).unwrap();
-        let sizes: Vec<usize> = api
-            .asked
-            .borrow()
+        let sizes: Vec<usize> = requests(&api)
             .iter()
             .map(|a| a["variables"].as_object().unwrap().len() - 2)
             .collect();
@@ -867,14 +806,14 @@ mod tests {
             reset: 1_900_000_000,
         };
         let found = origins_own(
-            &Fake::new(&[empty], Some(quota(500))),
+            &fake(&[empty], Some(quota(500))),
             &repo("o", "r").unwrap(),
             &branches(1),
         )
         .unwrap();
         assert_eq!(found.pause_until, None);
         let found = origins_own(
-            &Fake::new(&[empty], Some(quota(499))),
+            &fake(&[empty], Some(quota(499))),
             &repo("o", "r").unwrap(),
             &branches(1),
         )
@@ -888,13 +827,13 @@ mod tests {
         let missing = r#"{"data":{"repository":null},"errors":[{"type":"NOT_FOUND",
             "message":"Could not resolve to a Repository with the name 'me/gone'."}]}"#;
         assert!(matches!(
-            origins_own(&Fake::new(&[missing], None), &origin, &branches(1)),
+            origins_own(&fake(&[missing], None), &origin, &branches(1)),
             Err(ForgeError::NotFound { .. })
         ));
-        let odd = origins_own(&Fake::new(&["<html>"], None), &origin, &branches(1));
+        let odd = origins_own(&fake(&["<html>"], None), &origin, &branches(1));
         assert!(matches!(odd, Err(ForgeError::Parse(..))));
         let other = r#"{"errors":[{"type":"FORBIDDEN","message":"SAML enforcement"}]}"#;
-        match origins_own(&Fake::new(&[other], None), &origin, &branches(1)) {
+        match origins_own(&fake(&[other], None), &origin, &branches(1)) {
             Err(e) => assert!(e.to_string().contains("SAML enforcement"), "{e}"),
             Ok(_) => panic!("an error was expected"),
         }

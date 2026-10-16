@@ -127,7 +127,7 @@ fn request(after: Option<&str>) -> String {
 }
 
 fn page(body: &str) -> Result<Page, ForgeError> {
-    let answer: json::Answer<Data> = json::parse(body)?;
+    let answer: json::Answer<Data> = crate::parse_answer(Forge::Github, body)?;
     if let Some(page) = answer.data.and_then(|d| d.viewer).map(|v| v.repositories) {
         return Ok(page);
     }
@@ -173,7 +173,7 @@ struct Node {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::Fake;
+    use super::super::tests::{fake, requests};
     use super::*;
 
     fn page(names: &[&str], next: Option<&str>) -> String {
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn every_page_is_read_in_order() {
-        let api = Fake::new(
+        let api = fake(
             &[
                 &page(&["me/new", "org/shared"], Some("c1")),
                 &page(&["me/old"], None),
@@ -207,7 +207,7 @@ mod tests {
         let names: Vec<&str> = list.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, ["me/new", "org/shared", "me/old"]);
         assert!(list[2].archived);
-        let asked = api.asked.borrow();
+        let asked = requests(&api);
         assert_eq!(asked.len(), 2);
         assert_eq!(asked[0]["variables"]["after"], serde_json::Value::Null);
         assert_eq!(asked[1]["variables"]["after"], "c1");
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn an_error_answer_is_said() {
-        let api = Fake::new(
+        let api = fake(
             &[r#"{"data":null,"errors":[{"type":"FORBIDDEN","message":"no"}]}"#],
             None,
         );

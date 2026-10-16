@@ -2,23 +2,21 @@
 //! (#387): tabs and segments by Left and Right, a list's rows by Up and Down, a page at a time,
 //! or to either end.
 
-/// A move of the selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Move {
-    /// Up or Left.
     Back,
-    /// Down or Right.
     Forward,
-    /// Page Up and Page Down: by a page of rows.
+    /// A page of this many rows back, at least one.
     PageBack(usize),
+    /// A page of this many rows forward, at least one.
     PageForward(usize),
-    /// Home and End.
     First,
     Last,
 }
 
-/// The item `step` goes to from the `selected` one of `len`: none past either end, and from no
-/// selection, the first. `None` with no items.
+/// The item `step` goes to from the `selected` one of `len`, no further than either end. From no
+/// selection it goes to the first, or the last for [`Move::Last`]; from past the end, as from the
+/// last. `None` with no items.
 pub fn target(selected: Option<usize>, len: usize, step: Move) -> Option<usize> {
     let last = len.checked_sub(1)?;
     let Some(at) = selected.map(|s| s.min(last)) else {
