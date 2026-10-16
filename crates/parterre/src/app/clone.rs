@@ -102,7 +102,7 @@ pub struct CloneDialog {
     clipboard_url: Option<mpsc::Receiver<Option<String>>>,
     pub opener: ViewportId,
     fresh: bool,
-    /// The folder a clone would go in, there already.
+    /// The folder a clone would go in, there already, picked to open instead.
     pub open_instead: Option<PathBuf>,
 }
 

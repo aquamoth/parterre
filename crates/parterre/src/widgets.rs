@@ -719,8 +719,8 @@ pub struct ListKeys {
 }
 
 /// While list `id` has the keyboard: Up and Down, Page Up and Page Down (by `page` rows), Home
-/// and End move the selection from the `selected` row of `len`. Read before the rows are laid out, so
-/// that they show where it went.
+/// and End move the selection from the `selected` row of `len`. Read before the rows are laid
+/// out, so that they show where it went.
 pub fn list_keys(ui: &Ui, id: Id, selected: Option<usize>, len: usize, page: usize) -> ListKeys {
     if len == 0 || !ui.memory(|m| m.has_focus(id)) {
         return ListKeys::default();
