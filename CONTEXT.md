@@ -212,6 +212,46 @@ _Avoid_: selected commit, active commit
 The list at the bottom of a blame window of the commits that changed the file, one per row.
 _Avoid_: log pane, commit list
 
+### Builds and rings
+
+**Channel**:
+How a copy of parterre was installed: the Windows installer, the zip, a tarball, the macOS disk
+image, a .deb, an .rpm, `cargo install`, Snap or Flatpak. It decides what *Download* offers.
+_Avoid_: ring, track, store
+
+**Ring**:
+Which builds a user's parterre on a computer hears of: stable, rc, nightly or canary. Each ring
+hears of its own builds only, except rc, which also hears of stable releases. Every copy the
+user runs there shares it, and keeps it: running a published build
+from a later ring moves it there, running one from an earlier ring doesn't move it back, and
+only the user narrows it. A channel that can't take other builds hears of stable releases only,
+whatever the ring.
+_Avoid_: channel, track, level
+
+**Stable release**:
+A version published for everyone, with release notes, and the only kind distributed beyond
+GitHub. The stable ring hears of these only.
+_Avoid_: GA, official release, final
+
+**Release candidate**:
+A version published on GitHub for testing before a stable release of the same number.
+_Avoid_: beta, preview
+
+**Nightly build**:
+A build of the default branch published during the night when it has moved since the previous
+one, for testers who want the newest work.
+_Avoid_: daily, snapshot
+
+**Canary build**:
+A build published after every merge to the default branch, for the maintainer to carry work
+between computers.
+_Avoid_: dev build, edge, CI build
+
+**Dev build**:
+A build made from a checkout, past a release tag or with changes of its own, and never
+published.
+_Avoid_: canary build, local release
+
 ### What parterre sends
 
 **Update check**:
