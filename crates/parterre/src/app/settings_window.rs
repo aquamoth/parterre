@@ -380,6 +380,12 @@ impl ParterreApp {
                 });
                 self.set_remember_moves(remember);
             }
+            SettingsPage::Privacy if super::prototype_rings::active() => {
+                super::prototype_rings::updates_section(ui, &mut s.check_for_updates);
+                if let Some(error) = privacy_page(ui, &mut self.telemetry) {
+                    self.status = Some((error, true));
+                }
+            }
             SettingsPage::Privacy => {
                 group(ui, |rows| {
                     // Without `send`, and on Snap and Flatpak, there is nothing to turn on.
@@ -846,14 +852,14 @@ fn privacy_page(ui: &mut Ui, telemetry: &mut privacy::Telemetry) -> Option<Strin
     None
 }
 
-fn title(ui: &mut Ui, text: &str) {
+pub(super) fn title(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
     ui.label(RichText::new(text).strong().size(15.0));
     ui.add_space(6.0);
 }
 
 /// Rows of a [`group`].
-struct Rows<'a> {
+pub(super) struct Rows<'a> {
     ui: &'a mut Ui,
     count: usize,
 }
@@ -861,7 +867,7 @@ struct Rows<'a> {
 impl Rows<'_> {
     /// `label` on the left, explained by `tip` on hover if it isn't empty, and `control` on
     /// the right.
-    fn row(&mut self, label: &str, tip: &str, control: impl FnOnce(&mut Ui)) {
+    pub(super) fn row(&mut self, label: &str, tip: &str, control: impl FnOnce(&mut Ui)) {
         if self.count > 0 {
             let rect = self.ui.available_rect_before_wrap();
             let stroke = self.ui.visuals().widgets.noninteractive.bg_stroke;
@@ -884,7 +890,7 @@ impl Rows<'_> {
         });
     }
 
-    fn switch(&mut self, label: &str, tip: &str, on: &mut bool) {
+    pub(super) fn switch(&mut self, label: &str, tip: &str, on: &mut bool) {
         self.row(label, tip, |ui| {
             widgets::switch(ui, on);
         });
@@ -904,7 +910,7 @@ impl Rows<'_> {
 }
 
 /// Rows on a rounded background.
-fn group(ui: &mut Ui, add_rows: impl FnOnce(&mut Rows)) {
+pub(super) fn group(ui: &mut Ui, add_rows: impl FnOnce(&mut Rows)) {
     let t = widgets::tones(ui);
     let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
     egui::Frame::new()

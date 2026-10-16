@@ -34,6 +34,7 @@ mod merge;
 mod merge_tool;
 mod node_menu;
 mod privacy;
+mod prototype_rings;
 mod pull_requests;
 mod rebase;
 mod remote;
@@ -3095,7 +3096,14 @@ impl eframe::App for ParterreApp {
         if let Some(error) = self.about.show(&ctx) {
             self.status = Some((error, true));
         }
+        if prototype_rings::take_open_dialog() {
+            self.release_dialog = self.newer_release();
+        }
+        if prototype_rings::take_open_settings() {
+            self.open_settings(SettingsPage::Privacy);
+        }
         self.release_dialog(&ctx);
+        prototype_rings::bar(&ctx);
         self.file_drop(&ctx);
         // Over everything else.
         self.first_run_prompt(&ctx, frame);

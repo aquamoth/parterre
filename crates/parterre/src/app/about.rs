@@ -86,6 +86,7 @@ impl About {
             ui.label(RichText::new(about::TAGLINE).weak());
             ui.add_space(6.0);
             self.version(ui);
+            super::prototype_rings::about(ui);
             ui.add_space(12.0);
         });
         let mut error = None;
@@ -132,7 +133,7 @@ impl About {
         let text = if self.copied {
             "Copied"
         } else {
-            crate::VERSION
+            super::prototype_rings::running().unwrap_or(crate::VERSION)
         };
         let pill = egui::Button::new(RichText::new(text).color(t.on_fg))
             .fill(t.on_bg)

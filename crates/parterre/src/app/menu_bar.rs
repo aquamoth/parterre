@@ -536,7 +536,7 @@ fn app_menu(state: &State) -> Vec<Entry> {
 /// *Download ‹version›*, in the accent colour, while a newer release is out (#258).
 fn download(state: &State) -> Option<Entry> {
     let version = state.newer.as_ref()?;
-    let mut item = Item::new(format!("Download {version}"), Command::Download);
+    let mut item = Item::new(super::prototype_rings::download_label(version), Command::Download);
     item.accent = true;
     Some(item.into())
 }

@@ -48,6 +48,18 @@ impl ParterreApp {
         let Some(update) = &self.release_dialog else {
             return;
         };
+        if super::prototype_rings::active() {
+            match super::prototype_rings::release_dialog(ctx) {
+                Some(true) => {
+                    let download = update.download.clone();
+                    self.download(ctx, &download);
+                    self.release_dialog = None;
+                }
+                Some(false) => self.release_dialog = None,
+                None => {}
+            }
+            return;
+        }
         let this = crate::VERSION.split(' ').next().unwrap_or(crate::VERSION);
         let shown = Dialog::new("new-release", "New release")
             .screen(crate::usage::Screen::NewRelease)
@@ -108,6 +120,9 @@ impl ParterreApp {
     pub(super) fn newer_release(&mut self) -> Option<Update> {
         if !self.settings.check_for_updates {
             return None;
+        }
+        if let Some(update) = super::prototype_rings::newer() {
+            return Some(update);
         }
         match &self.automation.newer_release {
             Some(update) => Some(update.clone()),
