@@ -314,7 +314,7 @@ impl CommitTable<'_> {
                 // Not a stop of its own: the table is one.
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::CLICK);
-                focus::click_row(&response, stop_id);
+                focus::take_on_row_click(&response, stop_id);
                 let selected = list.is_selected(i);
                 let fill = if selected {
                     Some(c.selected_bg)
@@ -464,7 +464,7 @@ impl CommitTable<'_> {
                 }
                 let by_key = list.open_selected_menu && list.selected == Some(i);
                 let at = pos2(rect.left() + icon_column + CELL_PAD, rect.bottom());
-                crate::menu::context_menu(&response, by_key, at)
+                crate::menu::context_menu(&response, by_key.then_some(at))
                     .style(crate::menu::style)
                     .show(|ui| {
                         crate::menu::fit_window(ui, |ui| {

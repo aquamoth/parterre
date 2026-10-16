@@ -100,7 +100,6 @@ struct Current {
     id: Id,
     resizable: bool,
     in_growing_part: bool,
-    /// In its first frame.
     opening: bool,
 }
 
@@ -899,6 +898,8 @@ impl<'a> Primary<'a> {
     }
 }
 
+pub const PRIMARY_MIN_WIDTH: f32 = 90.0;
+
 /// `primary` and *Cancel*, which Esc clicks too.
 pub fn actions(ui: &mut Ui, primary: Primary) -> Answer {
     action_row(ui, Some(primary))
@@ -910,7 +911,6 @@ pub fn close_only(ui: &mut Ui) -> Answer {
 }
 
 fn action_row(ui: &mut Ui, primary: Option<Primary>) -> Answer {
-    const PRIMARY_MIN_WIDTH: f32 = 90.0;
     let mut answer = Answer::Open;
     let destructive = primary.is_some_and(|p| p.destructive);
     let close = if primary.is_some() { "Cancel" } else { "Close" };
@@ -959,8 +959,9 @@ fn action_row(ui: &mut Ui, primary: Option<Primary>) -> Answer {
 /// right-to-left row backwards).
 pub fn button_row<R>(ui: &mut Ui, widths: &[f32], add: impl FnOnce(&mut Ui) -> R) -> R {
     const GAP: f32 = 8.0;
+    const ROW_HEIGHT: f32 = 34.0;
     let room = widths.iter().sum::<f32>() + GAP * widths.len().saturating_sub(1) as f32;
-    let size = vec2(ui.available_width(), 34.0);
+    let size = vec2(ui.available_width(), ROW_HEIGHT);
     ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = GAP;
         ui.add_space((ui.available_width() - room).max(0.0));

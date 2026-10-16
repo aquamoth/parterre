@@ -35,6 +35,8 @@ impl ParterreApp {
     }
 
     pub(super) fn release_dialog(&mut self, ctx: &egui::Context) {
+        const CLOSE: &str = "Close";
+        const DOWNLOAD: &str = "Download";
         let Some(update) = &self.release_dialog else {
             return;
         };
@@ -57,14 +59,16 @@ impl ParterreApp {
                 });
                 ui.separator();
                 let widths = [
-                    widgets::text_button_width(ui, "Close"),
-                    widgets::filled_button_width(ui, "Download", 90.0),
+                    widgets::text_button_width(ui, CLOSE),
+                    widgets::filled_button_width(ui, DOWNLOAD, dialogs::PRIMARY_MIN_WIDTH),
                 ];
                 dialogs::button_row(ui, &widths, |ui| {
-                    if widgets::text_button(ui, "Close").clicked() {
+                    if widgets::text_button(ui, CLOSE).clicked() {
                         answer = ReleaseAnswer::Close;
                     }
-                    if widgets::primary_button(ui, "Download", 90.0).clicked() {
+                    let download =
+                        widgets::primary_button(ui, DOWNLOAD, dialogs::PRIMARY_MIN_WIDTH);
+                    if download.clicked() {
                         answer = ReleaseAnswer::Download;
                     }
                 });

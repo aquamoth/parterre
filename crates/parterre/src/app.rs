@@ -375,13 +375,7 @@ impl ParterreApp {
             cc.egui_ctx
                 .add_plugin(crate::automation::TextCollector(automation.texts.clone()));
         }
-        // Before the lock, which drops input: a click on a locked window is user input too.
-        cc.egui_ctx.add_plugin(privacy::UserInput::default());
-        cc.egui_ctx.add_plugin(crate::dialogs::ModalLock::default());
-        cc.egui_ctx.add_plugin(crate::focus::Cues::default());
-        crate::context_key::install(&cc.egui_ctx);
-        cc.egui_ctx.add_plugin(crate::context_key::ContextKey);
-        cc.egui_ctx.add_plugin(menu::ContextMenus);
+        add_input_plugins(&cc.egui_ctx);
         // Scripted runs show one window and are short: they may run as fast as they can.
         let frame_limiter = (!vsync && !automation.is_scripted()).then(FrameLimiter::default);
         // On at startup, they weren't turned on by the user: loading them says nothing.
@@ -2003,17 +1997,17 @@ impl ParterreApp {
                 .on_hover_ui_at_pointer(|ui| edge_tooltip(ui, scene, edge));
         }
 
-        // Built only while open: it asks the Git menu.
-        let by_key = std::mem::take(&mut self.context_menu_requested);
-        let mut at = canvas.center();
-        if by_key {
+        // The key opens the selected node's menu at the node, else the graph's in the middle.
+        let key_pressed_at = std::mem::take(&mut self.context_menu_requested).then(|| {
             self.context_node = self.selection.current();
-            if let (Some(node), Some(scene)) = (self.context_node, &self.scene) {
-                at = self.view.to_screen(canvas, scene.node_center(node));
+            match (self.context_node, &self.scene) {
+                (Some(node), Some(scene)) => self.view.to_screen(canvas, scene.node_center(node)),
+                _ => canvas.center(),
             }
-        }
-        let popup = menu::context_menu(&response, by_key, at);
-        let open = by_key
+        });
+        let popup = menu::context_menu(&response, key_pressed_at);
+        // Built only while open: it asks the Git menu.
+        let open = key_pressed_at.is_some()
             || response.secondary_clicked()
             || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
         let menu = match self.context_node {
@@ -2957,4 +2951,41 @@ impl eframe::App for ParterreApp {
 fn highlight_engine() -> parterre_highlight::Engine {
     use parterre_highlight::Engine;
     std::env::current_exe().map_or(Engine::Off, Engine::Child)
+}
+
+/// In this order: the context-menu key, handed in first, passes the rest as a pressed Shift+F10
+/// would, and a click on a locked window counts as user input before the lock drops it.
+fn add_input_plugins(ctx: &egui::Context) {
+    crate::context_key::install(ctx);
+    ctx.add_plugin(privacy::UserInput::default());
+    ctx.add_plugin(crate::dialogs::ModalLock::default());
+    ctx.add_plugin(crate::focus::Cues::default());
+    ctx.add_plugin(menu::ContextMenus);
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{self, Rect};
+
+    use crate::focus::tests::Screen;
+
+    #[test]
+    fn the_context_menu_key_shows_what_has_the_keyboard_as_shift_f10_does() {
+        let ctx = egui::Context::default();
+        super::add_input_plugins(&ctx);
+        let mut s = Screen::of(ctx);
+        let button = std::cell::Cell::new((egui::Id::NULL, Rect::NOTHING));
+        let show = |ui: &mut egui::Ui| {
+            let response = ui.button("Item");
+            button.set((response.id, response.rect));
+        };
+        s.frame(show);
+        let (id, rect) = button.get();
+        s.ctx.memory_mut(|m| m.request_focus(id));
+        s.frame(show);
+        assert!(!s.ringed(rect), "not before the keyboard is used");
+        let _turn = crate::context_key::tests::press();
+        s.frame(show);
+        assert!(s.ringed(rect));
+    }
 }

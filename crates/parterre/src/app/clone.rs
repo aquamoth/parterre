@@ -511,7 +511,7 @@ fn repository_list(
                         widgets::paint_list_cue(ui, response.rect);
                         cued = true;
                     }
-                    focus::click_row(&response, stop_id);
+                    focus::take_on_row_click(&response, stop_id);
                     let response = if listed.description.is_empty() {
                         response
                     } else {

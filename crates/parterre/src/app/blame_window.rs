@@ -1724,7 +1724,8 @@ impl LinePainter<'_> {
             response
         };
         let menu_at = pos2(self.text_x, rect.bottom());
-        crate::menu::context_menu(&response, self.open_menu_line == Some(i), menu_at)
+        let key_pressed_at = (self.open_menu_line == Some(i)).then_some(menu_at);
+        crate::menu::context_menu(&response, key_pressed_at)
             .style(crate::menu::style)
             .show(|ui| {
                 crate::menu::fit_window(ui, |ui| {

@@ -140,7 +140,7 @@ impl ParterreApp {
             .before_show(ctx, id, Screen::Settings);
         ctx.show_viewport_immediate(id, builder, |ui, class| {
             let input = self.settings_viewport.begin(ui, class, self.window_theme);
-            // As a dialog's, a switch or button clicked takes the keyboard.
+            // As in a dialog.
             crate::focus::take_on_click(ui.ctx());
             if let Some(input) = input {
                 // Its size is kept in points: it grows and shrinks with the text size.

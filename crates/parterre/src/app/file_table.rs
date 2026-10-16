@@ -439,7 +439,7 @@ impl FileTable {
                 // Not a stop of its own: the table is one.
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::CLICK);
-                focus::click_row(&response, stop_id);
+                focus::take_on_row_click(&response, stop_id);
                 if response.double_clicked() {
                     click = Some(FileClick::Open(row));
                 } else if response.clicked() {
@@ -526,7 +526,7 @@ impl FileTable {
                     response
                 };
                 let at = pos2(rect.left() + CELL_PAD, rect.bottom());
-                crate::menu::context_menu(&response, menu_row == Some(row), at)
+                crate::menu::context_menu(&response, (menu_row == Some(row)).then_some(at))
                     .style(crate::menu::style)
                     .show(|ui| {
                         crate::menu::fit_window(ui, |ui| {

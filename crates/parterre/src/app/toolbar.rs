@@ -44,6 +44,7 @@ const ZOOM_STEP: f32 = 0.8;
 const FILTER_ID: &str = "filter-popover";
 const ZOOM_ID: &str = "zoom-popover";
 const DRAG_ID: &str = "drag-popover";
+const TOOLS_ON_THE_RIGHT: &str = "toolbar";
 
 pub(super) fn popup_id(name: &str) -> Id {
     toolbar_button_id(name).with("popup")
@@ -99,7 +100,7 @@ impl ParterreApp {
                 .show(|ui| menu::fit_window(ui, |ui| self.filter_popover(ui)));
 
             let room = ui.available_width()
-                - widgets::trailing_width(ui, "toolbar")
+                - widgets::trailing_width(ui, TOOLS_ON_THE_RIGHT)
                 - ui.spacing().item_spacing.x;
             ui.allocate_ui_with_layout(
                 vec2(room.max(0.0), widgets::BUTTON_SIZE),
@@ -112,7 +113,7 @@ impl ParterreApp {
                 },
             );
 
-            widgets::trailing(ui, "toolbar", |ui| {
+            widgets::trailing(ui, TOOLS_ON_THE_RIGHT, |ui| {
                 let response =
                     widgets::popover_button(ui, Id::new(ZOOM_ID), Some(glyphs::ZOOM), false);
                 let response = tip(response, "Zoom", "");
