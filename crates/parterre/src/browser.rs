@@ -8,13 +8,14 @@ use std::process::{Command, Stdio};
 
 use crate::about::MAIL;
 
-const ALLOWED_PREFIX: &str = "https://github.com/";
+const ALLOWED_PREFIXES: [&str; 2] = ["https://github.com/", "https://dev.azure.com/"];
 
 /// Opens `url` in the default browser, or [`MAIL`] in the mail app. Any other URL is an error.
 pub fn open(url: &str) -> Result<(), String> {
     if !is_allowed(url) {
         return Err(format!(
-            "not opening {url}: only {ALLOWED_PREFIX} pages are opened"
+            "not opening {url}: only {} pages are opened",
+            ALLOWED_PREFIXES.join(" and ")
         ));
     }
     spawn_detached(opener(url)).map_err(|e| format!("could not open {url}: {e}"))
@@ -40,7 +41,9 @@ pub fn spawn_detached(mut cmd: Command) -> std::io::Result<()> {
 /// Nothing in an allowed URL is something an opener or a browser could take for more than a URL.
 fn is_allowed(url: &str) -> bool {
     url == MAIL
-        || url.starts_with(ALLOWED_PREFIX)
+        || ALLOWED_PREFIXES
+            .iter()
+            .any(|prefix| url.starts_with(prefix))
             && url
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"-._~/:?#=&%".contains(&b))
@@ -77,16 +80,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_plain_github_pages_and_the_contact_address_are_opened() {
+    fn only_plain_forge_pages_and_the_contact_address_are_opened() {
         assert!(is_allowed("https://github.com/aquamoth/parterre/pull/12"));
         assert!(is_allowed(
             "https://github.com/my-org/some.repo_name/pull/3"
+        ));
+        assert!(is_allowed(
+            "https://dev.azure.com/cosmojpn/CJP%20Work/_git/Apps/pullrequest/7"
         ));
         assert!(is_allowed(MAIL));
         for url in [
             "http://github.com/aquamoth/parterre/pull/12",
             "https://github.com.evil.example/x",
             "https://gist.github.com/x",
+            "https://dev.azure.com.evil.example/x",
+            "https://cosmojpn.visualstudio.com/Apps/_git/Apps/pullrequest/7",
+            "https://dev.azure.com/o/My Project/_git/r/pullrequest/1",
             "file:///etc/passwd",
             "mailto:someone@example.com",
             "mailto:parterre@trustfall.se?subject=x",

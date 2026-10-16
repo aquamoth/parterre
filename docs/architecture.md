@@ -22,6 +22,8 @@ crates/parterre-core   GUI-free; everything testable lives here
                        the log window's file filter and column sort
   columns.rs           tables' column widths: one column takes what the others leave, the
                        others as the layout says until the user drags their border
+  list_keys.rs         where the arrow keys, Page Up/Down, Home and End move the selection
+                       of a list, tabs or segments that are one stop for Tab (#387)
   compare.rs           comparing two commits, or a commit and the working tree: which goes
                        left, and the files between them (`git diff-tree A B`, `git diff A`,
                        or from `git merge-base`)
@@ -58,10 +60,15 @@ crates/parterre-core   GUI-free; everything testable lives here
 
 crates/parterre-forge  open pull requests, on core's types
   lib.rs               the model, where each is shown (head commit and base-branch refs),
-                       remotes and upstreams from git
+                       remotes and upstreams from git; which forge origin is on (`Origin`)
   github.rs            github.com remotes; one GraphQL request per 100 fetched branches of
                        origin (and its parent), signed in with `gh auth token`, within a
                        rate-limit budget; HTTPS through ureq behind the `github` feature
+  azure.rs             Azure DevOps remotes; one REST request per 500 active pull requests,
+                       signed in with what `git credential fill` gives for origin's HTTPS
+                       URL; each known organisation's repositories, to clone; HTTPS through
+                       ureq behind the `azure-devops` feature
+  repositories.rs      repositories to clone, from either forge, found again by URL
 
 crates/parterre-highlight
                        syntax colour for the diff and blame windows (#209)
@@ -150,11 +157,18 @@ crates/parterre        the binary (eframe/egui)
                        the setting, which is egui's zoom factor for every window
   theme.rs             TortoiseGit colours (light, and dark via lightness inversion)
   system_theme.rs      light or dark desktop preference on Linux (XDG portal)
-  menu.rs              the look of menus and popovers, menu items
-  browser.rs           opens github.com pages with the platform's opener
+  menu.rs              the look of menus and popovers, menu items, right-click menus that
+                       the keyboard opens too
+  context_key.rs       the context-menu key (Windows), which egui doesn't know, handed to
+                       the window in front as Shift+F10
+  browser.rs           opens github.com and dev.azure.com pages with the platform's opener
   file_manager.rs      opens a worktree's folder in the platform's file manager, or a
                        terminal there
-  widgets.rs           icon buttons, segmented buttons, switches, text fields
+  widgets.rs           icon buttons, segmented buttons, switches, text fields, tabs, and
+                       lists that are one stop for Tab
+  focus.rs             keyboard focus as desktop GUIs show it (#387): a ring once the
+                       keyboard is used, a click giving a dialog's button the keyboard (not
+                       on macOS), controls of several parts claiming their arrow keys
   settings.rs          persisted settings, each repository's (the filters), and the
                        Classic/Modern looks; apart from them, what is sent to PostHog (the
                        first-run prompt's answer and the install ID), never exported or reset
@@ -181,7 +195,7 @@ crates/parterre        the binary (eframe/egui)
      vanishes only if no shown branch contains it.
    - Open pull requests, while shown, label their head commits the same way: they never
      start history, and show only where one of their base branch's refs is shown. As labels
-     they make their heads nodes, like tags. They are loaded from GitHub on a worker thread
+     they make their heads nodes, like tags. They are loaded from origin's forge on a worker thread
      (`forge`), separately from the snapshot, which stays what git has.
    - Worktrees, while shown: a branch another worktree has checked out is shown even where
      the local-branch switch or the hide list would leave it out, and starts history. A

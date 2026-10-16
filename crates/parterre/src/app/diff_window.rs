@@ -690,9 +690,44 @@ impl DiffWindow {
         } else {
             None
         };
-        // Right to left from here: Blame and word mode take about as much room as the tools on
-        // the left, so that the find field between them can be centred.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // Word mode and Blame at the right edge take about as much room as the tools on the
+        // left, so that the find field between them can be centred: in the window, as in the
+        // others, if it fits between the tools; else in the middle of the room there is,
+        // squeezed rather than the tools.
+        let room = ui.available_rect_before_wrap();
+        let room = room.with_max_x(room.right() - widgets::trailing_width(ui, "diff-tools"));
+        let width = (room.width() - 16.0).clamp(60.0, 380.0);
+        let (lo, hi) = (room.left() + 8.0, room.right() - 8.0 - width);
+        let left = if lo <= hi {
+            (rect.center().x - width / 2.0).clamp(lo, hi)
+        } else {
+            room.center().x - width / 2.0
+        };
+        let at = Rect::from_center_size(
+            pos2(left + width / 2.0, rect.center().y),
+            vec2(width, widgets::BUTTON_SIZE),
+        );
+        let layout = egui::Layout::left_to_right(egui::Align::Center);
+        ui.scope_builder(UiBuilder::new().max_rect(at).layout(layout), |ui| {
+            self.find_field(ui, width, "Find in the diff");
+        });
+
+        widgets::trailing(ui, "diff-tools", |ui| {
+            ui.label(
+                RichText::new("Words")
+                    .size(12.5)
+                    .color(ui.visuals().weak_text_color()),
+            );
+            let mut words = self.options.words;
+            let items = WordMode::ALL.map(|m| (m, m.label()));
+            widgets::text_segmented(ui, &mut words, &items);
+            if words != self.options.words {
+                self.options.words = words;
+                settings.words = words;
+            }
+
+            ui.add_space(TOOL_GAP);
+
             let r = ui.add_enabled_ui(no_blame.is_none(), |ui| widgets::text_button(ui, "Blame"));
             let r = match no_blame {
                 Some(why) => r.inner.on_disabled_hover_text(why),
@@ -707,40 +742,6 @@ impl DiffWindow {
             if r.clicked() {
                 self.blame_request = self.blame_spec();
             }
-
-            ui.add_space(TOOL_GAP);
-
-            let mut words = self.options.words;
-            let items = WordMode::ALL.map(|m| (m, m.label()));
-            widgets::text_segmented(ui, &mut words, &items);
-            if words != self.options.words {
-                self.options.words = words;
-                settings.words = words;
-            }
-            ui.label(
-                RichText::new("Words")
-                    .size(12.5)
-                    .color(ui.visuals().weak_text_color()),
-            );
-
-            // Centred in the window, as in the others, if it fits between the tools; else in
-            // the middle of the room there is, squeezed rather than the tools.
-            let room = ui.available_rect_before_wrap();
-            let width = (room.width() - 16.0).clamp(60.0, 380.0);
-            let (lo, hi) = (room.left() + 8.0, room.right() - 8.0 - width);
-            let left = if lo <= hi {
-                (rect.center().x - width / 2.0).clamp(lo, hi)
-            } else {
-                room.center().x - width / 2.0
-            };
-            let at = Rect::from_center_size(
-                pos2(left + width / 2.0, rect.center().y),
-                vec2(width, widgets::BUTTON_SIZE),
-            );
-            let layout = egui::Layout::left_to_right(egui::Align::Center);
-            ui.scope_builder(UiBuilder::new().max_rect(at).layout(layout), |ui| {
-                self.find_field(ui, width, "Find in the diff");
-            });
         });
     }
 
@@ -976,7 +977,7 @@ impl DiffWindow {
             for i in range {
                 let (rect, response) = ui.allocate_exact_size(
                     vec2(ui.available_width(), row_h),
-                    Sense::click_and_drag(),
+                    crate::focus::pointer_only(),
                 );
                 match &shown[i] {
                     Shown::Fold(hidden) => {

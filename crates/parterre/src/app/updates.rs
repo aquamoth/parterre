@@ -7,6 +7,12 @@ use crate::widgets;
 
 pub const RELEASE_TOLD_KEY: &str = "parterre-release-told";
 
+/// Read as the `Option` the app's [`eframe::App::save`] stores: read as a `String`, `Some("1.0.0")`
+/// didn't parse and every start told of the same release again (#382).
+pub fn release_told(storage: &dyn eframe::Storage) -> Option<String> {
+    eframe::get_value::<Option<String>>(storage, RELEASE_TOLD_KEY).flatten()
+}
+
 impl ParterreApp {
     pub(super) fn update_check(&mut self, ctx: &egui::Context) {
         let prompting = self.telemetry.prompt.is_some();
@@ -50,15 +56,16 @@ impl ParterreApp {
                     }
                 });
                 ui.separator();
-                let row = egui::vec2(ui.available_width(), 34.0);
-                let layout = egui::Layout::right_to_left(egui::Align::Center);
-                ui.allocate_ui_with_layout(row, layout, |ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if widgets::primary_button(ui, "Download", 90.0).clicked() {
-                        answer = ReleaseAnswer::Download;
-                    }
+                let widths = [
+                    widgets::text_button_width(ui, "Close"),
+                    widgets::filled_button_width(ui, "Download", 90.0),
+                ];
+                dialogs::button_row(ui, &widths, |ui| {
                     if widgets::text_button(ui, "Close").clicked() {
                         answer = ReleaseAnswer::Close;
+                    }
+                    if widgets::primary_button(ui, "Download", 90.0).clicked() {
+                        answer = ReleaseAnswer::Download;
                     }
                 });
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -127,7 +134,8 @@ enum ReleaseAnswer {
 
 #[cfg(test)]
 mod tests {
-    use super::tell_once;
+    use super::{RELEASE_TOLD_KEY, release_told, tell_once};
+    use eframe::Storage as _;
 
     #[test]
     fn each_release_is_told_of_once() {
@@ -136,5 +144,34 @@ mod tests {
         assert!(!tell_once(&mut told, "0.8.0"));
         assert!(tell_once(&mut told, "0.9.0"));
         assert_eq!(told.as_deref(), Some("0.9.0"));
+    }
+
+    #[derive(Default)]
+    struct Memory(std::collections::HashMap<String, String>);
+
+    impl eframe::Storage for Memory {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn the_release_told_of_is_remembered_across_starts() {
+        let mut storage = Memory::default();
+        assert_eq!(release_told(&storage), None);
+        eframe::set_value(&mut storage, RELEASE_TOLD_KEY, &Some("1.0.0".to_owned()));
+        assert_eq!(release_told(&storage).as_deref(), Some("1.0.0"));
+        // As 1.0.0-rc1 stored it.
+        storage.set_string(RELEASE_TOLD_KEY, r#"Some("1.0.0")"#.to_owned());
+        assert_eq!(release_told(&storage).as_deref(), Some("1.0.0"));
+        eframe::set_value(&mut storage, RELEASE_TOLD_KEY, &None::<String>);
+        assert_eq!(release_told(&storage), None);
     }
 }

@@ -33,7 +33,7 @@ pub(super) fn divider(ui: &mut Ui, id: Id, bar: &Bar) -> Option<f32> {
     } else {
         CursorIcon::ResizeVertical
     };
-    let response = ui.interact(rect, id, Sense::drag()).on_hover_cursor(cursor);
+    let response = ui.interact(rect, id, Sense::DRAG).on_hover_cursor(cursor);
     let active = response.hovered() || response.dragged();
     let painter = ui.painter();
     let fill = if active {

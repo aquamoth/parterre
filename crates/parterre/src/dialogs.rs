@@ -14,7 +14,7 @@ use eframe::egui::{self, Align, Color32, Id, Layout, Pos2, RichText, Ui, Vec2, V
 use parterre_core::glyphs::Glyph;
 use parterre_core::{Oid, Repo};
 
-use crate::{menu, widgets};
+use crate::{focus, menu, widgets};
 
 pub const MARGIN: f32 = 20.0;
 
@@ -100,6 +100,8 @@ struct Current {
     id: Id,
     resizable: bool,
     in_growing_part: bool,
+    /// In its first frame.
+    opening: bool,
 }
 
 fn current_id() -> Id {
@@ -287,6 +289,8 @@ impl<'a> Dialog<'a> {
         window.width_key = Some(self.persisted_width_id());
         let mut style = (*ctx.global_style()).clone();
         menu::popover_style(&mut style);
+        // Its first frame in a window of its own, or sized anew.
+        let opening = window.size.is_none();
         // A new window opens in its size and place, rather than moving and growing in view.
         let size = *window.size.get_or_insert_with(|| {
             let size = self.measure(ctx, opener.as_ref(), width, &style, &mut content);
@@ -362,7 +366,8 @@ impl<'a> Dialog<'a> {
                     (true, false) => Some(ui.max_rect().height() - 2.0 * MARGIN),
                     (true, true) => Some(size.y - 2.0 * MARGIN),
                 };
-                let (inner, measured, fit) = self.body(ui, width, fill, &style, &mut content);
+                let (inner, measured, fit) =
+                    self.body(ui, width, fill, opening, &style, &mut content);
                 match fit {
                     Some(fit) if !embedded => self.follow(ui.ctx(), &mut window, fit, max_height),
                     // Embedded, no one sizes it: it is as tall as its content wants.
@@ -537,7 +542,7 @@ impl<'a> Dialog<'a> {
         };
         let mut size = Vec2::ZERO;
         let mut output = sizer.run_ui(input, |ui| {
-            size = self.body(ui, width, None, style, content).1;
+            size = self.body(ui, width, None, true, style, content).1;
         });
         // Nothing is painted.
         output.textures_delta.clear();
@@ -558,9 +563,11 @@ impl<'a> Dialog<'a> {
         ui: &mut Ui,
         width: f32,
         fill: Option<f32>,
+        opening: bool,
         style: &egui::Style,
         content: &mut impl FnMut(&mut Ui) -> R,
     ) -> (R, Vec2, Option<Fit>) {
+        focus::take_on_click(ui.ctx());
         let frame = egui::Frame::new()
             .fill(style.visuals.window_fill)
             .inner_margin(egui::Margin::same(MARGIN as i8));
@@ -577,6 +584,7 @@ impl<'a> Dialog<'a> {
                     id: self.id,
                     resizable: self.resizable,
                     in_growing_part: false,
+                    opening,
                 };
                 ui.data_mut(|d| {
                     d.insert_temp(current_id(), current);
@@ -882,6 +890,7 @@ impl<'a> Primary<'a> {
         }
     }
 
+    /// *Cancel* takes the keyboard as the dialog opens; Tab moves on from it.
     pub fn focus_cancel(self, focus_cancel: bool) -> Self {
         Primary {
             focus_cancel,
@@ -901,41 +910,38 @@ pub fn close_only(ui: &mut Ui) -> Answer {
 }
 
 fn action_row(ui: &mut Ui, primary: Option<Primary>) -> Answer {
+    const PRIMARY_MIN_WIDTH: f32 = 90.0;
     let mut answer = Answer::Open;
     let destructive = primary.is_some_and(|p| p.destructive);
-    let size = vec2(ui.available_width(), 34.0);
-    ui.allocate_ui_with_layout(size, Layout::right_to_left(Align::Center), |ui| {
+    let close = if primary.is_some() { "Cancel" } else { "Close" };
+    let mut widths = vec![widgets::text_button_width(ui, close)];
+    if let Some(primary) = primary {
+        widths.push(widgets::filled_button_width(
+            ui,
+            primary.label,
+            PRIMARY_MIN_WIDTH,
+        ));
+    }
+    button_row(ui, &widths, |ui| {
+        let cancel = widgets::text_button(ui, close);
+        let current: Option<Current> = ui.data(|d| d.get_temp(current_id()));
+        let opening = current.is_none_or(|c| c.opening);
+        if opening && primary.is_some_and(|p| p.focus_cancel) {
+            cancel.request_focus();
+        }
         if let Some(primary) = primary {
             let ok = ui
                 .add_enabled_ui(primary.enabled, |ui| {
                     if destructive {
-                        let color = ui.visuals().error_fg_color;
-                        ui.add(
-                            egui::Button::new(RichText::new(primary.label).color(Color32::WHITE))
-                                .fill(color)
-                                .corner_radius(8)
-                                .min_size(vec2(90.0, 30.0)),
-                        )
+                        widgets::danger_button(ui, primary.label, PRIMARY_MIN_WIDTH)
                     } else {
-                        widgets::primary_button(ui, primary.label, 90.0)
+                        widgets::primary_button(ui, primary.label, PRIMARY_MIN_WIDTH)
                     }
                 })
                 .inner;
             if ok.clicked() {
                 answer = Answer::Primary;
             }
-        }
-        let cancel = widgets::text_button(ui, if primary.is_some() { "Cancel" } else { "Close" });
-        if primary.is_some_and(|p| p.focus_cancel) {
-            cancel.request_focus();
-        }
-        if cancel.has_focus() {
-            ui.painter().rect_stroke(
-                cancel.rect.expand(2.0),
-                7,
-                egui::Stroke::new(2.0, widgets::tones(ui).accent),
-                egui::StrokeKind::Outside,
-            );
         }
         if cancel.clicked()
             || ui.input(|i| {
@@ -946,6 +952,21 @@ fn action_row(ui: &mut Ui, primary: Option<Primary>) -> Answer {
         }
     });
     answer
+}
+
+/// A dialog's row of buttons as wide as `widths`, which `add` lays out, against its right edge.
+/// Laid out left to right, so that Tab visits them in the order they read (egui visits a
+/// right-to-left row backwards).
+pub fn button_row<R>(ui: &mut Ui, widths: &[f32], add: impl FnOnce(&mut Ui) -> R) -> R {
+    const GAP: f32 = 8.0;
+    let room = widths.iter().sum::<f32>() + GAP * widths.len().saturating_sub(1) as f32;
+    let size = vec2(ui.available_width(), 34.0);
+    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = GAP;
+        ui.add_space((ui.available_width() - room).max(0.0));
+        add(ui)
+    })
+    .inner
 }
 
 pub fn command_box(ui: &mut Ui, commands: &[String]) {
@@ -1190,7 +1211,7 @@ pub fn radio_with_help(
         let help = ui.add(
             egui::Label::new(RichText::new(help).small().weak())
                 .wrap()
-                .sense(egui::Sense::click()),
+                .sense(egui::Sense::CLICK),
         );
         radio.clicked() || help.clicked()
     })
@@ -1326,6 +1347,34 @@ mod tests {
             output.textures_delta.clear();
             assert_eq!(answer, Answer::Cancel, "{key:?}");
         }
+    }
+
+    /// A destructive dialog opens with Cancel's keyboard, which Tab moves on to the button after
+    /// it, though the dialog asks for Cancel's every frame.
+    #[test]
+    fn cancel_has_the_keyboard_as_a_destructive_dialog_opens_and_tab_moves_on() {
+        let mut s = crate::focus::tests::Screen::new();
+        let show = |ui: &mut Ui| {
+            Dialog::new("delete", "Delete?").show(ui.ctx(), |ui| {
+                let primary = Primary::new("Delete anyway")
+                    .destructive(true)
+                    .focus_cancel(true);
+                actions(ui, primary)
+            });
+        };
+        for _ in 0..3 {
+            s.frame(show);
+        }
+        let cancel = s.focused();
+        assert!(cancel.is_some(), "Cancel has the keyboard");
+        s.press(egui::Key::Tab);
+        for _ in 0..3 {
+            s.frame(show);
+        }
+        assert!(
+            s.focused().is_some() && s.focused() != cancel,
+            "Tab moved on"
+        );
     }
 
     fn key(key: egui::Key, pressed: bool) -> egui::Event {

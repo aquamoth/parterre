@@ -98,47 +98,48 @@ impl ParterreApp {
             popover(&response, RectAlign::BOTTOM_START)
                 .show(|ui| menu::fit_window(ui, |ui| self.filter_popover(ui)));
 
-            // Right to left from here.
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let response = widgets::popover_button(ui, Id::new(DRAG_ID), None, false);
-                let response = tip(response, "Dragging options", "");
-                popover(&response, RectAlign::BOTTOM_END)
-                    .show(|ui| menu::fit_window(ui, |ui| self.drag_popover(ui)));
-                let drag = widgets::segmented(ui, self.settings.net.model, &DRAG_MODELS, |m, r| {
-                    tip_explained(r, m.label(), drag_key(m), m.description())
-                });
-                if let Some(m) = drag {
-                    self.set_drag_model(m);
-                }
-                group_separator(ui);
+            let room = ui.available_width()
+                - widgets::trailing_width(ui, "toolbar")
+                - ui.spacing().item_spacing.x;
+            ui.allocate_ui_with_layout(
+                vec2(room.max(0.0), widgets::BUTTON_SIZE),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    // Narrow windows squeeze the field rather than the tools.
+                    let width = (room - 16.0).clamp(60.0, 380.0);
+                    ui.add_space(((room - width) / 2.0).max(0.0));
+                    self.find_field(ui, width);
+                },
+            );
 
+            widgets::trailing(ui, "toolbar", |ui| {
+                let response =
+                    widgets::popover_button(ui, Id::new(ZOOM_ID), Some(glyphs::ZOOM), false);
+                let response = tip(response, "Zoom", "");
+                popover(&response, RectAlign::BOTTOM_END)
+                    .show(|ui| menu::fit_window(ui, |ui| self.zoom_popover(ui)));
+                let response = widgets::icon_button(ui, glyphs::HEAD, false);
+                if tip(response, "Go to HEAD", &keys::GO_TO_HEAD.label()).clicked() {
+                    self.go_to_head();
+                }
                 let overview = self.settings.show_overview;
                 let verb = if overview { "Hide" } else { "Show" };
                 let response = widgets::icon_button(ui, glyphs::OVERVIEW, overview);
                 if tip(response, &format!("{verb} the overview map"), "").clicked() {
                     self.settings.show_overview = !overview;
                 }
-                let response = widgets::icon_button(ui, glyphs::HEAD, false);
-                if tip(response, "Go to HEAD", &keys::GO_TO_HEAD.label()).clicked() {
-                    self.go_to_head();
-                }
-                let response =
-                    widgets::popover_button(ui, Id::new(ZOOM_ID), Some(glyphs::ZOOM), false);
-                let response = tip(response, "Zoom", "");
-                popover(&response, RectAlign::BOTTOM_END)
-                    .show(|ui| menu::fit_window(ui, |ui| self.zoom_popover(ui)));
+                group_separator(ui);
 
-                let room = ui.available_width();
-                ui.allocate_ui_with_layout(
-                    vec2(room, widgets::BUTTON_SIZE),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        // Narrow windows squeeze the field rather than the tools.
-                        let width = (room - 16.0).clamp(60.0, 380.0);
-                        ui.add_space(((room - width) / 2.0).max(0.0));
-                        self.find_field(ui, width);
-                    },
-                );
+                let drag = widgets::segmented(ui, self.settings.net.model, &DRAG_MODELS, |m, r| {
+                    tip_explained(r, m.label(), drag_key(m), m.description())
+                });
+                if let Some(m) = drag {
+                    self.set_drag_model(m);
+                }
+                let response = widgets::popover_button(ui, Id::new(DRAG_ID), None, false);
+                let response = tip(response, "Dragging options", "");
+                popover(&response, RectAlign::BOTTOM_END)
+                    .show(|ui| menu::fit_window(ui, |ui| self.drag_popover(ui)));
             });
         });
     }
@@ -386,11 +387,12 @@ pub(super) const HIDE_BRANCHES_TIP: &str = "Leave out branches matching these co
     wildcards (* is any text, ? one character; origin/release/1 matches release/*), with the \
     history only they lead to. Branches that a shown branch's history contains stay, and so does \
     the current branch.";
-pub(super) const PULL_REQUESTS_TIP: &str = "Open pull requests of origin on GitHub, and a \
-    fork's into its parent, as labels on the commits they propose, where those have been \
-    fetched. Click one to open it. Asks GitHub only when gh is signed in (gh auth login).";
+pub(super) const PULL_REQUESTS_TIP: &str = "Open pull requests of origin on GitHub or Azure \
+    DevOps, and a GitHub fork's into its parent, as labels on the commits they propose, where \
+    those have been fetched. Click one to open it. Asks GitHub only when gh is signed in (gh auth \
+    login), and Azure DevOps with the sign-in git has for origin, never asking for one.";
 pub(super) const NO_PULL_REQUESTS_TIP: &str =
-    "Pull requests: only for repositories whose origin is on GitHub, for now.";
+    "Pull requests: only for repositories whose origin is on GitHub or Azure DevOps, for now.";
 pub(super) const WORKTREES_TIP: &str = "The repository's worktrees, marked with a folder: \
     the branches they have checked out, even where hidden, and other worktrees' detached \
     HEADs in a colour of their own. Right-click one to open it.";

@@ -503,7 +503,7 @@ pub(super) fn overview_scroll(
     row_h: f32,
     view: ScrollView,
 ) -> Option<f32> {
-    let response = ui.interact(strip, id, Sense::click_and_drag());
+    let response = ui.interact(strip, id, crate::focus::pointer_only());
     let p = response.interact_pointer_pos()?;
     if !(response.clicked() || response.dragged()) || view.content <= view.height {
         return None;
@@ -532,7 +532,7 @@ pub(super) fn hscrollbar(
         pos2(x, track.top() + 2.0),
         vec2(thumb_w, SCROLLBAR_HEIGHT - 4.0),
     );
-    let response = ui.interact(track, id, Sense::click_and_drag());
+    let response = ui.interact(track, id, crate::focus::pointer_only());
     if response.dragged() {
         *scroll_x = (*scroll_x + response.drag_delta().x * max / room).clamp(0.0, max);
     } else if response.clicked()

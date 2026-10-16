@@ -16,7 +16,7 @@ use super::table_style::{
     heading_background,
 };
 use crate::theme::Palette;
-use crate::widgets;
+use crate::{focus, widgets};
 
 pub const ROW_HEIGHT: f32 = 24.0;
 const GRAPH_LANE_WIDTH: f32 = 11.0;
@@ -53,6 +53,7 @@ pub struct CommitList {
     /// Every selected row, in [`Select::Many`] tables.
     pub many: BTreeSet<usize>,
     pub reveal_selected: bool,
+    pub open_selected_menu: bool,
     pub scroll_offset: f32,
     pub view_height: f32,
     pub widths: ColumnWidths,
@@ -259,6 +260,23 @@ impl CommitTable<'_> {
         }
 
         ui.spacing_mut().item_spacing.y = 0.0;
+        // The rows are one stop for Tab, which the keys move the selection in.
+        let stop = self.id.with("stop");
+        let mut clicks = Clicks::default();
+        let keys = widgets::list_keys(ui, stop, list.selected, self.rows, list.rows_per_page());
+        if let Some(i) = keys.select {
+            list.select(Some(i));
+            clicks.clicked = Some(i);
+        }
+        if keys.enter {
+            clicks.double_clicked = list.selected;
+        }
+        if keys.menu {
+            list.open_selected_menu = true;
+            list.reveal_selected = true;
+        }
+        let cue = focus::shows_own_by_id(ui.ctx(), stop).then(|| list.selected.unwrap_or(0));
+        let mut cued = false;
         // As short as one row, not egui's default: a dialog's list of one commit is that tall.
         let mut area = ScrollArea::vertical()
             .id_salt(self.id)
@@ -282,14 +300,16 @@ impl CommitTable<'_> {
                 area = area.vertical_scroll_offset(top + ROW_HEIGHT - height);
             }
         }
-        let mut clicks = Clicks::default();
         let modifiers = ui.input(|i| i.modifiers);
+        let stop = widgets::list_stop(ui, stop, ui.available_rect_before_wrap());
         let output = area.show_rows(ui, ROW_HEIGHT, self.rows, |ui, range| {
             let graph = self.graph.rows(range.clone());
             for (i, graph_row) in range.zip(&graph) {
                 let r = row(i);
+                // Not a stop of its own: the table is one.
                 let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+                    ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::CLICK);
+                focus::click_row(&response, stop.id);
                 let selected = list.is_selected(i);
                 let fill = if selected {
                     Some(c.selected_bg)
@@ -302,6 +322,10 @@ impl CommitTable<'_> {
                 };
                 if let Some(fill) = fill {
                     ui.painter().rect_filled(rect, 0.0, fill);
+                }
+                if cue == Some(i) {
+                    widgets::paint_list_cue(ui, rect);
+                    cued = true;
                 }
                 let (fg, fg_weak) = match (selected, r.greyed) {
                     (true, false) => (c.selected_fg, c.selected_fg),
@@ -433,7 +457,9 @@ impl CommitTable<'_> {
                 if response.double_clicked() && !over_icon {
                     clicks.double_clicked = Some(i);
                 }
-                egui::Popup::context_menu(&response)
+                let by_key = list.open_selected_menu && list.selected == Some(i);
+                let at = pos2(rect.left() + icon_column + 8.0, rect.bottom());
+                crate::menu::context_menu(&response, by_key, at)
                     .style(crate::menu::style)
                     .show(|ui| {
                         crate::menu::fit_window(ui, |ui| {
@@ -444,8 +470,10 @@ impl CommitTable<'_> {
                     });
             }
         });
+        list.open_selected_menu = false;
         list.scroll_offset = output.state.offset.y;
         list.view_height = output.inner_rect.height();
+        widgets::list_stop_ring(ui, &stop, cued);
         clicks
     }
 

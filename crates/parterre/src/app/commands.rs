@@ -154,7 +154,7 @@ impl ParterreApp {
                 ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::Close)
             }
             Command::OpenFolder => self.folder_picker_requested = true,
-            Command::CloneRepository => self.branches.clone_repository(ctx, ViewportId::ROOT),
+            Command::CloneRepository => self.clone_repository(ctx),
             Command::OpenRecent(path) => self.open_folder(&path),
             Command::ClearRecent => {
                 self.recent.clear();

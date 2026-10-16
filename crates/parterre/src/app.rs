@@ -264,6 +264,7 @@ pub struct ParterreApp {
     /// Roots, and the nodes a Subtree drag of them would move.
     subtree_preview: Option<(Vec<usize>, Vec<usize>)>,
     context_node: Option<usize>,
+    context_menu_requested: bool,
     select_after_layout: Vec<Oid>,
     drag: Option<Drag>,
     search: Search,
@@ -377,6 +378,10 @@ impl ParterreApp {
         // Before the lock, which drops input: a click on a locked window is user input too.
         cc.egui_ctx.add_plugin(privacy::UserInput::default());
         cc.egui_ctx.add_plugin(crate::dialogs::ModalLock::default());
+        cc.egui_ctx.add_plugin(crate::focus::Cues::default());
+        crate::context_key::install(&cc.egui_ctx);
+        cc.egui_ctx.add_plugin(crate::context_key::ContextKey);
+        cc.egui_ctx.add_plugin(menu::ContextMenus);
         // Scripted runs show one window and are short: they may run as fast as they can.
         let frame_limiter = (!vsync && !automation.is_scripted()).then(FrameLimiter::default);
         // On at startup, they weren't turned on by the user: loading them says nothing.
@@ -421,6 +426,7 @@ impl ParterreApp {
                 tool
             },
             context_node: None,
+            context_menu_requested: false,
             select_after_layout: Vec::new(),
             drag: None,
             search: Search::default(),
@@ -458,7 +464,7 @@ impl ParterreApp {
             pull_requests_were_on,
             pull_requests_error: None,
             update_check: None,
-            release_told: storage.and_then(|s| eframe::get_value(s, updates::RELEASE_TOLD_KEY)),
+            release_told: storage.and_then(updates::release_told),
             release_dialog: None,
             telemetry,
             system_theme: SystemTheme::watch(&cc.egui_ctx),
@@ -1008,7 +1014,7 @@ impl ParterreApp {
             "legend" => self.show_legend = true,
             "first-run" => self.open_first_run_prompt(),
             "settings" => self.open_settings(self.settings_page),
-            "clone" => self.branches.clone_repository(ctx, egui::ViewportId::ROOT),
+            "clone" => self.clone_repository(ctx),
             "fetch" | "pull" => {
                 let repo = self.repo.clone().ok_or("no repository is open")?;
                 return self.open_branch_dialog(ctx, &repo, what, "");
@@ -1282,8 +1288,9 @@ impl ParterreApp {
                     (Some(repo), Some(list)) => list.heads(repo).len(),
                     _ => 0,
                 };
-                if asked {
-                    self.status = Some(Note::Info(pull_requests::loaded_status(count, here)));
+                if asked && let Some(origin) = loader.origin() {
+                    let status = pull_requests::loaded_status(origin.forge(), count, here);
+                    self.status = Some(Note::Info(status));
                 }
                 self.requested_options = None;
             }
@@ -1313,6 +1320,13 @@ impl ParterreApp {
             self.settings.graph.show_pull_requests = true;
             self.pull_requests.ask();
         }
+    }
+
+    /// The repositories opened before name the Azure DevOps organisations the dialog lists.
+    pub(super) fn clone_repository(&mut self, ctx: &egui::Context) {
+        let known = self.recent.iter().map(Path::to_owned).collect();
+        self.branches
+            .clone_repository(ctx, egui::ViewportId::ROOT, known);
     }
 
     fn pull_requests_dialog(&mut self, ctx: &egui::Context) {
@@ -1538,6 +1552,9 @@ impl ParterreApp {
             self.selection.set(None);
             self.selected_edge = None;
         }
+        if pressed(keys::CONTEXT_MENU) {
+            self.context_menu_requested = true;
+        }
         let step = ARROW_KEY_PAN;
         let page = self.canvas.height() * 0.8;
         let pan = [
@@ -1670,8 +1687,7 @@ impl ParterreApp {
                         .on_hover_text("From GitHub, Azure DevOps or any URL git takes")
                         .clicked()
                     {
-                        self.branches
-                            .clone_repository(ui.ctx(), egui::ViewportId::ROOT);
+                        self.clone_repository(ui.ctx());
                     }
                 });
             });
@@ -1714,7 +1730,7 @@ impl ParterreApp {
 
     fn canvas(&mut self, ui: &mut Ui) {
         let (canvas, response) =
-            ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+            ui.allocate_exact_size(ui.available_size(), crate::focus::pointer_only());
         self.canvas = canvas;
         // The overview map, drawn over the graph, counts as the graph.
         self.graph_hovered = ui.rect_contains_pointer(canvas);
@@ -1968,9 +1984,13 @@ impl ParterreApp {
 
         if let Some(i) = hovered_pull_request {
             let pull_request = &scene.pull_requests[i];
+            let forge = self
+                .pull_requests
+                .origin()
+                .map_or(parterre_forge::Forge::Github, parterre_forge::Origin::forge);
             response
                 .clone()
-                .on_hover_ui_at_pointer(|ui| pull_request_tooltip(ui, pull_request));
+                .on_hover_ui_at_pointer(|ui| pull_request_tooltip(ui, pull_request, forge));
         } else if let (Some(node), None) = (self.hovered, self.drag) {
             let details = &mut self.details;
             response
@@ -1984,8 +2004,17 @@ impl ParterreApp {
         }
 
         // Built only while open: it asks the Git menu.
-        let popup = egui::Popup::context_menu(&response);
-        let open = response.secondary_clicked()
+        let by_key = std::mem::take(&mut self.context_menu_requested);
+        let mut at = canvas.center();
+        if by_key {
+            self.context_node = self.selection.current();
+            if let (Some(node), Some(scene)) = (self.context_node, &self.scene) {
+                at = self.view.to_screen(canvas, scene.node_center(node));
+            }
+        }
+        let popup = menu::context_menu(&response, by_key, at);
+        let open = by_key
+            || response.secondary_clicked()
             || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
         let menu = match self.context_node {
             _ if !open => Vec::new(),
@@ -2040,7 +2069,11 @@ impl ParterreApp {
             &palette,
             self.selected_edge,
         );
-        let resp = ui.interact(rect, egui::Id::new("overview"), Sense::click_and_drag());
+        let resp = ui.interact(
+            rect,
+            egui::Id::new("overview"),
+            crate::focus::pointer_only(),
+        );
         if (resp.clicked() || resp.dragged())
             && let Some(p) = resp.interact_pointer_pos()
         {
@@ -2092,7 +2125,11 @@ impl ParterreApp {
     }
 }
 
-fn pull_request_tooltip(ui: &mut Ui, pull_request: &parterre_forge::PullRequest) {
+fn pull_request_tooltip(
+    ui: &mut Ui,
+    pull_request: &parterre_forge::PullRequest,
+    forge: parterre_forge::Forge,
+) {
     let pr = pull_request;
     ui.label(RichText::new(format!("#{} {}", pr.number, pr.title)).strong());
     // The author is missing if their account was deleted.
@@ -2104,7 +2141,7 @@ fn pull_request_tooltip(ui: &mut Ui, pull_request: &parterre_forge::PullRequest)
     }
     ui.label(RichText::new(format!("{} into {}", pr.head_label(), pr.base_branch)).monospace());
     ui.add_space(4.0);
-    ui.label(RichText::new("Click to open it on GitHub").weak());
+    ui.label(RichText::new(format!("Click to open it on {forge}")).weak());
 }
 
 fn node_tooltip(ui: &mut Ui, scene: &Scene, node: usize, details: &mut Details) {
@@ -2235,7 +2272,7 @@ fn legend(ui: &mut Ui, palette: &Palette, rules: &[crate::theme::BranchColor]) -
     for (fill, what) in [
         (
             palette.pull_request,
-            "Open pull request on GitHub (click to open)",
+            "Open pull request on GitHub or Azure DevOps (click to open)",
         ),
         (palette.draft_pull_request, "Draft pull request"),
     ] {
@@ -2364,7 +2401,7 @@ fn shortcut_rows() -> Vec<(String, &'static str)> {
         ("Click a node".into(), "Select it"),
         (
             "Click a pull request's number".into(),
-            "Open the pull request on GitHub",
+            "Open the pull request in the browser",
         ),
         (
             format!("{}, double-click a node", keys::SHOW_LOG.label()),
@@ -2445,6 +2482,15 @@ fn shortcut_rows() -> Vec<(String, &'static str)> {
             "Show log, compare (with HEAD, the working tree, two nodes, or the commit marked \
              for comparison), open its pull requests, copy hash or refs, select its subtree, \
              return it to the layout",
+        ),
+        (
+            if keys::Platform::CURRENT == keys::Platform::Windows {
+                format!("{}, the Menu key", keys::CONTEXT_MENU.label())
+            } else {
+                keys::CONTEXT_MENU.label()
+            },
+            "The right-click menu of what has the keyboard: the selected node, or a list's \
+             selected row",
         ),
     ]
 }

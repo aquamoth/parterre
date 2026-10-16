@@ -409,6 +409,49 @@ mod tests {
         });
     }
 
+    /// The commits are one stop for Tab: a click on one gives the table the keyboard, Down
+    /// moves in it, and Tab leaves it at once rather than row by row.
+    #[test]
+    fn the_commits_are_one_stop_for_tab() {
+        let mut h = Harness::new(repository());
+        open(&mut h);
+        let table = Some(egui::Id::new("cherry-pick-commits").with("stop"));
+        let focused = |h: &Harness| h.ctx.memory(|m| m.focused());
+        h.click("one");
+        assert_eq!(focused(&h), table);
+        h.key(egui::Key::ArrowDown);
+        assert_eq!(focused(&h), table, "Down stays in the table");
+        h.key(egui::Key::Tab);
+        assert!(focused(&h).is_some() && focused(&h) != table);
+    }
+
+    /// Shift+F10 (the context-menu key's stand-in) opens the selected commit's menu, with the
+    /// keyboard on its first item; Esc gives the keyboard back to the table.
+    #[test]
+    fn the_context_menu_key_opens_the_selected_commits_menu() {
+        let mut h = Harness::new(repository());
+        open(&mut h);
+        let table = Some(egui::Id::new("cherry-pick-commits").with("stop"));
+        let focused = |h: &Harness| h.ctx.memory(|m| m.focused());
+        // The dialog's own buttons say Pick and Drop too; the menu's are more of them.
+        let count = |h: &Harness, text: &str| h.texts.iter().filter(|(t, _)| t == text).count();
+        h.click("one");
+        let (picks, drops) = (count(&h, "Pick"), count(&h, "Drop"));
+        h.modifiers = egui::Modifiers::SHIFT;
+        h.key(egui::Key::F10);
+        h.modifiers = egui::Modifiers::NONE;
+        assert_eq!(count(&h, "Pick"), picks + 1, "{:?}", h.texts);
+        assert_eq!(count(&h, "Drop"), drops + 1);
+        let item = h.texts.iter().rev().find(|(t, _)| t == "Pick").unwrap().1;
+        let on_pick = focused(&h)
+            .and_then(|id| h.ctx.read_response(id))
+            .is_some_and(|r| r.rect.contains(item.center()));
+        assert!(on_pick, "the keyboard is on the first item");
+        h.key(egui::Key::Escape);
+        assert_eq!(count(&h, "Drop"), drops, "Esc closes it");
+        assert_eq!(focused(&h), table, "and the table has the keyboard again");
+    }
+
     #[test]
     fn dropped_commits_are_left_out_and_dropping_all_is_refused() {
         let dir = repository();

@@ -113,6 +113,8 @@ pub const RELOAD_F5: Shortcut = Shortcut::plain(Key::F5);
 pub const ZOOM_TO_FIT: Shortcut = Shortcut::plain(Key::F);
 pub const GO_TO_HEAD: Shortcut = Shortcut::plain(Key::H);
 pub const SHOW_LOG: Shortcut = Shortcut::plain(Key::L);
+/// The Menu key reaches the window as this too ([`crate::context_key`]).
+pub const CONTEXT_MENU: Shortcut = Shortcut::new(Modifiers::SHIFT, Key::F10);
 /// In the order of `DragModel::ALL`.
 pub const DRAG: [Shortcut; 3] = [
     Shortcut::plain(Key::Num1),

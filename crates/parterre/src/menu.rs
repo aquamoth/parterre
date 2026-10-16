@@ -2,7 +2,7 @@
 //! compact ones: rounder, a soft shadow, roomy rows, and shortcuts in a weaker colour.
 
 use eframe::egui::{
-    self, Atom, Button, Color32, CornerRadius, Id, Margin, Response, Shadow, Style, Ui, Vec2,
+    self, Atom, Button, Color32, CornerRadius, Id, Margin, Pos2, Response, Shadow, Style, Ui, Vec2,
     WidgetText, vec2,
 };
 use parterre_core::glyphs;
@@ -78,6 +78,86 @@ pub fn fit_window<R>(ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> R {
     // A handle that shows without hovering, so that a menu cut short looks scrollable.
     ui.spacing_mut().scroll = egui::style::ScrollStyle::thin();
     egui::ScrollArea::vertical().show(ui, content).inner
+}
+
+/// `response`'s right-click menu, as egui's [`egui::Popup::context_menu`], which the
+/// context-menu key ([`crate::keys::CONTEXT_MENU`]) opens too while `by_key`: then at `at`, the
+/// item's own place rather than the pointer's, with the keyboard on its first item, and back on
+/// what had it once the menu closes (#387). Esc closes it, and only it ([`ContextMenus`]).
+pub fn context_menu<'a>(response: &Response, by_key: bool, at: Pos2) -> egui::Popup<'a> {
+    let ctx = &response.ctx;
+    let id = egui::Popup::default_response_id(response);
+    let (place, back) = (id.with("by-key"), id.with("keyboard-back"));
+    let open = egui::Popup::is_id_open(ctx, id);
+    if open || by_key {
+        let key = open_menu_id(ctx);
+        ctx.data_mut(|d| d.insert_temp(key, id));
+    }
+    if by_key && !open {
+        egui::Popup::open_id(ctx, id);
+        let had = ctx.memory(|m| m.focused());
+        ctx.data_mut(|d| {
+            d.insert_temp(place, at);
+            if let Some(had) = had {
+                d.insert_temp(back, had);
+            }
+        });
+        // Into the menu: the first of its items made after this takes the keyboard.
+        ctx.memory_mut(|m| {
+            if let Some(had) = had {
+                m.surrender_focus(had);
+            }
+            m.move_focus(egui::FocusDirection::Next);
+        });
+    } else if response.secondary_clicked() {
+        ctx.data_mut(|d| {
+            d.remove::<Pos2>(place);
+            d.remove::<Id>(back);
+        });
+    } else if !open && let Some(had) = ctx.data(|d| d.get_temp::<Id>(back)) {
+        ctx.data_mut(|d| d.remove::<Id>(back));
+        ctx.memory_mut(|m| m.request_focus(had));
+    }
+    // egui's popup is a stop of its own, before its items (the handle that moves it): on, then.
+    let handle = id.with("move");
+    if ctx.memory(|m| m.focused()) == Some(handle) {
+        ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::Next));
+    }
+    let popup = egui::Popup::context_menu(response);
+    let keyed = ctx.data(|d| d.get_temp::<Pos2>(place));
+    match keyed.filter(|_| egui::Popup::is_id_open(ctx, id)) {
+        Some(at) => popup.at_position(at),
+        None => popup,
+    }
+}
+
+fn open_menu_id(ctx: &egui::Context) -> Id {
+    Id::new("open-context-menu").with(ctx.viewport_id())
+}
+
+/// Esc closes the open context menu ([`context_menu`]), and nothing else: egui closes it too,
+/// but leaves the key to the dialog or window it is in, which closed as well. Registered once,
+/// with [`egui::Context::add_plugin`].
+#[derive(Debug, Default)]
+pub struct ContextMenus;
+
+impl egui::Plugin for ContextMenus {
+    fn debug_name(&self) -> &'static str {
+        "parterre-context-menus"
+    }
+
+    fn on_begin_pass(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let key = open_menu_id(&ctx);
+        let Some(menu) = ctx.data(|d| d.get_temp::<Id>(key)) else {
+            return;
+        };
+        if !egui::Popup::is_id_open(&ctx, menu) {
+            ctx.data_mut(|d| d.remove::<Id>(key));
+        } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            egui::Popup::close_id(&ctx, menu);
+        }
+    }
 }
 
 pub fn separator(ui: &mut Ui) {
@@ -173,4 +253,43 @@ fn submenu_button(ui: &mut Ui, button: Button, open: Option<bool>, content: impl
         glyphs::CHEVRON_RIGHT,
         color,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{self, Key};
+
+    use crate::focus::tests::Screen;
+
+    fn button_with_menu(ui: &mut egui::Ui, by_key: bool, ids: &std::cell::Cell<[egui::Id; 2]>) {
+        let button = ui.button("Item");
+        let mut first = egui::Id::NULL;
+        super::context_menu(&button, by_key, button.rect.left_bottom()).show(|ui| {
+            first = ui.button("Copy").id;
+            let _ = ui.button("Paste");
+        });
+        ids.set([button.id, first]);
+    }
+
+    #[test]
+    fn the_key_opens_the_menu_with_the_keyboard_in_it() {
+        let mut s = Screen::new();
+        let ids = std::cell::Cell::new([egui::Id::NULL; 2]);
+        s.frame(|ui| button_with_menu(ui, false, &ids));
+        let [button, _] = ids.get();
+        s.ctx.memory_mut(|m| m.request_focus(button));
+        s.frame(|ui| button_with_menu(ui, false, &ids));
+        s.frame(|ui| button_with_menu(ui, true, &ids));
+        s.frame(|ui| button_with_menu(ui, false, &ids));
+        let [_, first] = ids.get();
+        let popup = egui::Popup::default_response_id(&s.ctx.read_response(button).unwrap());
+        assert!(egui::Popup::is_id_open(&s.ctx, popup), "open");
+        assert_eq!(s.focused(), Some(first), "on its first item");
+        s.press(Key::Escape);
+        for _ in 0..3 {
+            s.frame(|ui| button_with_menu(ui, false, &ids));
+        }
+        assert!(!egui::Popup::is_id_open(&s.ctx, popup), "closed");
+        assert_eq!(s.focused(), Some(button), "the keyboard back");
+    }
 }

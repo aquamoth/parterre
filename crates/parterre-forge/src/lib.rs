@@ -2,7 +2,9 @@
 //! pull request is shown only on a head commit the repository already has.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::fmt;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use parterre_core::git::{Git, GitError};
 use parterre_core::oid::Oid;
@@ -10,7 +12,14 @@ use parterre_core::repo::{RefKind, Repo};
 use parterre_core::revgraph::PullRequestHead;
 use parterre_core::text::capitalized;
 
+pub mod azure;
 pub mod github;
+mod repositories;
+
+pub use repositories::{Listed, Repositories};
+
+use azure::AzureRepo;
+use github::GithubRepo;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequest {
@@ -42,10 +51,131 @@ impl PullRequest {
     }
 }
 
+/// The forge repository a repository's `origin` points at, which its pull requests are asked of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Github(GithubRepo),
+    AzureDevops(AzureRepo),
+}
+
+impl Origin {
+    pub fn from_url(url: &str) -> Option<Origin> {
+        GithubRepo::from_url(url)
+            .map(Origin::Github)
+            .or_else(|| AzureRepo::from_url(url).map(Origin::AzureDevops))
+    }
+
+    pub fn forge(&self) -> Forge {
+        match self {
+            Origin::Github(_) => Forge::Github,
+            Origin::AzureDevops(_) => Forge::AzureDevops,
+        }
+    }
+
+    /// `owner/name` on GitHub, `org/project/name` on Azure DevOps.
+    pub fn full_name(&self) -> String {
+        match self {
+            Origin::Github(repo) => repo.full_name(),
+            Origin::AzureDevops(repo) => repo.full_name(),
+        }
+    }
+
+    /// Blocks: run it on a worker thread.
+    pub fn load(&self, git: &Git) -> Result<PullRequests, ForgeError> {
+        match self {
+            Origin::Github(_) => github::load(git),
+            Origin::AzureDevops(_) => azure::load(git),
+        }
+    }
+
+    /// From `json` instead of the forge (`--pull-requests-from`).
+    pub fn load_canned(&self, git: &Git, json: &str) -> Result<PullRequests, ForgeError> {
+        match self {
+            Origin::Github(_) => github::load_canned(git, json),
+            Origin::AzureDevops(_) => azure::load_canned(git, json),
+        }
+    }
+}
+
+/// Whether an open pull request proposes a branch about to be deleted on a remote (#318).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Proposed {
+    NotOnForge,
+    No,
+    Open(PullRequest),
+    /// The forge couldn't be asked: why.
+    Unknown(String),
+}
+
+impl Proposed {
+    /// Whether one of a forge's open pull requests proposes `branch` of `repo`.
+    fn among(found: &Result<Vec<PullRequest>, ForgeError>, repo: &str, branch: &str) -> Proposed {
+        let list = match found {
+            Ok(list) => list,
+            Err(e) => return Proposed::Unknown(e.to_string()),
+        };
+        let proposing = list.iter().find(|pr| {
+            pr.head_branch == branch
+                && pr
+                    .head_repo
+                    .as_deref()
+                    .is_some_and(|r| r.eq_ignore_ascii_case(repo))
+        });
+        proposing.map_or(Proposed::No, |pr| Proposed::Open(pr.clone()))
+    }
+}
+
+/// For each remote branch `(remote, branch)`: whether an open pull request proposes it, on the
+/// forge its remote points at, whether pull requests are shown or not. GitHub is asked once,
+/// and each Azure DevOps repository once, about their own remotes' branches only; `canned`,
+/// `--pull-requests-from`'s list, is used instead if given. Blocks: run it on a worker thread.
+pub fn proposals(git: &Git, branches: &[(String, String)], canned: Option<&str>) -> Vec<Proposed> {
+    let urls = remote_urls(git).unwrap_or_default();
+    let on: Vec<Option<(&str, Origin)>> = branches
+        .iter()
+        .map(|(remote, _)| {
+            let (_, url) = urls.iter().find(|(name, _)| name == remote)?;
+            Some((url.as_str(), Origin::from_url(url)?))
+        })
+        .collect();
+    let mut found = vec![Proposed::NotOnForge; branches.len()];
+    let mut github = Vec::new();
+    let mut azure = Vec::new();
+    for (i, (on, (_, branch))) in on.iter().zip(branches).enumerate() {
+        match on {
+            Some((_, Origin::Github(repo))) => github.push((i, (repo, branch.as_str()))),
+            Some((url, Origin::AzureDevops(repo))) => {
+                azure.push((i, (*url, repo, branch.as_str())))
+            }
+            None => {}
+        }
+    }
+    if !github.is_empty() {
+        let asked: Vec<_> = github.iter().map(|(_, b)| *b).collect();
+        for ((i, _), proposed) in github.iter().zip(github::proposals(git, &asked, canned)) {
+            found[*i] = proposed;
+        }
+    }
+    if !azure.is_empty() {
+        let asked: Vec<_> = azure.iter().map(|(_, b)| *b).collect();
+        for ((i, _), proposed) in azure.iter().zip(azure::proposals(git, &asked, canned)) {
+            found[*i] = proposed;
+        }
+    }
+    found
+}
+
+/// Asks git only, not the forge.
+pub fn origin(git: &Git) -> Option<Origin> {
+    let url = git.query(&["remote", "get-url", "origin"]).ok()??;
+    Origin::from_url(&url)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remote {
     pub name: String,
-    /// The forge repository it points at, `owner/name`.
+    /// The forge repository it points at: `owner/name` on GitHub, `org/project/name` on Azure
+    /// DevOps.
     pub repo: String,
 }
 
@@ -116,30 +246,73 @@ fn remote_branch<'a>(remotes: &[Remote], full_name: &'a str) -> Option<(String, 
         .map(|(remote, branch)| (remote.repo.to_ascii_lowercase(), branch))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Forge {
+    Github,
+    AzureDevops,
+}
+
+impl Forge {
+    /// Whether this build of parterre has its feature.
+    pub fn supported(self) -> bool {
+        match self {
+            Forge::Github => cfg!(feature = "github"),
+            Forge::AzureDevops => cfg!(feature = "azure-devops"),
+        }
+    }
+
+    /// Whose sign-in parterre asks with, as an error message names it.
+    fn account(self) -> &'static str {
+        match self {
+            Forge::Github => "gh's account",
+            Forge::AzureDevops => "git's sign-in",
+        }
+    }
+}
+
+impl fmt::Display for Forge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Forge::Github => "GitHub",
+            Forge::AzureDevops => "Azure DevOps",
+        })
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ForgeError {
-    #[error("origin is not a GitHub repository")]
+    #[error("origin is not on GitHub or Azure DevOps")]
     NoForge,
-    #[error("this build of parterre has no GitHub support")]
-    Unsupported,
+    #[error("this build of parterre has no {0} support")]
+    Unsupported(Forge),
     #[error("the GitHub CLI (gh) isn't installed")]
     NoGh,
     #[error("the GitHub CLI (gh) isn't signed in to github.com")]
     NotSignedIn,
     #[error("GitHub turned down the GitHub CLI's (gh's) sign-in")]
     TokenRejected,
+    #[error("git has no sign-in for {url} that it can give without asking")]
+    NoGitSignIn { url: String },
+    #[error("Azure DevOps turned down git's sign-in for {url}")]
+    GitSignInRejected { url: String },
     #[error(transparent)]
     Git(#[from] GitError),
-    #[error("could not reach GitHub: {0}")]
-    Network(String),
+    #[error("could not reach {0}: {1}")]
+    Network(Forge, String),
     #[error("GitHub's hourly limit is nearly used up; asking again in {minutes} min")]
     RateLimited { minutes: u64 },
-    #[error("GitHub has no repository {repo}, or gh's account can't see it")]
-    NotFound { repo: String },
-    #[error("GitHub answered {status}: {message}")]
-    Status { status: u16, message: String },
-    #[error("unexpected answer from GitHub: {0}")]
-    Parse(String),
+    #[error("Azure DevOps asked parterre to wait; asking again in {minutes} min")]
+    Throttled { minutes: u64 },
+    #[error("{forge} has no repository {repo}, or {} can't see it", forge.account())]
+    NotFound { forge: Forge, repo: String },
+    #[error("{forge} answered {status}: {message}")]
+    Status {
+        forge: Forge,
+        status: u16,
+        message: String,
+    },
+    #[error("unexpected answer from {0}: {1}")]
+    Parse(Forge, String),
     /// From `--pull-requests-from`'s file.
     #[error("pull requests file: {0}")]
     Canned(String),
@@ -149,46 +322,72 @@ impl ForgeError {
     pub fn needs_sign_in(&self) -> bool {
         matches!(
             self,
-            ForgeError::NoGh | ForgeError::NotSignedIn | ForgeError::TokenRejected
+            ForgeError::NoGh
+                | ForgeError::NotSignedIn
+                | ForgeError::TokenRejected
+                | ForgeError::NoGitSignIn { .. }
+                | ForgeError::GitSignInRejected { .. }
         )
     }
 
-    /// How long GitHub asked to be left alone, if it did.
+    /// How long the forge asked to be left alone, if it did.
     pub fn wait(&self) -> Option<Duration> {
         match self {
-            ForgeError::RateLimited { minutes } => Some(Duration::from_secs(minutes * 60)),
+            ForgeError::RateLimited { minutes } | ForgeError::Throttled { minutes } => {
+                Some(Duration::from_secs(minutes * 60))
+            }
             _ => None,
         }
     }
 
     pub fn explain(&self) -> Explanation {
-        const SIGN_IN: &str = "gh auth login";
+        let sign_in = || Some("gh auth login".to_owned());
+        // Asked for its refs, git signs in to the repository, with Git Credential Manager
+        // keeping the sign-in, and changes nothing. Over HTTPS also for an SSH origin.
+        let git_sign_in = |url: &str| Some(format!("git ls-remote {url}"));
         let (title, body, command) = match self {
             ForgeError::NoGh => (
-                "GitHub CLI not found",
+                "GitHub CLI not found".to_owned(),
                 "parterre gets pull requests from GitHub through the GitHub CLI (gh), which \
                  isn't installed. Install it, sign in with this command in a terminal, and \
                  turn pull requests on again."
                     .to_owned(),
-                Some(SIGN_IN),
+                sign_in(),
             ),
             ForgeError::NotSignedIn => (
-                "Not signed in to GitHub",
+                "Not signed in to GitHub".to_owned(),
                 "parterre gets pull requests from GitHub through the GitHub CLI (gh), which \
                  isn't signed in. Sign in with this command in a terminal, and turn pull \
                  requests on again."
                     .to_owned(),
-                Some(SIGN_IN),
+                sign_in(),
             ),
             ForgeError::TokenRejected => (
-                "GitHub didn't accept the sign-in",
+                "GitHub didn't accept the sign-in".to_owned(),
                 "The GitHub CLI's sign-in may have expired. Sign in again with this command in \
                  a terminal, and turn pull requests on again."
                     .to_owned(),
-                Some(SIGN_IN),
+                sign_in(),
+            ),
+            ForgeError::NoGitSignIn { url } => (
+                "Not signed in to Azure DevOps".to_owned(),
+                "parterre asks Azure DevOps with the sign-in git has for origin, and git has \
+                 none it can give without asking. Run this command in a terminal, signing in \
+                 when asked (Git Credential Manager keeps the sign-in), and turn pull requests \
+                 on again."
+                    .to_owned(),
+                git_sign_in(url),
+            ),
+            ForgeError::GitSignInRejected { url } => (
+                "Azure DevOps didn't accept the sign-in".to_owned(),
+                "The sign-in git has for origin may have expired, or not be allowed to read \
+                 code. Run this command in a terminal, signing in again if asked, and turn \
+                 pull requests on again."
+                    .to_owned(),
+                git_sign_in(url),
             ),
             ForgeError::RateLimited { minutes } => (
-                "GitHub's hourly limit is nearly used up",
+                "GitHub's hourly limit is nearly used up".to_owned(),
                 format!(
                     "parterre stops asking GitHub while less than a tenth of your hourly \
                      allowance is left, so that your other tools keep working. Pull requests \
@@ -196,16 +395,38 @@ impl ForgeError {
                 ),
                 None,
             ),
-            ForgeError::NotFound { repo } => (
-                "Repository not found on GitHub",
+            ForgeError::Throttled { minutes } => (
+                "Azure DevOps asked parterre to wait".to_owned(),
+                format!(
+                    "Azure DevOps is slowing down your requests. Pull requests appear by \
+                     themselves in about {minutes} min."
+                ),
+                None,
+            ),
+            ForgeError::NotFound {
+                forge: Forge::Github,
+                repo,
+            } => (
+                "Repository not found on GitHub".to_owned(),
                 format!(
                     "GitHub has no repository {repo}, or your account can't see it. For a \
                      private repository, check which account the GitHub CLI is signed in as:"
                 ),
-                Some("gh auth status"),
+                Some("gh auth status".to_owned()),
             ),
-            ForgeError::Network(why) => (
-                "Couldn't reach GitHub",
+            ForgeError::NotFound {
+                forge: Forge::AzureDevops,
+                repo,
+            } => (
+                "Repository not found on Azure DevOps".to_owned(),
+                format!(
+                    "Azure DevOps has no repository {repo}, or the account git signs in to it \
+                     with can't see it."
+                ),
+                None,
+            ),
+            ForgeError::Network(forge, why) => (
+                format!("Couldn't reach {forge}"),
                 format!(
                     "{}. Check the network connection, and turn pull requests on again.",
                     capitalized(why)
@@ -213,7 +434,7 @@ impl ForgeError {
                 None,
             ),
             other => (
-                "Couldn't show pull requests",
+                "Couldn't show pull requests".to_owned(),
                 format!("{}.", capitalized(&other.to_string())),
                 None,
             ),
@@ -228,10 +449,92 @@ impl ForgeError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Explanation {
-    pub title: &'static str,
+    pub title: String,
     pub body: String,
     /// To run in a terminal.
-    pub command: Option<&'static str>,
+    pub command: Option<String>,
+}
+
+/// Never printed: its `Debug` shows stars.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Token(String);
+
+impl fmt::Debug for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Token(***)")
+    }
+}
+
+/// What `cmd` prints with `input` on its stdin, if it succeeds within `timeout`: `Ok(None)` if
+/// it fails, or takes longer and is stopped. Errs if it can't be started. Its errors are
+/// dropped.
+pub(crate) fn output_within(
+    cmd: &mut Command,
+    input: &str,
+    timeout: Duration,
+) -> std::io::Result<Option<String>> {
+    use std::io::{Read as _, Write as _};
+
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        // A GUI-subsystem app on Windows; without this a console window would flash up.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn()?;
+    // Written and read from threads of their own, so that neither pipe can stall it.
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let input = input.to_owned();
+    std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        let _ = tx.send(out);
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            // What it started may hold the pipe open after it exits: waited for until the
+            // deadline at most, and then left to finish alone.
+            Ok(Some(status)) if status.success() => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                return Ok(rx.recv_timeout(left).ok());
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
+        }
+    }
+}
+
+#[cfg(any(feature = "github", feature = "azure-devops"))]
+const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+
+#[cfg(any(feature = "github", feature = "azure-devops"))]
+fn agent() -> ureq::Agent {
+    use ureq::tls::{RootCerts, TlsConfig};
+    // The system's certificate authorities, including any a company adds.
+    let tls = TlsConfig::builder()
+        .root_certs(RootCerts::PlatformVerifier)
+        .build();
+    ureq::Agent::config_builder()
+        .tls_config(tls)
+        .timeout_global(Some(Duration::from_secs(30)))
+        // Error answers carry the reason, and the rate limit in their headers.
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .user_agent(concat!("parterre/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into()
 }
 
 /// How long a loaded list is used before GitHub is asked again, as in t3code.
@@ -280,6 +583,54 @@ fn parse_remote_urls(out: &str) -> Vec<(String, String)> {
             let (name, rest) = line.split_once('\t')?;
             let (url, _) = rest.split_once(" (fetch)")?;
             Some((name.to_owned(), url.to_owned()))
+        })
+        .collect()
+}
+
+/// Pull requests from `json` (`--pull-requests-from`), for screenshots and demos without the
+/// network: an array of `{"number", "title", "author", "draft", "head", "base"}`, where `head`
+/// and `base` are branches of `origin`, the pull requests' repository, `repo` on its forge.
+/// Each one is on the commit `origin/<head>` is at; `url` makes its page from its number.
+fn canned(
+    git: &Git,
+    json: &str,
+    repo: &str,
+    url: impl Fn(u64) -> String,
+) -> Result<Vec<PullRequest>, ForgeError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Canned {
+        number: u64,
+        title: String,
+        #[serde(default)]
+        author: String,
+        #[serde(default)]
+        draft: bool,
+        head: String,
+        base: String,
+    }
+    let canned: Vec<Canned> =
+        serde_json::from_str(json).map_err(|e| ForgeError::Canned(e.to_string()))?;
+    canned
+        .into_iter()
+        .map(|pr| {
+            let tip = format!("refs/remotes/origin/{}^{{commit}}", pr.head);
+            let head = git
+                .query(&["rev-parse", "--verify", "--quiet", &tip])?
+                .and_then(|hex| Oid::from_hex(&hex))
+                .ok_or_else(|| ForgeError::Canned(format!("origin has no branch {}", pr.head)))?;
+            Ok(PullRequest {
+                url: url(pr.number),
+                number: pr.number,
+                title: pr.title,
+                author: pr.author,
+                draft: pr.draft,
+                head,
+                head_branch: pr.head,
+                head_repo: Some(repo.to_owned()),
+                base_branch: pr.base,
+                base_repo: repo.to_owned(),
+            })
         })
         .collect()
 }
@@ -466,16 +817,26 @@ mod tests {
     fn errors_are_explained_plainly() {
         let e = ForgeError::NotSignedIn.explain();
         assert_eq!(e.title, "Not signed in to GitHub");
-        assert_eq!(e.command, Some("gh auth login"));
+        assert_eq!(e.command.as_deref(), Some("gh auth login"));
         assert!(e.body.ends_with("turn pull requests on again."));
-        assert_eq!(ForgeError::NoGh.explain().command, Some("gh auth login"));
+        assert_eq!(
+            ForgeError::NoGh.explain().command.as_deref(),
+            Some("gh auth login")
+        );
         let e = ForgeError::RateLimited { minutes: 12 }.explain();
         assert!(e.body.contains("in about 12 min"), "{}", e.body);
         assert_eq!(e.command, None);
-        let e = ForgeError::Network("connection refused".into()).explain();
+        let e = ForgeError::Network(Forge::Github, "connection refused".into()).explain();
         assert!(e.body.starts_with("Connection refused. "), "{}", e.body);
-        let e = ForgeError::Parse("bad JSON".into()).explain();
+        let e = ForgeError::Parse(Forge::Github, "bad JSON".into()).explain();
         assert_eq!(e.body, "Unexpected answer from GitHub: bad JSON.");
+    }
+
+    #[test]
+    fn tokens_are_not_printed() {
+        let token = Token("gho_secret".into());
+        assert_eq!(format!("{token:?}"), "Token(***)");
+        assert!(!format!("{:?}", Some(token)).contains("secret"));
     }
 
     #[test]

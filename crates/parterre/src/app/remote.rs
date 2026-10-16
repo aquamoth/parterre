@@ -9,7 +9,7 @@ use parterre_core::remote::{
     self, Diverged, Live, Pull, PushState, Reconcile, RemoteBranchTip, SetUpstream,
 };
 use parterre_core::{Oid, Repo};
-use parterre_forge::github::{self, Proposed};
+use parterre_forge::{self as forge, Proposed};
 
 use super::branches::{Request, Target, operation_item, target_menu_named};
 use crate::{dialogs, menu, widgets, worker};
@@ -325,7 +325,7 @@ impl PullRequestCheck {
             .map(|b| (b.remote.clone(), b.branch.clone()))
             .collect();
         let rx = worker::spawn(ctx, move || {
-            github::proposals(&Git::new(&path), &named, canned.as_deref())
+            forge::proposals(&Git::new(&path), &named, canned.as_deref())
         });
         PullRequestCheck {
             rx: Some(rx),
@@ -768,7 +768,7 @@ mod tests {
         assert!(h.shows("Deleted on origin for everyone."), "{:?}", h.texts);
         assert!(h.shows("feature loses its upstream."), "{:?}", h.texts);
         assert!(!h.shows("Delete anyway"));
-        // Not on GitHub: nothing to wait for once looked up.
+        // On no forge: nothing to wait for once looked up.
         h.until("looked up", |h| !h.shows_part("Looking for a pull request"));
         h.click("Delete");
         h.until("deleted", |_| {
