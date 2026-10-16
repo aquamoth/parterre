@@ -2277,7 +2277,8 @@ mod tests {
     }
 
     /// With nothing else having the keyboard, the context-menu key (Shift+F10) opens the menu
-    /// of the commit the arrow keys move; Esc closes the menu, and only then the window.
+    /// of the commit the arrow keys move; Esc closes the menu and not the window (which Esc
+    /// closes on Windows and Linux, ⌘W on macOS).
     #[test]
     fn the_context_menu_key_opens_the_selected_commits_menu() {
         let ctx = egui::Context::default();
@@ -2292,8 +2293,8 @@ mod tests {
         frame(&ctx, &mut w, vec![key(Key::Escape)]);
         assert!(!egui::Popup::is_any_open(&ctx), "Esc closes the menu");
         assert!(w.is_open(), "but not the window");
-        frame(&ctx, &mut w, vec![key(Key::Escape)]);
-        assert!(!w.is_open());
+        frame(&ctx, &mut w, vec![crate::keys::close_window().event()]);
+        assert!(!w.is_open(), "which its own key closes then");
     }
 
     #[test]
