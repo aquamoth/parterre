@@ -15,7 +15,7 @@ use parterre_core::file_diff::{
 };
 use parterre_core::find::{self, Step};
 use parterre_core::glyphs;
-use parterre_core::text::word_at;
+use parterre_core::text::{plural, word_at};
 use parterre_core::{Oid, Repo};
 use parterre_highlight::{self as highlight, Engine, Spans};
 use parterre_util::Cancel;
@@ -23,9 +23,10 @@ use parterre_util::Cancel;
 use super::text_view::{
     Colors, Find, FindInText, HEADER_HEIGHT, LINE_END, Load, OVERVIEW_WIDTH, SCROLLBAR_HEIGHT,
     SIDEWAYS_MARGIN, ScrollView, TOOL_GAP, TextAt, TextMetrics, TextRow, chosen_columns, colors,
-    file_window_title, hscrollbar, line_numbers_width, message, overview_background,
-    overview_found, overview_scale, overview_scroll, overview_view, paint_text, raw_slice, reveal,
-    reveal_columns, scroll_sideways, text_font, toolbar_row, with_arrows,
+    file_window_title, find_field_left, find_field_width, hscrollbar, line_numbers_width, message,
+    overview_background, overview_found, overview_scale, overview_scroll, overview_view,
+    paint_text, raw_slice, reveal, reveal_columns, scroll_sideways, text_font, toolbar_row,
+    with_arrows,
 };
 use super::viewport::{self, Viewport};
 use super::{ParterreApp, syntax};
@@ -40,6 +41,8 @@ const NOTES_HEIGHT: f32 = 20.0;
 const PANE_TITLE_HEIGHT: f32 = 24.0;
 const MARKER_WIDTH: f32 = 16.0;
 const ROWS_ABOVE_CHANGE: usize = 3;
+/// The [`widgets::trailing`] row of the toolbar's tools on the right.
+const TOOLS_ROW: &str = "diff-tools";
 
 #[derive(Debug, Default)]
 pub struct DiffWindows {
@@ -627,7 +630,7 @@ impl DiffWindow {
         let label = match (changes, at) {
             (0, _) => "No changes".to_owned(),
             (n, Some(c)) => format!("Change {} of {n}", c + 1),
-            (n, None) => format!("{n} change{}", if n == 1 { "" } else { "s" }),
+            (n, None) => plural(n, "change"),
         };
         ui.add_space(4.0);
         ui.label(
@@ -691,18 +694,11 @@ impl DiffWindow {
             None
         };
         // Word mode and Blame at the right edge take about as much room as the tools on the
-        // left, so that the find field between them can be centred: in the window, as in the
-        // others, if it fits between the tools; else in the middle of the room there is,
-        // squeezed rather than the tools.
+        // left, so that the find field between them can be centred in the window.
         let room = ui.available_rect_before_wrap();
-        let room = room.with_max_x(room.right() - widgets::trailing_width(ui, "diff-tools"));
-        let width = (room.width() - 16.0).clamp(60.0, 380.0);
-        let (lo, hi) = (room.left() + 8.0, room.right() - 8.0 - width);
-        let left = if lo <= hi {
-            (rect.center().x - width / 2.0).clamp(lo, hi)
-        } else {
-            room.center().x - width / 2.0
-        };
+        let room = room.with_max_x(room.right() - widgets::trailing_width(ui, TOOLS_ROW));
+        let width = find_field_width(room.width());
+        let left = find_field_left(room.x_range(), rect.center().x, width);
         let at = Rect::from_center_size(
             pos2(left + width / 2.0, rect.center().y),
             vec2(width, widgets::BUTTON_SIZE),
@@ -712,7 +708,7 @@ impl DiffWindow {
             self.find_field(ui, width, "Find in the diff");
         });
 
-        widgets::trailing(ui, "diff-tools", |ui| {
+        widgets::trailing(ui, TOOLS_ROW, |ui| {
             ui.label(
                 RichText::new("Words")
                     .size(12.5)

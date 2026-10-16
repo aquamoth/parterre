@@ -234,6 +234,17 @@ impl Harness {
         self.frame();
     }
 
+    pub fn key_with(&mut self, key: egui::Key, modifiers: Modifiers) {
+        self.modifiers = modifiers;
+        self.key(key);
+        self.modifiers = Modifiers::NONE;
+    }
+
+    /// The widget with the keyboard.
+    pub fn focused(&self) -> Option<egui::Id> {
+        self.ctx.memory(|m| m.focused())
+    }
+
     pub fn type_text(&mut self, text: &str) {
         self.events.push(Event::Text(text.to_owned()));
         self.frame();

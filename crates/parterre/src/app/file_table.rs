@@ -116,11 +116,7 @@ impl FileSelection {
             self.anchor = Some(path.clone());
             return;
         }
-        let anchor = self
-            .anchor
-            .as_ref()
-            .and_then(|a| shown.iter().position(|&i| &files[i].path == a));
-        match anchor {
+        match self.anchor_row(files, shown) {
             Some(from) if modifiers.shift => {
                 let (first, last) = (from.min(row), from.max(row));
                 self.paths = shown[first..=last]
@@ -130,6 +126,12 @@ impl FileSelection {
             }
             _ => self.select_only(path),
         }
+    }
+
+    /// Where the row clicked last is in the list as shown, if it's there.
+    fn anchor_row(&self, files: &[ChangedFile], shown: &[usize]) -> Option<usize> {
+        let anchor = self.anchor.as_ref()?;
+        shown.iter().position(|&i| &files[i].path == anchor)
     }
 
     fn selected<'f>(
@@ -411,15 +413,11 @@ impl FileTable {
         let mut pick = None;
         // The rows are one stop for Tab, which the keys move the selection in, from the row
         // clicked last.
-        let stop = Id::new(("files", list_id, "stop"));
-        let anchor_row = self
-            .selection
-            .anchor
-            .as_ref()
-            .and_then(|a| shown.iter().position(|&i| &files[i].path == a));
+        let stop_id = Id::new(("files", list_id, "stop"));
+        let anchor_row = self.selection.anchor_row(files, shown);
         let height = ui.available_height();
         let rows_per_page = ((height / ROW_HEIGHT).floor() as usize).saturating_sub(1);
-        let keys = widgets::list_keys(ui, stop, anchor_row, shown.len(), rows_per_page);
+        let keys = widgets::list_keys(ui, stop_id, anchor_row, shown.len(), rows_per_page);
         let mut area = ScrollArea::vertical()
             .id_salt(("files", list_id))
             .auto_shrink(false);
@@ -431,17 +429,17 @@ impl FileTable {
             area = area.vertical_scroll_offset(offset.max(0.0));
         }
         let keyed_row = keys.select.or(anchor_row);
-        let cue = focus::shows_own_by_id(ui.ctx(), stop).then(|| keyed_row.unwrap_or(0));
+        let cue = focus::shows_own_by_id(ui.ctx(), stop_id).then(|| keyed_row.unwrap_or(0));
         let menu_row = keyed_row.filter(|_| keys.menu);
         let mut cued = false;
-        let stop = widgets::list_stop(ui, stop, ui.available_rect_before_wrap());
+        let stop = widgets::list_stop(ui, stop_id, ui.available_rect_before_wrap());
         let output = area.show_rows(ui, ROW_HEIGHT, shown.len(), |ui, range| {
             for row in range {
                 let file = &files[shown[row]];
                 // Not a stop of its own: the table is one.
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::CLICK);
-                focus::click_row(&response, stop.id);
+                focus::click_row(&response, stop_id);
                 if response.double_clicked() {
                     click = Some(FileClick::Open(row));
                 } else if response.clicked() {

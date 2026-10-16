@@ -27,9 +27,9 @@ use super::table_style::{self, CELL_PAD, HEADING_HEIGHT, cell};
 use super::text_view::{
     Colors, Find, FindInText, HEADER_HEIGHT, LINE_END, Load, OVERVIEW_WIDTH, SCROLLBAR_HEIGHT,
     ScrollView, TOOL_GAP, TextAt, TextMetrics, TextRow, chosen_columns, colors, file_window_title,
-    hscrollbar, line_numbers_width, message, overview_background, overview_found, overview_mark,
-    overview_scale, overview_scroll, overview_view, paint_text, raw_slice, reveal, reveal_columns,
-    scroll_sideways, text_font, third_of_the_way_down, toolbar_row,
+    find_field_width, hscrollbar, line_numbers_width, message, overview_background, overview_found,
+    overview_mark, overview_scale, overview_scroll, overview_view, paint_text, raw_slice, reveal,
+    reveal_columns, scroll_sideways, text_font, third_of_the_way_down, toolbar_row,
 };
 use super::viewport::{self, Viewport};
 use super::{Details, MESSAGE_TIP_MAX_CHARS, MESSAGE_TIP_MAX_LINES, ParterreApp, syntax};
@@ -46,6 +46,8 @@ const AUTHOR_WIDTH: f32 = 130.0;
 const DATE_WIDTH: f32 = 84.0;
 const MIN_HISTORY_HEIGHT: f32 = HEADING_HEIGHT + ROW_HEIGHT;
 const MIN_TEXT_HEIGHT: f32 = 80.0;
+/// The [`widgets::trailing`] row of the toolbar's tools on the right.
+const TOOLS_ROW: &str = "blame-tools";
 
 #[derive(Debug)]
 pub enum BlameRequest {
@@ -828,15 +830,14 @@ impl BlameWindow {
 
         // In the middle of what the history button on the right leaves, as in the main window.
         let room = ui.available_width()
-            - widgets::trailing_width(ui, "blame-tools")
+            - widgets::trailing_width(ui, TOOLS_ROW)
             - ui.spacing().item_spacing.x;
         let find = ui
             .allocate_ui_with_layout(
                 vec2(room.max(0.0), widgets::BUTTON_SIZE),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    // Narrow windows squeeze the field rather than the tools.
-                    let width = (room - 16.0).clamp(60.0, 380.0);
+                    let width = find_field_width(room);
                     ui.add_space(((room - width) / 2.0).max(0.0));
                     let left = ui.cursor().left();
                     self.find_field(ui, width, "Find in the file");
@@ -845,7 +846,7 @@ impl BlameWindow {
                 },
             )
             .inner;
-        widgets::trailing(ui, "blame-tools", |ui| {
+        widgets::trailing(ui, TOOLS_ROW, |ui| {
             let on = self.show_history;
             let title = if on {
                 "Hide the history pane"

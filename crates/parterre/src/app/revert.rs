@@ -211,15 +211,18 @@ impl RestoreDialog {
 
 /// *Restore* and *Keep stashed*, as [`dialogs::actions`] lays them out.
 fn restore_or_keep(ui: &mut Ui, enabled: bool) -> dialogs::Answer {
+    const RESTORE_MIN_WIDTH: f32 = 90.0;
     let mut answer = dialogs::Answer::Open;
     let widths = [
         widgets::text_button_width(ui, "Keep stashed"),
-        widgets::filled_button_width(ui, "Restore", 90.0),
+        widgets::filled_button_width(ui, "Restore", RESTORE_MIN_WIDTH),
     ];
     dialogs::button_row(ui, &widths, |ui| {
         let keep = widgets::text_button(ui, "Keep stashed");
         let restore = ui
-            .add_enabled_ui(enabled, |ui| widgets::primary_button(ui, "Restore", 90.0))
+            .add_enabled_ui(enabled, |ui| {
+                widgets::primary_button(ui, "Restore", RESTORE_MIN_WIDTH)
+            })
             .inner;
         if restore.clicked() {
             answer = dialogs::Answer::Primary;
@@ -347,9 +350,7 @@ mod tests {
             .1
             .center();
         h.click_at(field, 1);
-        h.modifiers = eframe::egui::Modifiers::COMMAND;
-        h.key(eframe::egui::Key::A);
-        h.modifiers = eframe::egui::Modifiers::NONE;
+        h.key_with(eframe::egui::Key::A, eframe::egui::Modifiers::COMMAND);
         h.type_text("Undo the change to file");
         h.click("Git command");
         let full = h.rev("main~1").to_hex();

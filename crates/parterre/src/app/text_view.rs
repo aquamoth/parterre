@@ -23,6 +23,10 @@ pub(super) const SCROLLBAR_HEIGHT: f32 = 10.0;
 pub(super) const SIDEWAYS_MARGIN: f32 = 80.0;
 pub(super) const LINE_END: usize = usize::MAX;
 const FONT_SIZE: f32 = 13.0;
+const FIND_FIELD_MIN_WIDTH: f32 = 60.0;
+const FIND_FIELD_MAX_WIDTH: f32 = 380.0;
+/// Kept free on either side of the find field.
+const FIND_FIELD_MARGIN: f32 = 8.0;
 
 #[derive(Debug)]
 pub(super) enum Load<T> {
@@ -172,6 +176,25 @@ pub(super) fn match_count(current: Option<usize>, matches: usize) -> String {
         (Some(c), n) => format!("{} of {n}", c + 1),
         (None, 1) => "1 match".to_owned(),
         (None, n) => format!("{n} matches"),
+    }
+}
+
+/// The find field's width in `room`: a narrow window squeezes the field rather than the tools.
+pub(super) fn find_field_width(room: f32) -> f32 {
+    (room - 2.0 * FIND_FIELD_MARGIN).clamp(FIND_FIELD_MIN_WIDTH, FIND_FIELD_MAX_WIDTH)
+}
+
+/// Where a find field `width` wide starts in `room`: centred on `centre`, the window's, if it
+/// fits there, as in the other windows; else in the middle of the room.
+pub(super) fn find_field_left(room: Rangef, centre: f32, width: f32) -> f32 {
+    let (lo, hi) = (
+        room.min + FIND_FIELD_MARGIN,
+        room.max - FIND_FIELD_MARGIN - width,
+    );
+    if lo <= hi {
+        (centre - width / 2.0).clamp(lo, hi)
+    } else {
+        room.center() - width / 2.0
     }
 }
 

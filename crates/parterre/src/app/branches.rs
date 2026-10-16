@@ -1575,8 +1575,8 @@ pub struct Tool {
 }
 
 impl Tool {
-    /// A tool that looks up pull requests in `json` (`--pull-requests-from`) rather than on
-    /// GitHub.
+    /// A tool that looks up pull requests in `json` (`--pull-requests-from`) rather than on the
+    /// forge.
     pub fn with_canned_pull_requests(json: Option<&str>) -> Tool {
         let mut tool = Tool::default();
         tool.canned_pull_requests = json.map(Arc::from);
@@ -2147,7 +2147,7 @@ impl Tool {
             return;
         };
         let answer = dialog.show(ctx, self.busy());
-        if let Some(existing) = dialog.opened.take() {
+        if let Some(existing) = dialog.open_instead.take() {
             self.cloned = Some(existing);
             return;
         }

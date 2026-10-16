@@ -17,6 +17,7 @@ use std::time::Instant;
 use eframe::egui;
 use parterre_core::git::Git;
 use parterre_core::glyphs;
+use parterre_core::text::plural;
 use parterre_forge::{self as forge, Forge, ForgeError, Origin, PullRequests};
 
 use crate::{widgets, worker};
@@ -43,6 +44,7 @@ struct Entry {
 #[derive(Debug)]
 struct Job {
     path: PathBuf,
+    forge: Forge,
     user_asked: bool,
     rx: Receiver<Result<PullRequests, ForgeError>>,
 }
@@ -166,7 +168,7 @@ impl PullRequestLoader {
         let job = self.job.as_ref()?;
         let stopped = || {
             Err(ForgeError::Network(
-                self.origin.as_ref().map_or(Forge::Github, Origin::forge),
+                job.forge,
                 "loading them stopped unexpectedly".into(),
             ))
         };
@@ -212,6 +214,7 @@ impl PullRequestLoader {
         let (Some(path), Some(origin)) = (self.shown_repo.clone(), self.origin.clone()) else {
             return;
         };
+        let forge = origin.forge();
         let git = Git::new(&path);
         let canned = self.canned_json.clone();
         let rx = worker::spawn(ctx, move || match canned {
@@ -220,6 +223,7 @@ impl PullRequestLoader {
         });
         self.job = Some(Job {
             path,
+            forge,
             user_asked: std::mem::take(&mut self.user_asked),
             rx,
         });
@@ -237,6 +241,8 @@ pub enum DialogAnswer {
 /// The dialog saying why pull requests the user turned on can't be shown: a modal over the main
 /// window, with the command that helps, if one does, ready to copy.
 pub fn dialog(ctx: &egui::Context, error: &ForgeError) -> DialogAnswer {
+    const INSTALL_GH: &str = "Install the GitHub CLI…";
+    const OK_MIN_WIDTH: f32 = 80.0;
     let explanation = error.explain();
     let shown = crate::dialogs::Dialog::new("pull-requests-error", &explanation.title)
         .screen(crate::usage::Screen::PullRequestsError)
@@ -251,17 +257,18 @@ pub fn dialog(ctx: &egui::Context, error: &ForgeError) -> DialogAnswer {
                 command_box(ui, command);
             }
             ui.add_space(4.0);
-            const INSTALL: &str = "Install the GitHub CLI…";
             let install = matches!(error, ForgeError::NoGh);
-            let mut widths = vec![widgets::filled_button_width(ui, "OK", 80.0)];
-            if install {
-                widths.push(widgets::text_button_width(ui, INSTALL));
-            }
-            crate::dialogs::button_row(ui, &widths, |ui| {
-                if install && widgets::text_button(ui, INSTALL).clicked() {
+            let ok_width = widgets::filled_button_width(ui, "OK", OK_MIN_WIDTH);
+            let widths: &[f32] = if install {
+                &[ok_width, widgets::text_button_width(ui, INSTALL_GH)]
+            } else {
+                &[ok_width]
+            };
+            crate::dialogs::button_row(ui, widths, |ui| {
+                if install && widgets::text_button(ui, INSTALL_GH).clicked() {
                     answer = DialogAnswer::Install;
                 }
-                if widgets::primary_button(ui, "OK", 80.0).clicked() {
+                if widgets::primary_button(ui, "OK", OK_MIN_WIDTH).clicked() {
                     answer = DialogAnswer::Close;
                 }
             });
@@ -303,11 +310,10 @@ fn command_box(ui: &mut egui::Ui, command: &str) {
 /// What the status bar says once `count` open pull requests have loaded from `forge`, of which
 /// `here` have their head in the repository.
 pub fn loaded_status(forge: Forge, count: usize, here: usize) -> String {
-    let open = match count {
-        0 => return format!("No open pull requests on {forge}"),
-        1 => format!("1 open pull request on {forge}"),
-        n => format!("{n} open pull requests on {forge}"),
-    };
+    if count == 0 {
+        return format!("No open pull requests on {forge}");
+    }
+    let open = format!("{} on {forge}", plural(count, "open pull request"));
     match (count, count.saturating_sub(here)) {
         (_, 0) => open,
         (1, _) => format!("{open}, on a commit not fetched here"),
@@ -320,13 +326,8 @@ pub fn loaded_status(forge: Forge, count: usize, here: usize) -> String {
 mod tests {
     use super::*;
 
-    /// A loader of an empty list (as GitHub answers before the pull request is opened), for a
-    /// repository whose `origin` is on GitHub, with its first load done.
-    fn loaded(dir: &Path, ctx: &egui::Context) -> PullRequestLoader {
-        for args in [
-            &["init", "-q"][..],
-            &["remote", "add", "origin", "https://github.com/o/r.git"],
-        ] {
+    fn repository(dir: &Path, origin: &str) {
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", origin]] {
             let ok = std::process::Command::new(parterre_core::git::program())
                 .args(args)
                 .current_dir(dir)
@@ -336,6 +337,12 @@ mod tests {
                 .success();
             assert!(ok, "git {args:?}");
         }
+    }
+
+    /// A loader of an empty list (as GitHub answers before the pull request is opened), for a
+    /// repository whose `origin` is on GitHub, with its first load done.
+    fn loaded(dir: &Path, ctx: &egui::Context) -> PullRequestLoader {
+        repository(dir, "https://github.com/o/r.git");
         let mut loader = PullRequestLoader::canned("[]");
         loader.follow(Some(dir));
         assert!(matches!(
@@ -420,6 +427,26 @@ mod tests {
         expire(&mut loader);
         loader.update(true, &ctx);
         assert!(loader.is_loading());
+    }
+
+    /// The repository on another forge opened meanwhile doesn't lend the failure its forge.
+    #[test]
+    fn a_load_that_stopped_names_the_forge_it_asked() {
+        let azure = tempfile::tempdir().unwrap();
+        let github = tempfile::tempdir().unwrap();
+        repository(azure.path(), "https://dev.azure.com/o/p/_git/r");
+        repository(github.path(), "https://github.com/o/r.git");
+        let ctx = egui::Context::default();
+        let mut loader = PullRequestLoader::canned("[]");
+        loader.follow(Some(azure.path()));
+        loader.update(true, &ctx);
+        // Its worker gone without an answer.
+        loader.job.as_mut().expect("loading").rx = std::sync::mpsc::channel().1;
+        loader.follow(Some(github.path()));
+        assert!(loader.update(false, &ctx).is_none());
+        loader.follow(Some(azure.path()));
+        let error = loader.error().expect("the load failed");
+        assert!(error.contains("Azure DevOps"), "{error}");
     }
 
     #[test]

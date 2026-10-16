@@ -16,7 +16,7 @@ use parterre_core::log::{self, LogList, LogOptions, LogOrder, LogQuery};
 use parterre_core::log_graph::LogGraph;
 use parterre_core::log_layout::LogLayout;
 use parterre_core::revgraph::GraphOptions;
-use parterre_core::text::{find_urls, thousands};
+use parterre_core::text::{find_urls, plural, thousands};
 use parterre_core::{Commit, CommitIx, Oid, Repo};
 
 use super::commit_table::{CommitList, CommitTable, Row, Select};
@@ -24,7 +24,7 @@ use super::compare_window::CompareRequest;
 use super::divider::{Bar, DIVIDER_THICKNESS, divider};
 use super::file_table::{DiffQueue, FileTable, Lister, Listing};
 use super::table_style::{Colors, badge_widget, badges, colors};
-use super::text_view::match_count;
+use super::text_view::{find_field_left, find_field_width, match_count};
 use super::viewport::{self, Viewport};
 use super::{Details, ParterreApp};
 use crate::keys;
@@ -35,6 +35,9 @@ use crate::usage::Screen;
 use crate::widgets;
 
 const HEADER_HEIGHT: f32 = 40.0;
+const HEADER_PAD: f32 = 8.0;
+/// The [`widgets::trailing`] row of the header's tools.
+const TOOLS_ROW: &str = "log-tools";
 const COPIED_CHECK_SECONDS: f64 = 1.2;
 /// A copy button's height.
 const FIELD_HEIGHT: f32 = 20.0;
@@ -596,11 +599,11 @@ impl LogWindow {
         // The tools go in after find, so that Tab reads them in order: placed by their width.
         let mut tools = ui.new_child(
             UiBuilder::new()
-                .max_rect(rect.shrink2(vec2(8.0, 0.0)))
+                .max_rect(rect.shrink2(vec2(HEADER_PAD, 0.0)))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         tools.spacing_mut().item_spacing.x = 4.0;
-        let tools_left = rect.right() - 8.0 - widgets::trailing_width(&tools, "log-tools");
+        let tools_left = rect.right() - HEADER_PAD - widgets::trailing_width(&tools, TOOLS_ROW);
         let painter = ui.painter();
         painter.hline(
             rect.x_range(),
@@ -612,11 +615,7 @@ impl LogWindow {
         });
         if view.pinned {
             label.from = None;
-            let count = view.commits.len();
-            label.to = format!(
-                "{count} commit{} at risk",
-                if count == 1 { "" } else { "s" }
-            );
+            label.to = format!("{} at risk", plural(view.commits.len(), "commit"));
         }
         let font = FontId::proportional(13.5);
         let weak = ui.visuals().weak_text_color();
@@ -633,16 +632,10 @@ impl LogWindow {
         let count = format!("{} commit{}", thousands(n), if n == 1 { "" } else { "s" });
         let count = painter.layout_no_wrap(count, FontId::proportional(13.0), weak);
         let count_left = tools_left - 14.0 - count.size().x;
-        // Find is centred in the window if it fits between the range (given some room) and the
-        // count; else in the middle of the room there is, squeezed.
+        // Find goes between the range (given some room) and the count.
         let room = Rangef::new(rect.left() + 12.0 + 140.0, count_left - 14.0);
-        let width = (room.span() - 16.0).clamp(60.0, 380.0);
-        let (lo, hi) = (room.min + 8.0, room.max - 8.0 - width);
-        let find_left = if lo <= hi {
-            (rect.center().x - width / 2.0).clamp(lo, hi)
-        } else {
-            room.center() - width / 2.0
-        };
+        let width = find_field_width(room.span());
+        let find_left = find_field_left(room, rect.center().x, width);
         job.wrap = TextWrapping::truncate_at_width((find_left - rect.left() - 36.0).max(0.0));
         let galley = painter.layout_job(job);
         painter.galley(
@@ -665,7 +658,7 @@ impl LogWindow {
         });
         let Some(view) = &self.view else { return };
         let requests = &mut self.compare_requests;
-        widgets::trailing(&mut tools, "log-tools", |ui| {
+        widgets::trailing(&mut tools, TOOLS_ROW, |ui| {
             if let (Some(&from), Some(&to)) = (view.query.exclude.first(), view.query.tips.first())
             {
                 let compare = widgets::tip_explained(
@@ -1116,17 +1109,11 @@ fn walk_tools(ui: &mut Ui, options: &mut LogOptions) {
 fn walk_toggles(ui: &mut Ui, options: &mut LogOptions) {
     let toggles = [
         (
-            &mut options.branchings_only,
-            glyphs::BRANCHINGS,
-            "Branchings and merges only",
-            "List only the commits where history branches or joins, and those with refs; the \
-             ones in between are left out.",
-        ),
-        (
-            &mut options.no_merges,
-            glyphs::NO_MERGES,
-            "No merges",
-            "Leave merge commits out.",
+            &mut options.all_branches,
+            glyphs::ALL_BRANCHES,
+            "All branches",
+            "Also list the commits of every branch, remote branch and tag, not only the \
+             history the log was opened on.",
         ),
         (
             &mut options.first_parent,
@@ -1136,14 +1123,20 @@ fn walk_toggles(ui: &mut Ui, options: &mut LogOptions) {
              out.",
         ),
         (
-            &mut options.all_branches,
-            glyphs::ALL_BRANCHES,
-            "All branches",
-            "Also list the commits of every branch, remote branch and tag, not only the \
-             history the log was opened on.",
+            &mut options.no_merges,
+            glyphs::NO_MERGES,
+            "No merges",
+            "Leave merge commits out.",
+        ),
+        (
+            &mut options.branchings_only,
+            glyphs::BRANCHINGS,
+            "Branchings and merges only",
+            "List only the commits where history branches or joins, and those with refs; the \
+             ones in between are left out.",
         ),
     ];
-    for (on, glyph, title, body) in toggles.into_iter().rev() {
+    for (on, glyph, title, body) in toggles {
         let response = widgets::icon_button(ui, glyph, *on);
         if widgets::tip_explained(response, title, "", body).clicked() {
             *on = !*on;

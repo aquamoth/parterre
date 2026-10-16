@@ -26,6 +26,10 @@ fn record_origin_id() -> Id {
     Id::new("cherry-pick-record-origin")
 }
 
+fn commits_id() -> Id {
+    Id::new("cherry-pick-commits")
+}
+
 #[derive(Debug)]
 pub struct CherryPickDialog {
     preview: Preview,
@@ -65,7 +69,7 @@ impl CherryPickDialog {
         CherryPickDialog {
             record_origin: ctx.data_mut(|d| *d.get_persisted_mut_or(record_origin_id(), false)),
             stash: false,
-            listed: ListedCommits::new(repo, Id::new("cherry-pick-commits"), commits, graph),
+            listed: ListedCommits::new(repo, commits_id(), commits, graph),
             preview,
             opener,
             fresh: true,
@@ -242,7 +246,9 @@ mod tests {
     use parterre_core::cherry_pick::Picks;
 
     use super::super::branches::{self, Request};
+    use super::super::commit_table;
     use super::super::tool_harness::{Harness, banner_texts, git, init, load, menu, read, write};
+    use super::commits_id;
 
     fn commit(dir: &Path, path: &str, text: &str, message: &str) {
         write(dir, path, text);
@@ -415,14 +421,13 @@ mod tests {
     fn the_commits_are_one_stop_for_tab() {
         let mut h = Harness::new(repository());
         open(&mut h);
-        let table = Some(egui::Id::new("cherry-pick-commits").with("stop"));
-        let focused = |h: &Harness| h.ctx.memory(|m| m.focused());
+        let table = Some(commit_table::list_stop_id(commits_id()));
         h.click("one");
-        assert_eq!(focused(&h), table);
+        assert_eq!(h.focused(), table);
         h.key(egui::Key::ArrowDown);
-        assert_eq!(focused(&h), table, "Down stays in the table");
+        assert_eq!(h.focused(), table, "Down stays in the table");
         h.key(egui::Key::Tab);
-        assert!(focused(&h).is_some() && focused(&h) != table);
+        assert!(h.focused().is_some() && h.focused() != table);
     }
 
     /// Shift+F10 (the context-menu key's stand-in) opens the selected commit's menu, with the
@@ -431,25 +436,23 @@ mod tests {
     fn the_context_menu_key_opens_the_selected_commits_menu() {
         let mut h = Harness::new(repository());
         open(&mut h);
-        let table = Some(egui::Id::new("cherry-pick-commits").with("stop"));
-        let focused = |h: &Harness| h.ctx.memory(|m| m.focused());
+        let table = Some(commit_table::list_stop_id(commits_id()));
         // The dialog's own buttons say Pick and Drop too; the menu's are more of them.
         let count = |h: &Harness, text: &str| h.texts.iter().filter(|(t, _)| t == text).count();
         h.click("one");
         let (picks, drops) = (count(&h, "Pick"), count(&h, "Drop"));
-        h.modifiers = egui::Modifiers::SHIFT;
-        h.key(egui::Key::F10);
-        h.modifiers = egui::Modifiers::NONE;
+        h.key_with(egui::Key::F10, egui::Modifiers::SHIFT);
         assert_eq!(count(&h, "Pick"), picks + 1, "{:?}", h.texts);
         assert_eq!(count(&h, "Drop"), drops + 1);
         let item = h.texts.iter().rev().find(|(t, _)| t == "Pick").unwrap().1;
-        let on_pick = focused(&h)
+        let on_pick = h
+            .focused()
             .and_then(|id| h.ctx.read_response(id))
             .is_some_and(|r| r.rect.contains(item.center()));
         assert!(on_pick, "the keyboard is on the first item");
         h.key(egui::Key::Escape);
         assert_eq!(count(&h, "Drop"), drops, "Esc closes it");
-        assert_eq!(focused(&h), table, "and the table has the keyboard again");
+        assert_eq!(h.focused(), table, "and the table has the keyboard again");
     }
 
     #[test]
@@ -464,9 +467,7 @@ mod tests {
         h.key(egui::Key::D);
         assert!(!h.shows_part(&side), "{:?}", h.texts);
         // All of them: nothing left to pick.
-        h.modifiers = egui::Modifiers::COMMAND;
-        h.key(egui::Key::A);
-        h.modifiers = egui::Modifiers::NONE;
+        h.key_with(egui::Key::A, egui::Modifiers::COMMAND);
         h.click("Drop");
         assert!(h.shows("Pick at least one commit."));
         // Picked again by the menu's button, and one dropped by its icon.
