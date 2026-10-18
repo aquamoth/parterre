@@ -364,7 +364,8 @@ mod tests {
             newer_tag("1.2.4+a1b2c3d", Ring::Nightly, &PUBLISHED),
             Some("v1.2.8-nightly.20261018".into())
         );
-        // A dev build hears of the stored ring's builds of later commits.
+        // A dev build's version against a ring's builds: later commits only. (Its channel is
+        // cargo, which the check narrows to stable, Ring::on.)
         assert_eq!(
             newer_tag("1.2.5-dev+a1b2c3d.dirty", Ring::Nightly, &PUBLISHED),
             Some("v1.2.8-nightly.20261018".into())

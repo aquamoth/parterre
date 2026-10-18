@@ -110,6 +110,11 @@ impl Privacy {
     pub fn keep_ring(&mut self, running: Option<parterre_telemetry::Ring>) {
         self.set_ring(parterre_telemetry::Ring::kept(self.ring(), running));
     }
+
+    /// *Reset*: the ring of the build running, which a nightly build keeps at nightly (#398).
+    pub fn reset_ring(&mut self, running: Option<parterre_telemetry::Ring>) {
+        self.set_ring(parterre_telemetry::Ring::kept(None, running));
+    }
 }
 
 pub fn load_moves(storage: &dyn eframe::Storage) -> RememberedMoves {

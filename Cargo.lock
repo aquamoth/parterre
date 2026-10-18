@@ -2775,6 +2775,9 @@ dependencies = [
 [[package]]
 name = "parterre-stamp"
 version = "0.0.0"
+dependencies = [
+ "parterre-core",
+]
 
 [[package]]
 name = "parterre-telemetry"

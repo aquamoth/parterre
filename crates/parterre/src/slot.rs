@@ -44,11 +44,8 @@ pub fn read(slot: &[u8; LEN]) -> (String, bool) {
     )
 }
 
-/// Writes `version` into the one slot in `file`, returning where the slot starts.
-pub fn write(file: &mut [u8], version: &str) -> Result<usize, String> {
-    if version.len() > ROOM || version.bytes().any(|b| b == 0) {
-        return Err(format!("{version:?} doesn't fit the slot's {ROOM} bytes"));
-    }
+/// Where the one slot in `file` starts.
+pub fn locate(file: &[u8]) -> Result<usize, String> {
     let found: Vec<usize> = find(file, MARKER).take(2).collect();
     let start = match found[..] {
         [start] => start,
@@ -58,6 +55,15 @@ pub fn write(file: &mut [u8], version: &str) -> Result<usize, String> {
     if start + LEN > file.len() {
         return Err("the version slot is cut off".to_owned());
     }
+    Ok(start)
+}
+
+/// Writes `version` into the one slot in `file`, returning where the slot starts.
+pub fn write(file: &mut [u8], version: &str) -> Result<usize, String> {
+    if version.len() > ROOM || version.bytes().any(|b| b == 0) {
+        return Err(format!("{version:?} doesn't fit the slot's {ROOM} bytes"));
+    }
+    let start = locate(file)?;
     let slot = &mut file[start..start + LEN];
     slot[WRITTEN] = 1;
     slot[VERSION..].fill(0);

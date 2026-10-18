@@ -136,7 +136,8 @@ fn is_number(s: &str) -> bool {
 /// The [`Base`] of `rev`, asking `git` (which runs git with the arguments given and returns its
 /// trimmed output, `None` if it failed). The minor is the highest of the maintainer's tags in
 /// its history ([`tag_minor`]); the patch counts the first-parent commits since the oldest tag
-/// of that minor, i.e. the most since any of them.
+/// of that minor, i.e. the most since any of them. Counted from each, as tags made in the same
+/// second can't be told apart by date; a minor has few.
 pub fn base(git: impl Fn(&[&str]) -> Option<String>, rev: &str) -> Option<Base> {
     let tags = git(&["tag", "--merged", rev, "--list", "v[0-9]*"])?;
     let tagged: Vec<(&str, (u64, u64))> = tags

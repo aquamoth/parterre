@@ -241,8 +241,7 @@ fn apply_registered(properties: &feature::Properties, event: &mut Event) {
 }
 
 /// PostHog's standard properties, and parterre's own three, `channel`, `ring` and
-/// `git_version`. `$os`
-/// and `$os_version` are the SDK's.
+/// `git_version`. `$os` and `$os_version` are the SDK's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Standard {
     app_version: String,

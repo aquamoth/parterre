@@ -102,12 +102,8 @@ fn write(binary: &Path, version: &str) -> Result<(), String> {
 
 fn read(binary: &Path) -> Result<(), String> {
     let file = std::fs::read(binary).map_err(|e| format!("{}: {e}", binary.display()))?;
-    let mut found = slot::find(&file, slot::MARKER);
-    let at = found.next().ok_or("no version slot found")?;
-    let slot: &[u8; slot::LEN] = file
-        .get(at..at + slot::LEN)
-        .and_then(|s| s.try_into().ok())
-        .ok_or("the version slot is cut off")?;
+    let at = slot::locate(&file)?;
+    let slot: &[u8; slot::LEN] = file[at..at + slot::LEN].try_into().unwrap();
     let (version, written) = slot::read(slot);
     println!("{version}{}", if written { " written" } else { "" });
     Ok(())

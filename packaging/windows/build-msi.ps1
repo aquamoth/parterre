@@ -49,12 +49,11 @@ try {
         throw "$Stage\parterre.exe has no version information: it was built without rc.exe (docs/building.md)"
     }
     $msiVersion = ($version -split '-')[0]
-    $channel = "$root\target\msi\channel"
     New-Item -ItemType Directory -Force "$root\target\msi" | Out-Null
+    $channel = "$root\target\msi\channel"
     Set-Content -NoNewline -Encoding ascii $channel 'msi'
 
     if (-not $Out) {
-        New-Item -ItemType Directory -Force "$root\target\msi" | Out-Null
         $Out = "$root\target\msi\parterre-$version-x86_64-pc-windows-msvc.msi"
     }
 

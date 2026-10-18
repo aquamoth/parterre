@@ -14,5 +14,9 @@ homepage.workspace = true
 
 [dependencies]
 
+[dev-dependencies]
+# The git its tests run, as parterre resolves it (CLAUDE.md).
+parterre-core.workspace = true
+
 [lints]
 workspace = true

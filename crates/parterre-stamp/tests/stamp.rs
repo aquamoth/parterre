@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = Command::new(parterre_core::git::program())
         .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
         .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
         .args(args)

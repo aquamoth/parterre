@@ -38,8 +38,8 @@ jobs:
         run: |
           version=${VERSION%%+*}
           tag=v$version
-          # The ring's previous build, which the notes start from. A release's notes start from
-          # the previous release, as GitHub's do by default.
+          # The ring's previous build, which the notes start from: a release's from the previous
+          # release, which GitHub would pick too unless a prerelease is newer.
           case $RING in
           canary) previous='-canary$' title="parterre $version (canary build)" ;;
           nightly)
@@ -48,7 +48,7 @@ jobs:
             title="parterre nightly build ${date:0:4}-${date:4:2}-${date:6:2} ($version)"
             ;;
           rc) previous='^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]*)?$' title="parterre $version (release candidate)" ;;
-          stable) previous= title="parterre $version" ;;
+          stable) previous='^v[0-9]+\.[0-9]+\.[0-9]+$' title="parterre $version" ;;
           *) echo "::error::not a ring: $RING"; exit 1 ;;
           esac
           releases=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
