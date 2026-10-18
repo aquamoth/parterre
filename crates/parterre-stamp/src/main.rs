@@ -83,10 +83,12 @@ fn write(binary: &Path, version: &str) -> Result<(), String> {
     let before = std::fs::read(binary).map_err(at)?;
     let mut file = before.clone();
     let slot = slot::write(&mut file, version)?;
-    let mut changed = vec![slot..slot + slot::LEN];
-    if file.starts_with(b"MZ") {
-        changed.extend(pe::write(&mut file, version)?);
-    }
+    let mut changed = if file.starts_with(b"MZ") {
+        pe::write(&mut file, version)?
+    } else {
+        Vec::new()
+    };
+    changed.push(slot..slot + slot::LEN);
     let stray = (0..file.len())
         .filter(|&i| file[i] != before[i])
         .find(|i| !changed.iter().any(|r| r.contains(i)));
