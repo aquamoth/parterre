@@ -2869,7 +2869,7 @@ impl eframe::App for ParterreApp {
         self.compare_window_requests(&ctx);
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
-        if let Some(error) = self.about.show(&ctx) {
+        if let Some(error) = self.about.show(&ctx, self.heard_ring()) {
             self.status = Some(Note::Error(error));
         }
         self.release_dialog(&ctx);

@@ -1077,17 +1077,21 @@ mod tests {
     #[test]
     fn a_newer_release_is_offered_first_in_help_or_under_about() {
         let mut s = state(Platform::Linux);
-        s.newer_version = Some("0.8.0".into());
+        // In full: which nightly build it is.
+        s.newer_version = Some("1.3.6-nightly.20261017".into());
         let menus = build(&s);
         let help = find(&menus, Kind::Help);
         assert!(help.accent);
-        assert_eq!(labels(&help.entries)[..2], ["Download 0.8.0", "|"]);
+        assert_eq!(
+            labels(&help.entries)[..2],
+            ["Download 1.3.6-nightly.20261017", "|"]
+        );
         s.platform = Platform::Mac;
         let menus = build(&s);
         assert!(!find(&menus, Kind::Help).accent);
         assert_eq!(
             labels(&find(&menus, Kind::App).entries)[..2],
-            ["About parterre", "Download 0.8.0"]
+            ["About parterre", "Download 1.3.6-nightly.20261017"]
         );
     }
 
