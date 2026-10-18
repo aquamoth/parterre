@@ -7,6 +7,8 @@ use eframe::egui::{
     self, Align, Color32, CornerRadius, Layout, RichText, Sense, Stroke, TextureHandle, Ui, Vec2,
 };
 
+use parterre_telemetry::Ring;
+
 use crate::about::{self, CONTACT};
 use crate::dialogs::{self, Answer, Dialog};
 use crate::widgets;
@@ -36,8 +38,8 @@ impl About {
         self.open = true;
     }
 
-    /// Returns why a link didn't open.
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<String> {
+    /// Returns why a link didn't open. `ring` is what the installation hears of.
+    pub fn show(&mut self, ctx: &egui::Context, ring: Ring) -> Option<String> {
         let mut error = None;
         if self.open {
             let icon = self.icon.get_or_insert_with(|| icon(ctx)).clone();
@@ -45,7 +47,7 @@ impl About {
                 .screen(crate::usage::Screen::About)
                 .width(380.0)
                 .show(ctx, |ui| {
-                    if let Some(e) = self.content(ui, &icon) {
+                    if let Some(e) = self.content(ui, &icon, ring) {
                         error = Some(e);
                     }
                     ui.separator();
@@ -61,7 +63,7 @@ impl About {
         error
     }
 
-    fn content(&mut self, ui: &mut Ui, icon: &TextureHandle) -> Option<String> {
+    fn content(&mut self, ui: &mut Ui, icon: &TextureHandle, ring: Ring) -> Option<String> {
         ui.vertical_centered(|ui| {
             ui.add_space(8.0);
             let rect = ui
@@ -82,6 +84,10 @@ impl About {
             ui.label(RichText::new(about::TAGLINE).weak());
             ui.add_space(6.0);
             self.version(ui);
+            if let Some(heard) = hears_of(ring) {
+                ui.add_space(2.0);
+                ui.label(RichText::new(heard).small().weak());
+            }
             ui.add_space(12.0);
         });
         let mut error = None;
@@ -127,7 +133,7 @@ impl About {
         let text = if self.version_copied {
             "Copied"
         } else {
-            crate::VERSION
+            crate::version()
         };
         let pill = egui::Button::new(RichText::new(text).color(t.on_fg))
             .fill(t.on_bg)
@@ -165,6 +171,11 @@ impl About {
             self.legal_open = false;
         }
     }
+}
+
+/// The line under the version: nothing for stable releases, which everyone hears of.
+fn hears_of(ring: Ring) -> Option<String> {
+    (ring != Ring::Stable).then(|| format!("Hears of {}", super::updates::builds(ring)))
 }
 
 fn icon(ctx: &egui::Context) -> TextureHandle {
@@ -224,12 +235,15 @@ fn rows(ui: &mut Ui, items: &[(&str, &str)], mark: &str) -> Option<usize> {
 mod tests {
     use eframe::egui::{self, Event, Modifiers, PointerButton, Rect, vec2};
 
-    use super::About;
+    use parterre_telemetry::Ring;
+
+    use super::{About, hears_of};
     use crate::app::tool_harness::{click_events, raw_input, run_frame, text_at};
 
     struct Screen {
         ctx: egui::Context,
         about: About,
+        ring: Ring,
         time: f64,
         events: Vec<Event>,
         texts: Vec<(String, Rect)>,
@@ -237,12 +251,17 @@ mod tests {
 
     impl Screen {
         fn new() -> Screen {
+            Screen::hearing_of(Ring::Stable)
+        }
+
+        fn hearing_of(ring: Ring) -> Screen {
             let ctx = egui::Context::default();
             let mut about = About::default();
             about.open(&ctx);
             let mut screen = Screen {
                 ctx,
                 about,
+                ring,
                 time: 0.0,
                 events: Vec::new(),
                 texts: Vec::new(),
@@ -258,9 +277,9 @@ mod tests {
                 time: Some(self.time),
                 ..raw_input(vec2(1600.0, 1000.0), std::mem::take(&mut self.events))
             };
-            let about = &mut self.about;
+            let (about, ring) = (&mut self.about, self.ring);
             self.texts = run_frame(&self.ctx, input, |ui| {
-                assert_eq!(about.show(ui.ctx()), None);
+                assert_eq!(about.show(ui.ctx(), ring), None);
             });
             let clashes: Vec<_> = self
                 .texts
@@ -296,7 +315,7 @@ mod tests {
         for text in [
             "parterre",
             crate::about::TAGLINE,
-            crate::VERSION,
+            crate::version(),
             "Website",
             "Report a bug",
             "Privacy",
@@ -323,9 +342,23 @@ mod tests {
     }
 
     #[test]
+    fn under_the_version_is_what_the_installation_hears_of_unless_stable() {
+        assert_eq!(hears_of(Ring::Stable), None);
+        assert_eq!(hears_of(Ring::Rc).unwrap(), "Hears of release candidates");
+        assert_eq!(hears_of(Ring::Canary).unwrap(), "Hears of canary builds");
+        assert!(
+            !Screen::new()
+                .texts
+                .iter()
+                .any(|(t, _)| t.starts_with("Hears of"))
+        );
+        assert!(Screen::hearing_of(Ring::Nightly).shows("Hears of nightly builds"));
+    }
+
+    #[test]
     fn the_version_copies_what_a_bug_report_wants() {
         let mut s = Screen::new();
-        s.click(crate::VERSION);
+        s.click(crate::version());
         assert!(s.shows("Copied"), "{:?}", s.texts);
     }
 }

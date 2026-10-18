@@ -288,7 +288,7 @@ pub fn about_panel() {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    let (version, commit) = crate::about::version_and_commit(crate::VERSION);
+    let (version, commit) = crate::about::version_and_commit(crate::version());
     let notices = crate::about::third_party_notices()
         .and_then(NSURL::from_file_path)
         .and_then(|url| url.absoluteString())

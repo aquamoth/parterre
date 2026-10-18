@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui::{self, Align, Layout, RichText, ScrollArea, Stroke, Ui, vec2};
 use parterre_core::glyphs;
 use parterre_core::layout::{Direction, LayoutOptions, Ranking, Trunk};
+use parterre_telemetry::{Channel, Ring};
 use rfd::AsyncFileDialog;
 
 use super::log_window::layout_picker;
@@ -101,6 +102,7 @@ const IMPORT_FILTERS_TIP: &str = "The filters in the file, for the repository sh
 const RESET_TIP: &str = "Every setting back to its default, and every repository's filters.";
 const UPDATES_TIP: &str = "Ask GitHub once a day whether a newer release is out. Sends nothing \
     of parterre's own.";
+const RING_TIP: &str = "Which builds the update check tells of.";
 const NO_UPDATES_TIP: &str = "Not in this build: its package manager updates parterre.";
 const NO_POSTHOG_TIP: &str = "Not in this build: it sends nothing.";
 const INSTALL_ID_TIP: &str = "Sent with the usage statistics, never with a crash report. Quote \
@@ -354,17 +356,15 @@ impl ParterreApp {
                 self.set_remember_moves(remember);
             }
             SettingsPage::Privacy => {
-                group(ui, |rows| {
-                    let available = parterre_telemetry::has_update_check();
-                    let tip = if available {
-                        UPDATES_TIP
-                    } else {
-                        NO_UPDATES_TIP
-                    };
-                    rows.row("Check for updates", tip, |ui| {
-                        switch_or_greyed_off(ui, &mut s.check_for_updates, available);
-                    });
-                });
+                let privacy = &mut self.telemetry.privacy;
+                let mut ring = privacy.ring().unwrap_or(Ring::Stable);
+                let updates = Updates {
+                    available: parterre_telemetry::has_update_check(),
+                    channel: Channel::current(),
+                };
+                if updates.show(ui, &mut s.check_for_updates, &mut ring) {
+                    privacy.set_ring(ring);
+                }
                 ui.add_space(14.0);
                 if let Some(error) = privacy_page(ui, &mut self.telemetry) {
                     self.status = Some(super::Note::Error(error));
@@ -684,6 +684,7 @@ impl ParterreApp {
 
     fn reset_settings(&mut self) {
         self.settings = Settings::default();
+        self.telemetry.privacy.reset_ring(privacy::running_ring());
         self.stored.reset();
         self.settings_note = None;
     }
@@ -733,6 +734,95 @@ fn filters(ui: &mut Ui, s: &mut Settings) {
             text_field(ui, &mut g.hide_branches, "e.g. pipeline/*, release/*");
         });
     });
+}
+
+/// The update check's rows on the Privacy page, for a build with or without one, installed on
+/// `channel`.
+struct Updates {
+    available: bool,
+    channel: Channel,
+}
+
+impl Updates {
+    /// Returns whether `ring` was changed.
+    fn show(&self, ui: &mut Ui, check: &mut bool, ring: &mut Ring) -> bool {
+        let stable_only = self.channel.is_stable_only();
+        let mut changed = false;
+        group(ui, |rows| {
+            let tip = if self.available {
+                UPDATES_TIP
+            } else {
+                NO_UPDATES_TIP
+            };
+            rows.row("Check for updates", tip, |ui| {
+                switch_or_greyed_off(ui, check, self.available);
+            });
+            let enabled = self.available && *check && !stable_only;
+            rows.row("Tell me about", RING_TIP, |ui| {
+                ui.add_enabled_ui(enabled, |ui| {
+                    changed = ring_combo(ui, ring, self.channel);
+                });
+            });
+        });
+        if self.available {
+            ui.add_space(8.0);
+            ui.weak(ring_line(*ring, self.channel));
+        }
+        changed
+    }
+}
+
+/// Returns whether `ring` was changed.
+fn ring_combo(ui: &mut Ui, ring: &mut Ring, channel: Channel) -> bool {
+    let stored = *ring;
+    let id = ui.make_persistent_id("ring");
+    let shift_key = id.with("shift");
+    let mut changed = false;
+    let shown = egui::ComboBox::from_id_salt(id)
+        .selected_text(super::updates::builds(stored.on(channel)))
+        .width(170.0)
+        .show_ui(ui, |ui| {
+            // Held while the list is open, Shift keeps canary listed until it closes.
+            let shift = ui.input(|i| i.modifiers.shift)
+                || ui.data(|d| d.get_temp::<bool>(shift_key).unwrap_or(false));
+            ui.data_mut(|d| d.insert_temp(shift_key, shift));
+            for r in listed_rings(stored, shift) {
+                if ui
+                    .selectable_label(r == stored, super::updates::builds(r))
+                    .clicked()
+                {
+                    changed = r != stored;
+                    *ring = r;
+                }
+            }
+        });
+    if shown.inner.is_none() {
+        ui.data_mut(|d| d.remove::<bool>(shift_key));
+    }
+    changed
+}
+
+/// The rings the *Tell me about* list offers: canary only if it is the stored one, or while
+/// Shift is held.
+fn listed_rings(stored: Ring, shift: bool) -> Vec<Ring> {
+    Ring::ALL
+        .into_iter()
+        .filter(|&r| r != Ring::Canary || stored == Ring::Canary || shift)
+        .collect()
+}
+
+/// The line under the update check's rows.
+fn ring_line(ring: Ring, channel: Channel) -> &'static str {
+    match channel {
+        Channel::MsiMachine => "Installed for all users, so this copy takes stable releases only.",
+        Channel::Cargo => "Installed with cargo, so this copy takes stable releases only.",
+        _ => match ring {
+            Ring::Stable => "Releases, for everyone.",
+            Ring::Rc => "Try the next release before it's out. Also hears of stable releases.",
+            Ring::Nightly => "The newest work on main, built each night it has moved.",
+            Ring::Canary => "Every merge to main. For parterre's maintainer.",
+        },
+    }
 }
 
 fn switch_or_greyed_off(ui: &mut Ui, on: &mut bool, available: bool) {
@@ -956,5 +1046,162 @@ fn branch_colours(ui: &mut Ui, rules: &mut Vec<BranchColor>) {
             patterns: String::new(),
             color: suggested[rules.len() % suggested.len()],
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{self, Event, Modifiers, PointerButton, Rect, vec2};
+    use parterre_telemetry::{Channel, Ring};
+
+    use super::{Updates, listed_rings, ring_line};
+    use crate::app::tool_harness::{
+        assert_no_id_clashes, click_events, raw_input, run_frame, text_at,
+    };
+
+    #[test]
+    fn canary_is_listed_when_stored_or_while_shift_is_held() {
+        use Ring::*;
+        assert_eq!(listed_rings(Stable, false), [Stable, Rc, Nightly]);
+        assert_eq!(listed_rings(Nightly, false), [Stable, Rc, Nightly]);
+        assert_eq!(listed_rings(Canary, false), Ring::ALL);
+        assert_eq!(listed_rings(Rc, true), Ring::ALL);
+    }
+
+    #[test]
+    fn the_line_explains_the_ring_or_why_a_copy_takes_stable_only() {
+        assert_eq!(
+            ring_line(Ring::Stable, Channel::Msi),
+            "Releases, for everyone."
+        );
+        assert_eq!(
+            ring_line(Ring::Nightly, Channel::Deb),
+            "The newest work on main, built each night it has moved."
+        );
+        assert_eq!(
+            ring_line(Ring::Nightly, Channel::MsiMachine),
+            "Installed for all users, so this copy takes stable releases only."
+        );
+        assert_eq!(
+            ring_line(Ring::Rc, Channel::Cargo),
+            "Installed with cargo, so this copy takes stable releases only."
+        );
+    }
+
+    struct Screen {
+        ctx: egui::Context,
+        updates: Updates,
+        check: bool,
+        ring: Ring,
+        changed: bool,
+        time: f64,
+        events: Vec<Event>,
+        texts: Vec<(String, Rect)>,
+    }
+
+    impl Screen {
+        fn new(channel: Channel, ring: Ring) -> Screen {
+            let mut screen = Screen {
+                ctx: egui::Context::default(),
+                updates: Updates {
+                    available: true,
+                    channel,
+                },
+                check: true,
+                ring,
+                changed: false,
+                time: 0.0,
+                events: Vec::new(),
+                texts: Vec::new(),
+            };
+            screen.frame();
+            screen.frame();
+            screen
+        }
+
+        fn frame(&mut self) {
+            self.time += 1.0 / 60.0;
+            let input = egui::RawInput {
+                time: Some(self.time),
+                ..raw_input(vec2(800.0, 600.0), std::mem::take(&mut self.events))
+            };
+            let Screen {
+                updates,
+                check,
+                ring,
+                changed,
+                ..
+            } = self;
+            self.texts = run_frame(&self.ctx, input, |ui| {
+                ui.set_width(500.0);
+                *changed |= updates.show(ui, check, ring);
+            });
+            assert_no_id_clashes(&self.texts);
+        }
+
+        fn shows(&self, text: &str) -> bool {
+            self.texts.iter().any(|(t, _)| t == text)
+        }
+
+        fn click_with(&mut self, text: &str, modifiers: Modifiers) {
+            let at = text_at(&self.texts, text);
+            self.events.push(Event::ModifiersChanged(modifiers));
+            for events in click_events(at, PointerButton::Primary, modifiers) {
+                self.events.extend(events);
+                self.frame();
+            }
+            self.events.push(Event::ModifiersChanged(Modifiers::NONE));
+            self.frame();
+        }
+
+        fn click(&mut self, text: &str) {
+            self.click_with(text, Modifiers::NONE);
+        }
+    }
+
+    #[test]
+    fn tell_me_about_chooses_the_ring_and_explains_it() {
+        let mut s = Screen::new(Channel::Deb, Ring::Stable);
+        assert!(s.shows("Tell me about"), "{:?}", s.texts);
+        assert!(s.shows("stable releases"));
+        assert!(s.shows("Releases, for everyone."));
+        s.click("stable releases");
+        assert!(s.shows("nightly builds"), "{:?}", s.texts);
+        assert!(!s.shows("canary builds"));
+        s.click("nightly builds");
+        assert!(s.changed);
+        assert_eq!(s.ring, Ring::Nightly);
+        assert!(s.shows("The newest work on main, built each night it has moved."));
+    }
+
+    #[test]
+    fn shift_lists_canary() {
+        let mut s = Screen::new(Channel::Tarball, Ring::Rc);
+        s.click_with("release candidates", Modifiers::SHIFT);
+        // Listed until the list closes, with Shift let go.
+        assert!(s.shows("canary builds"), "{:?}", s.texts);
+        s.click("canary builds");
+        assert_eq!(s.ring, Ring::Canary);
+        assert!(s.shows("Every merge to main. For parterre's maintainer."));
+    }
+
+    #[test]
+    fn a_stable_only_copy_is_locked_to_stable_releases() {
+        let mut s = Screen::new(Channel::Cargo, Ring::Nightly);
+        assert!(s.shows("stable releases"), "{:?}", s.texts);
+        assert!(s.shows("Installed with cargo, so this copy takes stable releases only."));
+        s.click("stable releases");
+        assert!(!s.shows("nightly builds"), "{:?}", s.texts);
+        assert!(!s.changed);
+        assert_eq!(s.ring, Ring::Nightly);
+    }
+
+    #[test]
+    fn tell_me_about_is_greyed_without_the_check() {
+        let mut s = Screen::new(Channel::Deb, Ring::Stable);
+        s.check = false;
+        s.frame();
+        s.click("stable releases");
+        assert!(!s.shows("nightly builds"), "{:?}", s.texts);
     }
 }

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Align, Layout, RichText, Ui, vec2};
 use parterre_core::Repo;
-use parterre_telemetry::{Build, Choices, Context, Lifecycle, Properties, Usage};
+use parterre_telemetry::{Build, Choices, Context, Lifecycle, Properties, Ring, Usage};
 
 use super::ParterreApp;
 use crate::settings::{Privacy, PrivacyAnswer};
@@ -42,8 +42,16 @@ pub(super) struct Telemetry {
     registered_properties: Option<Properties>,
 }
 
+/// The ring of the build running, if it was published: a dev build has none (#411).
+pub(super) fn running_ring() -> Option<Ring> {
+    let (version, published) = crate::this_build();
+    let version = parterre_telemetry::Version::parse(version)?;
+    published.then(|| Ring::of(&version)).flatten()
+}
+
 impl Telemetry {
     pub fn new(mut privacy: Privacy, scripted: bool) -> Telemetry {
+        privacy.keep_ring(running_ring());
         let do_not_track = parterre_telemetry::do_not_track();
         // Scripted runs read no stored settings: answered with the defaults.
         if scripted && privacy.answer.is_none() && parterre_telemetry::has_usage_statistics() {
@@ -79,7 +87,7 @@ impl Telemetry {
         if !self.scripted && !cfg!(test) {
             parterre_telemetry::start_crash_reports(
                 self.privacy.choices(),
-                crate::VERSION,
+                crate::version(),
                 parterre_core::git::version,
             );
         }
@@ -123,8 +131,8 @@ impl Telemetry {
             self.screen_size = screen;
             let last = self.privacy.last_version.as_deref();
             self.pending_launch_events =
-                parterre_telemetry::launch(self.first_run, last, crate::VERSION);
-            self.privacy.last_version = Some(parterre_telemetry::app_version(crate::VERSION));
+                parterre_telemetry::launch(self.first_run, last, crate::version());
+            self.privacy.last_version = Some(parterre_telemetry::app_version(crate::version()));
         }
         if !self.sends() {
             self.usage = None;
@@ -140,7 +148,7 @@ impl Telemetry {
         {
             let context = Context {
                 install_id: answer.install_id.clone(),
-                version: crate::VERSION.to_owned(),
+                version: crate::version().to_owned(),
                 screen: self.screen_size,
                 git_version: parterre_core::git::version,
             };
@@ -432,7 +440,7 @@ mod tests {
             output.textures_delta.clear();
         }
         assert_eq!(t.launching, None);
-        let version = parterre_telemetry::app_version(crate::VERSION);
+        let version = parterre_telemetry::app_version(crate::version());
         assert_eq!(t.privacy.last_version, Some(version));
         // Scripted: the launch's events are dropped, nothing started.
         assert!(t.pending_launch_events.is_empty());

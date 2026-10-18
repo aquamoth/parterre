@@ -13,6 +13,7 @@ mod feature;
 mod github;
 #[cfg(feature = "send")]
 mod posthog;
+mod ring;
 // No session is started without `send`.
 #[cfg_attr(not(feature = "send"), allow(dead_code))]
 mod session;
@@ -25,6 +26,7 @@ pub use feature::{
     Action, DiffForm, DragModel, Feature, GraphDirection, GraphMode, LogLayout, MAX_REPOSITORIES,
     Menu, Properties, Range, Screen, Theme, Value, record, recording, register,
 };
+pub use ring::Ring;
 pub use update::{CARGO_INSTALL, Download, Release, Update, Version, newer};
 pub use usage::{
     Build, Choices, Lifecycle, app_version, asks_first_run_prompt, do_not_track,
@@ -166,26 +168,31 @@ pub fn start_crash_reports(
     }
 }
 
+static PUBLISHED: OnceLock<bool> = OnceLock::new();
+
+/// Tells, once and before anything asks [`Channel::current`], whether the pipeline wrote this
+/// build's version, i.e. published it. Unset, it wasn't.
+pub fn set_published(published: bool) {
+    let _ = PUBLISHED.set(published);
+}
+
 impl Channel {
     pub fn current() -> Channel {
         static CURRENT: OnceLock<Channel> = OnceLock::new();
         *CURRENT.get_or_init(|| {
-            Channel::of(option_env!("PARTERRE_CHANNEL"), |name| {
-                std::env::var(name).ok()
-            })
+            let exe = std::env::current_exe().ok();
+            let marker = exe
+                .as_deref()
+                .and_then(channel::marker_path)
+                .and_then(|path| channel::read_marker(&path));
+            let published = PUBLISHED.get().copied().unwrap_or(false);
+            Channel::of(
+                marker.as_deref(),
+                published,
+                |name| std::env::var(name).ok(),
+                exe.as_deref(),
+            )
         })
-    }
-
-    /// Snap and Flatpak set the name of the app they run, and leak it to what is started from a
-    /// terminal there, so only parterre's own counts.
-    fn of(stamp: Option<&str>, var: impl Fn(&str) -> Option<String>) -> Channel {
-        if var("SNAP_NAME").as_deref() == Some("parterre") {
-            Channel::Snap
-        } else if var("FLATPAK_ID").as_deref() == Some("se.trustfall.parterre") {
-            Channel::Flatpak
-        } else {
-            stamp.and_then(Channel::stamped).unwrap_or(Channel::Cargo)
-        }
     }
 }
 
@@ -205,18 +212,24 @@ pub struct UpdateCheck {
 }
 
 impl UpdateCheck {
-    /// `current` is this build's version: `0.6.0 (a1b2c3d)`. `found` is called on the checking
-    /// thread when a newer release turns up. `None`, asking nothing, without
+    /// `current` is this build's version: `1.2.3-rc+a1b2c3d`; `ring` the installation's, which
+    /// is narrowed to what this copy's channel can take ([`Ring::on`]). `found` is called on the
+    /// checking thread when a newer build turns up. `None`, asking nothing, without
     /// [`has_update_check`].
-    pub fn start(current: &str, found: impl Fn() + Send + 'static) -> Option<UpdateCheck> {
+    pub fn start(
+        current: &str,
+        ring: Ring,
+        found: impl Fn() + Send + 'static,
+    ) -> Option<UpdateCheck> {
         if !has_update_check() {
             return None;
         }
         let current = Version::parse(current)?;
+        let ring = ring.on(Channel::current());
         let (stop, stopped) = mpsc::channel();
         let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
-            check_for_updates(&current, &stopped, &send, &found);
+            check_for_updates(&current, ring, &stopped, &send, &found);
         });
         Some(UpdateCheck {
             found: receive,
@@ -236,14 +249,15 @@ impl UpdateCheck {
 #[cfg(feature = "send")]
 fn check_for_updates(
     current: &Version,
+    ring: Ring,
     stopped: &Receiver<()>,
     send: &Sender<Update>,
     found: &dyn Fn(),
 ) {
     use std::sync::mpsc::RecvTimeoutError;
     loop {
-        let releases = github::releases(current.is_prerelease()).unwrap_or_default();
-        if let Some(update) = newer(current, &releases).and_then(|r| Update::to(&r.tag)) {
+        let releases = github::releases().unwrap_or_default();
+        if let Some(update) = newer(current, ring, &releases).and_then(|r| Update::to(&r.tag)) {
             if send.send(update).is_err() {
                 return;
             }
@@ -260,19 +274,11 @@ fn check_for_updates(
 
 /// Never started: [`has_update_check`] is false without `send`.
 #[cfg(not(feature = "send"))]
-fn check_for_updates(_: &Version, _: &Receiver<()>, _: &Sender<Update>, _: &dyn Fn()) {}
+fn check_for_updates(_: &Version, _: Ring, _: &Receiver<()>, _: &Sender<Update>, _: &dyn Fn()) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn env<'a>(vars: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
-        |name| {
-            vars.iter()
-                .find(|(n, _)| *n == name)
-                .map(|(_, v)| v.to_string())
-        }
-    }
 
     #[test]
     fn a_recorded_feature_is_activity_in_the_current_session() {
@@ -309,29 +315,5 @@ mod tests {
         assert_ne!(ids[3], first);
         assert_eq!(lock(&session).id(), ids[3]);
         assert!(sent.iter().all(|(feature, _)| *feature == fit));
-    }
-
-    #[test]
-    fn the_stamp_names_the_channel_and_an_unstamped_build_is_cargo() {
-        for channel in Channel::STAMPED {
-            assert_eq!(Channel::of(Some(channel.name()), env(&[])), channel);
-        }
-        assert_eq!(Channel::of(None, env(&[])), Channel::Cargo);
-        assert_eq!(Channel::of(Some(""), env(&[])), Channel::Cargo);
-    }
-
-    #[test]
-    fn snap_and_flatpak_are_told_by_their_own_app() {
-        let snap = [("SNAP_NAME", "parterre")];
-        assert_eq!(Channel::of(None, env(&snap)), Channel::Snap);
-        let flatpak = [("FLATPAK_ID", "se.trustfall.parterre")];
-        assert_eq!(Channel::of(None, env(&flatpak)), Channel::Flatpak);
-        // Started from a terminal in another app's snap or flatpak.
-        let code = [
-            ("SNAP_NAME", "code"),
-            ("FLATPAK_ID", "com.visualstudio.code"),
-        ];
-        assert_eq!(Channel::of(None, env(&code)), Channel::Cargo);
-        assert_eq!(Channel::of(Some("deb"), env(&code)), Channel::Deb);
     }
 }

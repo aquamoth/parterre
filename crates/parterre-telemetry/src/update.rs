@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use crate::Channel;
+use crate::{Channel, Ring};
 
 const REPOSITORY_URL: &str = "https://github.com/aquamoth/parterre";
 
@@ -9,9 +9,9 @@ const TARGET: &str = env!("PARTERRE_TARGET");
 
 pub const CARGO_INSTALL: &str = "cargo install --locked parterre";
 
-/// A version as parterre's tags and its `--version` write it: `v0.6.0`, `0.6.0-rc1`,
-/// `0.6.0 (a1b2c3d)` or `0.6.1-dev.3+a1b2c3d.dirty`. The commit and build metadata are left
-/// out: they don't order versions.
+/// A version as parterre's tags and its `--version` write it: `v1.2.3`, `1.2.3-rc+a1b2c3d`,
+/// `1.2.3-dev+a1b2c3d.dirty`, or older ones' `0.6.0 (a1b2c3d)`. The commit and build metadata
+/// are left out: they don't order versions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Version {
     numbers: [u64; 3],
@@ -46,6 +46,16 @@ impl Version {
 
     pub fn is_prerelease(&self) -> bool {
         !self.pre.is_empty()
+    }
+
+    /// The pre-release identifiers: `["nightly", "20261016"]`.
+    pub fn pre(&self) -> &[String] {
+        &self.pre
+    }
+
+    /// `[1, 2, 3]`: the commit, within a minor (#397).
+    pub fn numbers(&self) -> [u64; 3] {
+        self.numbers
     }
 }
 
@@ -136,24 +146,25 @@ pub struct Release {
     pub prerelease: bool,
 }
 
-/// The newest of `releases`, if newer than `current`: of any kind for a release candidate or a
-/// dev build, so that it hears of the next candidate and the final, else releases only. Tags
-/// that aren't versions are passed over.
-pub fn newer<'a>(current: &Version, releases: &'a [Release]) -> Option<&'a Release> {
+/// The newest of `releases` that `ring` hears of ([`Ring::hears_of`]), if it is of a later
+/// commit than `current`: of higher numbers, so never a build of the commit running, as a
+/// release of the release candidate running. Tags that aren't versions are passed over.
+pub fn newer<'a>(current: &Version, ring: Ring, releases: &'a [Release]) -> Option<&'a Release> {
     releases
         .iter()
-        .filter(|r| current.is_prerelease() || !r.prerelease)
         .filter_map(|r| Some((Version::parse(&r.tag)?, r)))
-        .filter(|(v, _)| current.is_prerelease() || !v.is_prerelease())
+        .filter(|(v, _)| Ring::of(v).is_some_and(|of| ring.hears_of(of)))
         .max_by(|(a, _), (b, _)| a.cmp(b))
-        .filter(|(v, _)| v > current)
+        .filter(|(v, _)| v.numbers > current.numbers)
         .map(|(_, r)| r)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Update {
-    /// Without the `v`: `0.6.0`.
+    /// Without the `v`: `1.2.3-nightly.20261016`.
     pub version: String,
+    /// The ring of the build: what the dialog calls it.
+    pub ring: Ring,
     pub download: Download,
 }
 
@@ -176,13 +187,15 @@ impl Update {
         format!("{REPOSITORY_URL}/releases/tag/v{}", self.version)
     }
 
-    /// `None` on Snap and Flatpak, whose stores update parterre, and for a tag that isn't a
-    /// version.
+    /// `None` on Snap and Flatpak, whose stores update parterre, and for a tag that isn't the
+    /// version of a ring's build.
     pub fn of(tag: &str, channel: Channel, target: &str) -> Option<Update> {
-        let version = Version::parse(tag)?.to_string();
+        let parsed = Version::parse(tag)?;
+        let ring = Ring::of(&parsed)?;
+        let version = parsed.to_string();
         let arch = target.split('-').next().unwrap_or(target);
         let file = match channel {
-            Channel::Msi => format!("parterre-{version}-{target}.msi"),
+            Channel::Msi | Channel::MsiMachine => format!("parterre-{version}-{target}.msi"),
             Channel::Zip => format!("parterre-{version}-{target}.zip"),
             Channel::Tarball => format!("parterre-{version}-{target}.tar.gz"),
             Channel::Dmg => format!("parterre-{version}-{target}.dmg"),
@@ -198,6 +211,7 @@ impl Update {
             Channel::Cargo => {
                 return Some(Update {
                     version,
+                    ring,
                     download: Download::Copy(CARGO_INSTALL),
                 });
             }
@@ -206,6 +220,7 @@ impl Update {
         let url = format!("{REPOSITORY_URL}/releases/download/v{version}/{file}");
         Some(Update {
             version,
+            ring,
             download: Download::Open(url),
         })
     }
@@ -226,20 +241,26 @@ mod tests {
         }
     }
 
-    fn newer_tag(current: &str, tags: &[&str]) -> Option<String> {
+    fn newer_tag(current: &str, ring: Ring, tags: &[&str]) -> Option<String> {
         let releases: Vec<_> = tags.iter().map(|t| release(t)).collect();
-        newer(&v(current), &releases).map(|r| r.tag.clone())
+        newer(&v(current), ring, &releases).map(|r| r.tag.clone())
     }
 
     #[test]
     fn versions_as_tags_and_builds_write_them() {
-        assert_eq!(v("v0.6.0").to_string(), "0.6.0");
+        assert_eq!(v("v1.2.3").to_string(), "1.2.3");
+        assert_eq!(v("1.2.3+a1b2c3d").to_string(), "1.2.3");
+        assert_eq!(
+            v("1.2.3-nightly.20261016+a1b2c3d").to_string(),
+            "1.2.3-nightly.20261016"
+        );
         assert_eq!(v("0.6.0 (a1b2c3d)").to_string(), "0.6.0");
         assert_eq!(v("0.6.0-rc1 (a1b2c3d)").to_string(), "0.6.0-rc1");
-        assert_eq!(v("0.6.1-dev.3+a1b2c3d.dirty").to_string(), "0.6.1-dev.3");
-        assert!(!v("0.6.0 (a1b2c3d)").is_prerelease());
-        assert!(v("0.6.0-rc1").is_prerelease());
-        assert!(v("0.6.1-dev.3+a1b2c3d").is_prerelease());
+        assert_eq!(v("1.2.3-dev+a1b2c3d.dirty").to_string(), "1.2.3-dev");
+        assert!(!v("1.2.3+a1b2c3d").is_prerelease());
+        assert!(v("1.2.3-rc").is_prerelease());
+        assert_eq!(v("1.2.3-nightly.20261016").pre(), ["nightly", "20261016"]);
+        assert_eq!(v("1.2.3-canary").numbers(), [1, 2, 3]);
     }
 
     #[test]
@@ -264,69 +285,106 @@ mod tests {
     }
 
     #[test]
-    fn versions_order_as_releases_follow_each_other() {
+    fn versions_order_as_builds_follow_each_other() {
         let order = [
             "0.5.1",
-            "0.6.0-dev.3",
             "0.6.0-rc1",
-            "0.6.0-rc1.dev.2",
             "0.6.0-rc2",
             "0.6.0-rc10",
             "0.6.0",
-            "0.6.1-dev.1",
-            "0.6.1-dev.12",
-            "0.10.0",
-            "1.0.0",
+            "1.2.3-canary",
+            "1.2.3-dev",
+            "1.2.3-nightly.20261016",
+            "1.2.3-nightly.20261017",
+            "1.2.3-rc",
+            "1.2.3",
+            "1.2.4-canary",
+            "1.10.0-rc",
         ];
         for pair in order.windows(2) {
             assert!(v(pair[0]) < v(pair[1]), "{} < {}", pair[0], pair[1]);
         }
-        assert_eq!(v("0.6.0").cmp(&v("v0.6.0 (a1b2c3d)")), Ordering::Equal);
+        assert_eq!(v("1.2.3").cmp(&v("v1.2.3+a1b2c3d")), Ordering::Equal);
         assert!(v("1.0.0-1") < v("1.0.0-alpha"));
     }
 
+    const PUBLISHED: [&str; 9] = [
+        "v1.2.9-canary",
+        "v1.2.8-nightly.20261018",
+        "v1.2.6-nightly.20261017",
+        "v1.2.5-rc",
+        "v1.2.4",
+        "v1.2.2-nightly.20261016",
+        "v1.2.2-rc",
+        "v1.1.7",
+        "v1.0.0-rc1",
+    ];
+
     #[test]
-    fn a_release_build_hears_of_newer_releases_only() {
+    fn each_ring_hears_of_its_own_builds() {
+        let newest = |current, ring| newer_tag(current, ring, &PUBLISHED);
+        assert_eq!(newest("1.1.7+a1b2c3d", Ring::Stable), Some("v1.2.4".into()));
         assert_eq!(
-            newer_tag("0.5.1 (a1b2c3d)", &["v0.6.0"]),
-            Some("v0.6.0".into())
+            newest("1.2.2-rc+a1b2c3d", Ring::Rc),
+            Some("v1.2.5-rc".into())
         );
-        assert_eq!(newer_tag("0.6.0 (a1b2c3d)", &["v0.6.0"]), None);
-        assert_eq!(newer_tag("0.6.1 (a1b2c3d)", &["v0.6.0"]), None);
-        assert_eq!(newer_tag("0.6.0", &["v0.7.0-rc1", "v0.6.0"]), None);
+        assert_eq!(
+            newest("1.2.2-nightly.20261016+a1b2c3d", Ring::Nightly),
+            Some("v1.2.8-nightly.20261018".into())
+        );
+        assert_eq!(
+            newest("1.2.3-canary+a1b2c3d", Ring::Canary),
+            Some("v1.2.9-canary".into())
+        );
+        assert_eq!(newest("1.2.4+a1b2c3d", Ring::Stable), None);
+        assert_eq!(newest("1.2.9-canary+a1b2c3d", Ring::Canary), None);
     }
 
     #[test]
-    fn a_release_candidate_hears_of_the_next_candidate_and_the_final() {
-        let tags = ["v0.6.0-rc2", "v0.6.0-rc1", "v0.5.1"];
+    fn a_release_candidate_hears_of_the_release() {
+        let tags = ["v1.2.7", "v1.2.5-rc"];
         assert_eq!(
-            newer_tag("0.6.0-rc1 (a1b2c3d)", &tags),
-            Some("v0.6.0-rc2".into())
+            newer_tag("1.2.5-rc+a1b2c3d", Ring::Rc, &tags),
+            Some("v1.2.7".into())
         );
-        assert_eq!(newer_tag("0.6.0-rc2 (a1b2c3d)", &tags), None);
-        let tags = ["v0.6.0", "v0.6.0-rc2", "v0.6.0-rc1"];
-        assert_eq!(newer_tag("0.6.0-rc2", &tags), Some("v0.6.0".into()));
-        // Listed newest first by date, which needn't be by version.
-        let tags = ["v0.5.2", "v0.6.0-rc10", "v0.6.0-rc9"];
-        assert_eq!(newer_tag("0.6.0-rc9", &tags), Some("v0.6.0-rc10".into()));
+        // Not when it is a release of the commit running.
+        let tags = ["v1.2.5", "v1.2.5-rc"];
+        assert_eq!(newer_tag("1.2.5-rc+a1b2c3d", Ring::Rc, &tags), None);
+        assert_eq!(newer_tag("1.2.5-rc+a1b2c3d", Ring::Stable, &tags), None);
     }
 
     #[test]
-    fn a_dev_build_hears_of_what_follows_its_release() {
-        let tags = ["v0.6.1-rc1", "v0.6.0"];
+    fn a_ring_switched_to_hears_of_later_commits_only() {
+        // A nightly installation switched to stable waits for a release of a later commit.
         assert_eq!(
-            newer_tag("0.6.1-dev.4+a1b2c3d", &tags),
-            Some("v0.6.1-rc1".into())
+            newer_tag("1.2.8-nightly.20261018+a1b2c3d", Ring::Stable, &PUBLISHED),
+            None
         );
-        assert_eq!(newer_tag("0.6.1-dev.4+a1b2c3d", &["v0.6.0"]), None);
+        assert_eq!(
+            newer_tag("1.2.4+a1b2c3d", Ring::Nightly, &PUBLISHED),
+            Some("v1.2.8-nightly.20261018".into())
+        );
+        // A dev build's version against a ring's builds: later commits only. (Its channel is
+        // cargo, which the check narrows to stable, Ring::on.)
+        assert_eq!(
+            newer_tag("1.2.5-dev+a1b2c3d.dirty", Ring::Nightly, &PUBLISHED),
+            Some("v1.2.8-nightly.20261018".into())
+        );
+        assert_eq!(
+            newer_tag("1.2.8-dev+a1b2c3d", Ring::Nightly, &PUBLISHED),
+            None
+        );
     }
 
     #[test]
-    fn tags_that_are_not_versions_are_passed_over() {
-        let tags = ["nightly", "v0.7", "v0.6.0"];
-        assert_eq!(newer_tag("0.5.1", &tags), Some("v0.6.0".into()));
-        assert_eq!(newer_tag("0.5.1", &["nightly"]), None);
-        assert_eq!(newer_tag("0.5.1", &[]), None);
+    fn tags_that_are_not_ring_builds_are_passed_over() {
+        let tags = ["nightly", "v0.7", "v1.3.0-beta", "v1.3.0-dev", "v1.2.0"];
+        assert_eq!(
+            newer_tag("1.1.0", Ring::Stable, &tags),
+            Some("v1.2.0".into())
+        );
+        assert_eq!(newer_tag("1.1.0", Ring::Rc, &["nightly"]), None);
+        assert_eq!(newer_tag("1.1.0", Ring::Rc, &[]), None);
     }
 
     #[test]
@@ -335,6 +393,7 @@ mod tests {
             Some(Update {
                 version,
                 download: Download::Open(url),
+                ..
             }) => {
                 assert_eq!(version, "0.6.0-rc1");
                 url

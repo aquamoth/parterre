@@ -28,12 +28,13 @@ fn copyright_of(notice: &str) -> String {
     format!("© {}", holder.trim_start_matches("(C)").trim_start())
 }
 
-/// `0.7.0 (a1b2c3d)` as `("0.7.0", "a1b2c3d")`; a version without a commit as `(version, "")`.
+/// A published `1.2.3-rc+a1b2c3d` as `("1.2.3-rc", "a1b2c3d")`; a dev build, or a version
+/// without a commit, as `(version, "")`.
 #[cfg(any(target_os = "macos", test))]
 pub fn version_and_commit(version: &str) -> (&str, &str) {
     version
-        .strip_suffix(')')
-        .and_then(|v| v.split_once(" ("))
+        .split_once('+')
+        .filter(|(v, _)| !v.contains("dev"))
         .unwrap_or((version, ""))
 }
 
@@ -59,7 +60,7 @@ pub fn build_info() -> String {
     let git = parterre_core::git::version().unwrap_or_else(|| "not found".into());
     format!(
         "parterre {}\ngit {git}\n{} {}",
-        crate::VERSION,
+        crate::version(),
         std::env::consts::OS,
         std::env::consts::ARCH
     )
@@ -102,13 +103,15 @@ mod tests {
     #[test]
     fn the_commit_goes_in_parentheses_when_there_is_one() {
         assert_eq!(
-            version_and_commit("0.7.0-rc3 (85656da)"),
-            ("0.7.0-rc3", "85656da")
+            version_and_commit("1.2.3-rc+85656da"),
+            ("1.2.3-rc", "85656da")
         );
+        assert_eq!(version_and_commit("1.2.3+85656da"), ("1.2.3", "85656da"));
         assert_eq!(
-            version_and_commit("0.7.1-dev.3+a1b2c3d"),
-            ("0.7.1-dev.3+a1b2c3d", "")
+            version_and_commit("1.2.3-dev+a1b2c3d"),
+            ("1.2.3-dev+a1b2c3d", "")
         );
+        assert_eq!(version_and_commit("0.0.0-dev"), ("0.0.0-dev", ""));
     }
 
     #[test]

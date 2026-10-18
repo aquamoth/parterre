@@ -1,19 +1,19 @@
 name: Release
 
-# Pushing a tag vX.Y.Z[-prerelease] publishes a GitHub Release with binaries for Linux, Windows
-# and macOS, the Windows installer, the macOS disk images, and .deb and .rpm packages, then the
-# crates and the Chocolatey package. PARTERRE_RELEASE_TAG supplies the binary's version; build.rs
-# checks that the tag points at the clean commit being built. The packages are installed on
-# Linux, Windows and macOS first, and nothing is published unless that passes. The Linux and
-# macOS builds upload their symbols to PostHog, for readable crash reports (#265). See
-# docs/releasing.md.
+# The maintainer's tag vX.Y-rcN publishes a release candidate, and vX.Y a release, of the commit
+# it is on (#397, #415). The version is counted for that commit, 1.2.3-rc or 1.2.3
+# (parterre-stamp), and the release hangs on a tag the pipeline makes for it, v1.2.3-rc or
+# v1.2.3. It reuses the commit's canary binaries (canary.yml), or builds them when there are
+# none, writes the version into them, packages them, installs the packages on Linux, Windows and
+# macOS, and publishes nothing unless that passes and CI passed on the commit. A release then
+# goes to crates.io and Chocolatey too. See docs/releasing.md.
 #
-# Started by hand on a branch (gh workflow run release.yml --ref BRANCH), it builds, packages and
-# installs the same way, and uploads the symbols, but publishes nothing, leaving the packages as
-# artifacts (#246).
+# Started by hand on a branch (gh workflow run release.yml --ref BRANCH), it builds, packages
+# and installs an rc of the branch's commit the same way, but publishes nothing, leaving the
+# packages as artifacts (#246).
 on:
   push:
-    tags: ["v*"]
+    tags: ["v[0-9]+.[0-9]+", "v[0-9]+.[0-9]+-rc[0-9]+"]
   workflow_dispatch:
 
 permissions:
@@ -22,363 +22,150 @@ permissions:
 concurrency:
   group: release-${{ github.ref }}
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  build:
-    name: Build (${{ matrix.target }})
-    strategy:
-      matrix:
-        include:
-          # In Ubuntu 22.04, so the binary needs only glibc 2.35 and runs on Debian 12, Ubuntu
-          # 22.04 and newer (docs/distribution.md). The Rust toolchain still comes from rustup.
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, container: "ubuntu:22.04" }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          # Cross-compiled on the Apple silicon runner, so the binary can't run there: no
-          # --version check. build.rs still checks the tag and sets the version.
-          - { os: macos-latest, target: x86_64-apple-darwin, cross: true }
-    runs-on: ${{ matrix.os }}
-    container: ${{ matrix.container }}
-    env:
-      # By hand there is no release tag; the version follows the nearest one, as in any build.
-      PARTERRE_RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
-    # No rust-cache: caches saved by a tag run are never restored by later runs, and a release
-    # should come from a clean build anyway.
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      ring: ${{ steps.plan.outputs.ring }}
+      tag: ${{ steps.plan.outputs.tag }}
+      run-id: ${{ steps.plan.outputs.run-id }}
     steps:
-      # Before checkout: without git it downloads the sources without .git, and build.rs needs
-      # the commit.
-      - name: Prepare container
-        if: matrix.container
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends build-essential ca-certificates curl git
-      # The whole history with its tags: the AppStream metadata lists the releases
-      # (packaging/linux/metainfo.sh), and by hand the version follows the nearest release tag.
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      # The checkout belongs to the runner's user and the container runs as root; git ignores
-      # such repositories unless they are marked safe.
-      - name: Trust the checkout
-        if: matrix.container
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      # Every build below keeps its line tables (Cargo.toml) for PostHog, which resolves the
-      # stack traces of crash reports with them (docs/releasing.md#crash-report-symbols). On
-      # macOS rustc packs them into a dSYM before it strips the binary. On Windows the linker
-      # writes them to a PDB, which it does only if nothing is stripped. On Linux they stay in
-      # the binary until "Split debug info" moves them out and strips it.
-      - name: Keep debug info
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = macOS ]; then
-            echo CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed >> "$GITHUB_ENV"
-          else
-            echo CARGO_PROFILE_RELEASE_STRIP=none >> "$GITHUB_ENV"
-          fi
-      # Stamped with the archive's channel. The installer and the packages are built again
-      # below, each stamped with its own, so that the update check offers each the same kind of
-      # file (#258). Only parterre-telemetry and parterre compile again.
-      - name: Build
+      - id: plan
         env:
-          PARTERRE_CHANNEL: ${{ runner.os == 'Windows' && 'zip' || 'tarball' }}
-        run: cargo build --release --locked --target ${{ matrix.target }}
-      # Each build is a binary of its own, with its own build ID, LC_UUID or PDB, so the debug
-      # info of each is kept under symbols/ or pdb/, by channel. Cargo leaves the dSYM in release/
-      # as a symlink into deps/, so it's copied with -L (#305).
-      - name: Split debug info
-        shell: bash
-        run: |
-          release=target/${{ matrix.target }}/release
-          case $RUNNER_OS in
-          Linux) packaging/linux/split-debuginfo.sh "$release/parterre" symbols/tarball ;;
-          macOS) mkdir -p symbols/tarball && cp -RL "$release/parterre.dSYM" symbols/tarball/ ;;
-          Windows) mkdir -p pdb/zip && cp "$release/parterre.pdb" pdb/zip/ ;;
-          esac
-      - name: Check version
-        if: ${{ !matrix.cross && github.event_name == 'push' }}
-        shell: bash
-        run: |
-          expected="parterre ${GITHUB_REF_NAME#v} ($(git rev-parse --short=7 HEAD))"
-          actual=$(target/${{ matrix.target }}/release/parterre --version)
-          echo "$actual"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error::--version printed '$actual', expected '$expected'"
-            exit 1
-          fi
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: ${{ runner.os == 'Linux' && 'cargo-about,cargo-deb,cargo-generate-rpm' || 'cargo-about' }}
-      # The files' names carry the tag's version, or by hand `git describe`'s.
-      - name: Name
-        shell: bash
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = push ]; then
-            version=${GITHUB_REF_NAME#v}
-          else
-            version=$(git describe --tags --match 'v[0-9]*' --always)
-            version=${version#v}
-          fi
-          echo "VERSION=$version" >> "$GITHUB_ENV"
-          echo "NAME=parterre-$version-${{ matrix.target }}" >> "$GITHUB_ENV"
-      # The binary with the README, its license, NOTICE and the licenses of the crates built
-      # into it.
-      - name: Package
-        shell: bash
-        run: |
-          name=$NAME
-          mkdir -p "$name" dist
-          cp README.md LICENSE NOTICE "$name/"
-          cargo about generate --locked -c packaging/about.toml packaging/about.hbs \
-            -o "$name/THIRD-PARTY-NOTICES.html"
-          if [ "$RUNNER_OS" = Windows ]; then
-            cp "target/${{ matrix.target }}/release/parterre.exe" "$name/"
-            7z a "dist/$name.zip" "$name"
-          else
-            cp "target/${{ matrix.target }}/release/parterre" "$name/"
-            tar czf "dist/$name.tar.gz" "$name"
-          fi
-      # The .deb and .rpm, each from a build stamped with its channel
-      # (packaging/linux/build-packages.sh).
-      - name: Linux packages
-        if: runner.os == 'Linux'
-        run: |
-          for channel in deb rpm; do
-            PARTERRE_CHANNEL=$channel cargo build --release --locked --target ${{ matrix.target }}
-            packaging/linux/split-debuginfo.sh target/${{ matrix.target }}/release/parterre \
-              symbols/$channel
-            packaging/linux/build-packages.sh --target ${{ matrix.target }} --only $channel dist
-          done
-      # parterre.app in a disk image, from a build stamped dmg (packaging/macos/build-dmg.sh).
-      # The version is passed, since the Intel build can't run here to tell it.
-      - name: macOS disk image
-        if: runner.os == 'macOS'
-        run: |
-          PARTERRE_CHANNEL=dmg cargo build --release --locked --target ${{ matrix.target }}
-          mkdir -p symbols/dmg
-          cp -RL target/${{ matrix.target }}/release/parterre.dSYM symbols/dmg/
-          packaging/macos/build-dmg.sh --target ${{ matrix.target }} --version "$VERSION" dist
-      # The installer, from the zip's files with a build stamped msi
-      # (packaging/windows/build-msi.ps1).
-      - name: Windows installer
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          PARTERRE_CHANNEL=msi cargo build --release --locked --target ${{ matrix.target }}
-          cp "target/${{ matrix.target }}/release/parterre.exe" "$NAME/"
-          mkdir -p pdb/msi && cp "target/${{ matrix.target }}/release/parterre.pdb" pdb/msi/
-          dotnet tool install --global wix --version 7.0.0
-          PATH="$USERPROFILE/.dotnet/tools:$PATH" \
-            pwsh packaging/windows/build-msi.ps1 -Stage "$NAME" -Out "dist/$NAME.msi"
-      # PostHog doesn't take PDBs yet, so they are a release asset of their own: the zip's
-      # parterre.exe and the installer's, under zip/ and msi/.
-      - name: Windows debug info
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          mv pdb "$NAME-pdb"
-          7z a "dist/$NAME-pdb.zip" "$NAME-pdb"
-      # PostHog matches a crash report's frames to the symbols of the binary it came from, by
-      # build ID on Linux and LC_UUID on macOS. Without the secrets (a fork) there is no upload.
-      - name: Upload symbols to PostHog
-        if: runner.os != 'Windows'
-        shell: bash
-        env:
-          POSTHOG_CLI_HOST: https://eu.posthog.com
-          POSTHOG_CLI_API_KEY: ${{ secrets.POSTHOG_CLI_API_KEY }}
-          POSTHOG_CLI_PROJECT_ID: ${{ secrets.POSTHOG_CLI_PROJECT_ID }}
-        run: |
-          if [ -z "$POSTHOG_CLI_API_KEY" ] || [ -z "$POSTHOG_CLI_PROJECT_ID" ]; then
-            echo "::warning::No POSTHOG_CLI_API_KEY or POSTHOG_CLI_PROJECT_ID; symbols not uploaded"
-            exit 0
-          fi
-          # posthog-cli 0.18.9, checked against the sha256.sum of its release.
-          case $RUNNER_OS in
-          Linux)
-            cli=posthog-cli-x86_64-unknown-linux-musl
-            sum=d132e0ab56d0afaee10fd37b0870ba1162b09f7dccc8eb92ea391fe081be60a5
-            check="sha256sum -c"
-            ;;
-          macOS)
-            cli=posthog-cli-aarch64-apple-darwin
-            sum=831d3a8f16f95fc7cdbff7c9e83a32f012e8bd5af983646582f52e3ca4221d01
-            check="shasum -a 256 -c"
-            ;;
-          esac
-          curl -fsSLO "https://github.com/PostHog/posthog/releases/download/posthog-cli/v0.18.9/$cli.tar.gz"
-          echo "$sum  $cli.tar.gz" | $check
-          tar xzf "$cli.tar.gz"
-          "$cli/posthog-cli" symbol-sets upload --directory symbols \
-            --release-name parterre --release-version "$VERSION"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.target }}
-          path: dist/*
-          if-no-files-found: error
-
-  # Installs the .deb and .rpm on Debian, Ubuntu, Fedora and openSUSE before they are published.
-  linux-packages:
-    name: Linux packages
-    needs: build
-    uses: ./.github/workflows/linux-packages.yml
-    with:
-      artifact: x86_64-unknown-linux-gnu
-
-  # Installs the MSI per user (its default, as winget does) and machine-wide (as Chocolatey does)
-  # before it is published, runs parterre and removes it (packaging/windows/test-msi.ps1).
-  windows-install:
-    name: Install (Windows, ${{ matrix.scope }})
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        scope: [user, machine]
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          sparse-checkout: packaging/windows
-      - uses: actions/download-artifact@v8
-        with:
-          name: x86_64-pc-windows-msvc
-          path: dist
-      - name: Install, run and remove
-        shell: pwsh
-        run: |
-          $msi = Get-ChildItem dist\*.msi
-          packaging\windows\test-msi.ps1 -Msi $msi.FullName -Scope ${{ matrix.scope }}
-
-  # Installs parterre.app from each disk image into /Applications, runs it, also started as
-  # Finder starts it, and removes it before it is published (packaging/macos/test-dmg.sh). The
-  # Intel image on an Intel runner, since Apple silicon can't be relied on to run it.
-  macos-install:
-    name: Install (macOS, ${{ matrix.target }})
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: macos-26-intel, target: x86_64-apple-darwin }
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          sparse-checkout: packaging/macos
-      - uses: actions/download-artifact@v8
-        with:
-          name: ${{ matrix.target }}
-          path: dist
-      # The checkout is the repository the app opens.
-      - name: Install, run and remove
-        run: packaging/macos/test-dmg.sh dist/*.dmg .
-
-  # The tag is on a commit of main, which CI has tested on all three systems, Linux in the same
-  # Ubuntu 22.04 container as the build above. Instead of testing it again, wait for that run
-  # and publish only if it passed (#236).
-  ci:
-    name: CI passed
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-    steps:
-      - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # An hour at most; CI takes about 15 minutes. A tag pushed right after its commit may
-          # be seen before its CI run is.
-          for attempt in $(seq 120); do
-            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main" \
-              --jq '.workflow_runs[0] // empty | "\(.status) \(.conclusion) \(.html_url)"')
-            if [ -z "$run" ]; then
-              if [ "$attempt" -ge 10 ]; then
-                echo "::error::No CI run on main for $GITHUB_SHA. Tag a commit on main (docs/releasing.md)."
-                exit 1
-              fi
-              echo "No CI run for $GITHUB_SHA yet"
-            else
-              read -r status conclusion url <<< "$run"
-              echo "$url: $status $conclusion"
-              if [ "$status" = completed ]; then
-                [ "$conclusion" = success ] && exit 0
-                echo "::error::CI did not pass on $GITHUB_SHA: $url"
-                exit 1
-              fi
+          ring=rc
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            case $GITHUB_REF_NAME in *-rc*) ;; *) ring=stable ;; esac
+          fi
+          version=$(cargo run -q --locked -p parterre-stamp -- version --ring "$ring")
+          tag=v${version%%+*}
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            # The tag names the minor; the commit must be in it. A vX.Y tag on a commit that
+            # already has a later minor's tags in its history would publish that minor.
+            minor=${GITHUB_REF_NAME#v}
+            minor=${minor%%-*}
+            case $version in
+            "$minor".*) ;;
+            *)
+              echo "::error::$GITHUB_REF_NAME is on a commit of $version: tag a commit of $minor"
+              exit 1
+              ;;
+            esac
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "::error::$tag is published already: this commit has its $ring build"
+              exit 1
             fi
-            sleep 30
-          done
-          echo "::error::CI did not finish on $GITHUB_SHA within an hour"
-          exit 1
+          fi
+          run=$(.github/scripts/canary-run.sh "$GITHUB_SHA")
+          echo "$version ($tag), ${run:+the binaries of canary run $run}${run:-binaries built here}"
+          {
+            echo "version=$version"
+            echo "ring=$ring"
+            echo "tag=$tag"
+            echo "run-id=$run"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build
+    needs: plan
+    if: needs.plan.outputs.run-id == ''
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+
+  package:
+    name: Package
+    needs: [plan, build]
+    if: ${{ !cancelled() && !failure() }}
+    uses: ./.github/workflows/package.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      version: ${{ needs.plan.outputs.version }}
+      run-id: ${{ needs.plan.outputs.run-id || github.run_id }}
+
+  install:
+    name: Install
+    needs: package
+    if: ${{ !cancelled() && !failure() && needs.package.result == 'success' }}
+    uses: ./.github/workflows/install.yml
+
+  # The tag is on a commit of main, which CI has tested on all three systems. Instead of testing
+  # it again, wait for that run and publish only if it passed (#236).
+  ci:
+    name: CI
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/ci-passed.yml
+    permissions:
+      actions: read
+    with:
+      sha: ${{ github.sha }}
 
   publish:
     name: Publish
-    needs: [build, linux-packages, windows-install, macos-install, ci]
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    needs: [plan, install, ci]
+    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && needs.install.result == 'success' }}
+    uses: ./.github/workflows/publish.yml
     permissions:
       contents: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Checksums
-        working-directory: dist
-        run: sha256sum * | tee SHA256SUMS
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # A tag with a pre-release part (v0.3.0-rc.1) makes a pre-release.
-          prerelease=
-          case "$GITHUB_REF_NAME" in *-*) prerelease=--prerelease ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --title "parterre ${GITHUB_REF_NAME#v}" \
-            --generate-notes \
-            $prerelease
+    with:
+      version: ${{ needs.plan.outputs.version }}
+      ring: ${{ needs.plan.outputs.ring }}
+      sha: ${{ github.sha }}
 
-  # The Chocolatey package, from the MSI just published. Pre-releases are built but not pushed.
+  # The Chocolatey package, from the MSI just published. Release candidates are built but not
+  # pushed.
   chocolatey:
     name: Chocolatey
-    needs: publish
+    needs: [plan, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
     uses: ./.github/workflows/chocolatey.yml
     with:
-      tag: ${{ github.ref_name }}
-      push: ${{ !contains(github.ref_name, '-') }}
+      tag: ${{ needs.plan.outputs.tag }}
+      push: ${{ needs.plan.outputs.ring == 'stable' }}
     secrets: inherit
 
-  # The crates, at the tag's version, from the same commit; not for pre-releases
+  # The crates, at the release's version, from the same commit; not for release candidates
   # (docs/releasing.md#cratesio). Trusted Publishing: crates.io trusts this workflow in the
   # crates-io environment and hands out a token for this run only. It can't create a crate, so
   # a new one is published by hand first. A crate already at this version is skipped, so
-  # rerunning the job publishes the rest.
+  # rerunning the job publishes the rest. Crates with `publish = false` (parterre-stamp) are
+  # left out.
   crates:
     name: crates.io
-    needs: publish
-    if: ${{ !contains(github.ref_name, '-') }}
+    needs: [plan, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.plan.outputs.ring == 'stable' }}
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
       contents: read
       id-token: write
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      # The release's tag, which the publish job made on this commit.
+      - name: Fetch the tag
+        run: git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
       # A checkout of the tag with the versions written into Cargo.toml and Cargo.lock.
       - name: Prepare
-        run: python3 scripts/prepare-crates-release.py "$GITHUB_REF_NAME" --output "$RUNNER_TEMP/crates"
+        run: python3 scripts/prepare-crates-release.py "$TAG" --output "$RUNNER_TEMP/crates"
       - name: Already published
         id: published
         working-directory: ${{ runner.temp }}/crates
         run: |
-          version=${GITHUB_REF_NAME#v}
+          version=${TAG#v}
           exists() {
             status=$(curl -s -o /dev/null -w '%{http_code}' -A "parterre release ($GITHUB_REPOSITORY)" \
               "https://crates.io/api/v1/crates/$1")
@@ -388,8 +175,12 @@ jobs:
               *) echo "::error::crates.io answered $status for $1"; exit 1 ;;
             esac
           }
+          metadata=$(cargo metadata --locked --no-deps --format-version 1)
           exclude= todo= new=
-          for crate in $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[].name'); do
+          for crate in $(echo "$metadata" | jq -r '.packages[] | select(.publish == []) | .name'); do
+            exclude="$exclude --exclude $crate"
+          done
+          for crate in $(echo "$metadata" | jq -r '.packages[] | select(.publish != []) | .name'); do
             if exists "$crate/$version"; then
               echo "$crate $version is published"
               exclude="$exclude --exclude $crate"

@@ -6,9 +6,9 @@
 #   packaging/macos/build-dmg.sh [--target TRIPLE] [--version VERSION] [OUT]
 #
 # OUT defaults to target/packages, and the image is parterre-VERSION-TRIPLE.dmg. VERSION
-# defaults to the binary's (parterre --version). A binary cross-compiled for Intel can't tell
-# it on Apple silicon, so the release workflow passes the version it names its files with. It
-# builds the image from a build stamped with its channel (PARTERRE_CHANNEL=dmg, #258).
+# defaults to the binary's (parterre --version), without the commit. A binary cross-compiled for
+# Intel can't tell it on Apple silicon, so the pipeline passes the version it wrote into it.
+# The app's Resources/channel, holding dmg, tells parterre how it was installed (#410).
 #
 # The app is signed ad hoc: Apple silicon runs nothing unsigned, and the signature seals
 # Info.plist and the resources with the binary. It has no Developer ID, so Gatekeeper asks once
@@ -36,6 +36,7 @@ if [ ! -x "$bin" ]; then
 fi
 [ -n "$target" ] || target=$(rustc -vV | sed -n 's/^host: //p')
 [ -n "$version" ] || version=$("$bin" --version | cut -d' ' -f2)
+version=${version%%+*}
 
 # Bundle versions are numbers only, so a pre-release has its release's: 0.5.0-rc1 is 0.5.0.
 numeric=$(echo "$version" | sed -n 's/^\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p')
@@ -62,6 +63,7 @@ rm -rf "$stage"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$out"
 cp "$bin" "$app/Contents/MacOS/"
 cp packaging/icon/parterre.icns LICENSE NOTICE "$app/Contents/Resources/"
+echo dmg >"$app/Contents/Resources/channel"
 cargo about generate --locked -c packaging/about.toml packaging/about.hbs \
     -o "$app/Contents/Resources/THIRD-PARTY-NOTICES.html"
 sed -e "s|@VERSION@|$numeric|" -e "s|@MINIMUM_SYSTEM_VERSION@|$minimum|" \

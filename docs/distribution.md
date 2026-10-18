@@ -83,24 +83,33 @@ release. Switching to a git library (gitoxide) would be a large rewrite; see
 
 ## Update check
 
-parterre asks GitHub's releases API at start and then once a day whether a newer release is out
-(#226, #258). It sends nothing of its own. A newer one is told of once, in a dialog (#345), and
-until then *Download X.Y.Z* heads the *Help* menu, whose title turns blue (on macOS it is under
-*About parterre*, and the Dock icon gets a badge). It does what fits the channel parterre came
-through:
+parterre asks GitHub's releases API at start and then once a day whether a newer build of its
+ring is out (#226, #258, #411). It sends nothing of its own. A newer one is told of once, in a
+dialog titled by its ring (#345, #412), and until then *Download X.Y.Z* heads the *Help* menu,
+whose title turns blue (on macOS it is under *About parterre*, and the Dock icon gets a badge).
+It does what fits the channel parterre came through:
 
 | Channel | *Download* |
 |---|---|
-| MSI (also winget and Chocolatey, which install it), zip, tarballs, macOS disk images, .deb, .rpm | opens that channel's own file of the release in the browser |
-| crates.io (`cargo install`), and any build without a channel | copies `cargo install --locked parterre` |
+| MSI (also winget and Chocolatey, which install it), zip, tarballs, macOS disk images, .deb, .rpm | opens that channel's own file of the build in the browser |
+| crates.io (`cargo install`), and any build whose version the pipeline didn't write | copies `cargo install --locked parterre` |
 | Snap, Flathub | nothing: their stores update parterre, and there is no check |
 
-- **The channel is stamped at build time.** Each packaging job in `release.yml` builds with
-  `PARTERRE_CHANNEL` set to `msi`, `zip`, `tarball`, `dmg`, `deb` or `rpm`, so the installers
-  and the packages each get a build of their own. Snap and Flatpak are told at run time by
-  `SNAP_NAME=parterre` and `FLATPAK_ID=se.trustfall.parterre`.
-- **Pre-releases:** a release build compares with the latest release, a release candidate (or
-  a dev build) with the newest of any kind, so it hears of the next candidate and the final.
+- **Rings.** Each installation keeps a ring, per user beside the install ID: stable, rc,
+  nightly or canary ([releasing.md](releasing.md)). Stable, nightly and canary hear of their
+  own builds only, rc of release candidates and releases; never of a build of the commit
+  running. The first run and *Reset* take the running build's ring; running a published build
+  of a later ring widens it, a canary build to nightly, and only the user narrows it, in
+  Settings › Privacy (*Tell me about*). Canary is listed there once chosen, or with Shift held.
+- **Stable only:** an MSI installed for all users, from Program Files (Chocolatey, winget's
+  machine-wide install), and `cargo install` hear of releases only, whatever the ring: Windows
+  Installer never upgrades a machine-wide install with a per-user MSI, and crates.io has
+  nothing else (#393, #398).
+- **The channel is a marker the package adds.** Each platform has one release binary, and the
+  MSI, the disk image, the .deb and the .rpm add a file `channel` beside it naming them: next to
+  `parterre.exe`, in `parterre.app/Contents/Resources/`, as `/usr/lib/parterre/channel` (#410).
+  A published binary without one is its platform's archive. Snap and Flatpak are told at run
+  time by `SNAP_NAME=parterre` and `FLATPAK_ID=se.trustfall.parterre`.
 - **Not before the first-run prompt:** on the first start, the check waits until the user has
   answered the prompt about usage statistics (#223, #261); later starts check at once.
 - **Off switches:** *Check for updates* in Settings › Privacy, for users. For packagers, the
@@ -114,7 +123,8 @@ statistics (ticked) and crash reports (unticked) to PostHog in the EU (#223, #22
 Nothing is sent before *Continue*. With usage statistics ticked, a release build sends
 `Application Installed` (first run), `Application Updated` (a new version), `Application Opened`
 (every start) and `Application Backgrounded` (on close), with a random install ID made at the
-first run. The channel above goes with them, as `channel`.
+first run. The channel above goes with them, as `channel`, and the running build's ring, as
+`ring` (`dev` for a build nobody published).
 
 With crash reports ticked, a release build sends a panic to PostHog as a `$exception` the moment
 it happens (#263), through posthog-rs's panic capture. A crash report never carries the install

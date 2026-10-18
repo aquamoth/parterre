@@ -1,9 +1,16 @@
-//! The version string parterre reports, e.g. `0.3.0 (a1b2c3d)` for a release.
+//! The version string a build of parterre reports, e.g. `1.2.3-dev+a1b2c3d` for a dev build.
 //!
-//! `build.rs` includes this file and runs [`describe`]; the app only reads the result
-//! (`PARTERRE_VERSION`) and compiles this module for its tests, so it must not use anything
-//! outside `std`. It isn't in `parterre-core` because the build script would then have to
-//! compile all of core as a build dependency.
+//! `build.rs` includes this file and runs [`describe`]; so does `parterre-stamp`, which the
+//! pipeline runs for the version it writes into a published build ([`published`]). The app
+//! compiles this module for its tests only, so it must not use anything outside `std`. It isn't
+//! in `parterre-core` because the build script would then have to compile all of core as a
+//! build dependency.
+//!
+//! The maintainer chooses major and minor by tagging `vX.Y-rcN` or `vX.Y`; the patch is counted:
+//! the commits on the first-parent line since the oldest tag of that minor (#397). So every
+//! commit on `main` has a patch of its own, and the builds of one commit are told apart by the
+//! pre-release word naming the ring: `1.2.1-canary`, `1.2.1-nightly.20261016`, `1.2.1-rc`,
+//! `1.2.1`, and `1.2.1-dev` for a build nobody published.
 
 #[derive(Debug)]
 pub enum Source {
@@ -19,15 +26,16 @@ pub enum Source {
 pub struct GitState {
     pub short_hash: String,
     pub dirty: bool,
-    pub tags_at_head: Vec<String>,
-    /// The release tag nearest `HEAD` in its history, which the version follows.
-    pub nearest: Option<NearestTag>,
+    /// `None` without a version tag in its history, as in a shallow clone.
+    pub base: Option<Base>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct NearestTag {
-    pub tag: String,
-    pub commits_since: u32,
+/// Where a commit stands: its minor, and its patch within it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Base {
+    pub major: u64,
+    pub minor: u64,
+    pub patch: u64,
 }
 
 /// The commit a packaged crate was made from, as its `.cargo_vcs_info.json` records it.
@@ -38,152 +46,122 @@ pub struct VcsInfo {
     pub dirty: bool,
 }
 
-/// The version string for a build of package version `pkg_version`.
-///
-/// Versions come from the release tags. A build of exactly the released sources reports the
-/// plain version and commit, `0.3.0 (a1b2c3d)`: a clean checkout of tag `v0.3.0`, or a packaged
-/// crate such as the one on crates.io (whose `Cargo.toml` has the tag's version). Every other
-/// build is a dev build, marked with a `dev` pre-release and the commit as build metadata.
-/// Past a release tag it is a pre-release of the next version, numbered by the commits since
-/// the tag: `0.3.1-dev.4+a1b2c3d(.dirty)` four commits after `v0.3.0`, or
-/// `0.3.0-rc1.dev.4+a1b2c3d` after `v0.3.0-rc1`, so that it sorts after the release it follows
-/// and before the next one (in dpkg and rpm too, with `-` as `~`). Only without a release tag
-/// in sight does the dev version fall back to `Cargo.toml`'s: `0.3.0-dev+a1b2c3d`, or just
-/// `0.3.0-dev` without git.
-///
-/// The release workflow sets `release_tag`. Its version comes from the tag, and the build
-/// fails unless that tag points at the commit being built and the checkout is clean.
-pub fn describe(
-    pkg_version: &str,
-    release_tag: Option<&str>,
-    source: &Source,
-) -> Result<String, String> {
-    if let Some(tag) = release_tag {
-        return release(pkg_version, tag, source);
-    }
+/// What a build is published as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ring {
+    Canary,
+    /// With the date it was built on, `20261016`.
+    Nightly(u32),
+    Rc,
+    Stable,
+}
+
+/// The version of a build that hasn't been published: `1.2.3-dev+a1b2c3d`, with `.dirty` when
+/// the sources have local changes. A packaged crate, such as the one on crates.io (whose
+/// `Cargo.toml` has the release's version), says `1.2.3+a1b2c3d`. Without a version tag in
+/// sight the version falls back to `Cargo.toml`'s, `0.0.0-dev+a1b2c3d`, or just `0.0.0-dev`
+/// without git.
+pub fn describe(pkg_version: &str, source: &Source) -> String {
     let (short_hash, dirty) = match source {
         Source::Git(git) => (Some(git.short_hash.as_str()), git.dirty),
         Source::Package(info) => (info.short_hash.as_deref(), info.dirty),
         Source::Unknown => (None, false),
     };
-    let nearest = match source {
-        Source::Git(git) => git
-            .nearest
-            .as_ref()
-            .and_then(|n| Some((parse_release_tag(&n.tag).ok()?, n.commits_since))),
-        _ => None,
-    };
-    let released = match source {
-        Source::Git(_) => nearest.and_then(|(version, since)| (since == 0).then_some(version)),
-        Source::Package(_) => Some(pkg_version),
-        Source::Unknown => None,
-    };
-    if let Some(version) = released
-        && !dirty
-    {
-        return Ok(plain(version, short_hash));
-    }
-    let dev = match nearest {
-        Some((version, since)) if version.contains('-') => format!("{version}.dev.{since}"),
-        Some((version, since)) => format!("{}-dev.{since}", next_patch(version)),
-        None => {
+    let version = match source {
+        Source::Git(GitState {
+            base: Some(base), ..
+        }) => format!("{}-dev", numbers(*base)),
+        Source::Package(_) if !dirty => pkg_version.to_owned(),
+        _ => {
             let sep = if pkg_version.contains('-') { '.' } else { '-' };
             format!("{pkg_version}{sep}dev")
         }
     };
     let Some(short_hash) = short_hash else {
-        return Ok(dev);
+        return version;
     };
     let dirty = if dirty { ".dirty" } else { "" };
-    Ok(format!("{dev}+{short_hash}{dirty}"))
+    format!("{version}+{short_hash}{dirty}")
 }
 
-fn release(pkg_version: &str, tag: &str, source: &Source) -> Result<String, String> {
-    let version = parse_release_tag(tag)?;
-    let (short_hash, dirty, tagged) = match source {
-        Source::Git(git) => (
-            Some(git.short_hash.as_str()),
-            git.dirty,
-            git.tags_at_head.iter().any(|t| t == tag),
-        ),
-        Source::Package(info) => {
-            if version != pkg_version {
-                return Err(format!(
-                    "release tag {tag} doesn't match the packaged crate version {pkg_version}"
-                ));
-            }
-            (info.short_hash.as_deref(), info.dirty, true)
-        }
-        Source::Unknown => (None, false, false),
+/// The version a build of the commit at `base` is published under in `ring`:
+/// `1.2.1-canary+a1b2c3d`, `1.2.1-nightly.20261016+a1b2c3d`, `1.2.1-rc+a1b2c3d` or
+/// `1.2.1+a1b2c3d`. Its release's tag is the same without the commit, after a `v`.
+pub fn published(base: Base, ring: Ring, short_hash: &str) -> String {
+    let pre = match ring {
+        Ring::Canary => "-canary".to_owned(),
+        Ring::Nightly(date) => format!("-nightly.{date}"),
+        Ring::Rc => "-rc".to_owned(),
+        Ring::Stable => String::new(),
     };
-    let Some(short_hash) = short_hash else {
-        return Err(format!(
-            "release tag {tag} given, but git can't tell which commit is being built"
-        ));
-    };
-    if !tagged {
-        return Err(format!(
-            "release tag {tag} doesn't point at the commit being built ({short_hash})"
-        ));
-    }
-    if dirty {
-        return Err(format!(
-            "release {tag} is being built from a checkout with local changes"
-        ));
-    }
-    Ok(plain(version, Some(short_hash)))
+    format!("{}{pre}+{short_hash}", numbers(base))
 }
 
-/// `0.3.0 (a1b2c3d)`, or `0.3.0` when the commit isn't known.
-fn plain(version: &str, short_hash: Option<&str>) -> String {
-    match short_hash {
-        Some(short_hash) => format!("{version} ({short_hash})"),
-        None => version.to_owned(),
-    }
+fn numbers(base: Base) -> String {
+    let Base {
+        major,
+        minor,
+        patch,
+    } = base;
+    format!("{major}.{minor}.{patch}")
 }
 
-/// `0.3.1` for `0.3.0`, a version [`parse_release_tag`] has accepted.
-fn next_patch(version: &str) -> String {
-    let (minor, patch) = version.rsplit_once('.').unwrap();
-    format!("{minor}.{}", patch.parse::<u64>().unwrap() + 1)
-}
-
-/// The tag and the commits since it from `git describe --tags --long`, e.g.
-/// `v0.3.0-rc1-4-ga1b2c3d`. `None` for anything else, such as a bare hash.
-pub fn parse_describe(described: &str) -> Option<NearestTag> {
-    let mut parts = described.rsplitn(3, '-');
-    let hash = parts.next()?;
-    let commits_since = parts.next()?.parse().ok()?;
-    let tag = parts.next()?;
-    hash.starts_with('g').then(|| NearestTag {
-        tag: tag.to_owned(),
-        commits_since,
-    })
-}
-
-/// The version of a `vX.Y.Z[-prerelease]` tag. Release tags carry no build metadata, so that
-/// the same version can later be a Cargo package version.
-fn parse_release_tag(tag: &str) -> Result<&str, String> {
-    let invalid = || format!("invalid release tag {tag}: expected vX.Y.Z[-prerelease]");
-    let version = tag.strip_prefix('v').ok_or_else(invalid)?;
+/// The minor of a tag the maintainer pushed: `v1.2` and `v1.2-rc3`, or one made before the
+/// patch was counted, such as `v1.0.0` and `v1.0.0-rc1`. `None` for the tags the pipeline
+/// makes for each ring, `v1.2.1-canary`, `v1.2.1-nightly.20261016` and `v1.2.1-rc`, so that no
+/// build is described from them. (A stable's own `v1.2.1` is taken, but its minor already has
+/// the maintainer's older `v1.2` tag.)
+pub fn tag_minor(tag: &str) -> Option<(u64, u64)> {
+    let version = tag.strip_prefix('v')?;
     let (numbers, pre) = version
         .split_once('-')
         .map_or((version, None), |(n, p)| (n, Some(p)));
-    let is_numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    let has_leading_zero = |s: &str| s.len() > 1 && s.starts_with('0');
-    let valid_number = |n: &str| is_numeric(n) && !has_leading_zero(n);
-    let valid_pre_part = |part: &str| {
-        !part.is_empty()
-            && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            && !(is_numeric(part) && has_leading_zero(part))
-    };
-    if numbers.split('.').count() != 3
-        || !numbers.split('.').all(valid_number)
-        || pre.is_some_and(|p| !p.split('.').all(valid_pre_part))
-    {
-        return Err(invalid());
+    if let Some(pre) = pre {
+        let n = pre.strip_prefix("rc")?;
+        if n.is_empty() || !is_number(n) {
+            return None;
+        }
     }
-    Ok(version)
+    let parts: Vec<&str> = numbers.split('.').collect();
+    if !(2..=3).contains(&parts.len()) || !parts.iter().all(|p| is_number(p)) {
+        return None;
+    }
+    Some((parts[0].parse().ok()?, parts[1].parse().ok()?))
+}
+
+fn is_number(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) && !(s.len() > 1 && s.starts_with('0'))
+}
+
+/// The [`Base`] of `rev`, asking `git` (which runs git with the arguments given and returns its
+/// trimmed output, `None` if it failed). The minor is the highest of the maintainer's tags in
+/// its history ([`tag_minor`]); the patch counts the first-parent commits since the oldest tag
+/// of that minor, i.e. the most since any of them. Counted from each, as tags made in the same
+/// second can't be told apart by date; a minor has few.
+pub fn base(git: impl Fn(&[&str]) -> Option<String>, rev: &str) -> Option<Base> {
+    let tags = git(&["tag", "--merged", rev, "--list", "v[0-9]*"])?;
+    let tagged: Vec<(&str, (u64, u64))> = tags
+        .lines()
+        .filter_map(|t| Some((t, tag_minor(t)?)))
+        .collect();
+    let (major, minor) = tagged.iter().map(|(_, m)| *m).max()?;
+    let patch = tagged
+        .iter()
+        .filter(|(_, m)| *m == (major, minor))
+        .map(|(tag, _)| {
+            let range = format!("refs/tags/{tag}..{rev}");
+            git(&["rev-list", "--count", "--first-parent", &range])?
+                .parse::<u64>()
+                .ok()
+        })
+        .collect::<Option<Vec<u64>>>()?
+        .into_iter()
+        .max()?;
+    Some(Base {
+        major,
+        minor,
+        patch,
+    })
 }
 
 /// Reads `.cargo_vcs_info.json`, e.g.
@@ -208,87 +186,18 @@ pub fn parse_vcs_info(json: &str) -> VcsInfo {
 mod tests {
     use super::*;
 
-    fn git(commit: &str, dirty: bool, tags: &[&str]) -> Source {
+    const BASE: Base = Base {
+        major: 1,
+        minor: 2,
+        patch: 3,
+    };
+
+    fn git(base: Option<Base>, dirty: bool) -> Source {
         Source::Git(GitState {
-            short_hash: commit.to_owned(),
+            short_hash: "a1b2c3d".to_owned(),
             dirty,
-            tags_at_head: tags.iter().map(|t| t.to_string()).collect(),
-            nearest: None,
+            base,
         })
-    }
-
-    fn after(tag: &str, commits_since: u32, commit: &str, dirty: bool) -> Source {
-        let tags_at_head = if commits_since == 0 {
-            vec![tag.to_owned()]
-        } else {
-            vec![]
-        };
-        Source::Git(GitState {
-            short_hash: commit.to_owned(),
-            dirty,
-            tags_at_head,
-            nearest: Some(NearestTag {
-                tag: tag.to_owned(),
-                commits_since,
-            }),
-        })
-    }
-
-    #[test]
-    fn dev_build_is_versioned_after_the_last_release_tag() {
-        // Cargo.toml's version isn't bumped for releases; the tags are the versions. A dev build
-        // comes after the release it follows and before the next one, in semver, dpkg and rpm.
-        let git = after("v0.5.1", 3, "a1b2c3d", false);
-        assert_eq!(
-            describe("0.4.0", None, &git).unwrap(),
-            "0.5.2-dev.3+a1b2c3d"
-        );
-    }
-
-    #[test]
-    fn dev_build_after_a_prerelease_tag_extends_its_prerelease() {
-        let git = after("v0.5.0-rc1", 2, "a1b2c3d", false);
-        assert_eq!(
-            describe("0.4.0", None, &git).unwrap(),
-            "0.5.0-rc1.dev.2+a1b2c3d"
-        );
-    }
-
-    #[test]
-    fn clean_checkout_of_a_tag_shows_the_tag_version() {
-        let git = after("v0.5.1", 0, "a1b2c3d", false);
-        assert_eq!(describe("0.4.0", None, &git).unwrap(), "0.5.1 (a1b2c3d)");
-    }
-
-    #[test]
-    fn tagged_checkout_with_local_changes_is_a_dev_build_of_the_next_version() {
-        let git = after("v0.5.1", 0, "a1b2c3d", true);
-        assert_eq!(
-            describe("0.4.0", None, &git).unwrap(),
-            "0.5.2-dev.0+a1b2c3d.dirty"
-        );
-    }
-
-    #[test]
-    fn nearest_tag_that_isnt_a_version_is_ignored() {
-        let git = after("vnext", 1, "a1b2c3d", false);
-        assert_eq!(describe("0.4.0", None, &git).unwrap(), "0.4.0-dev+a1b2c3d");
-    }
-
-    #[test]
-    fn git_describe_gives_tag_and_commits_since() {
-        let nearest = |tag: &str, commits_since| {
-            Some(NearestTag {
-                tag: tag.to_owned(),
-                commits_since,
-            })
-        };
-        assert_eq!(parse_describe("v0.5.1-3-ga1b2c3d"), nearest("v0.5.1", 3));
-        assert_eq!(
-            parse_describe("v0.5.0-rc1-0-ga1b2c3d"),
-            nearest("v0.5.0-rc1", 0)
-        );
-        assert_eq!(parse_describe("a1b2c3d"), None);
     }
 
     fn package(commit: Option<&str>, dirty: bool) -> Source {
@@ -299,113 +208,126 @@ mod tests {
     }
 
     #[test]
-    fn dev_build_carries_commit_as_build_metadata() {
-        let git = git("a1b2c3d", false, &[]);
-        assert_eq!(describe("0.3.0", None, &git).unwrap(), "0.3.0-dev+a1b2c3d");
-    }
-
-    #[test]
-    fn dev_build_with_local_changes_says_dirty() {
-        let git = git("a1b2c3d", true, &[]);
+    fn a_dev_build_has_its_commits_patch_and_the_commit() {
         assert_eq!(
-            describe("0.3.0", None, &git).unwrap(),
-            "0.3.0-dev+a1b2c3d.dirty"
+            describe("0.0.0", &git(Some(BASE), false)),
+            "1.2.3-dev+a1b2c3d"
+        );
+        assert_eq!(
+            describe("0.0.0", &git(Some(BASE), true)),
+            "1.2.3-dev+a1b2c3d.dirty"
         );
     }
 
     #[test]
-    fn dev_build_without_git_has_no_build_metadata() {
+    fn without_a_tag_in_sight_the_version_is_cargo_tomls() {
+        assert_eq!(describe("0.0.0", &git(None, false)), "0.0.0-dev+a1b2c3d");
         // E.g. built from GitHub's source archive, which has no .git directory.
+        assert_eq!(describe("0.0.0", &Source::Unknown), "0.0.0-dev");
+        // Semver allows one pre-release part.
         assert_eq!(
-            describe("0.3.0", None, &Source::Unknown).unwrap(),
-            "0.3.0-dev"
-        );
-    }
-
-    #[test]
-    fn dev_build_of_a_prerelease_extends_its_prerelease() {
-        // Semver allows one pre-release part; "0.3.0-rc.1-dev" would be a single odd identifier.
-        let git = git("a1b2c3d", false, &[]);
-        assert_eq!(
-            describe("0.3.0-rc.1", None, &git).unwrap(),
+            describe("0.3.0-rc.1", &git(None, false)),
             "0.3.0-rc.1.dev+a1b2c3d"
         );
     }
 
     #[test]
-    fn release_build_shows_plain_version_and_commit() {
-        let git = git("a1b2c3d", false, &["v0.3.0"]);
-        assert_eq!(
-            describe("0.3.0", Some("v0.3.0"), &git).unwrap(),
-            "0.3.0 (a1b2c3d)"
-        );
-    }
-
-    #[test]
-    fn release_version_comes_from_tag() {
-        let git = git("a1b2c3d", false, &["v0.5.0-rc1"]);
-        assert_eq!(
-            describe("0.4.0", Some("v0.5.0-rc1"), &git).unwrap(),
-            "0.5.0-rc1 (a1b2c3d)"
-        );
-    }
-
-    #[test]
-    fn release_tag_must_be_a_version() {
-        let git = git("a1b2c3d", false, &["vnot-a-version"]);
-        assert!(describe("0.4.0", Some("vnot-a-version"), &git).is_err());
-        assert!(describe("0.4.0", Some("v0.5.0-"), &git).is_err());
-        assert!(describe("0.4.0", Some("v0.5.0-01"), &git).is_err());
-    }
-
-    #[test]
-    fn release_tag_must_point_at_the_built_commit() {
-        let git = git("a1b2c3d", false, &["v0.2.0"]);
-        let err = describe("0.3.0", Some("v0.3.0"), &git).unwrap_err();
-        assert!(err.contains("v0.3.0") && err.contains("a1b2c3d"), "{err}");
-    }
-
-    #[test]
-    fn release_build_must_be_clean() {
-        let git = git("a1b2c3d", true, &["v0.3.0"]);
-        let err = describe("0.3.0", Some("v0.3.0"), &git).unwrap_err();
-        assert!(err.contains("changes"), "{err}");
-    }
-
-    #[test]
-    fn release_build_needs_git() {
-        let err = describe("0.3.0", Some("v0.3.0"), &Source::Unknown).unwrap_err();
-        assert!(err.contains("git"), "{err}");
-    }
-
-    #[test]
-    fn packaged_crate_shows_plain_version() {
+    fn a_packaged_crate_has_its_own_version() {
         // What `cargo install parterre` builds from crates.io.
-        let pkg = package(Some("a1b2c3d"), false);
-        assert_eq!(describe("0.3.0", None, &pkg).unwrap(), "0.3.0 (a1b2c3d)");
-        let pkg = package(None, false);
-        assert_eq!(describe("0.3.0", None, &pkg).unwrap(), "0.3.0");
-    }
-
-    #[test]
-    fn crate_packaged_with_local_changes_is_a_dev_build() {
-        let pkg = package(Some("a1b2c3d"), true);
         assert_eq!(
-            describe("0.3.0", None, &pkg).unwrap(),
-            "0.3.0-dev+a1b2c3d.dirty"
+            describe("1.2.3", &package(Some("a1b2c3d"), false)),
+            "1.2.3+a1b2c3d"
+        );
+        assert_eq!(describe("1.2.3", &package(None, false)), "1.2.3");
+        assert_eq!(
+            describe("1.2.3", &package(Some("a1b2c3d"), true)),
+            "1.2.3-dev+a1b2c3d.dirty"
         );
     }
 
     #[test]
-    fn release_workflow_may_build_the_packaged_crate() {
-        // `cargo publish` in the release workflow compiles the package it made.
-        let pkg = package(Some("a1b2c3d"), false);
+    fn each_ring_has_a_word_of_its_own() {
+        let v = |ring| published(BASE, ring, "a1b2c3d");
+        assert_eq!(v(Ring::Canary), "1.2.3-canary+a1b2c3d");
+        assert_eq!(v(Ring::Nightly(20261016)), "1.2.3-nightly.20261016+a1b2c3d");
+        assert_eq!(v(Ring::Rc), "1.2.3-rc+a1b2c3d");
+        assert_eq!(v(Ring::Stable), "1.2.3+a1b2c3d");
+    }
+
+    #[test]
+    fn only_the_maintainers_tags_have_a_minor() {
+        for (tag, minor) in [
+            ("v1.2", Some((1, 2))),
+            ("v1.2-rc3", Some((1, 2))),
+            ("v1.0.0", Some((1, 0))),
+            ("v1.0.0-rc1", Some((1, 0))),
+            ("v0.10.4", Some((0, 10))),
+            ("v1.2.1-canary", None),
+            ("v1.2.1-nightly.20261016", None),
+            ("v1.2.1-rc", None),
+            ("v1.2-rc", None),
+            ("v1", None),
+            ("v1.2.3.4", None),
+            ("v01.2", None),
+            ("vnext", None),
+            ("1.2", None),
+        ] {
+            assert_eq!(tag_minor(tag), minor, "{tag}");
+        }
+    }
+
+    /// Answers `tag --merged` with `tags`, and `rev-list --count` with `counts` per tag.
+    fn fake_git<'a>(
+        tags: &'a [&str],
+        counts: &'a [(&str, u64)],
+    ) -> impl Fn(&[&str]) -> Option<String> + 'a {
+        move |args| match args {
+            ["tag", "--merged", "HEAD", ..] => Some(tags.join("\n")),
+            ["rev-list", "--count", "--first-parent", range] => {
+                let tag = range.strip_prefix("refs/tags/")?.strip_suffix("..HEAD")?;
+                let (_, n) = counts.iter().find(|(t, _)| *t == tag)?;
+                Some(n.to_string())
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_patch_counts_from_the_oldest_tag_of_the_highest_minor() {
+        let tags = [
+            "v1.0.0-rc1",
+            "v1.0.0",
+            "v1.1-rc1",
+            "v1.1-rc2",
+            "v1.1.4-rc",
+            "v1.1.9-canary",
+        ];
+        let counts = [("v1.1-rc1", 12), ("v1.1-rc2", 8), ("v1.0.0", 40)];
         assert_eq!(
-            describe("0.3.0", Some("v0.3.0"), &pkg).unwrap(),
-            "0.3.0 (a1b2c3d)"
+            base(fake_git(&tags, &counts), "HEAD"),
+            Some(Base {
+                major: 1,
+                minor: 1,
+                patch: 12
+            })
         );
-        let err = describe("0.3.0", Some("v0.3.1"), &pkg).unwrap_err();
-        assert!(err.contains("v0.3.1"), "{err}");
+        let tags = ["v0.9.0", "v1.0.0-rc1", "v1.0.0"];
+        let counts = [("v1.0.0-rc1", 41), ("v1.0.0", 30)];
+        assert_eq!(
+            base(fake_git(&tags, &counts), "HEAD"),
+            Some(Base {
+                major: 1,
+                minor: 0,
+                patch: 41
+            })
+        );
+    }
+
+    #[test]
+    fn no_maintainer_tag_no_base() {
+        assert_eq!(base(fake_git(&[], &[]), "HEAD"), None);
+        assert_eq!(base(fake_git(&["v1.1.9-canary"], &[]), "HEAD"), None);
+        assert_eq!(base(|_: &[&str]| None, "HEAD"), None);
     }
 
     #[test]

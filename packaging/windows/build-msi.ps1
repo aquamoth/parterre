@@ -10,9 +10,10 @@
 # target\release\parterre.exe (run `cargo build --release` first) and cargo-about.
 # -Out defaults to target\msi\ with the name above.
 #
-# The MSI version is the version of the release tag in PARTERRE_RELEASE_TAG, as the release
-# workflow sets it, or else the version parterre.exe carries (from the git tags, see
-# docs/releasing.md), without its pre-release part: MSI versions are numbers only.
+# The MSI version is the version parterre.exe carries, the one the pipeline wrote into it
+# (parterre-stamp) or else its dev build's (docs/releasing.md), without its pre-release part: MSI
+# versions are numbers only. Beside parterre.exe it installs the channel's marker, a file
+# `channel` holding msi, which tells parterre how it was installed (#410).
 #
 # The MSI is then checked with the ICE rules (`wix msi validate`). Two are suppressed, for the
 # reasons given in parterre.wxs: ICE57 (the dual-purpose Start menu shortcut) and ICE61 (same
@@ -41,19 +42,18 @@ try {
             -o "$Stage\THIRD-PARTY-NOTICES.html"
     }
 
-    # The release workflow's tag, like the binary's version (docs/releasing.md). Otherwise the
-    # executable's own: "0.5.2-dev.3+a1b2c3d", or "0.5.1 (a1b2c3d)" from a checkout of a tag.
-    if ($env:PARTERRE_RELEASE_TAG) {
-        $version = $env:PARTERRE_RELEASE_TAG -replace '^v', ''
-    } else {
-        $version = ((Get-Item "$Stage\parterre.exe").VersionInfo.ProductVersion -split ' ')[0]
-        if (-not $version) {
-            throw "$Stage\parterre.exe has no version information: it was built without rc.exe (docs/building.md)"
-        }
+    # The executable's own, "1.2.3-nightly.20261016+a1b2c3d" or "1.2.3-dev+a1b2c3d", padded
+    # with spaces when it wasn't written (build.rs). The file names leave the commit out.
+    $version = (((Get-Item "$Stage\parterre.exe").VersionInfo.ProductVersion -split ' ')[0] -split '\+')[0]
+    if (-not $version) {
+        throw "$Stage\parterre.exe has no version information: it was built without rc.exe (docs/building.md)"
     }
-    $msiVersion = ($version -split '[-+]')[0]
+    $msiVersion = ($version -split '-')[0]
+    New-Item -ItemType Directory -Force "$root\target\msi" | Out-Null
+    $channel = "$root\target\msi\channel"
+    Set-Content -NoNewline -Encoding ascii $channel 'msi'
+
     if (-not $Out) {
-        New-Item -ItemType Directory -Force "$root\target\msi" | Out-Null
         $Out = "$root\target\msi\parterre-$version-x86_64-pc-windows-msvc.msi"
     }
 
@@ -64,6 +64,7 @@ try {
     wix build -acceptEula wix7 -arch x64 -pdbtype none `
         -d "Version=$msiVersion" `
         -d "Stage=$Stage" `
+        -d "Channel=$channel" `
         -d "Icon=$root\packaging\icon\parterre.ico" `
         -o $Out `
         packaging\windows\parterre.wxs

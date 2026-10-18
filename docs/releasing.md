@@ -1,70 +1,99 @@
 # Releasing
 
-GitHub releases are tag-driven. The tag supplies the version shown by the binary and in the
-release filenames. Tag a clean commit on `main`; the version in the root `Cargo.toml` stays
-`0.0.0` and is never bumped in the repository.
+Every build published comes from one release binary per platform, built once for each commit on
+`main`, and is published on GitHub in one of four rings (#390):
 
-1. Tag the chosen commit on `main` and push the tag:
+| Ring | When | Version and tag | Kept |
+|---|---|---|---|
+| canary | every merge to `main` (`canary.yml`) | `1.2.1-canary`, tag `v1.2.1-canary` | the newest |
+| nightly | 03:17 UTC, when `main` has moved since the last (`nightly.yml`) | `1.2.2-nightly.20261016`, tag `v1.2.2-nightly.20261016` | the last 7 |
+| rc | the maintainer pushes `v1.2-rcN` (`release.yml`) | `1.2.2-rc`, tag `v1.2.2-rc` | all |
+| stable | the maintainer pushes `v1.2` (`release.yml`) | `1.2.2`, tag `v1.2.2` | all |
+
+The maintainer chooses major and minor; the patch is counted ([Version strings](#version-strings)).
+Only stable goes beyond GitHub, to crates.io and Chocolatey. Canary, nightly and rc are GitHub
+prereleases, never its *Latest*.
+
+## How a build is published
+
+1. **Canary** (`.github/workflows/canary.yml`), on every push to `main`. `build.yml` builds the
+   release binary of each target: Linux in an Ubuntu 22.04 container (so it runs on glibc 2.35
+   and newer), Windows, and macOS for Apple silicon and Intel. It uploads the Linux and macOS
+   symbols to PostHog ([Crash report symbols](#crash-report-symbols)) and keeps each binary,
+   with its debug info, as the artifact `binary-<target>` for 14 days. `package.yml` then writes
+   the canary version into the binaries (`parterre-stamp`, below) and packages them. Once CI has
+   passed on the commit, `publish.yml` publishes the release and deletes the older canary
+   builds with their tags. A newer merge cancels the run of an older one.
+2. **Nightly** (`.github/workflows/nightly.yml`), at 03:17 UTC: if `main` has moved since the
+   newest nightly build, its commit is published as one. It reuses that commit's canary
+   binaries, or builds them when there are none (the canary run was cancelled, or its artifacts
+   expired), writes the nightly version in, packages, runs the install checks below and
+   publishes once CI has passed. The last 7 nightly builds are kept.
+3. **Release candidate or release**: tag a commit on `main` with the minor and push the tag.
 
    ```sh
    git switch main && git pull
-   git tag -a v0.5.0-rc1 -m "parterre 0.5.0-rc1"
-   git push origin v0.5.0-rc1
+   git tag -a v1.2-rc1 -m "parterre 1.2 rc1"     # or v1.2 for the release
+   git push origin v1.2-rc1
    ```
 
-2. `.github/workflows/release.yml` builds on Linux (in an Ubuntu 22.04 container, so
-   the binary runs on glibc 2.35 and newer), Windows and macOS (Apple silicon and Intel), then
-   publishes a GitHub Release. The release has one archive per target
-   (`parterre-0.5.0-rc1-<target>.tar.gz`, or `.zip` for Windows) and a `SHA256SUMS` file. Each
-   archive holds the binary, the README, `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.html`.
-   The Linux and macOS builds upload their symbols to PostHog, and Windows gets its PDBs as
-   `parterre-0.5.0-rc1-x86_64-pc-windows-msvc-pdb.zip` ([Crash report
-   symbols](#crash-report-symbols)).
-   Windows also gets an installer built from the same files,
-   `parterre-0.5.0-rc1-x86_64-pc-windows-msvc.msi` (see
-   [building.md](building.md#windows-installer)), Linux a `.deb` and an `.rpm`,
-   `parterre_0.5.0-rc1_amd64.deb` and `parterre-0.5.0-rc1-1.x86_64.rpm` (see
-   [building.md](building.md#linux-packages)), and each macOS target a disk image with the app,
-   `parterre-0.5.0-rc1-aarch64-apple-darwin.dmg` (see [building.md](building.md#macos-app)).
-   The installers and each package get a binary of their own, stamped with their channel for
-   the update check ([distribution.md](distribution.md#update-check)). Before the release is
-   published they are installed, run and removed: the `.deb` and `.rpm` on Debian 12, Ubuntu
-   22.04 and 24.04, Fedora and openSUSE Leap 15.6, the MSI on Windows per user and
-   machine-wide, and the disk images on Apple silicon and Intel Macs. If any of that fails,
-   nothing is published. A tag with a pre-release part goes through all of it and
-   publishes a pre-release; its MSI and Mac app have version `0.5.0`, since their versions are
-   numbers only.
-   CI builds no packages, so a pre-release (or a run by hand, below) is where packaging is
-   first tested.
+   `.github/workflows/release.yml` counts the commit's version (`1.2.2-rc`, or `1.2.2`), reuses
+   its canary binaries (or builds them), writes the version in, packages, runs the install
+   checks and, once CI has passed on the commit, makes the tag `v1.2.2-rc` (or `v1.2.2`) on the
+   same commit and publishes the release on it. A release then goes to [crates.io](#cratesio)
+   and [Chocolatey](#chocolatey); a release candidate's Chocolatey package is built but not
+   pushed. The tag must name the minor the commit is in: `v1.2` on a commit that already has
+   `v1.3-rc1` in its history fails. A commit can have one build of each ring, so a second rc tag
+   on the same commit fails too; tag a later commit.
 
-   The release doesn't run the tests again: it publishes only once the CI run of the tagged
-   commit on `main` has passed, and waits for it if it's still running (#236). A commit
-   without one, not pushed to `main`, fails the release.
+Every release has, for each target, the archive (`parterre-1.2.2-<target>.tar.gz`, or `.zip` on
+Windows) holding the binary, the README, `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.html`; the
+Windows installer (`parterre-1.2.2-x86_64-pc-windows-msvc.msi`, see
+[building.md](building.md#windows-installer)), the Windows PDB
+(`parterre-1.2.2-x86_64-pc-windows-msvc-pdb.zip`), the `.deb` and `.rpm`
+(`parterre_1.2.2_amd64.deb`, `parterre-1.2.2-1.x86_64.rpm`, see
+[building.md](building.md#linux-packages)), a disk image per macOS target
+(`parterre-1.2.2-aarch64-apple-darwin.dmg`, see [building.md](building.md#macos-app)), and
+`SHA256SUMS`. The packages wrap the same binary; each but the archive adds its marker, a file
+`channel`, which tells parterre how it was installed ([distribution.md](distribution.md#update-check)).
+Release titles say the ring (and a nightly build's date), and GitHub's generated notes start
+from the ring's previous build: a release candidate's from the previous release candidate or
+release.
 
-3. The workflow then publishes the [crates](#cratesio), and builds the
-   [Chocolatey](#chocolatey) package from that MSI and pushes it. A pre-release goes to
-   neither: its Chocolatey package is built but not pushed.
+**Install checks.** Nightly builds, release candidates and releases are installed, run and
+removed before they are published: the `.deb` and `.rpm` on Debian 12, Ubuntu 22.04 and 24.04,
+Fedora and openSUSE Leap 15.6, the MSI on Windows per user and machine-wide, and the disk images
+on Apple silicon and Intel Macs, each checking its marker (`install.yml`). If any of that fails,
+nothing is published. Canary builds aren't install-checked.
 
-To try a packaging change without tagging, run the release workflow by hand on its branch:
+**No tests again.** A published build doesn't run the tests: it is published only once the CI
+run of its commit on `main` has passed, and waits for it if it's still running (#236). A commit
+without one, not pushed to `main`, fails.
+
+**`parterre-stamp`** (`crates/parterre-stamp`, not published) is what the workflows run:
+`parterre-stamp version --ring rc` prints the version a build of `HEAD` is published under, and
+`parterre-stamp write BINARY VERSION` writes it into a built binary, into its 64-byte version
+slot and, on Windows, its version resource, in place: nothing moves, so the debug IDs stay
+those the symbols were uploaded with (#400). Mac binaries are signed ad hoc again after. Each
+package then takes its version from the binary.
+
+To try a packaging change before merging, run the canary or release workflow by hand on its
+branch:
 
 ```sh
-gh workflow run release.yml --ref my-branch
+gh workflow run canary.yml --ref my-branch     # builds and packages
+gh workflow run release.yml --ref my-branch    # also runs the install checks
 ```
 
-It builds, packages and installs as a release does, but publishes nothing: the packages are
-left as artifacts of the run. Only their symbols go to PostHog ([Crash report
-symbols](#crash-report-symbols)). Their version follows the nearest tag, as in any build
-([Version strings](#version-strings)).
-
-The build fails if the tag is not `vX.Y.Z` with an optional pre-release suffix, does not point
-at the commit being built, or the sources have local changes. In that case delete the tag
-(`git push origin :refs/tags/v0.5.0-rc1`), fix things and tag again.
+Either builds and packages as a published build does (`release.yml` as a release candidate of
+the branch's commit), and uploads the symbols, but publishes nothing: the packages are left as
+artifacts of the run.
 
 ## Crash report symbols
 
 The shipped binaries are stripped, so the crash reports they send to PostHog (#263) hold bare
 addresses. PostHog resolves them to functions, files and lines with the debug info of the
-binary that crashed, which the release workflow uploads (#265), following [PostHog's Rust
+binary that crashed, which `build.yml` uploads (#265), following [PostHog's Rust
 guide](https://posthog.com/docs/error-tracking/upload-source-maps/rust):
 
 - Release builds have line tables (`debug = "line-tables-only"` in `Cargo.toml`). A local
@@ -76,16 +105,16 @@ guide](https://posthog.com/docs/error-tracking/upload-source-maps/rust):
   - **macOS:** with `CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed`, rustc writes
     `parterre.dSYM` before it strips the binary, which keeps its `LC_UUID`.
   - **Windows:** with `CARGO_PROFILE_RELEASE_STRIP=none`, the linker writes `parterre.pdb`.
-- The tarball, the disk image, the `.deb`, the `.rpm`, the zip and the MSI each hold a build of
-  their own (stamped with its channel), so each has its own debug info: `symbols/<channel>/`
-  on Linux and macOS, `zip/` and `msi/` in the PDB archive.
-- **Upload:** each Linux and macOS build job runs `posthog-cli symbol-sets upload` (pinned to a
-  version and its checksum) on its `symbols/`, with `POSTHOG_CLI_HOST=https://eu.posthog.com`.
-  The symbols are filed under the release `parterre` with the version of the file names.
-  A failed upload fails the job, so nothing is published. A run by hand uploads too, so it can
-  be tried without a tag.
+- **One binary, one upload.** Every package and every ring of a commit reuse the same binary,
+  so it has one set of debug info, uploaded once when it is built: three symbol sets per build
+  (Linux, and each macOS target). They are filed under the release `parterre` and the commit's
+  full hash, which holds for every copy: PostHog labels a crash with the release of the symbols
+  it used, and refuses a binary's symbols again under another version (#394, #400). Which build
+  crashed is the event's `$app_version` and `ring`. A failed upload fails the build, so nothing
+  is published from it. A run by hand uploads too.
+- PostHog deletes a symbol set nothing has used for 30 days (#394).
 - **Windows:** PostHog doesn't take PDBs yet, so Windows reports show the panic message and its
-  `file:line` only. The PDBs are a release asset instead,
+  `file:line` only. The PDB is a release asset instead,
   `parterre-<version>-x86_64-pc-windows-msvc-pdb.zip`, listed in `SHA256SUMS` like the rest.
 
 The upload uses two repository secrets, set up for PostHog (#272):
@@ -95,18 +124,17 @@ The upload uses two repository secrets, set up for PostHog (#272):
 | `POSTHOG_CLI_API_KEY` | A PostHog personal API key with the *Source map upload* preset (error tracking write, organization read) |
 | `POSTHOG_CLI_PROJECT_ID` | The ID of parterre's PostHog project |
 
-Without them, in a fork, the upload is skipped with a warning and the release goes on.
+Without them, in a fork, the upload is skipped with a warning and the build goes on.
 
-To check that a release's symbols arrived:
+To check that a build's symbols arrived:
 
-1. The log of each build job's *Upload symbols to PostHog* step lists every file with its debug
-   ID and ends with an upload summary: three files on Linux (tarball, deb, rpm), two dSYMs on
-   macOS (tarball, dmg).
+1. The log of each `build.yml` job's *Upload symbols to PostHog* step lists the file with its
+   debug ID and ends with an upload summary: `parterre.debug` on Linux, a dSYM on macOS.
 2. In PostHog, *Error tracking › Configuration › Symbol sets* lists them, under the release
-   `parterre` and its version.
-3. A panic from one of the release's builds, with crash reports ticked, shows functions and
-   `file:line` in its stack trace instead of addresses. A rebuild has another build ID, so only
-   the published files count.
+   `parterre` and the commit.
+3. A panic from the build, with crash reports ticked, shows functions and `file:line` in its
+   stack trace instead of addresses. A rebuild has another build ID, so only the published
+   files count.
 
 ## crates.io
 
@@ -116,7 +144,7 @@ dependency (`parterre-util`, `parterre-core`, `parterre-forge`, `parterre-highli
 separate checkout of a tag with those versions:
 
 ```sh
-scripts/prepare-crates-release.py v0.5.0-rc1
+scripts/prepare-crates-release.py v1.2.2
 ```
 
 The script prints the checkout path and publish command. It updates the versions and the six
@@ -126,8 +154,9 @@ checkout; the pushed tag and `main` still point at the same original commit. The
 crate's recorded commit is the local packaging commit; the GitHub binary reports the tagged
 source commit.
 
-Once the GitHub release is published, the release workflow's `crates.io` job runs the script
-and `cargo publish --workspace` from the checkout it makes. Pre-releases aren't published. It
+Once a GitHub release is published, the release workflow's `crates.io` job runs the script on
+the release's tag (`v1.2.2`, which it fetches) and `cargo publish --workspace` from the checkout
+it makes, leaving out `parterre-stamp` (`publish = false`). Release candidates aren't published. It
 signs in with [Trusted Publishing](https://crates.io/docs/trusted-publishing): crates.io gives
 `release.yml`, running in the `crates-io` environment, a token for that run only, so none is
 stored. Crates already published at the tag's version are skipped, so a failed job is simply
@@ -153,10 +182,10 @@ URL and its SHA-256, and runs `choco pack`.
 `.github/workflows/chocolatey.yml` builds the package from a release's MSI and keeps the
 `.nupkg` as a workflow artifact. Nothing installs the package itself; the release has already
 installed the MSI it wraps, machine-wide as the package does. The release workflow runs it for
-every tag, and it can be run by hand for an existing release:
+every release and release candidate, and it can be run by hand for an existing release:
 
 ```sh
-gh workflow run chocolatey.yml -f tag=v0.5.1 -f push=true
+gh workflow run chocolatey.yml -f tag=v1.2.2 -f push=true
 ```
 
 Pushing uses the `CHOCOLATEY_API_KEY` secret of the `chocolatey` environment, the API key of
@@ -193,28 +222,34 @@ how to make one.
 
 | Build | Version |
 |---|---|
-| Release workflow for `v0.5.0-rc1` | `parterre 0.5.0-rc1 (a1b2c3d)` |
-| A clean checkout of tag `v0.5.1` | `parterre 0.5.1 (a1b2c3d)` |
-| The published crate (`cargo install parterre --version 0.5.0-rc1`) | `parterre 0.5.0-rc1 (b4c5d6e)` |
-| A checkout 3 commits past `v0.5.1` | `parterre 0.5.2-dev.3+a1b2c3d` |
-| A checkout 3 commits past `v0.5.0-rc1` | `parterre 0.5.0-rc1.dev.3+a1b2c3d` |
-| … with uncommitted changes to the sources (`crates/`, Cargo files) | `parterre 0.5.2-dev.3+a1b2c3d.dirty` |
-| A git checkout without release tags (e.g. a shallow clone) | `parterre 0.0.0-dev+a1b2c3d` |
+| Canary build | `parterre 1.2.1-canary+a1b2c3d` |
+| Nightly build | `parterre 1.2.2-nightly.20261016+a1b2c3d` |
+| Release candidate | `parterre 1.2.2-rc+a1b2c3d` |
+| Release | `parterre 1.2.2+a1b2c3d` |
+| The published crate (`cargo install parterre`) | `parterre 1.2.2+b4c5d6e` |
+| Any other build of a checkout, a dev build | `parterre 1.2.3-dev+a1b2c3d` |
+| … with uncommitted changes to the sources (`crates/`, Cargo files) | `parterre 1.2.3-dev+a1b2c3d.dirty` |
+| A git checkout without version tags (e.g. a shallow clone) | `parterre 0.0.0-dev+a1b2c3d` |
 | Without git (e.g. from GitHub's source archive) | `parterre 0.0.0-dev` |
 
-The version comes from the release tags, not from `Cargo.toml`: `build.rs` asks
-`git describe --tags --match 'v[0-9]*'` for the nearest one. A plain version means a clean build
-of a tag. A dev build is a pre-release of the version after the tag it follows, numbered by the
-commits since, so it sorts after that release and before the next one: in semver, and in dpkg
-and rpm, where the `.deb` and `.rpm` write its `-` as `~`. The commit is semver build metadata.
-Only a checkout without release tags (CI checks out the whole history for this reason) or
-without git falls back to `Cargo.toml`'s version, which is always `0.0.0` so that it can't pass
-for a real one.
+The version comes from the tags, not from `Cargo.toml` (#397). The maintainer chooses major and
+minor by pushing `vX.Y-rcN` or `vX.Y`; the patch is the number of commits on the first-parent
+line since the oldest tag of the highest minor in the commit's history (`git rev-list --count
+--first-parent`), so every commit on `main` has its own patch within a minor, and a new minor
+starts at 0. The tags from before this scheme (`v1.0.0`, `v1.0.0-rc1`) count as the maintainer's;
+the ones the pipeline makes for canary and nightly builds and release candidates
+(`v1.2.1-canary`, `v1.2.2-nightly.20261016`, `v1.2.2-rc`) never do. The pre-release word names
+the ring, and for one commit `canary` < `nightly.…` < `rc` < the release, in semver, dpkg and rpm;
+the patch orders different commits. The commit is semver build metadata. The `.deb` and `.rpm`
+write the `-` as `~`, and the MSI and the Mac app take `X.Y.Z` only. Known and accepted: patch
+numbers jump with the merges (`1.2.0` then `1.2.7`).
 
-The published crate has no `.git`; `cargo package` records its packaging commit in
-`.cargo_vcs_info.json`, which `build.rs` reads, and its `Cargo.toml` has the tag's version. Git
-only counts when its top level is the workspace root, so sources unpacked inside some other
-repository don't take that repository's commit or tags. The release workflow sets
-`PARTERRE_RELEASE_TAG` to the tag, which supplies the binary version and makes anything but a
-clean build of that tag fail. The logic is in `crates/parterre/src/version.rs`, which
-`crates/parterre/build.rs` runs.
+Every build is a dev build: `crates/parterre/build.rs` runs `crates/parterre/src/version.rs` and
+puts the result in the binary's version slot (`src/slot.rs`), which the pipeline later writes the
+published version into. A build whose slot was never written is a dev build, or the published
+crate, which has no `.git`: `cargo package` records its packaging commit in
+`.cargo_vcs_info.json`, which `build.rs` reads, and its `Cargo.toml` has the release's version.
+Git only counts when its top level is the workspace root, so sources unpacked inside some other
+repository don't take that repository's commit or tags. Only a checkout without version tags (CI
+checks out the whole history for this reason) or without git falls back to `Cargo.toml`'s
+version, which is always `0.0.0` so that it can't pass for a real one.

@@ -40,13 +40,16 @@ function Test-OnPath {
 
 Invoke-Msiexec i
 if (-not (Test-Path $exe)) { throw "$exe is not there after installing" }
+# The marker parterre tells its channel by (#410).
+$channel = "$(Get-Content -Raw (Join-Path $folder 'channel'))".Trim()
+if ($channel -ne 'msi') { throw "the channel marker beside $exe says '$channel'" }
 # PowerShell doesn't capture the output of a GUI-subsystem program like parterre.exe
 # (`& $exe` returns nothing), so redirect it to a file.
 $out = Join-Path $env:TEMP "parterre-version-$Scope.txt"
 Start-Process $exe --version -Wait -NoNewWindow -RedirectStandardOutput $out
 $version = "$(Get-Content -Raw $out)".Trim()
 Write-Host $version
-if ($version -notmatch '^parterre \d+\.\d+\.\d+\S*( \([0-9a-f]{7,}\))?$') { throw "--version printed '$version'" }
+if ($version -notmatch '^parterre \d+\.\d+\.\d+\S*$') { throw "--version printed '$version'" }
 if (-not (Test-OnPath)) { throw "$folder is not on the $pathScope PATH" }
 
 Invoke-Msiexec x

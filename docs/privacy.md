@@ -45,8 +45,9 @@ On unless you untick them. Sent to PostHog as parterre is used, with the
 
 Every event carries:
 
-- parterre's name, version and channel (MSI, zip, tarball, `.deb`, `.rpm`, Snap, cargo and so
-  on), and the version of git it runs
+- parterre's name, version, channel (MSI, zip, tarball, `.deb`, `.rpm`, Snap, cargo and so
+  on) and ring (stable, rc, nightly, canary, or dev for a build nobody published), and the
+  version of git it runs
 - the operating system and its version
 - the language and region setting, and the time zone
 - the screen size and the display's scale
@@ -80,8 +81,8 @@ Off unless you tick them. When parterre panics, PostHog's SDK sends a report at 
 - the stack trace: function names, source file paths and addresses
 - the executable and system libraries loaded, with their paths and build IDs, so that the
   stack trace can be read
-- parterre's version and channel, the version of git it runs, the operating system and its
-  version, the language and region setting, and the time zone
+- parterre's version, channel and ring, the version of git it runs, the operating system and
+  its version, the language and region setting, and the time zone
 
 Paths in your home folder become `~`. A report may still contain personal information,
 such as a file or branch name in the panic message.

@@ -5,12 +5,13 @@
 #   cargo build --release [--target TRIPLE]
 #   packaging/linux/build-packages.sh [--target TRIPLE] [--only deb|rpm] [OUT]
 #
-# OUT defaults to target/packages. The release workflow builds each package with --only, from a
-# build stamped with its channel (PARTERRE_CHANNEL=deb or rpm, #258).
+# OUT defaults to target/packages. Both packages wrap the same binary, each with its marker,
+# /usr/lib/parterre/channel holding deb or rpm, which tells parterre how it was installed (#410).
 #
-# The packages take their version from the binary: the release tag's in the release workflow,
-# X.Y.Z-dev.N+commit otherwise. A pre-release's - becomes ~, which sorts before the release in
-# both dpkg and rpm, so 0.5.0-rc1 is packaged as 0.5.0~rc1 and 0.5.0 replaces it.
+# The packages take their version from the binary, without the commit: the one the pipeline
+# wrote into it (parterre-stamp), X.Y.Z-dev otherwise. A pre-release's - becomes ~, which sorts
+# before the release in both dpkg and rpm, so 1.2.3-rc is packaged as 1.2.3~rc and 1.2.3
+# replaces it.
 set -eu
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -41,10 +42,13 @@ if [ ! -x "$bin" ]; then
 fi
 
 release=$("$bin" --version | cut -d' ' -f2)
+release=${release%%+*}
 version=$(echo "$release" | tr - '~')
 
 # The generated files the metadata expects next to the binary.
 mkdir -p "$dir/packaging" "$out"
+echo deb >"$dir/packaging/channel-deb"
+echo rpm >"$dir/packaging/channel-rpm"
 cargo about generate --locked -c packaging/about.toml packaging/about.hbs \
     -o "$dir/packaging/THIRD-PARTY-NOTICES.html"
 packaging/linux/metainfo.sh "$release" "$dir/packaging/se.trustfall.parterre.metainfo.xml"

@@ -297,7 +297,8 @@ pub struct ParterreApp {
     pull_requests: pull_requests::PullRequestLoader,
     pull_requests_were_on: bool,
     pull_requests_error: Option<parterre_forge::ForgeError>,
-    update_check: Option<parterre_telemetry::UpdateCheck>,
+    /// With the ring it was started for: a ring chosen in Settings starts it again.
+    update_check: Option<(parterre_telemetry::Ring, parterre_telemetry::UpdateCheck)>,
     release_told: Option<String>,
     release_dialog: Option<parterre_telemetry::Update>,
     telemetry: privacy::Telemetry,
@@ -2868,7 +2869,7 @@ impl eframe::App for ParterreApp {
         self.compare_window_requests(&ctx);
         self.diff_windows(&ctx);
         self.blame_windows(&ctx);
-        if let Some(error) = self.about.show(&ctx) {
+        if let Some(error) = self.about.show(&ctx, self.heard_ring()) {
             self.status = Some(Note::Error(error));
         }
         self.release_dialog(&ctx);

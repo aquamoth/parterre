@@ -10,6 +10,8 @@ Standalone TortoiseGit-style revision graph viewer. Rust workspace, egui/eframe 
   `send` feature) wrap external stacks: their dependencies live in those manifests only, so an
   engine is swapped by replacing the crate. `crates/parterre-util` holds
   the std-only cancellation handles the others share; keep it that small (#214).
+  `crates/parterre-stamp` (not published) is the pipeline's tool that writes a published
+  version into a built binary (`docs/releasing.md`).
 - Behavioural reference for what TortoiseGit does: `docs/research/tortoisegit-revision-graph.md`.
 - Screenshots live in `docs/images/<major>.<minor>/`; published packages link to them, so never
   move or delete one. `scripts/readme-images.sh` takes a new set (`docs/images/README.md`).

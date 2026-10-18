@@ -1,7 +1,7 @@
 name: Linux packages
 
 # Installs the .deb and .rpm of a build on the oldest and newest distributions parterre supports,
-# runs it and removes it again (packaging/linux/test-package.sh). Called by release.yml with the
+# runs it and removes it again (packaging/linux/test-package.sh). Called by install.yml with the
 # name of the artifact that holds the packages.
 on:
   workflow_call:

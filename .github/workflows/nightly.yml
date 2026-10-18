@@ -1,0 +1,109 @@
+name: Nightly
+
+# Each night main has moved, its newest commit is published as the nightly build
+# vX.Y.Z-nightly.<date>, for bleeding-edge testers (#390, #414). It reuses that commit's canary
+# binaries (canary.yml), or builds them when there are none (a superseded canary run, expired
+# artifacts), writes the nightly version into them, packages them, runs the install checks
+# release.yml runs, and publishes once CI has passed on the commit. The last 7 nightly builds
+# are kept.
+#
+# 03:17 rather than on the hour, when GitHub delays or drops scheduled runs (#391). Started by
+# hand (gh workflow run nightly.yml), it does the same at once.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+
+jobs:
+  plan:
+    name: Plan
+    # The scheduled run is of main's newest commit; one started on a branch publishes nothing.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      moved: ${{ steps.plan.outputs.moved }}
+      version: ${{ steps.plan.outputs.version }}
+      run-id: ${{ steps.plan.outputs.run-id }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$GITHUB_SHA
+          # The newest nightly build's commit: none new if main hasn't moved since.
+          last=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[].tagName' |
+            grep -E -- '-nightly\.[0-9]{8}$' | head -n1 || true)
+          if [ -n "$last" ] && [ "$(git rev-parse "refs/tags/$last^{commit}")" = "$sha" ]; then
+            echo "main is still at $sha, as in $last: no nightly build"
+            echo "moved=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=$(cargo run -q --locked -p parterre-stamp -- version --ring nightly --date "$(date -u +%Y%m%d)")
+          run=$(.github/scripts/canary-run.sh "$sha")
+          echo "$version of $sha, ${run:+the binaries of canary run $run}${run:-binaries built here}"
+          {
+            echo "moved=true"
+            echo "version=$version"
+            echo "run-id=$run"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build
+    needs: plan
+    if: needs.plan.outputs.moved == 'true' && needs.plan.outputs.run-id == ''
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+
+  package:
+    name: Package
+    needs: [plan, build]
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.moved == 'true' }}
+    uses: ./.github/workflows/package.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      version: ${{ needs.plan.outputs.version }}
+      run-id: ${{ needs.plan.outputs.run-id || github.run_id }}
+
+  install:
+    name: Install
+    needs: package
+    if: ${{ !cancelled() && !failure() && needs.package.result == 'success' }}
+    uses: ./.github/workflows/install.yml
+
+  ci:
+    name: CI
+    needs: plan
+    if: needs.plan.outputs.moved == 'true'
+    uses: ./.github/workflows/ci-passed.yml
+    permissions:
+      actions: read
+    with:
+      sha: ${{ github.sha }}
+
+  publish:
+    name: Publish
+    needs: [plan, install, ci]
+    if: ${{ !cancelled() && !failure() && needs.install.result == 'success' }}
+    uses: ./.github/workflows/publish.yml
+    permissions:
+      contents: write
+    with:
+      version: ${{ needs.plan.outputs.version }}
+      ring: nightly
+      sha: ${{ github.sha }}

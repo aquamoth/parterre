@@ -30,10 +30,12 @@ codesign --verify --strict "$app" || fail "the signature of $app doesn't hold"
 id=$(defaults read "$app/Contents/Info" CFBundleIdentifier)
 [ "$id" = se.trustfall.parterre ] || fail "bundle identifier $id"
 [ -f "$app/Contents/Resources/parterre.icns" ] || fail "no icon in $app"
+# The marker parterre tells its channel by (#410).
+[ "$(cat "$app/Contents/Resources/channel")" = dmg ] || fail "no dmg marker in $app"
 
 version=$("$app/Contents/MacOS/parterre" --version)
 echo "$version"
-echo "$version" | grep -Eq '^parterre [0-9]+\.[0-9]+\.[0-9]+[^ ]*( \([0-9a-f]{7,}\))?$' ||
+echo "$version" | grep -Eq '^parterre [0-9]+\.[0-9]+\.[0-9]+[^ ]*$' ||
     fail "--version printed '$version'"
 
 # open waits (-W) for a new instance (-n), whose output goes to files: Launch Services has no

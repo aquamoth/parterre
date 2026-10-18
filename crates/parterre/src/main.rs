@@ -26,6 +26,8 @@ mod scene;
 mod script;
 mod settings;
 mod settings_file;
+#[cfg_attr(not(test), allow(dead_code))]
+mod slot;
 mod startup;
 mod system_theme;
 mod text_size;
@@ -59,11 +61,32 @@ use crate::automation::Automation;
 use crate::settings::{DiffForm, Look, Settings};
 use crate::theme::ThemeChoice;
 
-const VERSION: &str = env!("PARTERRE_VERSION");
+/// The version `build.rs` computed, until the pipeline writes the one it publishes this build
+/// under (`slot.rs`). Read only through [`this_build`].
+#[used]
+static VERSION_SLOT: [u8; slot::LEN] = slot::new(env!("PARTERRE_VERSION"));
+
+/// This build's version, `1.2.3-nightly.20261016+a1b2c3d`, and whether the pipeline wrote it
+/// (that is, it was published).
+fn this_build() -> &'static (String, bool) {
+    static THIS: std::sync::LazyLock<(String, bool)> = std::sync::LazyLock::new(|| {
+        // Volatile, so that the compiler can't fold the read into the slot as built (#400).
+        #[allow(unsafe_code)]
+        // SAFETY: a valid, aligned static of plain bytes.
+        let slot = unsafe { std::ptr::read_volatile(&raw const VERSION_SLOT) };
+        slot::read(&slot)
+    });
+    &THIS
+}
+
+/// As `--version` prints it after `parterre `.
+fn version() -> &'static str {
+    &this_build().0
+}
 
 /// Show the revision graph of a git repository: how its branches and tags relate.
 #[derive(Debug, Parser)]
-#[command(version = VERSION)]
+#[command(version = version())]
 struct Cli {
     /// Repository to show (any directory inside it). Without one, the repository of the current
     /// directory, or none: the window then asks for one.
@@ -313,6 +336,7 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
 
 fn main() -> ExitCode {
     startup::begin();
+    parterre_telemetry::set_published(this_build().1);
     console::attach_parent();
     let cli = Cli::parse();
     if let Some(language) = cli.highlight.as_deref() {

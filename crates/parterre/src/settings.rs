@@ -55,6 +55,9 @@ pub struct Privacy {
     pub answer: Option<PrivacyAnswer>,
     /// As `$app_version` names it, for `Application Updated`.
     pub last_version: Option<String>,
+    /// The installation's ring, which builds the update check tells of (#411): its name, as
+    /// [`parterre_telemetry::Ring::name`] writes it. Per user, like the install ID.
+    pub ring: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +93,27 @@ impl Privacy {
 
     pub fn choices(&self) -> Option<parterre_telemetry::Choices> {
         self.answer.as_ref().map(PrivacyAnswer::choices)
+    }
+
+    /// `None` until a start has kept one, or if it can't be read.
+    pub fn ring(&self) -> Option<parterre_telemetry::Ring> {
+        self.ring
+            .as_deref()
+            .and_then(parterre_telemetry::Ring::named)
+    }
+
+    pub fn set_ring(&mut self, ring: parterre_telemetry::Ring) {
+        self.ring = Some(ring.name().to_owned());
+    }
+
+    /// Keeps the ring as a start of a build of `running` leaves it ([`parterre_telemetry::Ring::kept`]).
+    pub fn keep_ring(&mut self, running: Option<parterre_telemetry::Ring>) {
+        self.set_ring(parterre_telemetry::Ring::kept(self.ring(), running));
+    }
+
+    /// *Reset*: the ring of the build running, which a nightly build keeps at nightly (#398).
+    pub fn reset_ring(&mut self, running: Option<parterre_telemetry::Ring>) {
+        self.set_ring(parterre_telemetry::Ring::kept(None, running));
     }
 }
 

@@ -1,5 +1,5 @@
-//! The release workflow sets `PARTERRE_RELEASE_TAG` to the pushed tag; the build then fails
-//! unless that tag points at the clean commit being built.
+//! Every build is a dev build: the pipeline writes the version it publishes a build under into
+//! the binary afterwards (`parterre-stamp`, docs/releasing.md).
 //!
 //! The sources are either a git checkout of the workspace, or a crate packaged by `cargo
 //! package` (from crates.io by `cargo install`, say), which has no `.git` but records its
@@ -7,7 +7,11 @@
 
 #[path = "src/notice.rs"]
 mod notice;
+#[path = "src/slot.rs"]
+#[allow(dead_code)]
+mod slot;
 #[path = "src/version.rs"]
+#[allow(dead_code)]
 mod version;
 #[path = "src/win_resource.rs"]
 mod win_resource;
@@ -16,8 +20,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use version::{GitState, Source};
-
-const RELEASE_TAG: &str = "PARTERRE_RELEASE_TAG";
 
 /// Relative to the workspace root. Only changes here make a build dirty, and they rerun this
 /// script so that the flag stays current.
@@ -34,8 +36,6 @@ fn main() {
     let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest_dir.join("../..");
     let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap();
-    println!("cargo:rerun-if-env-changed={RELEASE_TAG}");
-    let release_tag = std::env::var(RELEASE_TAG).ok().filter(|t| !t.is_empty());
 
     let packaged = manifest_dir.join("Cargo.toml.orig").exists();
 
@@ -65,8 +65,7 @@ fn main() {
     } else {
         Source::Unknown
     };
-    let version = version::describe(&pkg_version, release_tag.as_deref(), &source)
-        .unwrap_or_else(|e| panic!("{e}"));
+    let version = version::describe(&pkg_version, &source);
     println!("cargo:rustc-env=PARTERRE_VERSION={version}");
 
     windows_resources(
@@ -82,7 +81,7 @@ fn main() {
 fn windows_resources(ico: &Path, notice_path: &Path, version: &str) {
     println!("cargo:rerun-if-changed={}", ico.display());
     println!("cargo:rerun-if-changed={}", notice_path.display());
-    let numbers = version.split(['-', ' ']).next().unwrap();
+    let numbers = version.split(['-', '+']).next().unwrap();
     let mut parts = numbers.split('.');
     let mut part = || {
         parts
@@ -95,7 +94,8 @@ fn windows_resources(ico: &Path, notice_path: &Path, version: &str) {
     let script = win_resource::script(&win_resource::Resources {
         icon_path: &ico.display().to_string(),
         numeric_version: [part(), part(), part()],
-        version,
+        // Padded, so that `parterre-stamp` can write a published version in its place.
+        version: &format!("{version:<width$}", width = slot::ROOM),
         description: &std::env::var("CARGO_PKG_DESCRIPTION").unwrap(),
         copyright: notice::copyright_line(&notice_text),
     });
@@ -126,17 +126,11 @@ fn git_state(dir: &Path) -> Option<GitState> {
     ];
     status.extend(SOURCES);
     let status = git(dir, &status)?;
-    let tags = git(dir, &["tag", "--points-at", "HEAD"])?;
-    // The version follows the nearest release tag; none in a shallow clone without tags.
-    let described = git(
-        dir,
-        &["describe", "--tags", "--long", "--match", "v[0-9]*", "HEAD"],
-    );
     Some(GitState {
         short_hash: commit,
         dirty: !status.is_empty(),
-        tags_at_head: tags.lines().map(str::to_owned).collect(),
-        nearest: described.as_deref().and_then(version::parse_describe),
+        // None in a shallow clone without tags.
+        base: version::base(|args| git(dir, args), "HEAD"),
     })
 }
 

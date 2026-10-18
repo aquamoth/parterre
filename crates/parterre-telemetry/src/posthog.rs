@@ -19,7 +19,7 @@ use posthog_rs::{Client, ClientOptionsBuilder, ErrorTrackingOptionsBuilder, Even
 use serde_json::Value;
 
 use crate::feature::{self, Feature};
-use crate::{Channel, Context, Lifecycle, app_version, crash};
+use crate::{Channel, Context, Lifecycle, Ring, Version, app_version, crash};
 
 /// Public by design: it can only send events (#275).
 const TOKEN: &str = "phc_rdXXhGJLnbhdtA6tJ5bAXiNzntnob2krZCevNBz5GSES";
@@ -240,12 +240,14 @@ fn apply_registered(properties: &feature::Properties, event: &mut Event) {
     }
 }
 
-/// PostHog's standard properties, and parterre's own two, `channel` and `git_version`. `$os`
-/// and `$os_version` are the SDK's.
+/// PostHog's standard properties, and parterre's own three, `channel`, `ring` and
+/// `git_version`. `$os` and `$os_version` are the SDK's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Standard {
     app_version: String,
     channel: &'static str,
+    /// The running build's ([`Ring::of`]): `dev` for one nobody published.
+    ring: &'static str,
     git_version: Option<String>,
     /// BCP 47: `sv-SE`.
     locale: Option<String>,
@@ -272,6 +274,10 @@ impl Standard {
         Standard {
             app_version: app_version(version),
             channel: Channel::current().name(),
+            ring: Version::parse(version)
+                .as_ref()
+                .and_then(Ring::of)
+                .map_or("dev", Ring::name),
             git_version: None,
             locale: sys_locale::get_locale(),
             timezone: iana_time_zone::get_timezone().ok(),
@@ -285,6 +291,7 @@ impl Standard {
         let _ = event.insert_prop("$app_name", APP_NAME);
         let _ = event.insert_prop("$app_version", &self.app_version);
         let _ = event.insert_prop("channel", self.channel);
+        let _ = event.insert_prop("ring", self.ring);
         let optional = [
             ("git_version", &self.git_version),
             ("$locale", &self.locale),
@@ -319,6 +326,7 @@ mod tests {
         Standard {
             app_version: "0.6.0".into(),
             channel: "deb",
+            ring: "stable",
             git_version: Some("2.43.0".into()),
             locale: Some("sv-SE".into()),
             timezone: Some("Europe/Stockholm".into()),
@@ -359,6 +367,7 @@ mod tests {
             "$app_name": "parterre",
             "$app_version": "0.6.0",
             "channel": "deb",
+            "ring": "stable",
             "git_version": "2.43.0",
             "$locale": "sv-SE",
             "$timezone": "Europe/Stockholm",
@@ -375,6 +384,7 @@ mod tests {
         let unknown = Standard {
             app_version: "0.6.0".into(),
             channel: "cargo",
+            ring: "dev",
             ..Standard::default()
         };
         unknown.apply(&mut e);
@@ -387,7 +397,8 @@ mod tests {
                 "$app_version",
                 "$process_person_profile",
                 "$session_id",
-                "channel"
+                "channel",
+                "ring"
             ]
         );
     }
@@ -609,6 +620,12 @@ mod tests {
         let s = Standard::crash("0.6.0 (a1b2c3d)");
         assert_eq!(s.app_version, "0.6.0");
         assert_eq!(s.channel, Channel::current().name());
+        assert_eq!(s.ring, "stable");
+        assert_eq!(
+            Standard::crash("1.2.3-nightly.20261016+a1b2c3d").ring,
+            "nightly"
+        );
+        assert_eq!(Standard::crash("1.2.3-dev+a1b2c3d").ring, "dev");
         assert_eq!((s.git_version, s.screen), (None, None));
     }
 
@@ -709,6 +726,7 @@ mod tests {
                     "$app_name",
                     "$app_version",
                     "channel",
+                    "ring",
                     "git_version",
                     "$locale",
                     "$timezone",
