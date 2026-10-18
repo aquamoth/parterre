@@ -82,9 +82,12 @@ crates/parterre-telemetry
                        check (#258), the usage statistics (#261, #262, #264) and the crash
                        reports (#263)
   lib.rs               the update check's thread, at start and then every 24 h; the channel,
-                       stamped at build time (`PARTERRE_CHANNEL`), or Snap and Flatpak at
+                       from the package's marker beside the binary, or Snap and Flatpak at
                        run time; `Usage`, the usage statistics from start to close
-  update.rs            versions and their order, which release a build hears of, and where
+  channel.rs           how this copy was installed, and which channels take stable only
+  ring.rs              rings: which ring a version names, which builds each hears of, and
+                       how an installation keeps its ring
+  update.rs            versions and their order, which build a ring hears of, and where
                        *Download* goes on each channel; no network
   usage.rs             whether anything may go to PostHog (the first-run prompt's answer,
                        `DO_NOT_TRACK`, debug builds), the install ID, and which lifecycle
@@ -101,13 +104,18 @@ crates/parterre-telemetry
                        the events, their standard properties and the registered ones, and
                        the SDK's global client that sends panics, behind the `send` feature
 
+crates/parterre-stamp  the pipeline's tool: a commit's published version, written into a built
+                       binary in place (not published)
+
 crates/parterre        the binary (eframe/egui)
   build.rs             asks git for the commit and sets the version string
   main.rs              CLI (clap), window setup
   keys.rs              one key per action and platform, and its label (⌘O, Ctrl+O)
   macos.rs             folders opened from Finder and the Dock, the Services menu, the
                        clipboard, Install Command Line Tool, the input method (macOS)
-  version.rs           release/dev version strings (runs in build.rs; see docs/releasing.md)
+  version.rs           the version counted from the tags, dev and per ring (runs in build.rs
+                       and parterre-stamp; see docs/releasing.md)
+  slot.rs              the version slot the pipeline writes the published version into
   app.rs               canvas interaction, search, status bar, windows, opening folders
     toolbar.rs         the toolbar and its popovers
     menu_bar.rs        the menu bar (#339): the menus as a tree of entries built from the

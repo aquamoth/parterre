@@ -38,10 +38,11 @@ Debug builds never send usage statistics or crash reports, `send` or not.
 cargo build --release --locked --no-default-features --features azure-devops,github,syntax
 ```
 
-A release build stamps where it is published in `PARTERRE_CHANNEL` (`msi`, `zip`, `tarball`,
-`dmg`, `deb` or `rpm`), so that *Download* offers the same kind of file
-([distribution.md](distribution.md#update-check)). Leave it unset in any other build: unset is
-`cargo install`.
+Every build is a dev build. The pipeline writes the version it publishes a build under into the
+binary afterwards, and each package adds a file `channel` beside it saying how parterre was
+installed, so that *Download* offers the same kind of file
+([distribution.md](distribution.md#update-check), [releasing.md](releasing.md)). A build whose
+version was never written is `cargo install`.
 
 ## Windows
 
@@ -119,15 +120,14 @@ packaging\windows\build-msi.ps1   # → target\msi\parterre-<version>-x86_64-pc-
 ```
 
 The script gathers `parterre.exe`, `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.html` in
-`target\msi\stage`. With `-Stage DIR` it takes them from `DIR` instead, as the release
-workflow does, with a `parterre.exe` built with `PARTERRE_CHANNEL=msi` (see
-[Features](#features)); `-Out FILE` names the MSI. It passes `-acceptEula wix7` on every run, which
+`target\msi\stage`. With `-Stage DIR` it takes them from `DIR` instead, as the pipeline
+does (`.github/workflows/package.yml`); `-Out FILE` names the MSI. Beside `parterre.exe` it
+installs the marker `channel`, holding `msi`. It passes `-acceptEula wix7` on every run, which
 accepts WiX's Open Source Maintenance Fee EULA for that run only; don't run `wix eula accept`,
-which leaves an acceptance file behind. The MSI version is the release tag's version in the
-release workflow (`PARTERRE_RELEASE_TAG`), otherwise the version `parterre.exe` carries (from
-the git tags, see [releasing.md](releasing.md#version-strings)), in both cases without its
-pre-release part: `0.5.0-rc.1` and `0.5.0` both build MSI version `0.5.0`, and the one installed
-later replaces the other. The script checks the built MSI's version.
+which leaves an acceptance file behind. The MSI version is the version `parterre.exe` carries, the one
+the pipeline wrote into it or its dev build's ([releasing.md](releasing.md#version-strings)),
+without its pre-release part: `1.2.3-rc` and `1.2.3` both build MSI version `1.2.3`, and the one
+installed later replaces the other. The script checks the built MSI's version.
 
 The script ends with the ICE checks (`wix msi validate`), minus two it suppresses for reasons
 given in `parterre.wxs`: ICE57 (the Start menu shortcut in a dual-purpose package) and ICE61
@@ -180,16 +180,16 @@ cargo build --release
 packaging/linux/build-packages.sh              # → target/packages/parterre_<version>_amd64.deb, .rpm
 ```
 
-The release builds each package from a build stamped with its channel (see
-[Features](#features)), and the same again with `rpm`:
+Both packages wrap the same binary, each with its marker, `/usr/lib/parterre/channel` holding
+`deb` or `rpm`. The pipeline packages the one binary of a published build, its version written
+in (`.github/workflows/package.yml`):
 
 ```sh
-PARTERRE_CHANNEL=deb cargo build --release --target x86_64-unknown-linux-gnu
-packaging/linux/build-packages.sh --target x86_64-unknown-linux-gnu --only deb dist
+packaging/linux/build-packages.sh --target x86_64-unknown-linux-gnu dist
 ```
 
-The packages take their version from `parterre --version`, with a pre-release's `-` turned into
-`~` so that `0.5.0~rc1` sorts before `0.5.0` in both dpkg and rpm. The file names keep the `-`,
+The packages take their version from `parterre --version`, without the commit, with a
+pre-release's `-` turned into `~` so that `1.2.3~rc` sorts before `1.2.3` in both dpkg and rpm. The file names keep the `-`,
 since GitHub may rewrite a `~` in a release asset's name. The script also writes
 `THIRD-PARTY-NOTICES.html` and the AppStream metadata next to the binary. The metadata's
 releases come from the release tags, newest first and dated by the tag, without pre-releases
@@ -276,13 +276,11 @@ cargo build --release
 packaging/macos/build-dmg.sh    # → target/packages/parterre-<version>-<target>.dmg
 ```
 
-The release builds it for each target from a build stamped with its channel (see
-[Features](#features)), and passes the version, since the Intel binary built on Apple silicon
-can't be run to tell it:
+The pipeline builds it for each target from the binary of a published build, and passes the
+version, since the Intel binary built on Apple silicon can't be run to tell it:
 
 ```sh
-PARTERRE_CHANNEL=dmg cargo build --release --target aarch64-apple-darwin
-packaging/macos/build-dmg.sh --target aarch64-apple-darwin --version 0.5.1 dist
+packaging/macos/build-dmg.sh --target aarch64-apple-darwin --version 1.2.3 dist
 ```
 
 | File in `parterre.app/Contents` | What |
@@ -291,6 +289,7 @@ packaging/macos/build-dmg.sh --target aarch64-apple-darwin --version 0.5.1 dist
 | `Info.plist` | from `packaging/macos/Info.plist`: bundle ID `se.trustfall.parterre`, the version, and the oldest macOS the binary loads on (10.12 on Intel, 11.0 on Apple silicon) |
 | `Resources/parterre.icns` | the icon, in Finder, the Dock and the app switcher |
 | `Resources/LICENSE`, `NOTICE`, `THIRD-PARTY-NOTICES.html` | the licences, which go wherever the app goes |
+| `Resources/channel` | `dmg`: the marker that tells parterre how it was installed |
 
 The bundle version is the version without its pre-release part, as the MSI's is: bundle
 versions are numbers only, so `0.5.0-rc1` and `0.5.0` are both `0.5.0`.
