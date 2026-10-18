@@ -1,0 +1,80 @@
+name: Publish
+
+# Publishes the packages package.yml made as a GitHub release of their own, on a tag made on the
+# commit: the version without its commit, after a `v` (v1.2.3-nightly.20261016), so that every
+# release tag equals its version (#397). Every ring but stable is a prerelease, which is never
+# GitHub's latest. The notes are GitHub's, from the ring's previous build. Then only the newest
+# canary build and the last 7 nightly builds are kept (#392). Called by canary.yml,
+# nightly.yml and release.yml.
+on:
+  workflow_call:
+    inputs:
+      version: { type: string, required: true }
+      ring: { type: string, required: true }
+      sha: { type: string, required: true }
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * | tee SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          RING: ${{ inputs.ring }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          version=${VERSION%%+*}
+          tag=v$version
+          # The ring's previous build, which the notes start from. A release's notes start from
+          # the previous release, as GitHub's do by default.
+          case $RING in
+          canary) previous='-canary$' title="parterre $version (canary build)" ;;
+          nightly)
+            date=${version##*.}
+            previous='-nightly\.[0-9]{8}$'
+            title="parterre nightly build ${date:0:4}-${date:4:2}-${date:6:2} ($version)"
+            ;;
+          rc) previous='^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]*)?$' title="parterre $version (release candidate)" ;;
+          stable) previous= title="parterre $version" ;;
+          *) echo "::error::not a ring: $RING"; exit 1 ;;
+          esac
+          releases=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[].tagName')
+          options=(--title "$title" --generate-notes)
+          if [ -n "$previous" ]; then
+            start=$(printf '%s\n' "$releases" | grep -E "$previous" | head -n1 || true)
+            [ -n "$start" ] && options+=(--notes-start-tag "$start")
+          fi
+          [ "$RING" = stable ] || options+=(--prerelease)
+          gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$SHA" "${options[@]}"
+          echo "Published $tag on $SHA"
+      - name: Prune
+        if: inputs.ring == 'canary' || inputs.ring == 'nightly'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RING: ${{ inputs.ring }}
+        run: |
+          case $RING in
+          canary) pattern='-canary$' keep=1 ;;
+          nightly) pattern='-nightly\.[0-9]{8}$' keep=7 ;;
+          esac
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[].tagName' |
+            grep -E "$pattern" | tail -n +$((keep + 1)) |
+            while read -r tag; do
+              echo "Deleting $tag"
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+            done

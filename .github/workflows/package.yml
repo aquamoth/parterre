@@ -1,0 +1,143 @@
+name: Package
+
+# Writes the version a build is published under into the binaries build.yml made (in the run
+# `run-id`), then packages each for every channel: the archive (.tar.gz, or .zip on Windows), the
+# .deb and .rpm, the macOS disk image and the Windows installer. Every package wraps the same
+# binary; each but the archive adds its marker, a file `channel` naming it (#410). Leaves them as
+# the artifact package-<target>. Called by canary.yml, nightly.yml and release.yml (#413).
+on:
+  workflow_call:
+    inputs:
+      # As parterre-stamp prints it: 1.2.3-nightly.20261016+a1b2c3d.
+      version: { type: string, required: true }
+      run-id: { type: string, required: true }
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  package:
+    name: Package (${{ matrix.target }})
+    strategy:
+      matrix:
+        include:
+          # In Ubuntu 22.04, as the binary was built: the .deb's dependencies are the versions
+          # of the libraries there.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, container: "ubuntu:22.04" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          # The Intel binary can't run on the Apple silicon runner: its version is read from
+          # the slot instead.
+          - { os: macos-latest, target: x86_64-apple-darwin, cross: true }
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - name: Prepare container
+        if: matrix.container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential ca-certificates curl git
+      # The whole history with its tags: the AppStream metadata lists the releases
+      # (packaging/linux/metainfo.sh).
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Trust the checkout
+        if: matrix.container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ${{ runner.os == 'Linux' && 'cargo-about,cargo-deb,cargo-generate-rpm' || 'cargo-about' }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
+      # parterre-stamp checks that every byte it changes is inside the version slot or, on
+      # Windows, the version resource. Mac binaries are signed again after: Apple silicon runs
+      # nothing whose signature doesn't hold, and the patch breaks the linker's (#400).
+      - name: Write the version
+        shell: bash
+        run: |
+          cargo build --locked -p parterre-stamp
+          release=target/${{ matrix.target }}/release
+          bin=$release/parterre
+          [ "$RUNNER_OS" = Windows ] && bin=$release/parterre.exe
+          # Artifacts don't keep the executable bit.
+          chmod +x "$bin"
+          target/debug/parterre-stamp write "$bin" "$VERSION"
+          if [ "$RUNNER_OS" = macOS ]; then
+            codesign --force --sign - "$bin"
+            codesign --verify --strict "$bin"
+          fi
+          echo "FILE_VERSION=${VERSION%%+*}" >> "$GITHUB_ENV"
+          echo "NAME=parterre-${VERSION%%+*}-${{ matrix.target }}" >> "$GITHUB_ENV"
+      - name: Check version
+        shell: bash
+        run: |
+          release=target/${{ matrix.target }}/release
+          if [ "${{ matrix.cross }}" = true ]; then
+            actual=$(target/debug/parterre-stamp read "$release/parterre")
+            expected="$VERSION written"
+          else
+            actual=$("$release/parterre" --version)
+            expected="parterre $VERSION"
+          fi
+          echo "$actual"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::found '$actual', expected '$expected'"
+            exit 1
+          fi
+      # The binary with the README, its license, NOTICE and the licenses of the crates built
+      # into it. No marker: a published binary without one is the archive (#410).
+      - name: Archive
+        shell: bash
+        run: |
+          mkdir -p "$NAME" dist
+          cp README.md LICENSE NOTICE "$NAME/"
+          cargo about generate --locked -c packaging/about.toml packaging/about.hbs \
+            -o "$NAME/THIRD-PARTY-NOTICES.html"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "target/${{ matrix.target }}/release/parterre.exe" "$NAME/"
+            7z a "dist/$NAME.zip" "$NAME"
+          else
+            cp "target/${{ matrix.target }}/release/parterre" "$NAME/"
+            tar czf "dist/$NAME.tar.gz" "$NAME"
+          fi
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: packaging/linux/build-packages.sh --target ${{ matrix.target }} dist
+      # The version is passed, since the Intel build can't run here to tell it.
+      - name: macOS disk image
+        if: runner.os == 'macOS'
+        run: packaging/macos/build-dmg.sh --target ${{ matrix.target }} --version "$FILE_VERSION" dist
+      # The installer, from the archive's files (packaging/windows/build-msi.ps1).
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          dotnet tool install --global wix --version 7.0.0
+          PATH="$USERPROFILE/.dotnet/tools:$PATH" \
+            pwsh packaging/windows/build-msi.ps1 -Stage "$NAME" -Out "dist/$NAME.msi"
+      # PostHog doesn't take PDBs yet, so the one PDB of the binary in the zip and the MSI is a
+      # release asset of its own.
+      - name: Windows debug info
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir "$NAME-pdb"
+          cp "target/${{ matrix.target }}/release/parterre.pdb" "$NAME-pdb/"
+          7z a "dist/$NAME-pdb.zip" "$NAME-pdb"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: package-${{ matrix.target }}
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error

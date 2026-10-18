@@ -1,0 +1,77 @@
+name: Canary
+
+# After every merge to main: one release binary per target (build.yml), kept for the nightly,
+# rc and stable builds of that commit to reuse, then published as the canary build
+# vX.Y.Z-canary, for the maintainer to carry work between computers (#390, #413). Packaged for
+# every channel, without install checks, once CI has passed on the commit. Only the newest
+# canary build is kept. A newer merge cancels the run of an older one, whose build would be
+# deleted anyway.
+#
+# Started by hand on a branch (gh workflow run canary.yml --ref BRANCH), it builds and packages
+# the same way, and uploads the symbols, but publishes nothing, leaving the packages as
+# artifacts: how a change to packaging is tried before merging.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - id: version
+        run: |
+          version=$(cargo run -q --locked -p parterre-stamp -- version --ring canary)
+          echo "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+
+  package:
+    name: Package
+    needs: [version, build]
+    uses: ./.github/workflows/package.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      version: ${{ needs.version.outputs.version }}
+      run-id: ${{ github.run_id }}
+
+  ci:
+    name: CI
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci-passed.yml
+    permissions:
+      actions: read
+    with:
+      sha: ${{ github.sha }}
+
+  publish:
+    name: Publish
+    needs: [version, package, ci]
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/publish.yml
+    permissions:
+      contents: write
+    with:
+      version: ${{ needs.version.outputs.version }}
+      ring: canary
+      sha: ${{ github.sha }}

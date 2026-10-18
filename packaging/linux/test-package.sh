@@ -31,10 +31,13 @@ esac
 version=$(parterre --version)
 echo "$version"
 case $version in
-"parterre "*) ;;
+"parterre "[0-9]*) ;;
 *) echo "unexpected --version output: $version" >&2; exit 1 ;;
 esac
 command -v git
+# The marker parterre tells its channel by (#410).
+channel=$(cat /usr/lib/parterre/channel)
+[ "$channel" = "${pkg##*.}" ] || { echo "/usr/lib/parterre/channel says $channel" >&2; exit 1; }
 for f in \
     /usr/share/applications/$id.desktop \
     /usr/share/metainfo/$id.metainfo.xml \

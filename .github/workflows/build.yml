@@ -1,0 +1,128 @@
+name: Build
+
+# One release binary per target, of the commit the calling run is for, kept as the artifact
+# binary-<target> for every build published from that commit to reuse: canary, nightly, rc and
+# stable alike (#413). Nothing is written into it yet; package.yml writes the version it is
+# published under. The Linux and macOS debug info goes to PostHog here, once per binary, under
+# the release `parterre` and the commit: every copy of the binary shares its debug ID, and
+# PostHog refuses a binary's symbols again under another version (#394, #400). Windows keeps
+# its PDB in the artifact, for the release's PDB archive. See docs/releasing.md.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      matrix:
+        include:
+          # In Ubuntu 22.04, so the binary needs only glibc 2.35 and runs on Debian 12, Ubuntu
+          # 22.04 and newer (docs/distribution.md). The Rust toolchain still comes from rustup.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, container: "ubuntu:22.04" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          # Cross-compiled on the Apple silicon runner, so the binary can't run there.
+          - { os: macos-latest, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    # No rust-cache: the cache is full (#391), and a published build should come from a clean
+    # build anyway.
+    steps:
+      # Before checkout: without git it downloads the sources without .git, and build.rs needs
+      # the commit.
+      - name: Prepare container
+        if: matrix.container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential ca-certificates curl git
+      # The whole history with its tags, which build.rs counts the version from.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      # The checkout belongs to the runner's user and the container runs as root; git ignores
+      # such repositories unless they are marked safe.
+      - name: Trust the checkout
+        if: matrix.container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # The build keeps its line tables (Cargo.toml) for PostHog, which resolves the stack
+      # traces of crash reports with them (docs/releasing.md#crash-report-symbols). On macOS
+      # rustc packs them into a dSYM before it strips the binary. On Windows the linker writes
+      # them to a PDB, which it does only if nothing is stripped. On Linux they stay in the
+      # binary until "Split debug info" moves them out and strips it.
+      - name: Keep debug info
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            echo CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed >> "$GITHUB_ENV"
+          else
+            echo CARGO_PROFILE_RELEASE_STRIP=none >> "$GITHUB_ENV"
+          fi
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p parterre
+      # The binary and its debug info under out/, as package.yml expects them. Cargo leaves the
+      # dSYM in release/ as a symlink into deps/, so it's copied with -L (#305).
+      - name: Split debug info
+        shell: bash
+        run: |
+          release=target/${{ matrix.target }}/release
+          mkdir -p out symbols
+          case $RUNNER_OS in
+          Linux)
+            packaging/linux/split-debuginfo.sh "$release/parterre" symbols
+            cp "$release/parterre" symbols/parterre.debug out/
+            ;;
+          macOS)
+            cp -RL "$release/parterre.dSYM" symbols/
+            cp -R "$release/parterre" symbols/parterre.dSYM out/
+            ;;
+          Windows) cp "$release/parterre.exe" "$release/parterre.pdb" out/ ;;
+          esac
+      # PostHog matches a crash report's frames to the symbols of the binary it came from, by
+      # build ID on Linux and LC_UUID on macOS. Without the secrets (a fork) there is no upload.
+      - name: Upload symbols to PostHog
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          POSTHOG_CLI_HOST: https://eu.posthog.com
+          POSTHOG_CLI_API_KEY: ${{ secrets.POSTHOG_CLI_API_KEY }}
+          POSTHOG_CLI_PROJECT_ID: ${{ secrets.POSTHOG_CLI_PROJECT_ID }}
+        run: |
+          if [ -z "$POSTHOG_CLI_API_KEY" ] || [ -z "$POSTHOG_CLI_PROJECT_ID" ]; then
+            echo "::warning::No POSTHOG_CLI_API_KEY or POSTHOG_CLI_PROJECT_ID; symbols not uploaded"
+            exit 0
+          fi
+          # posthog-cli 0.18.9, checked against the sha256.sum of its release.
+          case $RUNNER_OS in
+          Linux)
+            cli=posthog-cli-x86_64-unknown-linux-musl
+            sum=d132e0ab56d0afaee10fd37b0870ba1162b09f7dccc8eb92ea391fe081be60a5
+            check="sha256sum -c"
+            ;;
+          macOS)
+            cli=posthog-cli-aarch64-apple-darwin
+            sum=831d3a8f16f95fc7cdbff7c9e83a32f012e8bd5af983646582f52e3ca4221d01
+            check="shasum -a 256 -c"
+            ;;
+          esac
+          curl -fsSLO "https://github.com/PostHog/posthog/releases/download/posthog-cli/v0.18.9/$cli.tar.gz"
+          echo "$sum  $cli.tar.gz" | $check
+          tar xzf "$cli.tar.gz"
+          "$cli/posthog-cli" symbol-sets upload --directory symbols \
+            --release-name parterre --release-version "$GITHUB_SHA"
+      # Kept long enough for an rc or a release of a recent commit to reuse; an older one is
+      # built again (#413).
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.target }}
+          path: out/
+          retention-days: 14
+          if-no-files-found: error
