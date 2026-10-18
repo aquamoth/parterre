@@ -7,6 +7,7 @@ members = [
     "crates/parterre-highlight",
     "crates/parterre-telemetry",
     "crates/parterre",
+    "crates/parterre-stamp",
 ]
 
 [workspace.package]

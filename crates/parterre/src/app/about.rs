@@ -127,7 +127,7 @@ impl About {
         let text = if self.version_copied {
             "Copied"
         } else {
-            crate::VERSION
+            crate::version()
         };
         let pill = egui::Button::new(RichText::new(text).color(t.on_fg))
             .fill(t.on_bg)
@@ -296,7 +296,7 @@ mod tests {
         for text in [
             "parterre",
             crate::about::TAGLINE,
-            crate::VERSION,
+            crate::version(),
             "Website",
             "Report a bug",
             "Privacy",
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn the_version_copies_what_a_bug_report_wants() {
         let mut s = Screen::new();
-        s.click(crate::VERSION);
+        s.click(crate::version());
         assert!(s.shows("Copied"), "{:?}", s.texts);
     }
 }

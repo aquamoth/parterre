@@ -2773,6 +2773,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "parterre-stamp"
+version = "0.0.0"
+
+[[package]]
 name = "parterre-telemetry"
 version = "0.0.0"
 dependencies = [

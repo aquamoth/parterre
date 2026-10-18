@@ -25,7 +25,7 @@ impl ParterreApp {
             self.update_check = None;
         } else if self.update_check.is_none() && parterre_telemetry::has_update_check() {
             let ctx = ctx.clone();
-            self.update_check = UpdateCheck::start(crate::VERSION, move || ctx.request_repaint());
+            self.update_check = UpdateCheck::start(crate::version(), move || ctx.request_repaint());
         }
         if let Some(update) = self.update_check.as_mut().and_then(|c| c.newer())
             && tell_once(&mut self.release_told, &update.version)
@@ -40,7 +40,10 @@ impl ParterreApp {
         let Some(update) = &self.release_dialog else {
             return;
         };
-        let this_version = crate::VERSION.split(' ').next().unwrap_or(crate::VERSION);
+        let this_version = crate::version()
+            .split(' ')
+            .next()
+            .unwrap_or(crate::version());
         let shown = Dialog::new("new-release", "New release")
             .screen(crate::usage::Screen::NewRelease)
             .width(360.0)

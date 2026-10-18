@@ -79,7 +79,7 @@ impl Telemetry {
         if !self.scripted && !cfg!(test) {
             parterre_telemetry::start_crash_reports(
                 self.privacy.choices(),
-                crate::VERSION,
+                crate::version(),
                 parterre_core::git::version,
             );
         }
@@ -123,8 +123,8 @@ impl Telemetry {
             self.screen_size = screen;
             let last = self.privacy.last_version.as_deref();
             self.pending_launch_events =
-                parterre_telemetry::launch(self.first_run, last, crate::VERSION);
-            self.privacy.last_version = Some(parterre_telemetry::app_version(crate::VERSION));
+                parterre_telemetry::launch(self.first_run, last, crate::version());
+            self.privacy.last_version = Some(parterre_telemetry::app_version(crate::version()));
         }
         if !self.sends() {
             self.usage = None;
@@ -140,7 +140,7 @@ impl Telemetry {
         {
             let context = Context {
                 install_id: answer.install_id.clone(),
-                version: crate::VERSION.to_owned(),
+                version: crate::version().to_owned(),
                 screen: self.screen_size,
                 git_version: parterre_core::git::version,
             };
@@ -432,7 +432,7 @@ mod tests {
             output.textures_delta.clear();
         }
         assert_eq!(t.launching, None);
-        let version = parterre_telemetry::app_version(crate::VERSION);
+        let version = parterre_telemetry::app_version(crate::version());
         assert_eq!(t.privacy.last_version, Some(version));
         // Scripted: the launch's events are dropped, nothing started.
         assert!(t.pending_launch_events.is_empty());

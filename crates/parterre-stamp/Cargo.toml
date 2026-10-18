@@ -1,0 +1,18 @@
+[package]
+name = "parterre-stamp"
+description = "The pipeline's tool that writes a published version into a built parterre binary."
+# Its own version, not the workspace's: scripts/prepare-crates-release.py sets that for the
+# published crates, and this one is never published.
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -223,7 +223,7 @@ where
 }
 
 fn header() -> Value {
-    json!({"version": FORMAT_VERSION, "parterre": crate::VERSION})
+    json!({"version": FORMAT_VERSION, "parterre": crate::version()})
 }
 
 fn to_value(value: &impl serde::Serialize) -> Value {
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(stored.repositories["/src/app"], filtered());
         let file: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(file["version"], FORMAT_VERSION);
-        assert_eq!(file["parterre"], crate::VERSION);
+        assert_eq!(file["parterre"], crate::version());
     }
 
     #[test]
@@ -294,7 +294,7 @@ mod tests {
         assert_eq!(out["repositories"]["/src/app"]["ref_filter"], "main");
         // Under its own version, or the newer one would convert it again (#369).
         assert_eq!(out["version"], 2);
-        assert_eq!(out["parterre"], crate::VERSION);
+        assert_eq!(out["parterre"], crate::version());
     }
 
     #[test]
