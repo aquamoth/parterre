@@ -166,26 +166,31 @@ pub fn start_crash_reports(
     }
 }
 
+static PUBLISHED: OnceLock<bool> = OnceLock::new();
+
+/// Tells, once and before anything asks [`Channel::current`], whether the pipeline wrote this
+/// build's version, i.e. published it. Unset, it wasn't.
+pub fn set_published(published: bool) {
+    let _ = PUBLISHED.set(published);
+}
+
 impl Channel {
     pub fn current() -> Channel {
         static CURRENT: OnceLock<Channel> = OnceLock::new();
         *CURRENT.get_or_init(|| {
-            Channel::of(option_env!("PARTERRE_CHANNEL"), |name| {
-                std::env::var(name).ok()
-            })
+            let exe = std::env::current_exe().ok();
+            let marker = exe
+                .as_deref()
+                .and_then(channel::marker_path)
+                .and_then(|path| channel::read_marker(&path));
+            let published = PUBLISHED.get().copied().unwrap_or(false);
+            Channel::of(
+                marker.as_deref(),
+                published,
+                |name| std::env::var(name).ok(),
+                exe.as_deref(),
+            )
         })
-    }
-
-    /// Snap and Flatpak set the name of the app they run, and leak it to what is started from a
-    /// terminal there, so only parterre's own counts.
-    fn of(stamp: Option<&str>, var: impl Fn(&str) -> Option<String>) -> Channel {
-        if var("SNAP_NAME").as_deref() == Some("parterre") {
-            Channel::Snap
-        } else if var("FLATPAK_ID").as_deref() == Some("se.trustfall.parterre") {
-            Channel::Flatpak
-        } else {
-            stamp.and_then(Channel::stamped).unwrap_or(Channel::Cargo)
-        }
     }
 }
 
@@ -266,14 +271,6 @@ fn check_for_updates(_: &Version, _: &Receiver<()>, _: &Sender<Update>, _: &dyn 
 mod tests {
     use super::*;
 
-    fn env<'a>(vars: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
-        |name| {
-            vars.iter()
-                .find(|(n, _)| *n == name)
-                .map(|(_, v)| v.to_string())
-        }
-    }
-
     #[test]
     fn a_recorded_feature_is_activity_in_the_current_session() {
         let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
@@ -309,29 +306,5 @@ mod tests {
         assert_ne!(ids[3], first);
         assert_eq!(lock(&session).id(), ids[3]);
         assert!(sent.iter().all(|(feature, _)| *feature == fit));
-    }
-
-    #[test]
-    fn the_stamp_names_the_channel_and_an_unstamped_build_is_cargo() {
-        for channel in Channel::STAMPED {
-            assert_eq!(Channel::of(Some(channel.name()), env(&[])), channel);
-        }
-        assert_eq!(Channel::of(None, env(&[])), Channel::Cargo);
-        assert_eq!(Channel::of(Some(""), env(&[])), Channel::Cargo);
-    }
-
-    #[test]
-    fn snap_and_flatpak_are_told_by_their_own_app() {
-        let snap = [("SNAP_NAME", "parterre")];
-        assert_eq!(Channel::of(None, env(&snap)), Channel::Snap);
-        let flatpak = [("FLATPAK_ID", "se.trustfall.parterre")];
-        assert_eq!(Channel::of(None, env(&flatpak)), Channel::Flatpak);
-        // Started from a terminal in another app's snap or flatpak.
-        let code = [
-            ("SNAP_NAME", "code"),
-            ("FLATPAK_ID", "com.visualstudio.code"),
-        ];
-        assert_eq!(Channel::of(None, env(&code)), Channel::Cargo);
-        assert_eq!(Channel::of(Some("deb"), env(&code)), Channel::Deb);
     }
 }

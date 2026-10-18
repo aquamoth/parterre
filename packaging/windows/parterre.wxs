@@ -55,6 +55,8 @@
         <File Id="LICENSE" Source="$(var.Stage)\LICENSE" />
         <File Id="NOTICE" Source="$(var.Stage)\NOTICE" />
         <File Id="THIRD_PARTY_NOTICES" Source="$(var.Stage)\THIRD-PARTY-NOTICES.html" />
+        <!-- The channel's marker, holding msi, which parterre looks for beside itself (#410). -->
+        <File Id="channel" Source="$(var.Channel)" />
         <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
       </Component>
 

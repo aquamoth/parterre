@@ -182,7 +182,7 @@ impl Update {
         let version = Version::parse(tag)?.to_string();
         let arch = target.split('-').next().unwrap_or(target);
         let file = match channel {
-            Channel::Msi => format!("parterre-{version}-{target}.msi"),
+            Channel::Msi | Channel::MsiMachine => format!("parterre-{version}-{target}.msi"),
             Channel::Zip => format!("parterre-{version}-{target}.zip"),
             Channel::Tarball => format!("parterre-{version}-{target}.tar.gz"),
             Channel::Dmg => format!("parterre-{version}-{target}.dmg"),

@@ -137,6 +137,8 @@ recommends = "python3-nautilus"
 depends = "$auto, git (>= 1:2.31), libegl1, libgl1, libwayland-client0, libwayland-egl1, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxrender1, libxkbcommon0, libxkbcommon-x11-0"
 assets = [
     ["target/release/parterre", "usr/bin/", "755"],
+    # The channel's marker, which parterre looks for beside its binary (#410).
+    ["target/release/packaging/channel-deb", "usr/lib/parterre/channel", "644"],
     ["../../packaging/linux/se.trustfall.parterre.desktop", "usr/share/applications/", "644"],
     ["target/release/packaging/se.trustfall.parterre.metainfo.xml", "usr/share/metainfo/", "644"],
     ["../../packaging/icon/parterre.svg", "usr/share/icons/hicolor/scalable/apps/se.trustfall.parterre.svg", "644"],
@@ -167,6 +169,7 @@ requires = { git-core = ">= 2.31", "libEGL.so.1()(64bit)" = "*", "libGL.so.1()(6
 recommends = { nautilus-python = "*", python3-nautilus = "*" }
 assets = [
     { source = "target/release/parterre", dest = "/usr/bin/parterre", mode = "755" },
+    { source = "target/release/packaging/channel-rpm", dest = "/usr/lib/parterre/channel", mode = "644" },
     { source = "../../packaging/linux/se.trustfall.parterre.desktop", dest = "/usr/share/applications/se.trustfall.parterre.desktop", mode = "644" },
     { source = "target/release/packaging/se.trustfall.parterre.metainfo.xml", dest = "/usr/share/metainfo/se.trustfall.parterre.metainfo.xml", mode = "644" },
     { source = "../../packaging/icon/parterre.svg", dest = "/usr/share/icons/hicolor/scalable/apps/se.trustfall.parterre.svg", mode = "644" },

@@ -336,6 +336,7 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
 
 fn main() -> ExitCode {
     startup::begin();
+    parterre_telemetry::set_published(this_build().1);
     console::attach_parent();
     let cli = Cli::parse();
     if let Some(language) = cli.highlight.as_deref() {
