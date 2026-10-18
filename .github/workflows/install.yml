@@ -1,0 +1,63 @@
+name: Install
+
+# Installs the packages package.yml made, runs parterre and removes it again, before they are
+# published: the .deb and .rpm on Debian, Ubuntu, Fedora and openSUSE (linux-packages.yml), the
+# MSI per user (its default, as winget does) and machine-wide (as Chocolatey does), and the disk
+# images on Apple silicon and Intel Macs. Each checks that the package's marker names its
+# channel (#410). Called by nightly.yml and release.yml; canary builds aren't install-checked
+# (#390).
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux
+    uses: ./.github/workflows/linux-packages.yml
+    with:
+      artifact: package-x86_64-unknown-linux-gnu
+
+  windows:
+    name: Install (Windows, ${{ matrix.scope }})
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [user, machine]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: packaging/windows
+      - uses: actions/download-artifact@v8
+        with:
+          name: package-x86_64-pc-windows-msvc
+          path: dist
+      - name: Install, run and remove
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem dist\*.msi
+          packaging\windows\test-msi.ps1 -Msi $msi.FullName -Scope ${{ matrix.scope }}
+
+  # The Intel image on an Intel runner, since Apple silicon can't be relied on to run it.
+  macos:
+    name: Install (macOS, ${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-26-intel, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: packaging/macos
+      - uses: actions/download-artifact@v8
+        with:
+          name: package-${{ matrix.target }}
+          path: dist
+      # The checkout is the repository the app opens.
+      - name: Install, run and remove
+        run: packaging/macos/test-dmg.sh dist/*.dmg .
