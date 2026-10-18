@@ -27,14 +27,17 @@ impl Repositories {
     /// Those whose name or description has every word of `query`, in any case; all for none.
     pub fn matching(&self, query: &str) -> Vec<&Listed> {
         let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        if words.is_empty() {
+            return self.list.iter().collect();
+        }
         self.list
             .iter()
             .filter(|l| {
-                let name = l.name.to_lowercase();
-                let description = l.description.to_lowercase();
+                let name = Searched::new(&l.name);
+                let description = Searched::new(&l.description);
                 words
                     .iter()
-                    .all(|w| name.contains(w.as_str()) || description.contains(w.as_str()))
+                    .all(|w| name.contains(w) || description.contains(w))
             })
             .collect()
     }
@@ -46,6 +49,36 @@ impl Repositories {
         self.list
             .iter()
             .find(|l| l.forge == forge && l.name.eq_ignore_ascii_case(&name))
+    }
+}
+
+/// Text looked through every frame, for the whole list: ASCII text, as names nearly always
+/// are, is compared without lowercasing a copy of it.
+enum Searched<'a> {
+    Ascii(&'a str),
+    Lowercased(String),
+}
+
+impl<'a> Searched<'a> {
+    fn new(text: &'a str) -> Self {
+        if text.is_ascii() {
+            Searched::Ascii(text)
+        } else {
+            Searched::Lowercased(text.to_lowercase())
+        }
+    }
+
+    fn contains(&self, lowercase_word: &str) -> bool {
+        match self {
+            Searched::Ascii(text) => {
+                lowercase_word.is_empty()
+                    || text
+                        .as_bytes()
+                        .windows(lowercase_word.len())
+                        .any(|w| w.eq_ignore_ascii_case(lowercase_word.as_bytes()))
+            }
+            Searched::Lowercased(text) => text.contains(lowercase_word),
+        }
     }
 }
 
@@ -105,5 +138,21 @@ mod tests {
         assert_eq!(names("PART"), ["aquamoth/parterre"]);
         assert_eq!(names("aquamoth graph"), ["aquamoth/parterre"]);
         assert!(names("graph clocks").is_empty());
+    }
+
+    #[test]
+    fn words_match_in_any_case_in_unicode_text_too() {
+        let repos = Repositories {
+            list: vec![
+                listed(Forge::Github, "mira/översikt", "Rapporter för året"),
+                listed(Forge::Github, "mira/checkout", "The shop's checkout"),
+            ],
+        };
+        let names =
+            |q: &str| -> Vec<String> { repos.matching(q).iter().map(|l| l.name.clone()).collect() };
+        assert_eq!(names("ÖVERSIKT"), ["mira/översikt"]);
+        assert_eq!(names("FÖR"), ["mira/översikt"]);
+        assert_eq!(names("SHOP'S"), ["mira/checkout"]);
+        assert!(names("ö checkout").is_empty());
     }
 }

@@ -1,12 +1,8 @@
-//! The user's merge tool, against real, disposable repositories: which tool git's config
-//! names and whether it can be used, and opening a file in it with `git mergetool`, left
-//! running on its own.
 mod common;
 
-use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{TestRepo, read_text};
+use common::{TestRepo, git_fails, read_text};
 use parterre_core::git::Git;
 use parterre_core::merge_tool::{self, Configured, Tool};
 
@@ -70,7 +66,6 @@ fn an_unknown_tool_is_not_available() {
     );
 }
 
-/// Waits until git no longer holds `path` unmerged.
 fn wait_resolved(r: &TestRepo, path: &str) {
     let start = Instant::now();
     while !r.git(&["ls-files", "--unmerged", "--", path]).is_empty() {
@@ -93,14 +88,7 @@ fn opening_a_file_runs_git_mergetool_and_git_stages_the_result() {
     r.checkout("main");
     r.write("list.txt", b"one\n2 (main)\n");
     r.commit_all("Main");
-    let merged = Command::new(parterre_core::git::program())
-        .current_dir(r.path())
-        .args(["merge", "-q", "topic"])
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
-    assert!(!merged.status.success());
+    git_fails(r.path(), &["merge", "-q", "topic"]);
     // A tool that takes their side, as a user resolving it would.
     r.git(&[
         "config",
@@ -118,8 +106,6 @@ fn opening_a_file_runs_git_mergetool_and_git_stages_the_result() {
     assert_eq!(read_text(&r.path().join("list.txt")), "one\nTWO (topic)\n");
 }
 
-/// `git mergetool --tool-help` starts git over a hundred times, for a minute on Windows
-/// (#355): detecting reads the config once and looks for the programs itself.
 #[test]
 fn detecting_does_not_ask_git_tool_by_tool() {
     let r = TestRepo::new();

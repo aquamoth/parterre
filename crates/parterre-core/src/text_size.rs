@@ -1,33 +1,33 @@
-//! The text size's steps, which Ctrl+plus and minus and the wheel go through. The size is
-//! egui's zoom factor, one for every window; the app reads the input (`text_size.rs` there).
-
-/// The sizes Ctrl+plus and minus step through, as in browsers.
+/// The sizes Ctrl+plus and minus and the wheel step through, as in browsers.
 pub const STEPS: [f32; 13] = [
     0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
 ];
 pub const MIN: f32 = STEPS[0];
 pub const MAX: f32 = STEPS[STEPS.len() - 1];
+const DEFAULT: f32 = 1.0;
+const STEP_TOLERANCE: f32 = 0.001;
 
-/// The next step up from `size`.
 pub fn larger(size: f32) -> f32 {
-    STEPS.into_iter().find(|&s| s > size + 0.001).unwrap_or(MAX)
+    STEPS
+        .into_iter()
+        .find(|&s| s > size + STEP_TOLERANCE)
+        .unwrap_or(MAX)
 }
 
-/// The next step down from `size`.
 pub fn smaller(size: f32) -> f32 {
     STEPS
         .into_iter()
         .rev()
-        .find(|&s| s < size - 0.001)
+        .find(|&s| s < size - STEP_TOLERANCE)
         .unwrap_or(MIN)
 }
 
-/// A size as saved, or given on the command line, within the steps' range.
+/// For a size as saved, or given on the command line.
 pub fn sanitize(size: f32) -> f32 {
     if size.is_finite() {
         size.clamp(MIN, MAX)
     } else {
-        1.0
+        DEFAULT
     }
 }
 
@@ -35,31 +35,31 @@ pub fn sanitize(size: f32) -> f32 {
 /// notch is one step, and so is pinching by a fifth.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Wheel {
-    /// The zoom gathered towards the next step, as its logarithm.
-    pending: f32,
-    /// When zoom last came in, in seconds.
-    last: f64,
+    /// Gathered towards the next step.
+    log_zoom: f32,
+    last_zoom_secs: f64,
 }
 
 /// A pause this long ends a gesture, and its remainder is dropped. Pinch events don't come
 /// every frame, so frames without zoom don't end one.
-const GESTURE_PAUSE: f64 = 0.5;
+const GESTURE_PAUSE_SECS: f64 = 0.5;
+const ZOOM_PER_STEP: f32 = 1.2;
 
 impl Wheel {
-    /// Adds one frame's zoom (egui's `zoom_delta`) at `now` (seconds); returns how many steps
-    /// to go up (positive) or down (negative).
-    pub fn steps(&mut self, delta: f32, now: f64) -> i32 {
+    /// Adds one frame's zoom (egui's `zoom_delta`); returns how many steps to go up
+    /// (positive) or down (negative).
+    pub fn steps(&mut self, delta: f32, now_secs: f64) -> i32 {
         if delta == 1.0 {
             return 0;
         }
-        if now - self.last > GESTURE_PAUSE {
-            self.pending = 0.0;
+        if now_secs - self.last_zoom_secs > GESTURE_PAUSE_SECS {
+            self.log_zoom = 0.0;
         }
-        self.last = now;
-        let step = 1.2_f32.ln();
-        self.pending += delta.ln();
-        let steps = (self.pending / step).trunc();
-        self.pending -= steps * step;
+        self.last_zoom_secs = now_secs;
+        let step = ZOOM_PER_STEP.ln();
+        self.log_zoom += delta.ln();
+        let steps = (self.log_zoom / step).trunc();
+        self.log_zoom -= steps * step;
         steps as i32
     }
 }

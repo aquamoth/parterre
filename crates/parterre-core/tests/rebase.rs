@@ -1,46 +1,16 @@
-//! Rebasing the open worktree's branch, against real, disposable repositories: when it's
-//! offered, what the confirmation says git leaves out (checked against what `git rebase` then
-//! does), and every way it can stop, refuse or keep changes aside.
 mod common;
 
-use common::TestRepo;
+use common::{TestRepo, done, failed, oid, rev};
 use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck};
+use parterre_core::branches::{Action, Catalog, GitOperation, Outcome, Stuck};
 use parterre_core::rebase::{self, Preview, Skipped, Todo};
-use parterre_util::CancelTree;
-
-fn oid(s: &str) -> Oid {
-    Oid::from_hex(s).unwrap()
-}
-
-fn rev(r: &TestRepo, rev: &str) -> Oid {
-    oid(&r.git(&["rev-parse", rev]))
-}
 
 fn preview(r: &TestRepo, onto: &str) -> Preview {
     Preview::load(r.path(), rev(r, onto)).unwrap()
 }
 
 fn execute(r: &TestRepo, rebase: rebase::Rebase) -> Outcome {
-    Branches::new(r.path()).execute(
-        Action::Rebase(Box::new(rebase)),
-        None,
-        &CancelTree::default(),
-    )
-}
-
-fn done(out: Outcome) -> Report {
-    match out {
-        Outcome::Done(report) => report,
-        other => panic!("expected it done: {other:?}"),
-    }
-}
-
-fn failed(out: Outcome) -> String {
-    match out {
-        Outcome::Failed { error, .. } => error.to_string(),
-        other => panic!("expected a failure: {other:?}"),
-    }
+    common::execute(r, Action::Rebase(Box::new(rebase)), None)
 }
 
 fn offered(r: &TestRepo, onto: &str) -> Option<String> {
@@ -149,7 +119,10 @@ fn a_conflict_stops_it_and_leaves_the_worktree_stuck() {
     assert_eq!(attention.title, "Rebase stopped on conflicts in 1 file");
 
     let catalog = Catalog::load(r.path()).unwrap();
-    assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a rebase")));
+    assert_eq!(
+        catalog.stuck(),
+        Some(Stuck::InProgress(GitOperation::Rebase))
+    );
     assert_eq!(catalog.conflicted, ["file"]);
     let rebasing = catalog
         .worktrees

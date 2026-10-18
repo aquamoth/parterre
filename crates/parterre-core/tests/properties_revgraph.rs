@@ -1,37 +1,20 @@
-//! Property tests over random inputs (adapted from a review's fuzzing).
+mod common;
 
-#![allow(clippy::needless_range_loop)] // index loops read better in these tests
-
+use common::Rng;
 use parterre_core::layout::{self, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking};
 use parterre_core::pattern::BranchPatterns;
 use parterre_core::revgraph::{self, GraphOptions, PullRequestHead, Simplification};
 use parterre_core::{Commit, CommitIx, GitRef, Head, Oid, RefKind, Repo};
 use std::collections::{HashMap, HashSet};
 
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn below(&mut self, n: u64) -> u64 {
-        if n == 0 { 0 } else { self.next() % n }
-    }
-    fn chance(&mut self, p: f64) -> bool {
-        (self.next() % 1_000_000) as f64 / 1e6 < p
-    }
-}
-
 fn oid(i: usize) -> Oid {
     Oid::from_hex(&format!("{:040x}", i + 1)).unwrap()
 }
 
 fn random_repo(rng: &mut Rng, n: usize) -> Repo {
-    // Topological: commit i's parents have index > i, except with permutation later.
+    // Commit i's parents have greater indices, until they are shuffled below.
     let mut parents: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for c in 0..n {
+    for (c, ps) in parents.iter_mut().enumerate() {
         let k = match rng.below(12) {
             0 => 0,
             1..=7 => 1,
@@ -48,13 +31,13 @@ fn random_repo(rng: &mut Rng, n: usize) -> Repo {
                 1 + rng.below((n - c - 1) as u64)
             };
             let p = (c as u64 + span).min(n as u64 - 1) as usize;
-            if parents[c].contains(&p) && !rng.chance(0.2) {
+            if ps.contains(&p) && !rng.chance(0.2) {
                 continue; // occasionally allow duplicate parents
             }
-            parents[c].push(p);
+            ps.push(p);
         }
     }
-    // Random permutation of indices (git log order with clock skew is not topological).
+    // git log's order with clock skew is not topological.
     let mut perm: Vec<usize> = (0..n).collect();
     if rng.chance(0.5) {
         for i in (1..n).rev() {
@@ -63,17 +46,12 @@ fn random_repo(rng: &mut Rng, n: usize) -> Repo {
         }
     }
     let mut commits: Vec<Option<Commit>> = vec![None; n];
-    for c in 0..n {
+    for (c, ps) in parents.iter().enumerate() {
         commits[perm[c]] = Some(Commit {
             oid: oid(perm[c]),
-            parents: parents[c]
-                .iter()
-                .map(|&p| CommitIx(perm[p] as u32))
-                .collect(),
+            parents: ps.iter().map(|&p| CommitIx(perm[p] as u32)).collect(),
             truncated: false,
-            empty_tree: parents[c].is_empty()
-                && std::env::var("NOEMPTY").is_err()
-                && rng.chance(0.4),
+            empty_tree: ps.is_empty() && rng.chance(0.4),
             author_name: "a".into(),
             author_email: "a@b".into(),
             author_time: (n - c) as i64,
@@ -122,7 +100,6 @@ fn random_repo(rng: &mut Rng, n: usize) -> Repo {
             target: None,
         },
         _ => {
-            // HEAD on a branch ref, if any local branch
             if let Some(i) = refs.iter().position(|r| r.kind == RefKind::LocalBranch) {
                 refs[i].is_head = true;
                 Head::Branch {
@@ -138,6 +115,29 @@ fn random_repo(rng: &mut Rng, n: usize) -> Repo {
         }
     };
     Repo::new("/tmp/x".into(), commits, refs, head)
+}
+
+/// Marks what `starts` reach in `visible`, following only first parents where `first_parent_only`
+/// says so.
+fn reach(
+    repo: &Repo,
+    starts: Vec<usize>,
+    first_parent_only: impl Fn(usize) -> bool,
+    visible: &mut [bool],
+) {
+    let mut stack = starts;
+    while let Some(c) = stack.pop() {
+        if !visible[c] {
+            visible[c] = true;
+            let ps = &repo.commits[c].parents;
+            let ps = if first_parent_only(c) {
+                &ps[..ps.len().min(1)]
+            } else {
+                &ps[..]
+            };
+            stack.extend(ps.iter().map(|p| p.ix()));
+        }
+    }
 }
 
 fn ancestors(repo: &Repo, c: usize) -> HashSet<usize> {
@@ -201,7 +201,6 @@ fn revgraph_invariants_random() {
             }
             let g = revgraph::build(&repo, opts);
             let what = format!("iter {iter} opts {opts:?}");
-            // node_of consistency
             let mut seen = HashSet::new();
             for (i, node) in g.nodes.iter().enumerate() {
                 assert!(seen.insert(node.commit), "{what}: duplicate node");
@@ -236,7 +235,6 @@ fn revgraph_invariants_random() {
                     assert!(anc[cc].contains(&c.ix()), "{what}: collapsed non-ancestor");
                     ends.entry(c).or_default().push(e.parent);
                 }
-                // grouping
                 if k == 0 || e.child != last_child {
                     assert!(
                         k == 0 || e.child > last_child,
@@ -259,14 +257,12 @@ fn revgraph_invariants_random() {
                     "{what}: collapsed into"
                 );
             }
-            // head
             if let Some(h) = repo.head_commit() {
                 let hn = g
                     .node_of(h)
                     .unwrap_or_else(|| panic!("{what}: head not a node"));
                 assert!(g.nodes[hn as usize].is_head);
             }
-            // decorated refs
             for (ri, r) in repo.refs.iter().enumerate() {
                 if opts.shows(r.kind)
                     && (r.kind != RefKind::Tag || opts.tags_make_nodes)
@@ -281,10 +277,8 @@ fn revgraph_invariants_random() {
                     );
                 }
             }
-            // visible commits all represented
             let hidden = BranchPatterns::parse(&opts.hide_branches);
-            let mut visible = vec![false; n];
-            let mut stack: Vec<usize> = repo
+            let mut starts: Vec<usize> = repo
                 .refs
                 .iter()
                 .filter(|r| {
@@ -296,33 +290,24 @@ fn revgraph_invariants_random() {
                 })
                 .map(|r| r.target.ix())
                 .collect();
-            stack.extend(repo.head_commit().map(|c| c.ix()));
-            let fpo_of: HashSet<usize> = repo
+            starts.extend(repo.head_commit().map(|c| c.ix()));
+            let stashes: HashSet<usize> = repo
                 .refs
                 .iter()
                 .filter(|r| r.kind == RefKind::Stash && opts.shows(r.kind))
                 .map(|r| r.target.ix())
                 .collect();
-            while let Some(c) = stack.pop() {
-                if !visible[c] {
-                    visible[c] = true;
-                    let ps = &repo.commits[c].parents;
-                    let ps = if opts.first_parent_only || fpo_of.contains(&c) {
-                        &ps[..ps.len().min(1)]
-                    } else {
-                        &ps[..]
-                    };
-                    stack.extend(ps.iter().map(|p| p.ix()));
-                }
-            }
+            let first_parent_only = |c: usize| opts.first_parent_only || stashes.contains(&c);
+            let mut visible = vec![false; n];
+            reach(&repo, starts, first_parent_only, &mut visible);
             assert_eq!(
                 g.visible_commits,
                 visible.iter().filter(|&&v| v).count(),
                 "{what}"
             );
-            for c in 0..n {
+            for (c, &is_visible) in visible.iter().enumerate() {
                 let r = g.represented_by(CommitIx(c as u32));
-                if !visible[c] {
+                if !is_visible {
                     assert!(r.is_none(), "{what}: invisible commit represented");
                     assert!(g.node_of(CommitIx(c as u32)).is_none());
                 } else if r.is_none() {
@@ -369,23 +354,17 @@ fn revgraph_invariants_random() {
                             && !hidden_ref(i))
                 };
                 let mut visible_with = visible.clone();
-                let mut stack: Vec<usize> = heads
+                let pull_request_starts = heads
                     .iter()
                     .filter(|h| shown(h) && h.head.is_some_and(starts))
                     .map(|h| h.commit.ix())
                     .collect();
-                while let Some(c) = stack.pop() {
-                    if !visible_with[c] {
-                        visible_with[c] = true;
-                        let ps = &repo.commits[c].parents;
-                        let ps = if opts.first_parent_only || fpo_of.contains(&c) {
-                            &ps[..ps.len().min(1)]
-                        } else {
-                            &ps[..]
-                        };
-                        stack.extend(ps.iter().map(|p| p.ix()));
-                    }
-                }
+                reach(
+                    &repo,
+                    pull_request_starts,
+                    first_parent_only,
+                    &mut visible_with,
+                );
                 assert_eq!(
                     gp.visible_commits,
                     visible_with.iter().filter(|&&v| v).count(),
@@ -414,7 +393,6 @@ fn revgraph_invariants_random() {
                     assert_eq!(gp.nodes.len(), g.nodes.len(), "{what}");
                 }
             }
-            // layout
             if oi % 13 == 0 {
                 let input = LayoutInput {
                     sizes: vec![Point::new(80.0, 20.0); g.nodes.len()],

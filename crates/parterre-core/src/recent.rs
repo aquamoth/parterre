@@ -1,19 +1,15 @@
-//! The repositories opened most recently, newest first, for the *Recent folders* menu.
-
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// How many repositories the list keeps.
 pub const MAX_RECENT: usize = 10;
 
+/// The repositories opened most recently, newest first.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Recent(Vec<PathBuf>);
 
 impl Recent {
-    /// Puts `path` at the top, moving it there if it is already in the list, and drops the
-    /// oldest entry once there are more than [`MAX_RECENT`].
     pub fn add(&mut self, path: &Path) {
         let path = normalize(path);
         self.remove(&path);
@@ -22,7 +18,7 @@ impl Recent {
     }
 
     pub fn remove(&mut self, path: &Path) {
-        self.0.retain(|p| !same_path(p, path));
+        self.0.retain(|p| !same_path_lexically(p, path));
     }
 
     pub fn clear(&mut self) {
@@ -33,21 +29,19 @@ impl Recent {
         self.0.is_empty()
     }
 
-    /// The repositories, newest first.
     pub fn iter(&self) -> impl Iterator<Item = &Path> {
         self.0.iter().map(PathBuf::as_path)
     }
 }
 
-/// `path` with the platform's own separators: git reports `C:/src/repo` on Windows, which
-/// becomes `C:\src\repo`. Also drops a trailing separator.
-pub fn normalize(path: &Path) -> PathBuf {
+/// git reports `C:/src/repo` on Windows, which becomes `C:\src\repo`. Also drops a trailing
+/// separator.
+fn normalize(path: &Path) -> PathBuf {
     path.components().collect()
 }
 
-/// Whether two paths name the same directory, as far as can be told without asking the file
-/// system: Windows paths ignore case and the kind of separator.
-pub fn same_path(a: &Path, b: &Path) -> bool {
+/// Windows paths ignore case and the kind of separator.
+pub fn same_path_lexically(a: &Path, b: &Path) -> bool {
     let (a, b) = (normalize(a), normalize(b));
     if cfg!(windows) {
         a.to_string_lossy()

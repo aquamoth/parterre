@@ -1,23 +1,15 @@
-//! PostHog, through its official SDK (`posthog-rs`): all of parterre's PostHog code (#225).
-//! Changing services means replacing this module.
+//! All of parterre's PostHog code (#225), through its official SDK.
 //!
-//! The SDK batches events on a thread of its own and sends them every few seconds. Every event
-//! carries the install ID as its `distinct_id` and is personless (`$process_person_profile:
-//! false`), PostHog's anonymous events, and PostHog's standard properties, added in
-//! `before_send` as its mobile SDKs add them. Only the channel and git's version get parterre's
-//! own names. Every usage event, the lifecycle and feature events (#264) alike, also carries
-//! the properties registered last (`feature.rs`), as PostHog's super properties, added in the
-//! usage client's `before_send`.
+//! Usage events carry the install ID as their `distinct_id` and are personless
+//! (`$process_person_profile: false`). `before_send` adds PostHog's standard properties, as its
+//! mobile SDKs do, and the properties registered last, as super properties. The session
+//! (`$session_id`, #262) goes on each usage event as it is made, not in `before_send`, so that
+//! nothing else the client sends is tied to the install ID's events.
 //!
-//! The session (`$session_id`, #262) goes on each usage event as it is made, the feature events
-//! included, not in `before_send`: nothing else this client sends, such as a crash report
-//! (`$exception`), carries it, as a session would tie it to the install ID's events.
-//!
-//! Crash reports (#263) go through a client of their own, the SDK's global one, whose panic
-//! capture sends a `$exception` the moment a panic happens. They carry the standard properties
-//! but never the install ID, the session or the registered properties: the SDK makes them
-//! personless with a random ID, and their `before_send` is their own. Home folders in them
-//! become `~` there, PostHog's way to keep personal data out of exceptions.
+//! Crash reports (#263) go through the SDK's global client, whose panic capture sends a
+//! `$exception` the moment a panic happens. They carry the standard properties but never the
+//! install ID, the session or the registered properties: the SDK makes them personless with a
+//! random ID. Home folders in them become `~`, PostHog's way to keep personal data out.
 
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, OnceLock};
@@ -29,36 +21,36 @@ use serde_json::Value;
 use crate::feature::{self, Feature};
 use crate::{Channel, Context, Lifecycle, app_version, crash};
 
-/// The parterre project's token. Public by design: it can only send events (#275).
+/// Public by design: it can only send events (#275).
 const TOKEN: &str = "phc_rdXXhGJLnbhdtA6tJ5bAXiNzntnob2krZCevNBz5GSES";
 
-/// PostHog Cloud EU's ingestion host (Frankfurt).
+/// PostHog Cloud EU (Frankfurt).
 pub(crate) const HOST: &str = "https://eu.i.posthog.com";
 
-/// The app, as `$app_name`.
 const APP_NAME: &str = "parterre";
 
-/// How long one request may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// What the usage statistics thread is told.
 enum Command {
-    /// The window closes, in session `.0`: say so, send what is queued, and tell the sender once
-    /// done.
-    Close(String, mpsc::Sender<()>),
-    /// A feature was used, in session `.1`.
-    Record(Feature, String),
+    /// Sends `Application Backgrounded` and what is queued, then tells `done`.
+    Close {
+        session: String,
+        done: mpsc::Sender<()>,
+    },
+    Record {
+        feature: Feature,
+        session: String,
+    },
 }
 
-/// The usage statistics' own thread, which talks to PostHog. Dropped, it sends what it has
-/// queued and nothing more.
+/// The usage statistics' own thread. Dropped, it sends what it has queued and nothing more.
 #[derive(Debug)]
 pub(crate) struct Sender {
     commands: mpsc::Sender<Command>,
 }
 
 impl Sender {
-    /// Starts the thread, which sends `events` at once, in `session`, to `host`.
+    /// Starts the thread, which sends `events` at once.
     pub(crate) fn start(
         host: &str,
         context: Context,
@@ -67,51 +59,50 @@ impl Sender {
     ) -> Sender {
         let (commands, received) = mpsc::channel();
         let host = host.to_owned();
-        let spawned = std::thread::Builder::new()
+        // If the thread can't start, nothing is sent.
+        let _ = std::thread::Builder::new()
             .name("usage statistics".into())
-            .spawn(move || run(&host, &context, (&session, events), &received));
-        // Without a thread, nothing is sent: commands go nowhere.
-        drop(spawned);
+            .spawn(move || run(&host, &context, &session, &events, &received));
         Sender { commands }
     }
 
-    /// Where features go, each in its session: to the thread, without waiting.
+    /// Hands each feature to the thread, without waiting.
     pub(crate) fn sink(&self) -> impl Fn(Feature, String) + Send + 'static {
         let commands = self.commands.clone();
         move |feature, session| {
-            let _ = commands.send(Command::Record(feature, session));
+            let _ = commands.send(Command::Record { feature, session });
         }
     }
 
-    /// `Application Backgrounded`, in `session`, then what is queued is sent, waiting at most
-    /// `wait`.
+    /// Sends `Application Backgrounded` and what is queued, waiting at most `wait`.
     pub(crate) fn close(&self, session: String, wait: Duration) {
         let (done, finished) = mpsc::channel();
-        if self.commands.send(Command::Close(session, done)).is_ok() {
+        if self.commands.send(Command::Close { session, done }).is_ok() {
             let _ = finished.recv_timeout(wait);
         }
     }
 }
 
-/// Sends the launch's `events`, in their session, then does as told.
 fn run(
     host: &str,
     context: &Context,
-    (session, events): (&str, Vec<Lifecycle>),
+    session: &str,
+    events: &[Lifecycle],
     commands: &Receiver<Command>,
 ) {
     let standard = Standard::of(context);
-    let client = client(host, standard, crate::CLOSE);
-    for lifecycle in &events {
-        client.capture(event(lifecycle, &context.install_id, session));
+    let client = client(host, standard, crate::CLOSE_TIMEOUT);
+    for lifecycle in events {
+        client.capture(lifecycle_event(lifecycle, &context.install_id, session));
     }
     loop {
         match commands.recv() {
-            Ok(Command::Record(feature, session)) => {
+            Ok(Command::Record { feature, session }) => {
                 client.capture(feature_event(feature, &context.install_id, &session));
             }
-            Ok(Command::Close(session, done)) => {
-                let backgrounded = event(&Lifecycle::Backgrounded, &context.install_id, &session);
+            Ok(Command::Close { session, done }) => {
+                let backgrounded =
+                    lifecycle_event(&Lifecycle::Backgrounded, &context.install_id, &session);
                 client.capture(backgrounded);
                 client.shutdown();
                 let _ = done.send(());
@@ -126,21 +117,25 @@ fn run(
     }
 }
 
-/// A client for `host`, with the standard properties on every event, which gives up sending
-/// on shutdown after `close`.
-fn client(host: &str, standard: Standard, close: Duration) -> Client {
+fn options(host: &str) -> ClientOptionsBuilder {
     let mut options = ClientOptionsBuilder::default();
     options
         .api_key(TOKEN.to_owned())
         .host(host)
         // A desktop app: `$os` is the user's, not a server's.
         .is_server(false)
-        .request_timeout_seconds(REQUEST_TIMEOUT.as_secs())
-        .shutdown_timeout_ms(u64::try_from(close.as_millis()).unwrap_or(u64::MAX))
+        .request_timeout_seconds(REQUEST_TIMEOUT.as_secs());
+    options
+}
+
+fn client(host: &str, standard: Standard, shutdown_timeout: Duration) -> Client {
+    let mut options = options(host);
+    options
+        .shutdown_timeout_ms(u64::try_from(shutdown_timeout.as_millis()).unwrap_or(u64::MAX))
         .before_send(move |mut event| {
             standard.apply(&mut event);
             if let Some(properties) = feature::registered() {
-                apply(&properties, &mut event);
+                apply_registered(&properties, &mut event);
             }
             Some(event)
         });
@@ -152,10 +147,9 @@ fn client(host: &str, standard: Standard, close: Duration) -> Client {
     }
 }
 
-/// Turns on the SDK's panic capture for the rest of the process: from now on a panic is sent to
-/// `host` as a `$exception` the moment it happens, waiting at most the SDK's 2 seconds. The
-/// panic hook installed before it is still called, after it. False if it couldn't be turned
-/// on, as when it already is.
+/// Turns on the SDK's panic capture for the rest of the process: a panic is sent the moment it
+/// happens, waiting at most the SDK's 2 seconds, and then the panic hook installed before is
+/// called. False if it couldn't be turned on, as when it already is.
 pub(crate) fn capture_panics(
     host: &str,
     version: &str,
@@ -176,12 +170,8 @@ pub(crate) fn capture_panics(
     else {
         return false;
     };
-    let mut options = ClientOptionsBuilder::default();
+    let mut options = options(host);
     options
-        .api_key(TOKEN.to_owned())
-        .host(host)
-        .is_server(false)
-        .request_timeout_seconds(REQUEST_TIMEOUT.as_secs())
         .error_tracking(error_tracking)
         .before_send(move |mut event| {
             if standard.git_version.is_none() {
@@ -196,34 +186,33 @@ pub(crate) fn capture_panics(
     posthog_rs::init_global(options).is_ok()
 }
 
-/// A panic, as it is sent: with the standard properties, never anything that ties it to this
-/// installation, and the `homes` scrubbed from every text in it ([`crash::scrub`]): the panic's
-/// message and file, the stack frames' files and `$debug_images[].code_file`.
+/// With the standard properties, nothing that ties it to this installation, and the `homes`
+/// scrubbed from every text in it: the panic's message and file, the stack frames' files and
+/// `$debug_images[].code_file`.
 fn crash_report(event: &mut Event, standard: &Standard, homes: &[String]) {
     standard.apply(event);
     // Sessions belong to the usage statistics, which carry the install ID (#262).
     let _ = event.remove_prop("$session_id");
+    // `Event` gives no mutable access to its properties.
     let keys: Vec<String> = event.properties().keys().cloned().collect();
     for key in keys {
         if let Some(mut value) = event.remove_prop(&key) {
-            scrub(&mut value, homes);
+            scrub_texts(&mut value, homes);
             let _ = event.insert_prop(key, value);
         }
     }
 }
 
-/// Every text in `value`, through [`crash::scrub`].
-fn scrub(value: &mut Value, homes: &[String]) {
+fn scrub_texts(value: &mut Value, homes: &[String]) {
     match value {
         Value::String(text) => *text = crash::scrub(text, homes),
-        Value::Array(values) => values.iter_mut().for_each(|v| scrub(v, homes)),
-        Value::Object(map) => map.values_mut().for_each(|v| scrub(v, homes)),
+        Value::Array(values) => values.iter_mut().for_each(|v| scrub_texts(v, homes)),
+        Value::Object(map) => map.values_mut().for_each(|v| scrub_texts(v, homes)),
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
-/// The event for `lifecycle`, from this installation, in `session`.
-fn event(lifecycle: &Lifecycle, install_id: &str, session: &str) -> Event {
+fn lifecycle_event(lifecycle: &Lifecycle, install_id: &str, session: &str) -> Event {
     let mut event = Event::new(lifecycle.name(), install_id);
     let _ = event.insert_prop("$session_id", session);
     if let Lifecycle::Updated { previous_version } = lifecycle {
@@ -232,8 +221,6 @@ fn event(lifecycle: &Lifecycle, install_id: &str, session: &str) -> Event {
     event
 }
 
-/// The event for `feature`, from this installation, in `session`: its fixed name, and which
-/// feature.
 fn feature_event(feature: Feature, install_id: &str, session: &str) -> Event {
     let mut event = Event::new(feature.event(), install_id);
     let _ = event.insert_prop("$session_id", session);
@@ -242,8 +229,7 @@ fn feature_event(feature: Feature, install_id: &str, session: &str) -> Event {
     event
 }
 
-/// The registered `properties`, on `event`.
-fn apply(properties: &feature::Properties, event: &mut Event) {
+fn apply_registered(properties: &feature::Properties, event: &mut Event) {
     for (key, value) in properties.pairs() {
         let _ = match value {
             feature::Value::Name(name) => event.insert_prop(key, name),
@@ -254,38 +240,34 @@ fn apply(properties: &feature::Properties, event: &mut Event) {
     }
 }
 
-/// PostHog's standard properties, and parterre's own two, as on every event. `$os` and
-/// `$os_version` are the SDK's.
+/// PostHog's standard properties, and parterre's own two, `channel` and `git_version`. `$os`
+/// and `$os_version` are the SDK's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Standard {
     app_version: String,
     channel: &'static str,
     git_version: Option<String>,
-    /// BCP 47, `sv-SE`.
+    /// BCP 47: `sv-SE`.
     locale: Option<String>,
-    /// IANA, `Europe/Stockholm`.
+    /// IANA: `Europe/Stockholm`.
     timezone: Option<String>,
-    /// In points (logical pixels).
+    /// In points.
     screen: Option<[u32; 2]>,
 }
 
 impl Standard {
-    /// This launch's, asking git and the system.
     fn of(context: &Context) -> Standard {
         Standard {
-            app_version: app_version(&context.version),
-            channel: Channel::current().name(),
             git_version: (context.git_version)(),
-            locale: sys_locale::get_locale(),
-            timezone: iana_time_zone::get_timezone().ok(),
             screen: context
                 .screen
                 .filter(|s| s.iter().all(|x| x.is_finite() && *x > 0.0))
                 .map(|s| s.map(|x| x.round() as u32)),
+            ..Standard::crash(&context.version)
         }
     }
 
-    /// A crash report's, known at start: not the screen's size, and git's version only later.
+    /// Known at start: no screen, and git's version only later.
     fn crash(version: &str) -> Standard {
         Standard {
             app_version: app_version(version),
@@ -360,7 +342,7 @@ mod tests {
 
     #[test]
     fn events_are_the_install_ids_and_personless() {
-        let mut e = event(&Lifecycle::Opened, ID, SESSION);
+        let mut e = lifecycle_event(&Lifecycle::Opened, ID, SESSION);
         standard().apply(&mut e);
         assert_eq!(e.event_name(), "Application Opened");
         assert_eq!(e.distinct_id(), ID);
@@ -369,7 +351,7 @@ mod tests {
 
     #[test]
     fn every_event_carries_the_standard_properties() {
-        let mut e = event(&Lifecycle::Installed, ID, SESSION);
+        let mut e = lifecycle_event(&Lifecycle::Installed, ID, SESSION);
         standard().apply(&mut e);
         let expected = json!({
             "$session_id": SESSION,
@@ -389,7 +371,7 @@ mod tests {
 
     #[test]
     fn what_is_unknown_is_left_out() {
-        let mut e = event(&Lifecycle::Opened, ID, SESSION);
+        let mut e = lifecycle_event(&Lifecycle::Opened, ID, SESSION);
         let unknown = Standard {
             app_version: "0.6.0".into(),
             channel: "cargo",
@@ -417,7 +399,7 @@ mod tests {
         let mut crash = Event::new_anon("$exception");
         standard().apply(&mut crash);
         assert!(!crash.properties().contains_key("$session_id"));
-        let e = event(&Lifecycle::Opened, ID, SESSION);
+        let e = lifecycle_event(&Lifecycle::Opened, ID, SESSION);
         assert_eq!(e.properties()["$session_id"], json!(SESSION));
     }
 
@@ -426,7 +408,7 @@ mod tests {
         let updated = Lifecycle::Updated {
             previous_version: "0.5.1".into(),
         };
-        let e = event(&updated, ID, SESSION);
+        let e = lifecycle_event(&updated, ID, SESSION);
         assert_eq!(e.event_name(), "Application Updated");
         assert_eq!(e.properties()["previous_version"], json!("0.5.1"));
     }

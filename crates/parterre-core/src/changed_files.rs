@@ -1,12 +1,6 @@
-//! Changed files: what one commit changed compared with its first parent.
-//!
-//! Git computes them ([`crate::git::Git::changed_files`]); this module holds the result types,
-//! the parser for git's output, and the path order the log window shows them in.
-
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-/// How a file changed, from git's `--raw` status letter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FileStatus {
     Added,
@@ -14,10 +8,8 @@ pub enum FileStatus {
     Deleted,
     Renamed,
     Copied,
-    /// The kind of entry changed, e.g. a file became a symlink.
     TypeChanged,
     Unmerged,
-    /// Any other letter git may print (`X`, or future additions).
     Unknown,
 }
 
@@ -35,7 +27,6 @@ impl FileStatus {
         }
     }
 
-    /// The word for the status column: "Added", "Modified", ...
     pub fn name(self) -> &'static str {
         match self {
             FileStatus::Added => "Added",
@@ -50,32 +41,26 @@ impl FileStatus {
     }
 }
 
-/// One file a commit changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangedFile {
-    /// Path in the commit, relative to the repository root with `/` separators. For a deleted
-    /// file, the path it had.
     pub path: String,
-    /// The path in the parent, for renames and copies.
+    /// For renames and copies.
     pub old_path: Option<String>,
     pub status: FileStatus,
-    /// The old and new mode, as git's octal numbers (`0o100644`, `0o160000` for a submodule;
-    /// 0 for a side that doesn't exist).
+    /// Old and new; 0 for a missing side.
     pub modes: [u32; 2],
-    /// Lines added; `None` for binary files.
+    /// `None` for a binary file.
     pub added: Option<u32>,
-    /// Lines removed; `None` for binary files.
+    /// `None` for a binary file.
     pub removed: Option<u32>,
 }
 
 impl ChangedFile {
-    /// True if git treats the file as binary (no line counts).
     pub fn is_binary(&self) -> bool {
         self.added.is_none()
     }
 
-    /// The file name's extension without the dot, or `""` (dotfiles such as `.gitignore`
-    /// have none).
+    /// Without the dot; a dotfile such as `.gitignore` has none.
     pub fn extension(&self) -> &str {
         let name = self.path.rsplit('/').next().unwrap_or(&self.path);
         match name.rfind('.') {
@@ -85,36 +70,30 @@ impl ChangedFile {
     }
 }
 
-/// Path order for changed files: folder by folder, a folder's files before its subfolders,
-/// names compared case-insensitively (ties broken case-sensitively, so the order is total).
-///
-/// `b.txt` < `a/z.txt`, `A.txt` < `b.txt` < `C.txt`, `src/x.rs` < `src/sub/a.rs`.
+/// Folder by folder, a folder's files before its subfolders, names ignoring case (then by
+/// case, so that the order is total).
 pub fn compare_paths(a: &str, b: &str) -> Ordering {
-    let mut ia = a.split('/').peekable();
-    let mut ib = b.split('/').peekable();
-    loop {
-        let (Some(ca), Some(cb)) = (ia.next(), ib.next()) else {
-            // Only reached for equal paths: a component that ends one path is a file and
-            // is decided below before the other path runs on.
-            return a.cmp(b);
-        };
-        let a_file = ia.peek().is_none();
-        let b_file = ib.peek().is_none();
-        if a_file != b_file {
-            return if a_file {
-                Ordering::Less
-            } else {
-                Ordering::Greater
-            };
-        }
-        let order = cmp_case_insensitive(ca, cb).then_with(|| ca.cmp(cb));
-        if order != Ordering::Equal || a_file {
+    /// Each component of `path`, and whether it is a folder.
+    fn components(path: &str) -> impl Iterator<Item = (&str, bool)> {
+        let mut parts = path.split('/').peekable();
+        std::iter::from_fn(move || {
+            let part = parts.next()?;
+            Some((part, parts.peek().is_some()))
+        })
+    }
+    // Where one path ends, the other has a folder, which decides: zip never cuts one short.
+    for ((a, a_is_folder), (b, b_is_folder)) in components(a).zip(components(b)) {
+        let order = a_is_folder
+            .cmp(&b_is_folder)
+            .then_with(|| cmp_case_insensitive(a, b))
+            .then_with(|| a.cmp(b));
+        if order.is_ne() {
             return order;
         }
     }
+    Ordering::Equal
 }
 
-/// A column of the changed-files table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum FileColumn {
     #[default]
@@ -134,7 +113,6 @@ impl FileColumn {
         FileColumn::Removed,
     ];
 
-    /// The column's heading.
     pub fn title(self) -> &'static str {
         match self {
             FileColumn::Path => "Path",
@@ -146,7 +124,6 @@ impl FileColumn {
     }
 }
 
-/// How the changed-files table is sorted. The default is the first view: path order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FileOrder {
     pub column: FileColumn,
@@ -154,7 +131,7 @@ pub struct FileOrder {
 }
 
 impl FileOrder {
-    /// A click on `column`'s heading: sorts by it, or reverses it if it is already the sort.
+    /// Sorts by `column`, or reverses the sort if it already is by `column`.
     pub fn click(&mut self, column: FileColumn) {
         if self.column == column {
             self.descending = !self.descending;
@@ -166,33 +143,26 @@ impl FileOrder {
         }
     }
 
-    /// Orders two files: by the column, ties by [`compare_paths`] (always ascending). Binary
-    /// files, which have no line counts, sort below 0 lines.
+    /// Ties go by path, ascending either way. Binary files, without line counts, sort below 0
+    /// lines.
     pub fn compare(self, a: &ChangedFile, b: &ChangedFile) -> Ordering {
         let by_column = match self.column {
-            FileColumn::Path => Ordering::Equal,
+            FileColumn::Path => compare_paths(&a.path, &b.path),
             FileColumn::Extension => cmp_case_insensitive(a.extension(), b.extension()),
             FileColumn::Status => a.status.name().cmp(b.status.name()),
             FileColumn::Added => a.added.cmp(&b.added),
             FileColumn::Removed => a.removed.cmp(&b.removed),
         };
-        let paths = compare_paths(&a.path, &b.path);
-        if self.column == FileColumn::Path {
-            if self.descending {
-                paths.reverse()
-            } else {
-                paths
-            }
-        } else if self.descending {
-            by_column.reverse().then(paths)
+        let by_column = if self.descending {
+            by_column.reverse()
         } else {
-            by_column.then(paths)
-        }
+            by_column
+        };
+        by_column.then_with(|| compare_paths(&a.path, &b.path))
     }
 }
 
-/// The indices of the files whose path (or old path) contains `filter`, ignoring case, in
-/// `order`.
+/// The indices of the files whose path or old path contains `filter`, ignoring case.
 pub fn filter_and_sort(files: &[ChangedFile], filter: &str, order: FileOrder) -> Vec<usize> {
     let filter = filter.to_lowercase();
     let matches = |f: &ChangedFile| {
@@ -213,8 +183,7 @@ fn cmp_case_insensitive(a: &str, b: &str) -> Ordering {
         .cmp(b.chars().flat_map(char::to_lowercase))
 }
 
-/// Parses `git diff-tree -z --raw --numstat` output (all raw records, then all numstat
-/// records) into changed files sorted by [`compare_paths`].
+/// Parses `git diff-tree -z --raw --numstat`: all raw records, then all numstat records.
 pub(crate) fn parse_diff_tree(out: &str) -> Result<Vec<ChangedFile>, String> {
     let mut tokens = out.split('\0').peekable();
     let mut files = Vec::new();

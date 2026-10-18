@@ -1,19 +1,13 @@
-//! Finding text in the lines of a file, as the blame and diff windows' find fields do: every
-//! place a query occurs, ignoring case as the main window's find does, and stepping from one
-//! to the next or previous, round the ends.
-
 use std::ops::Range;
 
-/// A place the query occurs: a line (an index into the lines searched) and a range in it.
-/// [`find`] gives byte ranges in the lines as searched.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Match {
     pub line: usize,
+    /// Bytes of the line.
     pub range: Range<usize>,
 }
 
-/// Every place `query` occurs in `lines`, in order, ignoring case (compared in lower case);
-/// places in a line don't overlap. An empty query occurs nowhere.
+/// Ignores case; matches don't overlap, and an empty query matches nothing.
 pub fn find<S: AsRef<str>>(lines: impl IntoIterator<Item = S>, query: &str) -> Vec<Match> {
     let query = query.to_lowercase();
     if query.is_empty() {
@@ -22,17 +16,16 @@ pub fn find<S: AsRef<str>>(lines: impl IntoIterator<Item = S>, query: &str) -> V
     let mut found = Vec::new();
     for (line, text) in lines.into_iter().enumerate() {
         let text = text.as_ref();
-        let (folded, from) = fold(text);
-        for (start, _) in folded.match_indices(&query) {
+        let (lower, origin) = lowercase_with_origins(text);
+        for (start, _) in lower.match_indices(&query) {
             let end = start + query.len();
-            // A match must start and end where whole characters of the line do (a character
-            // can lower to several, as 'İ' does).
-            let whole =
-                (start == 0 || from[start - 1] != from[start]) && from[end - 1] != from[end];
+            // A character can lower to several, as 'İ' does: a match must cover whole ones.
+            let whole = (start == 0 || origin[start - 1] != origin[start])
+                && origin[end - 1] != origin[end];
             if whole {
                 found.push(Match {
                     line,
-                    range: from[start]..from[end],
+                    range: origin[start]..origin[end],
                 });
             }
         }
@@ -40,7 +33,6 @@ pub fn find<S: AsRef<str>>(lines: impl IntoIterator<Item = S>, query: &str) -> V
     found
 }
 
-/// A place found, by the line it is on, for stepping with [`first_from`] and [`step`].
 pub trait Place {
     fn line(&self) -> usize;
 }
@@ -51,28 +43,28 @@ impl Place for Match {
     }
 }
 
-/// A line found as a whole, known by its number alone (the log's rows).
+/// A row found as a whole, as the log's are.
 impl Place for usize {
     fn line(&self) -> usize {
         *self
     }
 }
 
-/// `text` in lower case, and for each of its bytes (and its end) the byte in `text` where the
-/// character it came from starts (and `text`'s end).
-fn fold(text: &str) -> (String, Vec<usize>) {
-    let mut folded = String::with_capacity(text.len());
-    let mut from = Vec::with_capacity(text.len() + 1);
+/// `text` lowercased, and for each of its bytes, plus its end, where in `text` the character
+/// it came from starts.
+fn lowercase_with_origins(text: &str) -> (String, Vec<usize>) {
+    let mut lower = String::with_capacity(text.len());
+    let mut origin = Vec::with_capacity(text.len() + 1);
     for (i, c) in text.char_indices() {
-        let before = folded.len();
-        folded.extend(c.to_lowercase());
-        from.resize(from.len() + folded.len() - before, i);
+        let before = lower.len();
+        lower.extend(c.to_lowercase());
+        origin.resize(origin.len() + lower.len() - before, i);
     }
-    from.push(text.len());
-    (folded, from)
+    origin.push(text.len());
+    (lower, origin)
 }
 
-/// The first match at or after line `line`, else the first of all (going round the end).
+/// The first match at or after `line`, else the first of all.
 pub fn first_from<P: Place>(matches: &[P], line: usize) -> Option<usize> {
     if matches.is_empty() {
         return None;
@@ -81,24 +73,28 @@ pub fn first_from<P: Place>(matches: &[P], line: usize) -> Option<usize> {
     Some(if at < matches.len() { at } else { 0 })
 }
 
-/// The match after `current` (`forward`) or before it, going round the ends. With none
-/// current, the first at or after line `line` going forward, or the last before it going
-/// back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    Next,
+    Previous,
+}
+
+/// Goes round the ends. With no match current, starts from `line`.
 pub fn step<P: Place>(
     matches: &[P],
     current: Option<usize>,
-    forward: bool,
+    step: Step,
     line: usize,
 ) -> Option<usize> {
     let n = matches.len();
     if n == 0 {
         return None;
     }
-    Some(match (current, forward) {
-        (Some(c), true) => (c + 1) % n,
-        (Some(c), false) => (c + n - 1) % n,
-        (None, true) => first_from(matches, line)?,
-        (None, false) => {
+    Some(match (current, step) {
+        (Some(c), Step::Next) => (c + 1) % n,
+        (Some(c), Step::Previous) => (c + n - 1) % n,
+        (None, Step::Next) => first_from(matches, line)?,
+        (None, Step::Previous) => {
             let at = matches.partition_point(|m| m.line() < line);
             (at + n - 1) % n
         }
@@ -168,11 +164,11 @@ mod tests {
     #[test]
     fn steps_round_the_ends() {
         let matches = at(&[2, 5, 5, 9]);
-        assert_eq!(step(&matches, Some(0), true, 0), Some(1));
-        assert_eq!(step(&matches, Some(3), true, 0), Some(0));
-        assert_eq!(step(&matches, Some(0), false, 0), Some(3));
-        assert_eq!(step(&matches, Some(2), false, 0), Some(1));
-        assert_eq!(step::<Match>(&[], Some(0), true, 0), None);
+        assert_eq!(step(&matches, Some(0), Step::Next, 0), Some(1));
+        assert_eq!(step(&matches, Some(3), Step::Next, 0), Some(0));
+        assert_eq!(step(&matches, Some(0), Step::Previous, 0), Some(3));
+        assert_eq!(step(&matches, Some(2), Step::Previous, 0), Some(1));
+        assert_eq!(step::<Match>(&[], Some(0), Step::Next, 0), None);
     }
 
     #[test]
@@ -184,8 +180,8 @@ mod tests {
         // Past the last: round to the first.
         assert_eq!(first_from(&matches, 10), Some(0));
         assert_eq!(first_from::<Match>(&[], 3), None);
-        assert_eq!(step(&matches, None, true, 6), Some(3));
-        assert_eq!(step(&matches, None, false, 6), Some(2));
-        assert_eq!(step(&matches, None, false, 0), Some(3));
+        assert_eq!(step(&matches, None, Step::Next, 6), Some(3));
+        assert_eq!(step(&matches, None, Step::Previous, 6), Some(2));
+        assert_eq!(step(&matches, None, Step::Previous, 0), Some(3));
     }
 }

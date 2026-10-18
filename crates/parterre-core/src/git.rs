@@ -1,8 +1,6 @@
-//! Loading a [`Repo`] snapshot by running the `git` command-line tool.
-//!
-//! We shell out to `git` rather than linking a git library: it is always present where
-//! parterre is useful, honours every repository configuration (worktrees, alternates,
-//! packed refs, sha256, ...), and `git log` streams tens of thousands of commits in
+//! parterre runs the `git` command-line tool rather than linking a git library: it is always
+//! present where parterre is useful, honours every repository configuration (worktrees,
+//! alternates, packed refs, sha256, ...), and `git log` streams tens of thousands of commits in
 //! milliseconds.
 
 use std::collections::HashMap;
@@ -19,7 +17,7 @@ use crate::file_diff::{Content, FileDiffSpec, LoadedDiff, Rev, Version, decode};
 use crate::file_history::{self, FileLog};
 use crate::oid::Oid;
 use crate::repo::{Commit, CommitIx, DEFAULT_ABBREV_LEN, GitRef, Head, RefKind, Repo, Worktree};
-use crate::worktree_folder::same_path;
+use crate::worktree_folder::same_path_on_disk;
 
 mod program;
 mod version;
@@ -31,7 +29,6 @@ pub use version::{MINIMUM_VERSION, version};
 pub enum GitError {
     #[error("could not run git ({0}); is git installed and on PATH?")]
     Spawn(#[source] std::io::Error),
-    /// The version `git --version` printed, older than [`MINIMUM_VERSION`].
     #[error(
         "git {0} is too old; parterre needs git {major}.{minor} or newer",
         major = MINIMUM_VERSION.0,
@@ -42,8 +39,7 @@ pub enum GitError {
     Failed { args: String, stderr: String },
     #[error("{0} is not inside a git repository")]
     NotARepository(PathBuf),
-    /// git found a bare repository by itself and won't use it: `safe.bareRepository` is
-    /// `explicit`, Git 3.0's default. `open` is the folder that does open (#228).
+    /// `open` is the folder to open instead (#228).
     #[error(
         "git won't use discovered bare repository {found} (safe.bareRepository is 'explicit'); \
          open {open}"
@@ -57,37 +53,80 @@ pub enum GitError {
         #[source]
         source: std::io::Error,
     },
-    /// Stopped with [`Cancel::cancel`].
+    #[error("could not create {path}: {source}")]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not write {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("cancelled")]
     Cancelled,
 }
 
-/// Fails with [`GitError::Cancelled`] once `cancel` is.
-fn check(cancel: &Cancel) -> Result<(), GitError> {
+fn check_cancelled(cancel: &Cancel) -> Result<(), GitError> {
     if cancel.is_cancelled() {
         return Err(GitError::Cancelled);
     }
     Ok(())
 }
 
-/// A handle for running git commands against one repository.
+fn failed(args: &[&str], stderr: &[u8]) -> GitError {
+    GitError::Failed {
+        args: args.join(" "),
+        stderr: String::from_utf8_lossy(stderr).trim().to_owned(),
+    }
+}
+
+fn stdout_on_success(args: &[&str], out: Output) -> Result<Vec<u8>, GitError> {
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(failed(args, &out.stderr))
+    }
+}
+
+/// One per line, as `--stdin` and `--batch` read them.
+fn oid_lines(oids: &[Oid]) -> String {
+    oids.iter().map(|oid| format!("{oid}\n")).collect()
+}
+
+/// Copies only where the bytes aren't UTF-8, unlike `String::from_utf8_lossy(..).into_owned()`.
+fn into_string_lossy(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
 #[derive(Clone, Debug)]
 pub struct Git {
     dir: PathBuf,
-    /// Named with `--git-dir`: a bare repository git would not discover (#228).
     pass_git_dir: bool,
 }
 
-/// Separator for `for-each-ref` fields (ref names cannot contain control characters).
-const FIELD: char = '\x1f';
-/// `git log -z` format: NUL-separated fields, so subjects and names may contain anything.
+/// Ref names cannot contain control characters.
+const REF_FIELD_SEPARATOR: char = '\x1f';
+const REF_FIELDS: [&str; 9] = [
+    "%(refname)",
+    "%(objecttype)",
+    "%(objectname)",
+    "%(*objecttype)",
+    "%(*objectname)",
+    "%(symref)",
+    "%(upstream)",
+    "%(upstream:remotename)",
+    "%(upstream:remoteref)",
+];
+/// NUL-separated, so subjects and names may contain anything.
 const LOG_FORMAT: &str = "--format=%H%x00%P%x00%T%x00%an%x00%ae%x00%at%x00%ad%x00%ct%x00%s";
 const LOG_FIELDS: usize = 9;
+const LOG_DATE_FORMAT: &str = "--date=format-local:%Y-%m-%d %H:%M";
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 
-/// git with no arguments yet: piped output, the C locale, the user's shell's `PATH` and no
-/// console window.
 fn git_command() -> Command {
     let mut cmd = Command::new(program());
     crate::shell_path::apply(&mut cmd)
@@ -106,11 +145,11 @@ fn git_command() -> Command {
     cmd
 }
 
-/// Whether `dir` is a git dir that git would take for a bare repository if it found it by
-/// itself, which `safe.bareRepository=explicit` (Git 3.0's default) forbids. That is any but a
-/// work tree's `.git`, or a linked worktree's or a submodule's git dir inside one: git lets
-/// those through (`is_implicit_bare_repo` in setup.c), and `--git-dir` would make a `.git`
-/// folder its own work tree. Judged by the real path, as git does, so `.` inside a `.git` counts.
+/// Whether git, finding `dir` by itself, would take it for a bare repository, which
+/// `safe.bareRepository=explicit` (Git 3.0's default) forbids. That is any git dir but a work
+/// tree's `.git`, or a linked worktree's or a submodule's git dir inside one: git lets those
+/// through (`is_implicit_bare_repo` in setup.c), and `--git-dir` would make a `.git` folder its
+/// own work tree. Judged by the real path, as git does, so `.` inside a `.git` counts.
 fn is_implicit_bare(dir: &Path) -> bool {
     let looks_like_git_dir =
         dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir();
@@ -128,8 +167,7 @@ fn is_implicit_bare(dir: &Path) -> bool {
     !inside_dot_git
 }
 
-/// Why git could not open `dir`, from what it printed.
-fn not_opened(dir: &Path, stderr: &str) -> GitError {
+fn open_error(dir: &Path, stderr: &str) -> GitError {
     let stderr = stderr.trim();
     let refused = stderr.lines().find_map(|line| {
         let rest = line.strip_prefix("fatal: cannot use bare repository '")?;
@@ -154,30 +192,24 @@ fn not_opened(dir: &Path, stderr: &str) -> GitError {
     }
 }
 
-/// Where the repository around a folder keeps things, from one `rev-parse`.
+/// Where the repository around a folder keeps things.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Location {
-    /// The git dir: a work tree's `.git`, a linked worktree's `.git/worktrees/<name>`, or a
-    /// bare repository itself.
     pub git_dir: PathBuf,
-    /// The git dir the refs are kept in: the main worktree's, from a linked worktree;
-    /// otherwise the git dir itself.
     pub common_dir: PathBuf,
-    /// The root of the work tree the folder is in: none in a bare repository or inside a
-    /// `.git` folder.
+    /// `None` in a bare repository, and inside a `.git` folder.
     pub work_tree: Option<PathBuf>,
 }
 
 impl Location {
-    /// The repository root: the work tree, or the git dir where there is none.
     pub fn root(&self) -> &Path {
         self.work_tree.as_deref().unwrap_or(&self.git_dir)
     }
 }
 
-/// What [`Git::location`]'s `rev-parse` printed, as far as it got: with no work tree it stops
-/// at `--show-toplevel`, after `--is-inside-work-tree` has said `false`. `None` for anything
-/// else cut short, or nothing at all (not a repository).
+/// With no work tree, [`Git::location`]'s `rev-parse` fails at `--show-toplevel`, after
+/// `--is-inside-work-tree` has printed `false`. `None` for output cut short anywhere else, or
+/// none at all (not a repository).
 fn parse_location(stdout: &str, success: bool) -> Option<Location> {
     let mut lines = stdout.lines();
     let inside_work_tree = lines.next()? == "true";
@@ -195,26 +227,22 @@ fn parse_location(stdout: &str, success: bool) -> Option<Location> {
     })
 }
 
-/// git's settings as `git config --list` prints them, read in one call for whatever a loader
-/// or a dialog wants to know, where `git config --get` is a call per key (#309).
+/// git's settings from one `git config --list`, where `git config --get` is a call per key
+/// (#309).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {
-    /// Each setting's key, its section and name in lower case as git prints them, and its
-    /// value, in git's order: a later one overrides an earlier one. A key set without a value
-    /// (`[core]\n\tbare`) has none.
+    /// Keys as git prints them (section and name in lower case), in git's order: a later one
+    /// overrides an earlier one. A key set without a value (`[core]\n\tbare`) has none.
     entries: Vec<(String, Option<String>)>,
 }
 
 impl Config {
-    /// `key`'s value as `git config --get` gives it: the last one set, the section and name
-    /// matched regardless of case and the subsection as it is; empty for a key set without
-    /// a value.
+    /// As `git config --get` gives it: empty for a key set without a value.
     pub fn get(&self, key: &str) -> Option<&str> {
         self.last(key).map(|value| value.unwrap_or(""))
     }
 
-    /// `key` as `git config --bool` reads it: `true`, `yes`, `on`, `1` or set without a
-    /// value; `false`, `no`, `off`, `0` or empty. `None` if unset, or something else.
+    /// As `git config --bool` reads it; `None` if unset or not a boolean.
     pub fn bool(&self, key: &str) -> Option<bool> {
         match self.last(key)?.map(str::to_ascii_lowercase).as_deref() {
             None | Some("true" | "yes" | "on" | "1") => Some(true),
@@ -223,8 +251,7 @@ impl Config {
         }
     }
 
-    /// The remotes' names, as `git remote` lists them: every `remote.<name>.<setting>` names
-    /// one.
+    /// As `git remote` lists them.
     pub fn remotes(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .entries
@@ -237,8 +264,8 @@ impl Config {
         names
     }
 
-    /// The subsections whose `<section>.<subsection>.<name>` is set to something, in git's
-    /// order, each once: `mergetool.<tool>.cmd` names the user's tools.
+    /// The subsections whose `<section>.<subsection>.<name>` is set and not empty, in git's
+    /// order, each once.
     pub fn subsections(&self, section: &str, name: &str) -> Vec<String> {
         let (section, name) = (section.to_ascii_lowercase(), name.to_ascii_lowercase());
         let mut found: Vec<String> = Vec::new();
@@ -271,8 +298,7 @@ impl Config {
     }
 }
 
-/// `key` with its section and name in lower case, as git prints keys, and any subsection
-/// between them as it is.
+/// Section and name are case-insensitive in git; a subsection between them isn't.
 fn canonical_key(key: &str) -> String {
     match (key.find('.'), key.rfind('.')) {
         (Some(first), Some(last)) if first < last => format!(
@@ -285,8 +311,8 @@ fn canonical_key(key: &str) -> String {
     }
 }
 
-/// `git config -z --list`'s output: a NUL after each setting, its key and value separated by
-/// the first newline, and no newline for a key set without a value.
+/// `git config -z --list` puts a NUL after each setting, its key and value separated by the
+/// first newline, and no newline for a key set without a value.
 pub(crate) fn parse_config(out: &[u8]) -> Config {
     let entries = out
         .split(|&b| b == 0)
@@ -301,9 +327,8 @@ pub(crate) fn parse_config(out: &[u8]) -> Config {
     Config { entries }
 }
 
-/// `cat-file --batch`'s output for `count` objects asked for: `<oid> <type> <size>`, a
-/// newline, the contents and a newline, each. `None` if it reads otherwise, or an object is
-/// missing.
+/// `cat-file --batch` prints `<oid> <type> <size>`, a newline, the contents and a newline for
+/// each object. `None` if it reads otherwise, or an object is missing.
 fn parse_batch(out: &[u8], count: usize) -> Option<Vec<Vec<u8>>> {
     let mut objects = Vec::with_capacity(count);
     let mut rest = out;
@@ -321,24 +346,6 @@ fn parse_batch(out: &[u8], count: usize) -> Option<Vec<Vec<u8>>> {
         rest = rest.get(size + 1..)?;
     }
     Some(objects)
-}
-
-impl Git {
-    /// git's settings, in one call.
-    pub fn config(&self) -> Result<Config, GitError> {
-        Ok(parse_config(&self.run_bytes(&["config", "-z", "--list"])?))
-    }
-
-    /// The contents of blobs, in one call.
-    pub(crate) fn blobs(&self, oids: &[Oid]) -> Result<Vec<Vec<u8>>, GitError> {
-        if oids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let input: String = oids.iter().map(|o| format!("{o}\n")).collect();
-        let out = self.run_with_input_bytes(&["cat-file", "--batch"], input)?;
-        parse_batch(&out, oids.len())
-            .ok_or_else(|| GitError::Parse("unexpected output from cat-file --batch".into()))
-    }
 }
 
 impl Git {
@@ -377,8 +384,8 @@ impl Git {
         self.command(args).output().map_err(GitError::Spawn)
     }
 
-    /// Repository-changing porcelain: locks enabled and the user's locale inherited.
-    /// Kept separate from the viewer's read-only runner.
+    /// For operations, which change the repository: optional locks taken, messages in the
+    /// user's locale, and no prompt or editor waiting on a terminal nobody sees.
     pub(crate) fn operation_command(&self, args: &[String]) -> Command {
         let mut cmd = self.command(args);
         cmd.env("GIT_OPTIONAL_LOCKS", "1")
@@ -392,43 +399,24 @@ impl Git {
         cmd
     }
 
-    /// Runs git and returns stdout, failing on a non-zero exit status. Public for the crates
-    /// built on this one (the forge client); the app goes through the methods below.
+    /// Public for the crates built on this one (the forge client).
     pub fn run(&self, args: &[&str]) -> Result<String, GitError> {
-        let out = self.output(args)?;
-        if !out.status.success() {
-            return Err(GitError::Failed {
-                args: args.join(" "),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
-            });
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        self.run_bytes(args).map(into_string_lossy)
     }
 
-    /// Runs git and returns stdout as bytes, failing on a non-zero exit status.
     pub(crate) fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, GitError> {
-        let out = self.output(args)?;
-        if !out.status.success() {
-            return Err(GitError::Failed {
-                args: args.join(" "),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
-            });
-        }
-        Ok(out.stdout)
+        stdout_on_success(args, self.output(args)?)
     }
 
-    /// Runs git with `input` on stdin and returns stdout, failing on a non-zero exit status.
     pub(crate) fn run_with_input(
         &self,
         args: &[&str],
         input: impl Into<Vec<u8>>,
     ) -> Result<String, GitError> {
-        let out = self.run_with_input_bytes(args, input)?;
-        Ok(String::from_utf8_lossy(&out).into_owned())
+        self.run_with_input_bytes(args, input)
+            .map(into_string_lossy)
     }
 
-    /// Runs git with `input` on stdin and returns stdout as bytes, failing on a non-zero exit
-    /// status.
     fn run_with_input_bytes(
         &self,
         args: &[&str],
@@ -448,17 +436,9 @@ impl Git {
         });
         let out = child.wait_with_output().map_err(GitError::Spawn)?;
         let _ = writer.join();
-        if !out.status.success() {
-            return Err(GitError::Failed {
-                args: args.join(" "),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
-            });
-        }
-        Ok(out.stdout)
+        stdout_on_success(args, out)
     }
 
-    /// Runs git and returns stdout as bytes, failing on a non-zero exit status, unless `cancel`
-    /// kills it first.
     fn run_cancellable(&self, args: &[&str], cancel: &Cancel) -> Result<Vec<u8>, GitError> {
         let pipes = cancel
             .spawn(&mut self.command(args))
@@ -482,16 +462,13 @@ impl Git {
         let status = child.wait().map_err(GitError::Spawn)?;
         read.map_err(GitError::Spawn)?;
         if !status.success() {
-            return Err(GitError::Failed {
-                args: args.join(" "),
-                stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
-            });
+            return Err(failed(args, &stderr));
         }
         Ok(out)
     }
 
-    /// Runs git and returns trimmed stdout, or `None` on a non-zero exit status (for queries
-    /// such as `symbolic-ref -q` that signal "no" through the exit code). Public as [`Git::run`].
+    /// Trimmed stdout, or `None` for a non-zero exit status: for queries such as
+    /// `symbolic-ref -q` that say "no" through it. Public as [`Git::run`].
     pub fn query(&self, args: &[&str]) -> Result<Option<String>, GitError> {
         let out = self.output(args)?;
         Ok(out
@@ -500,7 +477,19 @@ impl Git {
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned()))
     }
 
-    /// Where the repository around [`Git::dir`] keeps things, or why git couldn't open it.
+    pub fn config(&self) -> Result<Config, GitError> {
+        Ok(parse_config(&self.run_bytes(&["config", "-z", "--list"])?))
+    }
+
+    pub(crate) fn blobs(&self, oids: &[Oid]) -> Result<Vec<Vec<u8>>, GitError> {
+        if oids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let out = self.run_with_input_bytes(&["cat-file", "--batch"], oid_lines(oids))?;
+        parse_batch(&out, oids.len())
+            .ok_or_else(|| GitError::Parse("unexpected output from cat-file --batch".into()))
+    }
+
     pub fn location(&self) -> Result<Location, GitError> {
         // One call for all of it: `--show-toplevel` fails after the others have printed where
         // there is no work tree (a bare repository, or inside a `.git` folder), which is how
@@ -519,17 +508,14 @@ impl Git {
             None if out.status.success() => {
                 Err(GitError::Parse(format!("rev-parse printed {stdout:?}")))
             }
-            None => Err(not_opened(&self.dir, &String::from_utf8_lossy(&out.stderr))),
+            None => Err(open_error(&self.dir, &String::from_utf8_lossy(&out.stderr))),
         }
     }
 
-    /// Resolves the repository root: the working tree, or the git dir for a bare repository.
     pub fn repo_root(&self) -> Result<PathBuf, GitError> {
         Ok(self.location()?.root().to_owned())
     }
 
-    /// Loads all refs (notes excluded) and every commit reachable from them.
-    ///
     /// Refs and HEAD are read first and the log is then walked from exactly those commits, so
     /// a concurrent fetch cannot leave refs pointing at commits that were not loaded.
     pub fn load(&self) -> Result<Repo, GitError> {
@@ -552,19 +538,20 @@ impl Git {
             let log = if starts.is_empty() {
                 Ok((Vec::new(), HashMap::new()))
             } else {
-                let input: String = starts.iter().map(|o| format!("{o}\n")).collect();
-                git.run_with_input(
+                git.run_with_input_bytes(
                     &[
                         "log",
                         "--no-color",
                         "--no-decorate",
-                        "--date=format-local:%Y-%m-%d %H:%M",
+                        LOG_DATE_FORMAT,
                         "-z",
                         LOG_FORMAT,
                         "--stdin",
                     ],
-                    input,
+                    oid_lines(&starts),
                 )
+                // A copy, git's bigger buffer freed before the parse: see `parse_log`.
+                .map(|out| String::from_utf8_lossy(&out).into_owned())
                 .and_then(|log| parse_log(&log))
             };
             (log, abbrev.join().unwrap_or(DEFAULT_ABBREV_LEN))
@@ -631,7 +618,7 @@ impl Git {
                     locked: w.locked.is_some(),
                     // A locked worktree is never prunable, even with its folder gone.
                     missing: w.prunable || !path.is_dir(),
-                    open: has_working_tree && same_path(&path, &root),
+                    open: has_working_tree && same_path_on_disk(&path, &root),
                     path,
                 }
             })
@@ -641,6 +628,7 @@ impl Git {
             .iter()
             .find(|(name, _)| name == "refs/remotes/origin/HEAD")
             .map(|(_, target)| target.clone());
+        // Indexed anew, after the commits: handed `by_oid` instead, a load is 0.4% slower.
         let mut repo = Repo::new(root, commits, refs, head);
         repo.abbrev_len = abbrev_len;
         repo.has_working_tree = has_working_tree;
@@ -651,13 +639,12 @@ impl Git {
         Ok(repo)
     }
 
-    /// The refs and worktrees of the repository at `location`, and HEAD: what [`Git::load`]
-    /// walks the log from, and what the branch catalogue is built from (#310). Run in its
-    /// root.
+    /// Run in the repository's root.
     pub(crate) fn list(&self, location: Location) -> Result<Listing, GitError> {
         let root = location.root().to_owned();
         let ref_format = format!(
-            "--format=%(refname){FIELD}%(objecttype){FIELD}%(objectname){FIELD}%(*objecttype){FIELD}%(*objectname){FIELD}%(symref){FIELD}%(upstream){FIELD}%(upstream:remotename){FIELD}%(upstream:remoteref)"
+            "--format={}",
+            REF_FIELDS.join(&REF_FIELD_SEPARATOR.to_string())
         );
         let (listing, worktrees) = std::thread::scope(|s| {
             // Listed alongside the refs, and before the walk, which starts from their HEADs
@@ -680,10 +667,8 @@ impl Git {
                 .collect();
             let out = self.run_with_input(&["cat-file", "--batch-check"], input)?;
             for (&i, line) in nested.iter().zip(out.lines()) {
-                if let Some((oid, "commit")) = line
-                    .split_once(' ')
-                    .map(|(o, rest)| (o, rest.split(' ').next().unwrap_or("")))
-                {
+                let mut fields = line.split(' ');
+                if let (Some(oid), Some("commit")) = (fields.next(), fields.next()) {
                     raw_refs[i].commit = Oid::from_hex(oid);
                 }
             }
@@ -708,10 +693,13 @@ impl Git {
         // HEAD's branch and commit are in the worktree listing, for the open worktree. Without
         // one to match (a bare repository, or inside a `.git` folder) git is asked: the branch,
         // and its commit unless the ref listing has it (#309).
-        let open = worktrees
-            .iter()
-            .filter(|_| location.work_tree.is_some())
-            .find(|w| same_path(Path::new(&w.path), &root));
+        let open = if location.work_tree.is_some() {
+            worktrees
+                .iter()
+                .find(|w| same_path_on_disk(Path::new(&w.path), &root))
+        } else {
+            None
+        };
         let (head_branch, head) = match open {
             Some(w) => (w.branch.clone(), w.head),
             None => {
@@ -740,9 +728,8 @@ impl Git {
         })
     }
 
-    /// `git worktree list --porcelain -z`'s worktrees, or the older form's where git lacks
-    /// `-z` (before 2.36: Ubuntu 22.04 has 2.34). An error where the older form can't be read
-    /// safely: a path with a newline in it splits its lines.
+    /// git before 2.36 (Ubuntu 22.04 has 2.34) lacks `-z`; its plain form is an error where it
+    /// can't be read safely, as a path with a newline in it splits its lines.
     fn worktrees(&self, root: &Path) -> Result<Vec<ListedWorktree>, String> {
         match self.run(&["worktree", "list", "--porcelain", "-z"]) {
             Ok(listing) => Ok(parse_worktrees(&listing)),
@@ -776,10 +763,8 @@ impl Git {
         }
     }
 
-    /// git's abbreviation length for the repository, as `%h` would print it (`core.abbrev`,
-    /// `auto` by default). git lengthens an abbreviation that would be ambiguous, so this takes
-    /// the shortest of a few samples. [`DEFAULT_ABBREV_LEN`] if there are no commits or git
-    /// fails.
+    /// As `%h` prints it. git lengthens an abbreviation that would be ambiguous, so this takes
+    /// the shortest of a few samples.
     fn abbrev_len(&self, commits: &[Oid]) -> usize {
         let samples: Vec<String> = commits.iter().take(3).map(Oid::to_hex).collect();
         if samples.is_empty() {
@@ -802,19 +787,17 @@ impl Git {
 /// What `git log` shows of a commit beyond what [`Git::load`] reads for every commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitDetails {
-    /// The full message: subject and body.
     pub message: String,
-    /// The author date to the second, in the author's time zone (`2026-09-27 08:14:19 +0200`).
+    /// In the author's time zone: `2026-09-27 08:14:19 +0200`.
     pub author_date: String,
     pub committer_name: String,
     pub committer_email: String,
-    /// The committer date, like [`CommitDetails::author_date`].
+    /// In the committer's time zone.
     pub committer_date: String,
-    /// The commit's notes from the refs `git log` shows notes from, in its order.
+    /// In the order `git log` shows them.
     pub notes: Vec<CommitNote>,
 }
 
-/// The note of one notes ref on a commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitNote {
     /// `Notes` for the default notes ref, `Notes (review)` for `refs/notes/review`.
@@ -823,7 +806,6 @@ pub struct CommitNote {
 }
 
 impl Git {
-    /// The message, dates, committer and notes of a commit.
     pub fn details(&self, oid: &Oid) -> Result<CommitDetails, GitError> {
         let hex = oid.to_hex();
         let out = self.run(&[
@@ -859,10 +841,8 @@ impl Git {
         })
     }
 
-    /// The changed files of a commit: what it changed compared with its first parent (a root
-    /// commit, or the boundary of a shallow clone, against the empty tree). Renames are
-    /// detected (`-M`); binary files have no line counts. Sorted by
-    /// [`compare_paths`](crate::changed_files::compare_paths).
+    /// Against the first parent; a root commit, or a shallow clone's boundary, against the
+    /// empty tree. Sorted by [`compare_paths`](crate::changed_files::compare_paths).
     pub fn changed_files(&self, commit: &Oid) -> Result<Vec<ChangedFile>, GitError> {
         let out = self.run(&[
             "diff-tree",
@@ -881,8 +861,6 @@ impl Git {
         parse_diff_tree(&out).map_err(GitError::Parse)
     }
 
-    /// The files that differ between the trees of two commits, `old` against `new`, as
-    /// `git diff-tree <old> <new>` lists them (TortoiseGit's "Compare revisions").
     pub fn changed_between(&self, old: &Oid, new: &Oid) -> Result<Vec<ChangedFile>, GitError> {
         let out = self.run(&[
             "diff-tree",
@@ -899,17 +877,32 @@ impl Git {
         parse_diff_tree(&out).map_err(GitError::Parse)
     }
 
-    /// The common ancestor git picks for two commits (`git merge-base`; hashes or names such
-    /// as `HEAD`), or `None` for unrelated histories.
+    /// `a` and `b` are hashes or names such as `HEAD`; `None` for unrelated histories.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<Oid>, GitError> {
         let out = self.query(&["merge-base", a, b])?;
         Ok(out.and_then(|hex| Oid::from_hex(&hex)))
     }
 
-    /// The files that differ between `commit` and the working tree, staged or not, as
-    /// `git diff <commit>` lists them; `reverse` lists the working tree against the commit
-    /// instead. Untracked files are not listed. The index's stat information is refreshed in
-    /// memory only (`--no-optional-locks`), so nothing is written.
+    pub(crate) fn is_ancestor(&self, ancestor: Oid, of: Oid) -> Result<bool, GitError> {
+        let (ancestor, of) = (ancestor.to_hex(), of.to_hex());
+        Ok(self
+            .query(&["merge-base", "--is-ancestor", &ancestor, &of])?
+            .is_some())
+    }
+
+    /// The commit `rev` names, if it names one.
+    pub(crate) fn resolve_commit(&self, rev: &str) -> Result<Option<Oid>, GitError> {
+        let out = self.query(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ])?;
+        Ok(out.and_then(|hex| Oid::from_hex(&hex)))
+    }
+
+    /// As `git diff <commit>` lists them, untracked files left out; `reverse` lists the working
+    /// tree against the commit instead. The index is refreshed in memory only.
     pub fn changed_in_working_tree(
         &self,
         commit: &Oid,
@@ -935,19 +928,18 @@ impl Git {
         let out = self.run(&args)?;
         parse_diff_tree(&out).map_err(GitError::Parse)
     }
-}
 
-impl Git {
-    /// Loads what a file diff compares: both versions as text, through the textconv filter
-    /// the file's `diff` attribute names (as `git show` does); or, for a binary file, their
-    /// sizes; or, for a submodule, the commits it pointed at.
+    /// Text goes through the textconv filter of the file's `diff` attribute, as `git show`
+    /// does.
     pub fn load_file_diff(&self, spec: &FileDiffSpec) -> Result<LoadedDiff, GitError> {
         let versions = [spec.old.as_ref(), spec.new.as_ref()];
         if spec.is_submodule() {
             let commit = |v: Option<&Version>| -> Result<Option<Oid>, GitError> {
                 let Some(v) = v else { return Ok(None) };
                 let out = match v.rev {
-                    Rev::Commit(_) => self.run(&["rev-parse", &object_name(v)])?,
+                    Rev::Commit(commit) => {
+                        self.run(&["rev-parse", &object_name(commit, &v.path)])?
+                    }
                     // What the submodule has checked out; nothing if it isn't.
                     Rev::WorkingTree => {
                         let dir = self.dir.join(&v.path);
@@ -970,14 +962,14 @@ impl Git {
         if spec.binary {
             let size = |v: Option<&Version>| -> Result<Option<u64>, GitError> {
                 let Some(v) = v else { return Ok(None) };
-                if v.rev == Rev::WorkingTree {
+                let Rev::Commit(commit) = v.rev else {
                     let path = self.dir.join(&v.path);
                     // A symlink's own size, as git sees it: its target needn't exist.
                     let meta = std::fs::symlink_metadata(&path)
                         .map_err(|source| GitError::Read { path, source })?;
                     return Ok(Some(meta.len()));
-                }
-                let out = self.run(&["cat-file", "-s", &object_name(v)])?;
+                };
+                let out = self.run(&["cat-file", "-s", &object_name(commit, &v.path)])?;
                 out.trim()
                     .parse()
                     .map(Some)
@@ -998,7 +990,9 @@ impl Git {
                 return Ok(String::new());
             };
             let bytes = match v.rev {
-                Rev::Commit(_) => self.run_bytes(&["cat-file", "--textconv", &object_name(v)])?,
+                Rev::Commit(commit) => {
+                    self.run_bytes(&["cat-file", "--textconv", &object_name(commit, &v.path)])?
+                }
                 Rev::WorkingTree => self.working_tree_file(&v.path)?,
             };
             let (text, bad) = decode(&bytes);
@@ -1018,9 +1012,7 @@ impl Git {
         })
     }
 
-    /// The textconv filter git applies to `path` when diffing, as `driver: command`: the
-    /// `diff` attribute (from the working tree, git's default) names a driver that has a
-    /// `diff.<driver>.textconv` command.
+    /// As `driver: command`.
     fn textconv(&self, path: &str) -> Result<Option<String>, GitError> {
         let out = self.run(&["check-attr", "-z", "diff", "--", path])?;
         // `<path> NUL diff NUL <value> NUL`
@@ -1033,13 +1025,8 @@ impl Git {
             .filter(|c| !c.is_empty())
             .map(|c| format!("{value}: {c}")))
     }
-}
 
-impl Git {
-    /// Blames a file: which commit last changed each of its lines (`git blame
-    /// --line-porcelain`), through the textconv filter of its `diff` attribute, as a diff
-    /// reads it. A root commit is the origin of its lines rather than a boundary; in the
-    /// working tree, lines no commit has yet belong to no commit.
+    /// Through the textconv filter of the file's `diff` attribute, as a diff reads it.
     pub fn blame(&self, spec: &BlameSpec, options: BlameOptions) -> Result<Blame, GitError> {
         let mut args = vec!["blame", "--line-porcelain", "--root"];
         if options.ignore_whitespace {
@@ -1054,21 +1041,16 @@ impl Git {
         let out = self.run_bytes(&args)?;
         Blame::parse(&out).map_err(GitError::Parse)
     }
-}
 
-impl Git {
-    /// The commits that changed the file a blame is of, up to the blamed revision, for the
-    /// history pane: `git log --no-follow --topo-order --parents <rev> -- <path>`, in git's
-    /// default history simplification, so a merge is listed only if it changed the file
-    /// compared with every parent. Combine it with the blame in
+    /// The commits that changed the file a blame is of, up to the blamed revision, in git's
+    /// default history simplification: a merge is listed only if it changed the file compared
+    /// with every parent. Combine it with the blame in
     /// [`FileHistory::new`](crate::file_history::FileHistory::new).
     ///
     /// For the working tree, the log starts at `HEAD` (and `MERGE_HEAD` during a merge) and
     /// runs on the file's path in `HEAD`, which differs after a staged rename; it also says
-    /// whether the file differs from `HEAD` at all (`git diff --quiet`), since an edit that
-    /// only deletes lines leaves no lines of its own in the blame.
-    ///
-    /// `cancel` kills git from another thread (the walk can take seconds on a long history).
+    /// whether the file differs from `HEAD` at all, since an edit that only deletes lines
+    /// leaves no lines of its own in the blame.
     pub fn file_log(&self, spec: &BlameSpec, cancel: &Cancel) -> Result<FileLog, GitError> {
         let (revs, path, working_tree_changed) = match spec.rev {
             Rev::Commit(oid) => (vec![oid.to_hex()], spec.path.clone(), false),
@@ -1076,11 +1058,11 @@ impl Git {
                 let mut revs = vec!["HEAD".to_owned()];
                 revs.extend(self.query(&["rev-parse", "-q", "--verify", "MERGE_HEAD^{commit}"])?);
                 let changed = self.differs_from_head(&spec.path)?;
-                check(cancel)?;
+                check_cancelled(cancel)?;
                 (revs, self.path_in_head(&spec.path)?, changed)
             }
         };
-        check(cancel)?;
+        check_cancelled(cancel)?;
         let mut args = vec![
             "--literal-pathspecs",
             "log",
@@ -1089,7 +1071,7 @@ impl Git {
             "--parents",
             "--no-color",
             "--no-decorate",
-            file_history::DATE_FORMAT,
+            LOG_DATE_FORMAT,
             "-z",
             file_history::LOG_FORMAT,
         ];
@@ -1103,7 +1085,6 @@ impl Git {
         })
     }
 
-    /// True if the file in the working tree, staged or not, differs from `HEAD`.
     fn differs_from_head(&self, path: &str) -> Result<bool, GitError> {
         let args = [
             "--no-optional-locks",
@@ -1119,17 +1100,13 @@ impl Git {
         match out.status.code() {
             Some(0) => Ok(false),
             Some(1) => Ok(true),
-            _ => Err(GitError::Failed {
-                args: args.join(" "),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
-            }),
+            _ => Err(failed(&args, &out.stderr)),
         }
     }
 
-    /// The path in `HEAD` of the working tree's file at `path`, as blame finds it: the same
-    /// path if `HEAD` has it, else the file a staged rename came from (`HEAD` against the
-    /// index, unlimited, since a diff limited to the path can't see the rename). Otherwise the
-    /// file is new and the path stays.
+    /// As blame finds it: `path` if `HEAD` has it, else the file a staged rename came from
+    /// (`HEAD` against the whole index, since a diff limited to the path can't see the
+    /// rename).
     fn path_in_head(&self, path: &str) -> Result<String, GitError> {
         if self
             .query(&["rev-parse", "-q", "--verify", &format!("HEAD:{path}")])?
@@ -1161,9 +1138,7 @@ impl Git {
         }
         Ok(path.to_owned())
     }
-}
 
-impl Git {
     /// A file of the working tree as `git diff` reads it: through its clean filter and
     /// line-ending conversion, then the textconv filter of its `diff` attribute. git has no
     /// command that prints that, so this diffs the file against the empty tree, which lists
@@ -1225,7 +1200,6 @@ fn added_lines(patch: &[u8]) -> Result<Vec<u8>, String> {
     Ok(text)
 }
 
-/// `<rev>:<path>`, the name git reads a committed version by.
 /// The notes in `git log --format=fuller --notes` output of one commit. The headers end at the
 /// first empty line; after them, the message and every note's text are indented by four
 /// spaces, and each note starts with a heading at the start of a line.
@@ -1250,19 +1224,33 @@ fn parse_notes(fuller: &str) -> Vec<CommitNote> {
     notes
 }
 
-fn object_name(v: &Version) -> String {
-    let rev = v.rev.commit().map(|o| o.to_hex()).unwrap_or_default();
-    format!("{rev}:{}", v.path)
+fn object_name(commit: Oid, path: &str) -> String {
+    format!("{commit}:{path}")
 }
 
-/// Convenience wrapper: load the repository containing `dir`. Fails with
-/// [`GitError::TooOld`] first if git is older than [`MINIMUM_VERSION`].
+/// Fails with [`GitError::TooOld`] first if git is older than [`MINIMUM_VERSION`].
 pub fn load_repo(dir: &Path) -> Result<Repo, GitError> {
     version::check()?;
     Git::new(dir).load()
 }
 
+/// `git log -z` output's fields, `per_record` to a record, or how many there are when that's
+/// not a whole number of records.
+pub(crate) fn log_fields(log: &str, per_record: usize) -> Result<Vec<&str>, usize> {
+    let mut fields: Vec<&str> = log.split('\0').collect();
+    // `-z` terminates the last record with a NUL too.
+    if fields.last() == Some(&"") && fields.len() % per_record == 1 {
+        fields.pop();
+    }
+    if fields.len().is_multiple_of(per_record) {
+        Ok(fields)
+    } else {
+        Err(fields.len())
+    }
+}
+
 fn parse_log(log: &str) -> Result<(Vec<Commit>, HashMap<Oid, CommitIx>), GitError> {
+    /// A record with its numbers parsed and its text not copied yet.
     struct Raw<'a> {
         oid: Oid,
         parents: &'a str,
@@ -1275,26 +1263,23 @@ fn parse_log(log: &str) -> Result<(Vec<Commit>, HashMap<Oid, CommitIx>), GitErro
         subject: &'a str,
     }
 
-    let mut tokens: Vec<&str> = log.split('\0').collect();
-    // `-z` terminates the last record with a NUL too.
-    if tokens.last() == Some(&"") && tokens.len() % LOG_FIELDS == 1 {
-        tokens.pop();
-    }
-    if !tokens.len().is_multiple_of(LOG_FIELDS) {
-        return Err(GitError::Parse(format!(
-            "log output has {} fields, not a multiple of {LOG_FIELDS}",
-            tokens.len()
-        )));
-    }
-    let mut raw = Vec::with_capacity(tokens.len() / LOG_FIELDS);
-    let (records, _) = tokens.as_chunks::<LOG_FIELDS>();
-    for [hash, parents, tree, an, ae, at, ad, ct, subject] in records {
+    let fields = log_fields(log, LOG_FIELDS).map_err(|n| {
+        GitError::Parse(format!(
+            "log output has {n} fields, not a multiple of {LOG_FIELDS}"
+        ))
+    })?;
+    let (records, _) = fields.as_chunks::<LOG_FIELDS>();
+    // Records of their own first, from a copy of git's output (`Git::load`): without both,
+    // glibc hands some 15 MB back to the OS after every load, and faulting it in again makes
+    // the next one 1% slower.
+    let mut raw = Vec::with_capacity(records.len());
+    for &[hash, parents, tree, an, ae, at, ad, ct, subject] in records {
         let hash = hash.trim_start_matches('\n');
         raw.push(Raw {
             oid: Oid::from_hex(hash)
                 .ok_or_else(|| GitError::Parse(format!("bad hash {hash:?}")))?,
             parents,
-            empty_tree: *tree == EMPTY_TREE_SHA1 || *tree == EMPTY_TREE_SHA256,
+            empty_tree: tree == EMPTY_TREE_SHA1 || tree == EMPTY_TREE_SHA256,
             author_name: an,
             author_email: ae,
             author_time: at.parse().unwrap_or(0),
@@ -1303,13 +1288,11 @@ fn parse_log(log: &str) -> Result<(Vec<Commit>, HashMap<Oid, CommitIx>), GitErro
             subject,
         });
     }
-
     let by_oid: HashMap<Oid, CommitIx> = raw
         .iter()
         .enumerate()
-        .map(|(i, r)| (r.oid, CommitIx(i as u32)))
+        .map(|(i, r)| (r.oid, CommitIx::new(i)))
         .collect();
-
     let commits = raw
         .into_iter()
         .map(|r| {
@@ -1340,32 +1323,29 @@ fn parse_log(log: &str) -> Result<(Vec<Commit>, HashMap<Oid, CommitIx>), GitErro
     Ok((commits, by_oid))
 }
 
-/// What git lists of a repository's refs and worktrees, and its HEAD: read once, by
-/// [`Git::load`], and kept in the [`Repo`] for the branch catalogue to be built from, so the
-/// catalogue agrees with the graph (#310).
+/// What git lists of a repository's refs, worktrees and HEAD: read once, by [`Git::load`], and
+/// kept in the [`Repo`] for the branch catalogue, so that it agrees with the graph (#310).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Listing {
     pub location: Location,
-    /// The refs that point at commits, tags peeled; notes and symbolic refs left out.
+    /// Tags peeled; notes and symbolic refs left out.
     pub refs: Vec<ListedRef>,
-    /// The symbolic refs and the refs they point at: `refs/remotes/origin/HEAD` at
-    /// `refs/remotes/origin/main`.
+    /// Each with the ref it points at: `refs/remotes/origin/HEAD` at `refs/remotes/origin/main`.
     pub symrefs: Vec<(String, String)>,
-    /// Every worktree, the main one first, a bare main repository's too.
+    /// The main one first, a bare main repository's too.
     pub worktrees: Vec<ListedWorktree>,
-    /// Why the worktrees couldn't be read, if they couldn't: there are none then.
+    /// Why the worktrees couldn't be read: there are none then.
     pub worktree_error: Option<String>,
-    /// The branch HEAD is on (`refs/heads/main`), if any.
+    /// `refs/heads/main`.
     pub head_branch: Option<String>,
-    /// HEAD's commit: none for an unborn branch.
+    /// `None` for an unborn branch.
     pub head: Option<Oid>,
 }
 
-/// A ref in a [`Listing`].
 #[derive(Clone, Debug)]
 pub(crate) struct ListedRef {
     pub full_name: String,
-    /// The commit it points at, tags peeled.
+    /// Tags peeled.
     pub commit: Oid,
     pub annotated: bool,
     /// A local branch's upstream (`refs/remotes/origin/topic`), whether it exists or not.
@@ -1374,25 +1354,24 @@ pub(crate) struct ListedRef {
     pub upstream_remote: Option<(String, String)>,
 }
 
-/// A ref as listed by `for-each-ref`, before its commit is looked up.
+/// A ref as `for-each-ref` lists it, before tags of tags are peeled.
 #[derive(Debug)]
 struct RawRef {
     full_name: String,
-    /// The commit it points at (tags peeled), or `None` for a tag of a tag, which still needs
-    /// peeling.
+    /// `None` for a tag of a tag.
     commit: Option<Oid>,
     annotated: bool,
     upstream: Option<String>,
     upstream_remote: Option<(String, String)>,
 }
 
-/// Parses `for-each-ref` output, and the symbolic refs with what they point at. Symbolic refs
-/// (duplicates), notes, and refs to trees or blobs are left out of the refs.
+/// The refs, and apart from them the symbolic refs with what they point at. Notes, and refs to
+/// trees or blobs, are left out.
 fn parse_refs(out: &str) -> (Vec<RawRef>, Vec<(String, String)>) {
     let mut refs = Vec::new();
     let mut symrefs = Vec::new();
     for line in out.lines() {
-        let f: Vec<&str> = line.split(FIELD).collect();
+        let f: Vec<&str> = line.split(REF_FIELD_SEPARATOR).collect();
         let [
             full_name,
             obj_type,
@@ -1434,7 +1413,6 @@ fn parse_refs(out: &str) -> (Vec<RawRef>, Vec<(String, String)>) {
     (refs, symrefs)
 }
 
-/// A worktree in a [`Listing`], as `git worktree list --porcelain` lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ListedWorktree {
     pub path: String,
@@ -1443,13 +1421,13 @@ pub(crate) struct ListedWorktree {
     /// `refs/heads/main`; `None` when detached.
     pub branch: Option<String>,
     pub bare: bool,
-    /// The lock's reason (empty when none was given), when it's locked.
+    /// The lock's reason, empty when none was given.
     pub locked: Option<String>,
     pub prunable: bool,
 }
 
-/// Parses `git worktree list --porcelain -z`: a NUL after each attribute, and another after
-/// each worktree's. `locked` and `prunable` are listed from git 2.31 on.
+/// `git worktree list --porcelain -z` puts a NUL after each attribute, and another after each
+/// worktree's. `locked` and `prunable` are listed from git 2.31 on.
 fn parse_worktrees(out: &str) -> Vec<ListedWorktree> {
     let mut worktrees: Vec<ListedWorktree> = Vec::new();
     for field in out.split('\0') {
@@ -1480,7 +1458,7 @@ fn parse_worktrees(out: &str) -> Vec<ListedWorktree> {
     worktrees
 }
 
-/// Classifies a full ref name and produces its display name.
+/// A full ref name's kind and display name.
 pub fn classify_ref(full_name: &str) -> (RefKind, String) {
     let strip = |prefix: &str| full_name.strip_prefix(prefix).map(str::to_owned);
     if let Some(n) = strip("refs/heads/") {
@@ -1605,14 +1583,14 @@ mod tests {
         };
         let dir = Path::new("/r/bare.git/refs");
         assert_eq!(
-            not_opened(dir, &refusal("/r/bare.git")).to_string(),
+            open_error(dir, &refusal("/r/bare.git")).to_string(),
             "git won't use discovered bare repository /r/bare.git \
              (safe.bareRepository is 'explicit'); open /r/bare.git"
         );
         // Before 2.45 git refuses a work tree's `.git` too; the work tree opens.
         let dot_git = Path::new("/r/work/.git");
         assert_eq!(
-            not_opened(dot_git, &refusal("/r/work/.git")).to_string(),
+            open_error(dot_git, &refusal("/r/work/.git")).to_string(),
             "git won't use discovered bare repository /r/work/.git \
              (safe.bareRepository is 'explicit'); open /r/work"
         );
@@ -1621,7 +1599,7 @@ mod tests {
             "fatal: cannot change to '/r/bare.git/refs': No such file or directory",
         ] {
             assert!(matches!(
-                not_opened(dir, missing),
+                open_error(dir, missing),
                 GitError::NotARepository(d) if d == dir
             ));
         }
@@ -1629,7 +1607,7 @@ mod tests {
         let dubious = "fatal: detected dubious ownership in repository at '/r'\n\
                        To add an exception for this directory, call:";
         assert!(
-            not_opened(dir, dubious)
+            open_error(dir, dubious)
                 .to_string()
                 .contains("detected dubious ownership in repository at '/r'")
         );

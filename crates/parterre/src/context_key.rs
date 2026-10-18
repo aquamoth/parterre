@@ -7,15 +7,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use eframe::egui;
 
-use crate::keys;
+use crate::keys::{self, Shortcut};
 
-/// The context-menu key was pressed, and no window has been handed it yet.
-static PRESSED: AtomicBool = AtomicBool::new(false);
+static PENDING_PRESS: AtomicBool = AtomicBool::new(false);
 
-/// Hands the context-menu key to the window in front as Shift+F10. Registered once, with
-/// [`egui::Context::add_plugin`], after [`install`].
 #[derive(Debug, Default)]
-pub struct ContextKey;
+struct ContextKey;
 
 impl egui::Plugin for ContextKey {
     fn debug_name(&self) -> &'static str {
@@ -24,34 +21,30 @@ impl egui::Plugin for ContextKey {
 
     fn input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
         // Kept for the window in front, which may run after the one that wakes first.
-        if input.focused && PRESSED.swap(false, Ordering::Relaxed) {
-            hand(input);
+        if input.focused && PENDING_PRESS.swap(false, Ordering::Relaxed) {
+            press_and_release(input, keys::CONTEXT_MENU);
         }
     }
 }
 
-/// The key, as Shift+F10, pressed and let go in `input`.
-fn hand(input: &mut egui::RawInput) {
-    let shortcut = keys::CONTEXT_MENU;
+fn press_and_release(input: &mut egui::RawInput, Shortcut { modifiers, key }: Shortcut) {
     input
         .events
         .extend([true, false].map(|pressed| egui::Event::Key {
-            key: shortcut.key,
+            key,
             physical_key: None,
             pressed,
             repeat: false,
-            modifiers: shortcut.modifiers,
+            modifiers,
         }));
 }
 
-/// Starts noting the context-menu key, for every window of this thread (Windows).
-#[cfg(windows)]
+/// Hands the context-menu key to the window in front as Shift+F10, from then on.
 pub fn install(ctx: &egui::Context) {
+    #[cfg(windows)]
     win32::install(ctx);
+    ctx.add_plugin(ContextKey);
 }
-
-#[cfg(not(windows))]
-pub fn install(_ctx: &egui::Context) {}
 
 /// A `WH_GETMESSAGE` hook on this thread, declared here as `console` declares its kernel32
 /// functions.
@@ -63,8 +56,7 @@ mod win32 {
 
     use eframe::egui;
 
-    /// Woken when the key is pressed, so that the window in front runs a frame.
-    static CONTEXT: OnceLock<egui::Context> = OnceLock::new();
+    static WOKEN_ON_PRESS: OnceLock<egui::Context> = OnceLock::new();
 
     const WH_GETMESSAGE: i32 = 3;
     const PM_REMOVE: usize = 1;
@@ -95,7 +87,7 @@ mod win32 {
     }
 
     pub fn install(ctx: &egui::Context) {
-        if CONTEXT.set(ctx.clone()).is_err() {
+        if WOKEN_ON_PRESS.set(ctx.clone()).is_err() {
             return;
         }
         // SAFETY: `hook` has the signature a WH_GETMESSAGE hook needs and lives as long as the
@@ -105,15 +97,15 @@ mod win32 {
         }
     }
 
-    /// Notes the key as its message is taken off the queue (not when only looked at).
+    /// Notes the key as its message is taken off the queue, not when it is only looked at.
     unsafe extern "system" fn hook(code: i32, w_param: usize, l_param: isize) -> isize {
         if code >= 0 && w_param == PM_REMOVE {
             // SAFETY: for WH_GETMESSAGE, `l_param` points at the MSG being taken off the queue,
             // whose start `Msg` is.
             let msg = unsafe { &*(l_param as *const Msg) };
             if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN) && msg.w_param == VK_APPS {
-                super::PRESSED.store(true, Ordering::Relaxed);
-                if let Some(ctx) = CONTEXT.get() {
+                super::PENDING_PRESS.store(true, Ordering::Relaxed);
+                if let Some(ctx) = WOKEN_ON_PRESS.get() {
                     ctx.request_repaint();
                 }
             }
@@ -124,18 +116,28 @@ mod win32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use std::sync::atomic::Ordering;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
 
     use eframe::egui::{self, Plugin};
 
-    use super::{ContextKey, PRESSED};
+    use super::{ContextKey, PENDING_PRESS};
 
-    /// The key reaches the window in front as Shift+F10, once; one behind it doesn't take it.
+    /// The key is pressed for the whole process: tests that press it take turns.
+    static PRESSING: Mutex<()> = Mutex::new(());
+
+    /// Presses the key for the next window in front to run a frame, as the hook does.
+    pub fn press() -> MutexGuard<'static, ()> {
+        let turn = PRESSING.lock().unwrap_or_else(PoisonError::into_inner);
+        PENDING_PRESS.store(true, Ordering::Relaxed);
+        turn
+    }
+
     #[test]
-    fn the_key_reaches_the_window_in_front_as_shift_f10() {
+    fn the_key_reaches_the_window_in_front_as_shift_f10_once() {
         let ctx = egui::Context::default();
-        PRESSED.store(true, Ordering::Relaxed);
+        let _turn = press();
         let mut behind = egui::RawInput {
             focused: false,
             ..Default::default()
@@ -151,6 +153,6 @@ mod tests {
         assert!(front.events.iter().any(shift_f10), "{:?}", front.events);
         let mut again = egui::RawInput::default();
         ContextKey.input_hook(&ctx, &mut again);
-        assert!(again.events.is_empty(), "once");
+        assert!(again.events.is_empty());
     }
 }

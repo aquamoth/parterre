@@ -1,93 +1,43 @@
-//! Merging into the open worktree's branch: the dialog, which lists the commits coming in as
-//! the log window does, and offers the merge methods, the merge commit's message and stashing
-//! uncommitted changes.
-
 use std::sync::Arc;
 
-use eframe::egui::{self, Id, RichText, Ui, ViewportId, vec2};
+use eframe::egui::{self, Id, Ui, ViewportId};
+use parterre_core::Repo;
 use parterre_core::branches::command_text;
-use parterre_core::log::{LogOptions, LogQuery};
-use parterre_core::log_graph::LogGraph;
 use parterre_core::merge::{self, Method, Preview};
 use parterre_core::revgraph::GraphOptions;
-use parterre_core::{CommitIx, Oid, Repo};
 
-use super::commit_table::{CommitList, CommitTable, ROW, Row, Select};
-use super::log_window::{self, HEADING};
+use super::branches::Asked;
+use super::rebase::{ListedCommits, listing_dialog_width, stash_checkbox};
 use crate::dialogs;
 use crate::theme::Palette;
 
-/// The commits listed at least, however small the window: the table scrolls.
-const MIN_ROWS: usize = 3;
+const METHOD_NAME_WIDTH: f32 = 130.0;
 
-/// A commit table's height for `rows` commits: a little more than the rows, for the spacing
-/// around its scroll area.
-pub fn list_height(rows: usize) -> f32 {
-    HEADING + ROW * rows.max(1) as f32 + 12.0
-}
-
-/// The width of the methods' names, before their help.
-const METHOD_NAME: f32 = 130.0;
-
+#[derive(Debug)]
 pub struct MergeDialog {
-    pub preview: Preview,
-    repo: Arc<Repo>,
+    preview: Preview,
     /// What the command names the target by: a branch's name, or the full hash.
     target: String,
-    pub method: Method,
-    pub message: String,
-    pub stash: bool,
-    /// The window it was asked from.
+    method: Method,
+    message: String,
+    stash: bool,
     pub opener: ViewportId,
     fresh: bool,
-    /// The commits coming in, as the log lists them.
-    commits: Vec<CommitIx>,
-    graph: LogGraph,
-    refs: Vec<Vec<usize>>,
-    list: CommitList,
-}
-
-impl std::fmt::Debug for MergeDialog {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MergeDialog")
-            .field("preview", &self.preview)
-            .field("target", &self.target)
-            .field("method", &self.method)
-            .finish_non_exhaustive()
-    }
-}
-
-/// What the dialog asks for in a frame.
-#[derive(Debug, Default)]
-pub struct Asked {
-    pub answer: Option<dialogs::Answer>,
-    /// A commit to show in the log: the target's, or one double-clicked in the list.
-    pub log: Option<Oid>,
+    listed: ListedCommits,
 }
 
 impl MergeDialog {
     pub fn new(preview: Preview, repo: Arc<Repo>, target: String, opener: ViewportId) -> Self {
-        let (commits, graph) = match (repo.lookup(&preview.head), repo.lookup(&preview.theirs)) {
-            (Some(head), Some(theirs)) => {
-                let list = LogQuery::range(&repo, head, theirs).list(&repo, &LogOptions::default());
-                let graph = LogGraph::new(&list);
-                (list.commits, graph)
-            }
-            _ => (Vec::new(), LogGraph::default()),
-        };
+        let id = Id::new("merge-commits");
         MergeDialog {
+            listed: ListedCommits::range(repo, id, preview.head, preview.theirs),
             method: preview.default_method(),
             message: preview.message.clone(),
             stash: preview.auto_stash,
-            refs: repo.refs_by_commit(),
             preview,
-            repo,
             target,
             opener,
             fresh: true,
-            commits,
-            graph,
-            list: CommitList::default(),
         }
     }
 
@@ -106,7 +56,6 @@ impl MergeDialog {
             .blocked(self.method, self.stash, &self.message, &self.name())
     }
 
-    /// `busy` while another Git operation runs.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -114,35 +63,25 @@ impl MergeDialog {
         palette: &Palette,
         options: &GraphOptions,
     ) -> Asked {
-        let mut asked = Asked::default();
         let name = self.name();
         let title = format!("Merge {name} into {}", self.preview.branch);
-        let width = (ctx.content_rect().width() - 80.0).clamp(420.0, 780.0);
+        let mut show_in_log = None;
         let shown = dialogs::Dialog::new("merge-branch", &title)
             .screen(crate::usage::Screen::Merge)
-            .width(width)
+            .width(listing_dialog_width(ctx))
             .opener(self.opener)
             .raise(self.fresh)
             .resizable()
             .show(ctx, |ui| {
                 // Only the commits scroll: everything else stays in view.
-                if let Some(ix) = self.repo.lookup(&self.preview.theirs)
-                    && dialogs::commit_line(ui, self.repo.commit(ix), self.repo.abbrev_len)
-                {
-                    asked.log = Some(self.preview.theirs);
+                if dialogs::commit_line(ui, self.listed.repo(), self.preview.theirs) {
+                    show_in_log = Some(self.preview.theirs);
                 }
-                let n = self.commits.len();
-                let min = list_height(n.min(MIN_ROWS));
-                let natural = list_height(n);
-                let picked = dialogs::growing(ui, min, |ui, height| {
-                    let height = height.unwrap_or(natural);
-                    (self.commits_table(ui, palette, options, height), natural)
-                });
-                if let Some(oid) = picked {
-                    asked.log = Some(oid);
+                if let Some(oid) = self.listed.show(ui, palette, options) {
+                    show_in_log = Some(oid);
                 }
                 self.methods(ui, &name);
-                ui.add_enabled_ui(self.method.commits(), |ui| {
+                ui.add_enabled_ui(self.method.makes_commit(), |ui| {
                     ui.label("Message");
                     ui.add(
                         egui::TextEdit::multiline(&mut self.message)
@@ -159,14 +98,10 @@ impl MergeDialog {
                     } else {
                         "git merge --autostash"
                     };
-                    let help = format!(
-                        "Set your uncommitted changes aside first, and put them back \
-                         afterwards ({how})."
-                    );
-                    ui.checkbox(&mut self.stash, "Stash changes")
-                        .on_hover_text(help);
+                    stash_checkbox(ui, &mut self.stash, how);
                 }
-                if let Some(why) = self.blocked() {
+                let blocked = self.blocked();
+                if let Some(why) = &blocked {
                     ui.colored_label(ui.visuals().error_fg_color, why);
                 }
                 let commands: Vec<String> = merge::commands(&self.merge())
@@ -174,16 +109,14 @@ impl MergeDialog {
                     .map(|c| command_text(c))
                     .collect();
                 dialogs::command_box(ui, &commands);
-                let enabled = self.blocked().is_none() && !busy;
-                dialogs::actions(ui, "Merge", enabled, false, false)
+                let primary = dialogs::Primary::new("Merge").enabled(blocked.is_none() && !busy);
+                dialogs::actions(ui, primary)
             });
         self.fresh = false;
-        asked.answer = Some(if shown.should_close() {
-            dialogs::Answer::Cancel
-        } else {
-            shown.inner
-        });
-        asked
+        Asked {
+            answer: shown.answer(),
+            show_in_log,
+        }
     }
 
     /// The merge methods, each with what it does; those that make no sense here are greyed
@@ -191,103 +124,33 @@ impl MergeDialog {
     fn methods(&mut self, ui: &mut Ui, name: &str) {
         for &m in self.preview.methods() {
             let unavailable = self.preview.unavailable(m, name);
-            ui.add_enabled_ui(unavailable.is_none(), |ui| {
-                ui.horizontal_top(|ui| {
-                    let radio = ui
-                        .allocate_ui_with_layout(
-                            vec2(METHOD_NAME, 18.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                ui.set_min_width(METHOD_NAME);
-                                ui.radio(self.method == m, m.name())
-                            },
-                        )
-                        .inner
-                        .on_hover_text(m.flag());
-                    let help = ui.add(
-                        egui::Label::new(
-                            RichText::new(m.help(&self.preview.branch, name))
-                                .small()
-                                .weak(),
-                        )
-                        .wrap()
-                        .sense(egui::Sense::CLICK),
-                    );
-                    if radio.clicked() || help.clicked() {
-                        self.method = m;
-                    }
-                })
-            })
-            .response
-            .on_disabled_hover_text(unavailable.unwrap_or_default());
-        }
-    }
-
-    /// The commits coming in, as the log window lists them, `height` tall. Returns the one
-    /// double-clicked.
-    fn commits_table(
-        &mut self,
-        ui: &mut Ui,
-        palette: &Palette,
-        options: &GraphOptions,
-        height: f32,
-    ) -> Option<Oid> {
-        let c = log_window::colors(ui);
-        let table = CommitTable {
-            id: Id::new("merge-commits"),
-            rows: self.commits.len(),
-            graph: &self.graph,
-            abbrev_len: self.repo.abbrev_len,
-            palette,
-            select: Select::One,
-            icons: false,
-        };
-        let (repo, commits, refs) = (&*self.repo, &self.commits, &self.refs);
-        let list = &mut self.list;
-        let clicks = ui
-            .allocate_ui(vec2(ui.available_width(), height), |ui| {
-                ui.set_min_height(height);
-                ui.set_max_height(height);
-                table.show(
+            let help = m.help(&self.preview.branch, name);
+            let picked = ui.add_enabled_ui(unavailable.is_none(), |ui| {
+                dialogs::radio_with_help(
                     ui,
-                    &c,
-                    list,
-                    |i| {
-                        let commit = repo.commit(commits[i]);
-                        Row {
-                            hash: commit.oid.short(repo.abbrev_len),
-                            refs: log_window::badges(
-                                repo,
-                                &refs[commits[i].ix()],
-                                Some(commits[i]),
-                                options,
-                            ),
-                            subject: &commit.subject,
-                            author: &commit.author_name,
-                            author_email: &commit.author_email,
-                            date: &commit.author_date,
-                            ..Row::default()
-                        }
-                    },
-                    |_, _, _| {},
-                    None,
+                    self.method == m,
+                    m.name(),
+                    METHOD_NAME_WIDTH,
+                    m.flag(),
+                    help,
                 )
-            })
-            .inner;
-        clicks
-            .double_clicked
-            .map(|i| self.repo.commit(self.commits[i]).oid)
+            });
+            picked
+                .response
+                .on_disabled_hover_text(unavailable.unwrap_or_default());
+            if picked.inner {
+                self.method = m;
+            }
+        }
     }
 }
 
-/// The dialog and the menus, driven frame by frame in a headless context against real,
-/// disposable repositories: clicked by the text on screen, as a person would.
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use parterre_core::Oid;
-    use parterre_core::branches::Stuck;
+    use parterre_core::branches::{GitOperation, Stuck};
 
     use super::super::branches::{self, Request};
     use super::super::tool_harness::{Harness, banner_texts, git, init, load, menu, read, write};
@@ -475,7 +338,10 @@ mod tests {
         assert!(h.shows("Finish or abort it with git, or go to another worktree."));
 
         let (repo, catalog) = load(h.path());
-        assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a merge")));
+        assert_eq!(
+            catalog.stuck(),
+            Some(Stuck::InProgress(GitOperation::Merge))
+        );
         let texts = banner_texts(h.path());
         assert!(texts.contains(&"1 conflicted file".to_owned()), "{texts:?}");
         // Merging is greyed out until it's finished with git.

@@ -1,6 +1,3 @@
-//! Local branches against their upstreams: the commits on one side only, and what a push or a
-//! pull would do with each of them (see [`Side`]).
-//!
 //! Ahead and behind are worked out from the snapshot's own commits. Only a branch that has
 //! diverged from its upstream asks git more: which of the upstream's commits have a copy on it
 //! (`rev-list --cherry-mark`).
@@ -8,10 +5,12 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::git::Git;
+use crate::oid::Oid;
 use crate::repo::{CommitIx, Repo};
 use crate::revgraph::RevGraph;
 
-/// Where a commit between a branch and its upstream stands.
+/// Where a commit between a branch and its upstream stands: what a push or a pull would do with
+/// it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Side {
     /// On the branch only: a push sends it.
@@ -29,13 +28,12 @@ pub enum Side {
 /// A local branch with an upstream, and how the two differ.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Upstream {
-    /// Index into [`Repo::refs`] of the local branch.
+    /// The local branch's index into [`Repo::refs`].
     pub branch: usize,
     /// The upstream's full name: `refs/remotes/origin/topic`, or `refs/heads/main` for a local
     /// one.
     pub name: String,
-    /// Index into [`Repo::refs`] of the upstream. `None` when it is gone: deleted on the remote
-    /// and pruned.
+    /// Into [`Repo::refs`]. `None` when it is gone: deleted on the remote and pruned.
     pub target: Option<usize>,
     /// The commits on one side only, newest first (parents after their children).
     pub commits: Vec<(CommitIx, Side)>,
@@ -45,7 +43,7 @@ pub struct Upstream {
 }
 
 impl Upstream {
-    /// The upstream's short name, as git prints it: `origin/topic`.
+    /// As git prints it: `origin/topic`.
     pub fn short_name(&self) -> &str {
         self.name
             .strip_prefix("refs/remotes/")
@@ -53,12 +51,10 @@ impl Upstream {
             .unwrap_or(&self.name)
     }
 
-    /// True when the upstream no longer exists.
     pub fn is_gone(&self) -> bool {
         self.target.is_none()
     }
 
-    /// git's ahead count: commits on the branch only.
     pub fn ahead(&self) -> usize {
         self.commits
             .iter()
@@ -66,18 +62,17 @@ impl Upstream {
             .count()
     }
 
-    /// git's behind count: commits on the upstream only, whatever became of them.
+    /// Commits on the upstream only, whatever became of them.
     pub fn behind(&self) -> usize {
         self.commits.len() - self.ahead()
     }
 
-    /// True when the branch was rebased (or otherwise rewritten) after it was pushed: the
-    /// upstream has commits it replaced.
+    /// Rebased, or otherwise rewritten, after it was pushed.
     pub fn is_rebased(&self) -> bool {
         self.commits.iter().any(|&(_, s)| s == Side::Replaced)
     }
 
-    /// True when a force push would lose commits of the upstream.
+    /// Whether a force push would lose commits of the upstream.
     pub fn loses_commits(&self) -> bool {
         self.commits.iter().any(|&(_, s)| s == Side::Lost)
     }
@@ -90,20 +85,18 @@ impl Upstream {
             return Vec::new();
         }
         let sides: HashMap<CommitIx, Side> = self.commits.iter().copied().collect();
-        let mut out = Vec::new();
-        for (e, &edge) in graph.edges.iter().enumerate() {
-            let child = graph.nodes[edge.child as usize].commit;
-            let mut along = std::iter::once(child).chain(graph.collapsed(e).iter().copied());
-            if !along.any(|c| sides.contains_key(&c)) {
-                continue;
-            }
-            let along: Vec<Option<Side>> = std::iter::once(child)
-                .chain(graph.collapsed(e).iter().copied())
-                .map(|c| sides.get(&c).copied())
-                .collect();
-            out.push((e, along));
-        }
-        out
+        graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter_map(|(e, edge)| {
+                let child = graph.nodes[edge.child as usize].commit;
+                let along = || std::iter::once(child).chain(graph.collapsed(e).iter().copied());
+                along()
+                    .any(|c| sides.contains_key(&c))
+                    .then(|| (e, along().map(|c| sides.get(&c).copied()).collect()))
+            })
+            .collect()
     }
 }
 
@@ -169,7 +162,7 @@ fn classify(
     let rewritten: HashSet<_> = ahead.iter().map(|&c| authored(c)).collect();
     let replaced: Vec<bool> = behind
         .iter()
-        .map(|&c| copied.contains(&repo.commit(c).oid.to_hex()) || rewritten.contains(&authored(c)))
+        .map(|&c| copied.contains(&repo.commit(c).oid) || rewritten.contains(&authored(c)))
         .collect();
     // Without anything replaced it is plain divergence: a pull brings the rest.
     let rebased = replaced.iter().any(|&r| r);
@@ -191,7 +184,7 @@ fn classify(
 }
 
 /// The upstream's own commits with a patch-equivalent copy on the branch.
-fn copied_onto_branch(git: &Git, branch: &str, upstream: &str) -> HashSet<String> {
+fn copied_onto_branch(git: &Git, branch: &str, upstream: &str) -> HashSet<Oid> {
     let range = format!("{branch}...{upstream}");
     let out = git
         .query(&["rev-list", "--right-only", "--cherry-mark", &range, "--"])
@@ -199,8 +192,7 @@ fn copied_onto_branch(git: &Git, branch: &str, upstream: &str) -> HashSet<String
         .flatten()
         .unwrap_or_default();
     out.lines()
-        .filter_map(|l| l.strip_prefix('='))
-        .map(str::to_owned)
+        .filter_map(|l| Oid::from_hex(l.strip_prefix('=')?))
         .collect()
 }
 

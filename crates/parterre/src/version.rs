@@ -1,49 +1,40 @@
 //! The version string parterre reports, e.g. `0.3.0 (a1b2c3d)` for a release.
 //!
-//! `build.rs` includes this file and runs [`describe`] at build time; the app only reads the
-//! result (`PARTERRE_VERSION`). The app compiles this module just for its tests, so it must not
-//! use anything outside `std`. It isn't in `parterre-core` because the build script would then
-//! have to compile all of core as a build dependency.
+//! `build.rs` includes this file and runs [`describe`]; the app only reads the result
+//! (`PARTERRE_VERSION`) and compiles this module for its tests, so it must not use anything
+//! outside `std`. It isn't in `parterre-core` because the build script would then have to
+//! compile all of core as a build dependency.
 
-/// Where the sources being built come from.
 #[derive(Debug)]
 pub enum Source {
-    /// A git checkout whose top level is the workspace root.
+    /// A checkout whose top level is the workspace root.
     Git(GitState),
-    /// A crate made by `cargo package`, such as one downloaded from crates.io. Cargo records the
-    /// commit it was packaged from in `.cargo_vcs_info.json` (see [`parse_vcs_info`]).
+    /// A crate made by `cargo package`, such as one downloaded from crates.io.
     Package(VcsInfo),
     /// Neither, e.g. a source archive without `.git`.
     Unknown,
 }
 
-/// What `git` says about the checkout being built.
 #[derive(Debug)]
 pub struct GitState {
-    /// Abbreviated hash of `HEAD`.
-    pub commit: String,
-    /// The sources differ from `HEAD` (uncommitted changes).
+    pub short_hash: String,
     pub dirty: bool,
-    /// Tags pointing at `HEAD`.
-    pub tags: Vec<String>,
+    pub tags_at_head: Vec<String>,
     /// The release tag nearest `HEAD` in its history, which the version follows.
     pub nearest: Option<NearestTag>,
 }
 
-/// A tag in the history of `HEAD`, from `git describe` (see [`parse_describe`]).
 #[derive(Debug, PartialEq, Eq)]
 pub struct NearestTag {
     pub tag: String,
-    /// Commits in `HEAD`'s history that the tag's doesn't have; 0 when it is `HEAD`.
-    pub since: u32,
+    pub commits_since: u32,
 }
 
-/// The commit a packaged crate was made from, as recorded in its `.cargo_vcs_info.json`.
+/// The commit a packaged crate was made from, as its `.cargo_vcs_info.json` records it.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct VcsInfo {
-    /// Abbreviated hash, or `None` if it was packaged outside git.
-    pub commit: Option<String>,
-    /// It was packaged with uncommitted changes (`cargo package --allow-dirty`).
+    /// `None` if it was packaged outside git.
+    pub short_hash: Option<String>,
     pub dirty: bool,
 }
 
@@ -70,16 +61,16 @@ pub fn describe(
     if let Some(tag) = release_tag {
         return release(pkg_version, tag, source);
     }
-    let (commit, dirty) = match source {
-        Source::Git(git) => (Some(&git.commit), git.dirty),
-        Source::Package(info) => (info.commit.as_ref(), info.dirty),
+    let (short_hash, dirty) = match source {
+        Source::Git(git) => (Some(git.short_hash.as_str()), git.dirty),
+        Source::Package(info) => (info.short_hash.as_deref(), info.dirty),
         Source::Unknown => (None, false),
     };
     let nearest = match source {
         Source::Git(git) => git
             .nearest
             .as_ref()
-            .and_then(|n| Some((parse_release_tag(&n.tag).ok()?, n.since))),
+            .and_then(|n| Some((parse_release_tag(&n.tag).ok()?, n.commits_since))),
         _ => None,
     };
     let released = match source {
@@ -90,7 +81,7 @@ pub fn describe(
     if let Some(version) = released
         && !dirty
     {
-        return Ok(plain(version, commit));
+        return Ok(plain(version, short_hash));
     }
     let dev = match nearest {
         Some((version, since)) if version.contains('-') => format!("{version}.dev.{since}"),
@@ -100,22 +91,20 @@ pub fn describe(
             format!("{pkg_version}{sep}dev")
         }
     };
-    let Some(commit) = commit else {
+    let Some(short_hash) = short_hash else {
         return Ok(dev);
     };
     let dirty = if dirty { ".dirty" } else { "" };
-    Ok(format!("{dev}+{commit}{dirty}"))
+    Ok(format!("{dev}+{short_hash}{dirty}"))
 }
 
-/// The version of a release build for tag `tag`, which must point at the clean commit being
-/// built.
 fn release(pkg_version: &str, tag: &str, source: &Source) -> Result<String, String> {
     let version = parse_release_tag(tag)?;
-    let (commit, dirty, tagged) = match source {
+    let (short_hash, dirty, tagged) = match source {
         Source::Git(git) => (
-            Some(&git.commit),
+            Some(git.short_hash.as_str()),
             git.dirty,
-            git.tags.iter().any(|t| t == tag),
+            git.tags_at_head.iter().any(|t| t == tag),
         ),
         Source::Package(info) => {
             if version != pkg_version {
@@ -123,18 +112,18 @@ fn release(pkg_version: &str, tag: &str, source: &Source) -> Result<String, Stri
                     "release tag {tag} doesn't match the packaged crate version {pkg_version}"
                 ));
             }
-            (info.commit.as_ref(), info.dirty, true)
+            (info.short_hash.as_deref(), info.dirty, true)
         }
         Source::Unknown => (None, false, false),
     };
-    let Some(commit) = commit else {
+    let Some(short_hash) = short_hash else {
         return Err(format!(
             "release tag {tag} given, but git can't tell which commit is being built"
         ));
     };
     if !tagged {
         return Err(format!(
-            "release tag {tag} doesn't point at the commit being built ({commit})"
+            "release tag {tag} doesn't point at the commit being built ({short_hash})"
         ));
     }
     if dirty {
@@ -142,18 +131,18 @@ fn release(pkg_version: &str, tag: &str, source: &Source) -> Result<String, Stri
             "release {tag} is being built from a checkout with local changes"
         ));
     }
-    Ok(plain(version, Some(commit)))
+    Ok(plain(version, Some(short_hash)))
 }
 
 /// `0.3.0 (a1b2c3d)`, or `0.3.0` when the commit isn't known.
-fn plain(version: &str, commit: Option<&String>) -> String {
-    match commit {
-        Some(commit) => format!("{version} ({commit})"),
+fn plain(version: &str, short_hash: Option<&str>) -> String {
+    match short_hash {
+        Some(short_hash) => format!("{version} ({short_hash})"),
         None => version.to_owned(),
     }
 }
 
-/// `0.3.1` for `0.3.0`, a version already checked by [`parse_release_tag`].
+/// `0.3.1` for `0.3.0`, a version [`parse_release_tag`] has accepted.
 fn next_patch(version: &str) -> String {
     let (minor, patch) = version.rsplit_once('.').unwrap();
     format!("{minor}.{}", patch.parse::<u64>().unwrap() + 1)
@@ -164,49 +153,41 @@ fn next_patch(version: &str) -> String {
 pub fn parse_describe(described: &str) -> Option<NearestTag> {
     let mut parts = described.rsplitn(3, '-');
     let hash = parts.next()?;
-    let since = parts.next()?.parse().ok()?;
+    let commits_since = parts.next()?.parse().ok()?;
     let tag = parts.next()?;
     hash.starts_with('g').then(|| NearestTag {
         tag: tag.to_owned(),
-        since,
+        commits_since,
     })
 }
 
-/// Accept `vX.Y.Z` with an optional semver pre-release suffix. Build metadata is left out of
-/// release tags so the same version can later be used as a Cargo package version.
-pub fn parse_release_tag(tag: &str) -> Result<&str, String> {
-    let Some(version) = tag.strip_prefix('v') else {
-        return Err(format!(
-            "invalid release tag {tag}: expected vX.Y.Z[-prerelease]"
-        ));
-    };
+/// The version of a `vX.Y.Z[-prerelease]` tag. Release tags carry no build metadata, so that
+/// the same version can later be a Cargo package version.
+fn parse_release_tag(tag: &str) -> Result<&str, String> {
+    let invalid = || format!("invalid release tag {tag}: expected vX.Y.Z[-prerelease]");
+    let version = tag.strip_prefix('v').ok_or_else(invalid)?;
     let (numbers, pre) = version
         .split_once('-')
         .map_or((version, None), |(n, p)| (n, Some(p)));
-    let valid_number = |n: &str| {
-        !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && (n == "0" || !n.starts_with('0'))
+    let is_numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let has_leading_zero = |s: &str| s.len() > 1 && s.starts_with('0');
+    let valid_number = |n: &str| is_numeric(n) && !has_leading_zero(n);
+    let valid_pre_part = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !(is_numeric(part) && has_leading_zero(part))
     };
     if numbers.split('.').count() != 3
         || !numbers.split('.').all(valid_number)
-        || pre.is_some_and(|p| {
-            p.split('.').any(|part| {
-                part.is_empty()
-                    || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                    || (part.bytes().all(|b| b.is_ascii_digit())
-                        && part.len() > 1
-                        && part.starts_with('0'))
-            })
-        })
+        || pre.is_some_and(|p| !p.split('.').all(valid_pre_part))
     {
-        return Err(format!(
-            "invalid release tag {tag}: expected vX.Y.Z[-prerelease]"
-        ));
+        return Err(invalid());
     }
     Ok(version)
 }
 
-/// Reads the commit from the `.cargo_vcs_info.json` that `cargo package` writes, e.g.
-/// `{"git": {"sha1": "a1b2c3d…", "dirty": true}, "path_in_vcs": "crates/parterre"}`.
+/// Reads `.cargo_vcs_info.json`, e.g.
+/// `{"git": {"sha1": "a1b2c3d…", "dirty": true}, "path_in_vcs": "crates/parterre"}`, where
 /// `dirty` is only present when true. Hand-parsed, as the build script has no dependencies.
 pub fn parse_vcs_info(json: &str) -> VcsInfo {
     let value_after = |key: &str| {
@@ -214,13 +195,13 @@ pub fn parse_vcs_info(json: &str) -> VcsInfo {
         let rest = rest.trim_start().strip_prefix(':')?.trim_start();
         Some(rest)
     };
-    let commit = value_after("sha1").and_then(|rest| {
+    let short_hash = value_after("sha1").and_then(|rest| {
         let hex = rest.strip_prefix('"')?;
         let hex = &hex[..hex.find('"')?];
         (hex.len() >= 7 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then(|| hex[..7].to_owned())
     });
     let dirty = value_after("dirty").is_some_and(|rest| rest.starts_with("true"));
-    VcsInfo { commit, dirty }
+    VcsInfo { short_hash, dirty }
 }
 
 #[cfg(test)]
@@ -229,27 +210,26 @@ mod tests {
 
     fn git(commit: &str, dirty: bool, tags: &[&str]) -> Source {
         Source::Git(GitState {
-            commit: commit.to_owned(),
+            short_hash: commit.to_owned(),
             dirty,
-            tags: tags.iter().map(|t| t.to_string()).collect(),
+            tags_at_head: tags.iter().map(|t| t.to_string()).collect(),
             nearest: None,
         })
     }
 
-    /// A checkout `since` commits past release tag `tag`.
-    fn after(tag: &str, since: u32, commit: &str, dirty: bool) -> Source {
-        let tags = if since == 0 {
+    fn after(tag: &str, commits_since: u32, commit: &str, dirty: bool) -> Source {
+        let tags_at_head = if commits_since == 0 {
             vec![tag.to_owned()]
         } else {
             vec![]
         };
         Source::Git(GitState {
-            commit: commit.to_owned(),
+            short_hash: commit.to_owned(),
             dirty,
-            tags,
+            tags_at_head,
             nearest: Some(NearestTag {
                 tag: tag.to_owned(),
-                since,
+                commits_since,
             }),
         })
     }
@@ -297,10 +277,10 @@ mod tests {
 
     #[test]
     fn git_describe_gives_tag_and_commits_since() {
-        let nearest = |tag: &str, since| {
+        let nearest = |tag: &str, commits_since| {
             Some(NearestTag {
                 tag: tag.to_owned(),
-                since,
+                commits_since,
             })
         };
         assert_eq!(parse_describe("v0.5.1-3-ga1b2c3d"), nearest("v0.5.1", 3));
@@ -313,7 +293,7 @@ mod tests {
 
     fn package(commit: Option<&str>, dirty: bool) -> Source {
         Source::Package(VcsInfo {
-            commit: commit.map(str::to_owned),
+            short_hash: commit.map(str::to_owned),
             dirty,
         })
     }
@@ -439,7 +419,7 @@ mod tests {
         assert_eq!(
             parse_vcs_info(clean),
             VcsInfo {
-                commit: Some("e6f2c0c".into()),
+                short_hash: Some("e6f2c0c".into()),
                 dirty: false
             }
         );
@@ -447,7 +427,7 @@ mod tests {
         assert_eq!(
             parse_vcs_info(dirty),
             VcsInfo {
-                commit: Some("e6f2c0c".into()),
+                short_hash: Some("e6f2c0c".into()),
                 dirty: true
             }
         );

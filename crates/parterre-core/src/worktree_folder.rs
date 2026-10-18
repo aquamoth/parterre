@@ -1,16 +1,11 @@
-//! Where a new worktree goes: the folder suggested for it, as VS Code suggests one, and whether
-//! that folder would sit unignored inside a repository's working tree.
-//!
-//! The suggestion is `<parent>/<repo>.worktrees/<name>` from the main worktree, and a sibling
-//! `<parent>/<name>` from a linked one. Nothing is stored: the root is worked out each time.
-
 use std::path::{Component, Path, PathBuf};
 
 use crate::git::{Git, GitError};
 
-/// The folder new worktrees go in by default.
+/// As VS Code suggests it: `<parent>/<repo>.worktrees` from the main worktree, and from a
+/// linked one its siblings' folder. Nothing is stored: it is worked out each time.
 pub fn default_root(main: &Path, open: &Path) -> PathBuf {
-    if !same_path(main, open) {
+    if !same_path_on_disk(main, open) {
         return open.parent().unwrap_or(open).to_owned();
     }
     let name = main
@@ -64,24 +59,21 @@ pub fn name_error(name: &str) -> Option<&'static str> {
 /// A folder git would refuse to add a worktree in: a file, a folder with something in it, or
 /// the folder of a worktree git still knows (`registered`), even one that's gone.
 pub fn taken(path: &Path, registered: &[PathBuf]) -> bool {
-    registered.iter().any(|r| same_path(r, path))
+    registered.iter().any(|r| same_path_on_disk(r, path))
         || path.is_file()
         || path.read_dir().is_ok_and(|mut d| d.next().is_some())
 }
 
 /// `base`, or `base-1`, `base-2`… when that's taken in `root`.
 pub fn free_name(root: &Path, base: &str, registered: &[PathBuf]) -> String {
-    if !taken(&root.join(base), registered) {
-        return base.to_owned();
-    }
-    (1..)
-        .map(|k| format!("{base}-{k}"))
+    std::iter::once(base.to_owned())
+        .chain((1..).map(|k| format!("{base}-{k}")))
         .find(|name| !taken(&root.join(name), registered))
         .expect("an unbounded search finds a free name")
 }
 
-/// Whether two paths name the same folder: as written, or once symlinks are resolved.
-pub fn same_path(a: &Path, b: &Path) -> bool {
+/// As written, or once symlinks are resolved.
+pub fn same_path_on_disk(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
     }
@@ -94,7 +86,6 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
 /// A folder inside a repository's working tree, where git status there would list it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Inside {
-    /// The top of that working tree.
     pub top: PathBuf,
     /// What *Exclude it* adds to that repository's `info/exclude`: the folder's first component
     /// below `top`, as `/name/`.
@@ -109,7 +100,7 @@ pub fn inside_repository(folder: &Path) -> Option<Inside> {
         .query(&["rev-parse", "--show-toplevel"])
         .ok()
         .flatten()
-        .map(|s| PathBuf::from(s.trim()))?;
+        .map(PathBuf::from)?;
     let top = std::fs::canonicalize(&top).unwrap_or(top);
     let canonical = std::fs::canonicalize(existing).ok()?;
     let rest = folder.strip_prefix(existing).ok()?;
@@ -141,17 +132,16 @@ pub fn exclude(inside: &Inside) -> Result<(), GitError> {
         "info/exclude",
     ])?;
     let path = PathBuf::from(path.trim());
-    let read = |e| GitError::Read {
-        path: path.clone(),
-        source: e,
-    };
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(read)?;
+        std::fs::create_dir_all(dir).map_err(|source| GitError::Create {
+            path: dir.to_owned(),
+            source,
+        })?;
     }
     let mut text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(read(e)),
+        Err(source) => return Err(GitError::Read { path, source }),
     };
     if text.lines().any(|l| l.trim() == inside.pattern) {
         return Ok(());
@@ -161,7 +151,7 @@ pub fn exclude(inside: &Inside) -> Result<(), GitError> {
     }
     text.push_str(&inside.pattern);
     text.push('\n');
-    std::fs::write(&path, text).map_err(read)
+    std::fs::write(&path, text).map_err(|source| GitError::Write { path, source })
 }
 
 #[cfg(test)]

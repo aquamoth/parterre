@@ -1,19 +1,17 @@
-//! The signed-in user's repositories on github.com, to clone one (#358): those GitHub's own
-//! pickers list, the user's, their organisations' and those they collaborate on, most
-//! recently pushed first. Their clone URL is HTTPS or SSH as `gh`'s `git_protocol` says, as
-//! `gh repo clone` does.
+//! The signed-in user's repositories, to clone one (#358): those GitHub's own pickers list, the
+//! user's, their organisations' and those they collaborate on, most recently pushed first.
 
 use serde::Deserialize;
 
-use super::{Answer, Api, Forge, ForgeError, GithubRepo, Quota, WEB};
+use super::{Api, Forge, ForgeError, GithubRepo, Quota, Response, WEB, json};
 use crate::repositories::{Listed, Repositories};
 
-/// Repositories asked for per request, GitHub's most.
-const PER_PAGE: usize = 100;
-/// Requests at most: the 1,000 most recently pushed are plenty to pick from.
-const PAGES: usize = 10;
+/// GitHub's maximum.
+const REPOSITORIES_PER_PAGE: usize = 100;
+/// The 1,000 most recently pushed are plenty to pick from.
+const MAX_PAGES: usize = 10;
 
-/// How a repository is cloned: `gh`'s `git_protocol`.
+/// `gh`'s `git_protocol`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Protocol {
     #[default]
@@ -31,7 +29,7 @@ impl Protocol {
     }
 }
 
-/// Asks GitHub for the user's repositories, signed in with `gh`. Run it on a worker thread.
+/// Blocks: run it on a worker thread.
 pub fn repositories() -> Result<Repositories, ForgeError> {
     let mut list = super::with_api(list)?;
     let protocol = protocol();
@@ -78,7 +76,7 @@ pub fn repositories_canned(json: &str) -> Result<Repositories, ForgeError> {
     Ok(Repositories { list })
 }
 
-/// `gh config get git_protocol`: HTTPS unless it says SSH, also when `gh` can't be asked.
+/// HTTPS unless `gh` says SSH.
 fn protocol() -> Protocol {
     match super::gh(&["config", "get", "git_protocol", "--host", "github.com"]) {
         Ok(out) if out.trim().eq_ignore_ascii_case("ssh") => Protocol::Ssh,
@@ -86,13 +84,12 @@ fn protocol() -> Protocol {
     }
 }
 
-/// Every page of the list, up to [`PAGES`], with no clone URLs yet; pauses asking when the
-/// budget runs low.
+/// With no clone URLs yet.
 fn list(api: &dyn Api) -> Result<Vec<Listed>, ForgeError> {
     let mut list = Vec::new();
     let mut after: Option<String> = None;
-    for _ in 0..PAGES {
-        let Answer { body, quota } = api.post(&request(after.as_deref()))?;
+    for _ in 0..MAX_PAGES {
+        let Response { body, quota } = api.post(&request(after.as_deref()))?;
         if let Some(until) = quota.and_then(Quota::pause_until) {
             super::pause(until);
         }
@@ -117,10 +114,9 @@ fn list(api: &dyn Api) -> Result<Vec<Listed>, ForgeError> {
     Ok(list)
 }
 
-/// The request for the page after `after`, as JSON.
 fn request(after: Option<&str>) -> String {
     let query = format!(
-        "query($after:String){{viewer{{repositories(first:{PER_PAGE},after:$after,\
+        "query($after:String){{viewer{{repositories(first:{REPOSITORIES_PER_PAGE},after:$after,\
          affiliations:[OWNER,ORGANIZATION_MEMBER,COLLABORATOR],\
          ownerAffiliations:[OWNER,ORGANIZATION_MEMBER,COLLABORATOR],\
          orderBy:{{field:PUSHED_AT,direction:DESC}}){{\
@@ -130,31 +126,15 @@ fn request(after: Option<&str>) -> String {
     serde_json::json!({ "query": query, "variables": { "after": after } }).to_string()
 }
 
-/// The page in an answer, or why there is none.
 fn page(body: &str) -> Result<Page, ForgeError> {
-    let answer: PageAnswer =
-        serde_json::from_str(body).map_err(|e| ForgeError::Parse(Forge::Github, e.to_string()))?;
+    let answer: json::Answer<Data> = crate::parse_answer(Forge::Github, body)?;
     if let Some(page) = answer.data.and_then(|d| d.viewer).map(|v| v.repositories) {
         return Ok(page);
     }
     Err(match answer.errors.into_iter().next() {
-        Some(e) if e.kind.as_deref() == Some("RATE_LIMITED") => {
-            ForgeError::RateLimited { minutes: 60 }
-        }
-        Some(e) => ForgeError::Status {
-            forge: Forge::Github,
-            status: 200,
-            message: e.message,
-        },
+        Some(e) => e.into_forge_error(),
         None => ForgeError::Parse(Forge::Github, "no repositories in the answer".into()),
     })
-}
-
-#[derive(Debug, Deserialize)]
-struct PageAnswer {
-    data: Option<Data>,
-    #[serde(default)]
-    errors: Vec<super::json::Error>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,31 +173,8 @@ struct Node {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-
+    use super::super::tests::{fake, requests};
     use super::*;
-
-    /// Answers each request with the next body.
-    struct Pages {
-        bodies: RefCell<Vec<String>>,
-        asked: RefCell<Vec<serde_json::Value>>,
-    }
-
-    impl Api for Pages {
-        fn post(&self, body: &str) -> Result<Answer, ForgeError> {
-            self.asked
-                .borrow_mut()
-                .push(serde_json::from_str(body).unwrap());
-            let mut bodies = self.bodies.borrow_mut();
-            if bodies.is_empty() {
-                return Err(ForgeError::Network(Forge::Github, "no more answers".into()));
-            }
-            Ok(Answer {
-                body: bodies.remove(0),
-                quota: None,
-            })
-        }
-    }
 
     fn page(names: &[&str], next: Option<&str>) -> String {
         let nodes: Vec<String> = names
@@ -239,18 +196,18 @@ mod tests {
 
     #[test]
     fn every_page_is_read_in_order() {
-        let api = Pages {
-            bodies: RefCell::new(vec![
-                page(&["me/new", "org/shared"], Some("c1")),
-                page(&["me/old"], None),
-            ]),
-            asked: RefCell::default(),
-        };
+        let api = fake(
+            &[
+                &page(&["me/new", "org/shared"], Some("c1")),
+                &page(&["me/old"], None),
+            ],
+            None,
+        );
         let list = list(&api).unwrap();
         let names: Vec<&str> = list.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, ["me/new", "org/shared", "me/old"]);
         assert!(list[2].archived);
-        let asked = api.asked.borrow();
+        let asked = requests(&api);
         assert_eq!(asked.len(), 2);
         assert_eq!(asked[0]["variables"]["after"], serde_json::Value::Null);
         assert_eq!(asked[1]["variables"]["after"], "c1");
@@ -261,12 +218,10 @@ mod tests {
 
     #[test]
     fn an_error_answer_is_said() {
-        let api = Pages {
-            bodies: RefCell::new(vec![
-                r#"{"data":null,"errors":[{"type":"FORBIDDEN","message":"no"}]}"#.into(),
-            ]),
-            asked: RefCell::default(),
-        };
+        let api = fake(
+            &[r#"{"data":null,"errors":[{"type":"FORBIDDEN","message":"no"}]}"#],
+            None,
+        );
         assert!(matches!(list(&api), Err(ForgeError::Status { .. })));
     }
 

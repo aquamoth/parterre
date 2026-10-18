@@ -1,7 +1,5 @@
-//! Cloning a repository into a new folder (#358): `git clone` from any URL git takes, GitHub,
-//! Azure DevOps or another host alike, with credentials left to git's credential helpers as
-//! for fetching. The folder is named as git names it, and a clone that fails or is cancelled
-//! leaves none behind.
+//! `git clone` from any URL git takes, GitHub, Azure DevOps or another host alike, with
+//! credentials left to git's credential helpers as for fetching (#358).
 
 use std::path::{Path, PathBuf};
 
@@ -9,6 +7,7 @@ use parterre_util::CancelTree;
 
 use crate::branches::{Error, Report};
 use crate::git::Git;
+use crate::operation::git_args;
 use crate::remote::Live;
 use crate::worktree_folder;
 
@@ -21,18 +20,16 @@ pub struct Cloning {
 }
 
 impl Cloning {
-    /// The folder the clone goes in.
     pub fn path(&self) -> PathBuf {
         self.parent.join(&self.name)
     }
 
-    /// Why it can't start, if it can't: said under the dialog's fields.
+    /// Why it can't start, said under the dialog's fields.
     pub fn error(&self) -> Option<String> {
-        if let Some(error) = self.input_error() {
-            return Some(error);
-        }
-        self.existing()
-            .map(|path| format!("{} already exists.", path.display()))
+        self.input_error().or_else(|| {
+            self.existing()
+                .map(|path| format!("{} already exists.", path.display()))
+        })
     }
 
     /// The folder the clone would go in, if it is there already and is all that's in the way:
@@ -42,7 +39,6 @@ impl Cloning {
         (self.input_error().is_none() && path.exists()).then_some(path)
     }
 
-    /// What's wrong with the URL, the parent folder or the folder name, if anything.
     fn input_error(&self) -> Option<String> {
         if !is_url(&self.url) {
             return Some("Enter the repository's URL.".into());
@@ -58,12 +54,10 @@ impl Cloning {
     }
 }
 
-/// `git clone`, into the full path, which may start with `-`.
+/// Into the full path, which may start with `-`.
 pub fn command(cloning: &Cloning) -> Vec<String> {
     let path = cloning.path().to_string_lossy().into_owned();
-    ["clone", "--progress", "--", &cloning.url, &path]
-        .map(str::to_owned)
-        .to_vec()
+    git_args(&["clone", "--progress", "--", &cloning.url, &path])
 }
 
 /// Whether `text` is something to clone rather than words to look for: a URL with a scheme,
@@ -73,7 +67,7 @@ pub fn is_url(text: &str) -> bool {
     if text.is_empty() {
         return false;
     }
-    if text.contains("://") || text.starts_with(['/', '\\', '~']) || text.starts_with('.') {
+    if text.contains("://") || text.starts_with(['/', '\\', '~', '.']) {
         return true;
     }
     // `C:\…` or `C:/…`, a Windows path.
@@ -111,7 +105,7 @@ pub fn folder_name(url: &str) -> String {
     worktree_folder::folder_name(name)
 }
 
-/// Clones, streaming git's output to `live`. A clone that doesn't finish leaves no folder.
+/// A clone that doesn't finish leaves no folder.
 pub fn execute(
     cloning: &Cloning,
     cancel: &CancelTree,
@@ -140,6 +134,7 @@ pub fn execute(
 
 /// git removes a folder it couldn't clone into, but not when it's killed by *Cancel*.
 fn remove_unfinished(path: &Path) {
+    // `exists` follows symlinks, `remove_dir_all` doesn't: a dangling one there isn't git's.
     if path.exists() {
         let _ = std::fs::remove_dir_all(path);
     }

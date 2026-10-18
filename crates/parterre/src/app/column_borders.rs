@@ -1,16 +1,13 @@
-//! The borders between a table's column headings, dragged to resize the columns and
-//! double-clicked to put one back to the layout's width (#125). The widths are
-//! [`ColumnWidths`]; the table lays its columns out again after [`drag`], so that the headings
-//! and rows follow the pointer in the same frame, then [`paint`]s the borders.
+//! A table lays its columns out again after [`drag`], so that headings and rows follow the
+//! pointer in the same frame, and then [`paint`]s the borders.
 
 use eframe::egui::{CursorIcon, Id, Rect, Stroke, Ui};
 use parterre_core::columns::{ColumnWidths, Layout};
 
-use super::log_window::Colors;
+use super::table_style::Colors;
 use crate::widgets;
 
-/// A table's columns: laid out as `layout`, `flex` taking what the others leave, down to
-/// `flex_min`.
+/// `flex` is the column taking what the others leave, down to `flex_min`.
 pub struct Columns<'a> {
     pub layout: &'a Layout,
     pub flex: usize,
@@ -18,7 +15,7 @@ pub struct Columns<'a> {
 }
 
 impl Columns<'_> {
-    /// The borders that size a column, and where they are.
+    /// Each border's index and x, but those sizing a hidden (zero-width) column.
     fn borders(&self) -> impl Iterator<Item = (usize, f32)> + '_ {
         (0..self.layout.w.len().saturating_sub(1))
             .filter(|&b| self.layout.w[ColumnWidths::sized_by(b, self.flex)] > 0.0)
@@ -26,10 +23,8 @@ impl Columns<'_> {
     }
 }
 
-/// Lets the borders of `columns` in the headings `head` be dragged, sizing the columns in
-/// `widths`, or double-clicked, resetting them. Returns the border under the pointer or being
-/// dragged, to [`paint`] highlighted. Call after the headings' own widgets, so that the borders
-/// are on top of them.
+/// Returns the border hovered or dragged. Call after the headings' own widgets, so that the
+/// borders are on top of them.
 pub fn drag(
     ui: &Ui,
     id: Id,
@@ -53,7 +48,7 @@ pub fn drag(
         } else if response.dragged()
             && let Some(pointer) = response.interact_pointer_pos()
         {
-            // Where on the border it was grabbed, so that it doesn't jump to the pointer.
+            // The grab's offset, so that the border doesn't jump to the pointer.
             if response.drag_started() {
                 let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(pointer);
                 ui.data_mut(|d| d.insert_temp(id, origin.x - x));
@@ -66,8 +61,6 @@ pub fn drag(
     active
 }
 
-/// Paints the borders of `columns` in the headings `head`: a short line, the `active` one
-/// full height in the accent colour.
 pub fn paint(ui: &Ui, head: Rect, columns: &Columns, active: Option<usize>, c: &Colors) {
     let painter = ui.painter();
     for (border, x) in columns.borders() {

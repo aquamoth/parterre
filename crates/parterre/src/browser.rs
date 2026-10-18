@@ -1,52 +1,49 @@
-//! Opening a web page in the default browser, or a file in its app, by running the platform's
-//! opener with the URL as its argument (no shell). eframe's `links` feature would do it through
-//! the `webbrowser` crate, which brings a dozen crates for URL parsing; see the research on
-//! GitHub pull requests (§14).
+//! Runs the platform's opener rather than using eframe's `links` feature, whose `webbrowser`
+//! crate brings a dozen crates for URL parsing (`docs/research/github-forks-and-pull-requests.md`,
+//! §14).
 
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// The only pages parterre opens: GitHub's, and Azure DevOps' (pull requests, #102).
-const ALLOWED: [&str; 2] = ["https://github.com/", "https://dev.azure.com/"];
-/// And parterre's contact address (#351), in the mail app.
-const MAIL: &str = crate::about::MAIL;
+use crate::about::MAIL;
 
-/// Opens `url` in the default browser. Only [`ALLOWED`] pages and [`MAIL`] are opened;
-/// anything else is an error, as is an opener that can't be started.
+const ALLOWED_PREFIXES: [&str; 2] = ["https://github.com/", "https://dev.azure.com/"];
+
+/// Opens `url` in the default browser, or [`MAIL`] in the mail app. Any other URL is an error.
 pub fn open(url: &str) -> Result<(), String> {
     if !is_allowed(url) {
         return Err(format!(
             "not opening {url}: only {} pages are opened",
-            ALLOWED.join(" and ")
+            ALLOWED_PREFIXES.join(" and ")
         ));
     }
-    spawn(opener(url)).map_err(|e| format!("could not open {url}: {e}"))
+    spawn_detached(opener(url)).map_err(|e| format!("could not open {url}: {e}"))
 }
 
-/// Opens the file at `path` in the app the system opens its kind with, such as the browser for
-/// an HTML file.
+/// Opens the file at `path` in the app the system opens its kind with.
 pub fn open_file(path: &Path) -> Result<(), String> {
-    spawn(opener(path)).map_err(|e| format!("could not open {}: {e}", path.display()))
+    spawn_detached(opener(path)).map_err(|e| format!("could not open {}: {e}", path.display()))
 }
 
-/// Starts `cmd` with no input or output, and doesn't wait for it: an opener may run as long as
-/// what it opens.
-pub fn spawn(mut cmd: Command) -> std::io::Result<()> {
+/// Starts `cmd` with no input or output, without waiting: an opener may run as long as what it
+/// opens.
+pub fn spawn_detached(mut cmd: Command) -> std::io::Result<()> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = cmd.spawn()?;
-    // Reaped in the background, so no zombie is left behind.
+    // Reaped, so no zombie is left behind.
     std::thread::spawn(move || child.wait());
     Ok(())
 }
 
-/// A github.com or dev.azure.com page, with nothing in it that an opener or a browser could
-/// take for more than a URL.
+/// Nothing in an allowed URL is something an opener or a browser could take for more than a URL.
 fn is_allowed(url: &str) -> bool {
     url == MAIL
-        || ALLOWED.iter().any(|allowed| url.starts_with(allowed))
+        || ALLOWED_PREFIXES
+            .iter()
+            .any(|prefix| url.starts_with(prefix))
             && url
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"-._~/:?#=&%".contains(&b))
@@ -62,11 +59,11 @@ fn opener(url: impl AsRef<OsStr>) -> Command {
 #[cfg(windows)]
 fn opener(url: impl AsRef<OsStr>) -> Command {
     use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     // Explorer hands a URL to the default browser. Not `cmd /c start`, which would read `&`
     // and `^` in it as commands.
     let mut cmd = Command::new("explorer.exe");
     cmd.arg(url);
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd
 }

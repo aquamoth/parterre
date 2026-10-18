@@ -1,16 +1,14 @@
-//! Feature events (#264): which windows, dialogs, menus and actions are used, and the settings
-//! every event carries, named as PostHog's naming guide says (lowercase snake case,
-//! `object_action`, a fixed event name with the variable part as a property).
+//! Feature events (#264), named as PostHog's naming guide says: lowercase snake case,
+//! `object_action`, a fixed event name with the variable part as a property.
 //!
-//! Every string a property can hold is a name from the fixed sets below, turned into a
-//! `&'static str` by a `match`; the other values are numbers and booleans. So no repository
-//! data (paths, names, refs, hashes) can reach an event, by construction (#223). No network
-//! here; the sending is in `posthog.rs`.
+//! Every string a property can hold is a `&'static str` from the fixed sets below; the other
+//! values are numbers and booleans. So no repository data (paths, names, refs, hashes) can
+//! reach an event, by construction (#223).
 
 use std::cell::RefCell;
 use std::sync::Mutex;
 
-/// An enum of names, with each variant's name and the whole set (`ALL`), for the tests.
+/// A fieldless enum, each variant's property value, and `ALL` variants for the tests.
 macro_rules! names {
     ($(#[$meta:meta])* $name:ident { $($(#[$vmeta:meta])* $variant:ident => $text:literal,)* }) => {
         $(#[$meta])*
@@ -22,7 +20,6 @@ macro_rules! names {
         impl $name {
             pub const ALL: &'static [$name] = &[$($name::$variant,)*];
 
-            /// As the property says it.
             pub fn name(self) -> &'static str {
                 match self {
                     $($name::$variant => $text,)*
@@ -227,7 +224,6 @@ names! {
 }
 
 impl Range {
-    /// The range `count` is in.
     pub fn of(count: usize) -> Range {
         match count {
             0 => Range::Zero,
@@ -245,7 +241,6 @@ impl Range {
 /// The most repositories `repository_count` says: the recent list keeps no more.
 pub const MAX_REPOSITORIES: usize = 10;
 
-/// A feature used: one of three events, with which feature as its property.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Feature {
     /// A window or dialog opens: `$screen`, as PostHog's mobile SDKs capture screen views.
@@ -257,7 +252,6 @@ pub enum Feature {
 }
 
 impl Feature {
-    /// The event's name.
     pub fn event(self) -> &'static str {
         match self {
             Feature::Screen(_) => "$screen",
@@ -266,7 +260,7 @@ impl Feature {
         }
     }
 
-    /// The property naming the feature, and its value.
+    /// `(key, value)`.
     pub fn property(self) -> (&'static str, &'static str) {
         match self {
             Feature::Screen(s) => ("$screen_name", s.name()),
@@ -276,12 +270,11 @@ impl Feature {
     }
 }
 
-/// What every event says of the settings, the screen and the repository: PostHog's super
-/// properties, as its SDKs' `register` adds them, at their values when the event is sent.
+/// PostHog's super properties, as its SDKs' `register` adds them: on every event, at their
+/// values when it is sent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Properties {
     pub theme: Theme,
-    /// The size of all text, one of the text size steps.
     pub text_size: f32,
     pub graph_mode: GraphMode,
     pub graph_direction: GraphDirection,
@@ -290,19 +283,18 @@ pub struct Properties {
     pub diff_form: DiffForm,
     pub auto_reload: bool,
     pub pull_requests: bool,
-    /// The display's scale (physical pixels per point), if known.
+    /// Physical pixels per point.
     pub screen_density: Option<f32>,
-    /// How many repositories the recent list holds.
+    /// How many the recent list holds.
     pub repositories: usize,
-    /// The open repository's commits, and the graph's nodes, while one is open.
+    /// The open repository's, while one is open.
     pub commits: Option<usize>,
     pub nodes: Option<usize>,
 }
 
-/// A property's value.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
-    /// A name from the fixed sets above.
+    /// From the fixed sets above.
     Name(&'static str),
     Number(f64),
     Count(usize),
@@ -310,7 +302,7 @@ pub enum Value {
 }
 
 impl Properties {
-    /// The properties as sent: names, and what is unknown left out.
+    /// As sent: what is unknown is left out.
     pub fn pairs(&self) -> Vec<(&'static str, Value)> {
         let mut pairs = vec![
             ("theme", Value::Name(self.theme.name())),
@@ -345,27 +337,24 @@ fn rounded(x: f32) -> f64 {
     (f64::from(x) * 100.0).round() / 100.0
 }
 
-/// The usage statistics' thread, while they are sent: given every feature recorded.
 type Sink = Box<dyn Fn(Feature) + Send>;
 
 static SINK: Mutex<Option<Sink>> = Mutex::new(None);
 
-/// The properties registered last, for every event.
 static REGISTERED: Mutex<Option<Properties>> = Mutex::new(None);
 
 thread_local! {
-    /// What [`recording`] has recorded on this thread.
     static RECORDED: RefCell<Option<Vec<Feature>>> = const { RefCell::new(None) };
 }
 
-/// Records that a feature was used. Sent while usage statistics are ([`crate::Usage`]), and
-/// nothing otherwise. Never waits: it is handed to the usage statistics' thread.
+/// Sent while usage statistics are ([`crate::Usage`]), and nothing otherwise. Never waits: it
+/// is handed to the usage statistics' thread.
 pub fn record(feature: Feature) {
-    let tested = RECORDED.with(|recorded| {
+    let is_kept_for_test = RECORDED.with(|recorded| {
         let mut recorded = recorded.borrow_mut();
         recorded.as_mut().map(|r| r.push(feature)).is_some()
     });
-    if tested {
+    if is_kept_for_test {
         return;
     }
     if let Ok(sink) = SINK.lock()
@@ -375,28 +364,26 @@ pub fn record(feature: Feature) {
     }
 }
 
-/// The settings, screen and repository as they are now, for every event from now on.
+/// For every event from now on.
 pub fn register(properties: Properties) {
     if let Ok(mut registered) = REGISTERED.lock() {
         *registered = Some(properties);
     }
 }
 
-/// The properties registered last.
 #[cfg(feature = "send")]
 pub(crate) fn registered() -> Option<Properties> {
     REGISTERED.lock().ok().and_then(|r| *r)
 }
 
-/// While usage statistics are sent: features go to `sink`. `None` stops it.
 pub(crate) fn sink(sink: Option<Sink>) {
     if let Ok(mut current) = SINK.lock() {
         *current = sink;
     }
 }
 
-/// For tests: runs `f`, and gives what it recorded on this thread besides its result. What is
-/// recorded meanwhile on this thread is kept here and never sent.
+/// For tests: runs `f`, and returns its result with the features recorded meanwhile on this
+/// thread, which are not sent.
 pub fn recording<R>(f: impl FnOnce() -> R) -> (R, Vec<Feature>) {
     let outer = RECORDED.with(|r| r.replace(Some(Vec::new())));
     let result = f();
@@ -409,7 +396,6 @@ pub(crate) mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// Every feature there is.
     fn features() -> Vec<Feature> {
         let screens = Screen::ALL.iter().map(|&s| Feature::Screen(s));
         let menus = Menu::ALL.iter().map(|&m| Feature::Menu(m));

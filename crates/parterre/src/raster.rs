@@ -1,16 +1,13 @@
-//! A small software rasteriser for egui's triangle meshes, so that a PNG export is drawn by the
-//! same painting code as the window, without a GPU (and without a window, for `--export`).
-//!
-//! It does what egui's glow painter does: per-vertex colours times the texture (the font
-//! atlas), premultiplied alpha blended in gamma space, with anti-aliasing coming from the
-//! tessellator's feathering. The target is opaque (the graph's background), so it keeps RGB
-//! only.
+//! Rasterises egui's meshes on the CPU, so that a PNG export is drawn by the window's painting
+//! code without a GPU or a window. It does what egui's glow painter does: per-vertex colours
+//! times the texture (the font atlas), premultiplied alpha blended in gamma space, with
+//! anti-aliasing from the tessellator's feathering. The target is the opaque background, so it
+//! keeps RGB only.
 
 use eframe::egui::epaint::{ImageData, ImageDelta, Mesh, Vertex};
 use eframe::egui::{Color32, Pos2};
 use image::RgbImage;
 
-/// A CPU copy of a texture, kept up to date from egui's texture deltas.
 #[derive(Default)]
 pub struct Texture {
     size: [usize; 2],
@@ -37,8 +34,7 @@ impl Texture {
         }
     }
 
-    /// Bilinear sample at normalised coordinates, clamped to the edges (egui's font atlas is
-    /// sampled linearly).
+    /// Bilinear, as egui samples its font atlas, and clamped to the edges.
     fn sample(&self, u: f32, v: f32) -> [f32; 4] {
         let [w, h] = self.size;
         if w == 0 || h == 0 {
@@ -61,7 +57,7 @@ impl Texture {
     }
 }
 
-/// A rectangle of pixels: `min` inclusive, `max` exclusive.
+/// `min` inclusive, `max` exclusive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PixelRect {
     pub min: [i64; 2],
@@ -77,8 +73,8 @@ impl PixelRect {
     }
 }
 
-/// Draws `mesh`, whose positions are in points, into `target`. Point (0, 0) lands on the pixel
-/// `origin` of `target`, and only pixels inside `clip` (relative to `origin`) are touched.
+/// Point (0, 0) of `mesh` lands on the pixel `origin` of `target`, and only pixels inside `clip`
+/// (relative to `origin`) are touched.
 pub fn draw_mesh(
     target: &mut RgbImage,
     origin: [i64; 2],
@@ -98,9 +94,9 @@ pub fn draw_mesh(
     if clip.min[0] >= clip.max[0] || clip.min[1] >= clip.max[1] {
         return;
     }
-    for tri in mesh.indices.as_chunks::<3>().0 {
-        let v = tri.map(|i| &mesh.vertices[i as usize]);
-        fill_triangle(target, origin, clip, pixels_per_point, v, texture);
+    for triangle in mesh.indices.as_chunks::<3>().0 {
+        let vertices = triangle.map(|i| &mesh.vertices[i as usize]);
+        fill_triangle(target, origin, clip, pixels_per_point, vertices, texture);
     }
 }
 
@@ -111,11 +107,11 @@ fn fill_triangle(
     target: &mut RgbImage,
     origin: [i64; 2],
     clip: PixelRect,
-    ppp: f32,
+    pixels_per_point: f32,
     v: [&Vertex; 3],
     texture: &Texture,
 ) {
-    let p = v.map(|v| Pos2::new(v.pos.x * ppp, v.pos.y * ppp));
+    let p = v.map(|v| (v.pos.to_vec2() * pixels_per_point).to_pos2());
     let cross = |a: Pos2, b: Pos2, c: Pos2| (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
     let area = cross(p[0], p[1], p[2]);
     if area == 0.0 || !area.is_finite() {
@@ -156,9 +152,10 @@ fn fill_triangle(
             let texel = if solid {
                 solid_texel
             } else {
-                let u = lerp(v[0].uv.x, v[1].uv.x, v[2].uv.x);
-                let w = lerp(v[0].uv.y, v[1].uv.y, v[2].uv.y);
-                texture.sample(u, w)
+                texture.sample(
+                    lerp(v[0].uv.x, v[1].uv.x, v[2].uv.x),
+                    lerp(v[0].uv.y, v[1].uv.y, v[2].uv.y),
+                )
             };
             let src: [f32; 4] = std::array::from_fn(|i| {
                 lerp(colors[0][i], colors[1][i], colors[2][i]) * texel[i] / 255.0

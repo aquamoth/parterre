@@ -1,46 +1,17 @@
-//! Reverting a commit on the open worktree's branch, against real, disposable repositories:
-//! when it's offered, the message (checked against what `git revert` itself writes), merges,
-//! uncommitted changes with and without stashing them, restoring the stash, and every way it
-//! can stop or refuse without losing work.
 mod common;
 
-use common::{TestRepo, read_text};
-use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck};
+use common::{TestRepo, done, failed, read_text, rev};
+use parterre_core::branches::{Action, Catalog, GitOperation, Outcome, Stuck};
 use parterre_core::revert::{self, Preview};
-use parterre_util::CancelTree;
-
-fn rev(r: &TestRepo, rev: &str) -> Oid {
-    Oid::from_hex(&r.git(&["rev-parse", rev])).unwrap()
-}
 
 fn preview(r: &TestRepo, commit: &str) -> Preview {
     Preview::load(r.path(), rev(r, commit)).unwrap()
 }
 
-fn run(r: &TestRepo, action: Action) -> Outcome {
-    Branches::new(r.path()).execute(action, None, &CancelTree::default())
-}
-
 fn execute(r: &TestRepo, revert: revert::Revert) -> Outcome {
-    run(r, Action::Revert(Box::new(revert)))
+    common::execute(r, Action::Revert(Box::new(revert)), None)
 }
 
-fn done(out: Outcome) -> Report {
-    match out {
-        Outcome::Done(report) => report,
-        other => panic!("expected it done: {other:?}"),
-    }
-}
-
-fn failed(out: Outcome) -> (String, Report) {
-    match out {
-        Outcome::Failed { error, report } => (error.to_string(), report),
-        other => panic!("expected a failure: {other:?}"),
-    }
-}
-
-/// The revert `p` would run with git's message.
 fn plain(p: &Preview, stash: bool) -> revert::Revert {
     p.revert(stash, &p.message.clone())
 }
@@ -59,7 +30,6 @@ fn message(r: &TestRepo) -> String {
     r.git(&["log", "-1", "--format=%B"])
 }
 
-/// main: base (file "one") → change (file "two") → later (another file).
 fn history() -> TestRepo {
     let mut r = TestRepo::new();
     r.write("file", b"one\n");
@@ -95,7 +65,7 @@ fn offered_for_commits_head_reaches_only() {
 fn the_message_is_what_git_writes() {
     let r = history();
     let p = preview(&r, "change");
-    assert!(!p.merge && !p.reference);
+    assert!(!p.is_merge && !p.revert_reference);
     r.git(&["revert", "--no-edit", "change"]);
     assert_eq!(p.message.trim_end(), message(&r));
     assert!(
@@ -179,7 +149,7 @@ fn with_revert_reference_the_title_is_the_users() {
     let r = history();
     r.git(&["config", "revert.reference", "true"]);
     let p = preview(&r, "change");
-    assert!(p.reference);
+    assert!(p.revert_reference);
     let short = r.git(&["show", "-s", "--pretty=reference", "change"]);
     assert_eq!(p.message, format!("\n\nThis reverts commit {short}.\n"));
     assert!(p.blocked(false, &p.message).is_some());
@@ -200,14 +170,14 @@ fn a_merge_is_reverted_against_its_first_parent() {
     r.commit_all("main only");
     r.merge("feature", "Merge branch 'feature'");
     let p = preview(&r, "HEAD");
-    assert!(p.merge);
+    assert!(p.is_merge);
     let revert = plain(&p, false);
     assert!(
         revert::command(&revert)
             .windows(2)
             .any(|w| w == ["-m", "1"])
     );
-    // Compare with git's own wording first, in a throwaway branch.
+    // Git's own wording, in a throwaway branch.
     r.git(&["switch", "-q", "-c", "check"]);
     r.git(&["revert", "--no-edit", "-m", "1", "HEAD"]);
     assert_eq!(p.message.trim_end(), message(&r));
@@ -242,7 +212,7 @@ fn local_changes_to_a_file_the_revert_changes_need_a_stash() {
     let p = preview(&r, "change");
     assert_eq!(p.overlap, ["file"]);
     assert_eq!(p.refused(false), ["file"]);
-    let short = &rev(&r, "change").to_hex()[..7];
+    let short = rev(&r, "change").short(7);
     assert_eq!(
         p.refusal(false),
         Some(format!("{short} changes 1 file with local changes"))
@@ -251,7 +221,7 @@ fn local_changes_to_a_file_the_revert_changes_need_a_stash() {
     assert!(p.blocked(false, &p.message).is_some());
     // Run anyway, as a stale dialog might: refused before git touches anything.
     let head = rev(&r, "HEAD");
-    let (error, _) = failed(execute(&r, plain(&p, false)));
+    let error = failed(execute(&r, plain(&p, false)));
     assert!(error.contains("local changes changed"), "{error}");
     assert_eq!(rev(&r, "HEAD"), head);
     assert_eq!(text(&r, "file"), "mine\n");
@@ -291,7 +261,7 @@ fn stashing_reverts_and_leaves_the_changes_to_restore() {
     // Another entry on top since: it's found by its commit.
     r.write("later", b"someone else's\n");
     r.git(&["stash", "push", "-q", "-m", "theirs"]);
-    let report = done(run(&r, Action::RestoreStash(stash.oid)));
+    let report = done(common::execute(&r, Action::RestoreStash(stash.oid), None));
     assert!(report.attention.is_none());
     assert_eq!(text(&r, "other"), "also mine\n");
     assert_eq!(text(&r, "staged"), "staged\n");
@@ -304,7 +274,7 @@ fn a_restore_that_conflicts_keeps_the_entry() {
     r.write("file", b"mine\n");
     let p = preview(&r, "change");
     let stash = done(execute(&r, plain(&p, true))).stash.unwrap();
-    let report = done(run(&r, Action::RestoreStash(stash.oid)));
+    let report = done(common::execute(&r, Action::RestoreStash(stash.oid), None));
     let attention = report.attention.expect("conflicted");
     assert_eq!(
         attention.title,
@@ -322,11 +292,10 @@ fn restoring_an_entry_gone_since_says_so() {
     let p = preview(&r, "change");
     let stash = done(execute(&r, plain(&p, true))).stash.unwrap();
     r.git(&["stash", "drop", "-q"]);
-    let (error, _) = failed(run(&r, Action::RestoreStash(stash.oid)));
+    let error = failed(common::execute(&r, Action::RestoreStash(stash.oid), None));
     assert!(error.contains("gone from the stash list"), "{error}");
 }
 
-/// main, where `file` changed again after `change`: reverting `change` conflicts.
 fn conflicting() -> TestRepo {
     let mut r = history();
     r.write("file", b"three\n");
@@ -343,11 +312,13 @@ fn a_conflict_leaves_the_revert_in_progress() {
     assert_eq!(attention.title, "Revert stopped on conflicts in 1 file");
     assert!(report.created.is_none() && report.stash.is_none());
     let catalog = Catalog::load(r.path()).unwrap();
-    assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a revert")));
+    assert_eq!(
+        catalog.stuck(),
+        Some(Stuck::InProgress(GitOperation::Revert))
+    );
     let open = catalog.worktrees.iter().find(|w| w.open).unwrap();
     assert_eq!(open.reverting, Some(rev(&r, "change")));
     assert_eq!(catalog.stashed_for_revert, None);
-    // Nothing more is offered there until it's finished.
     assert!(Preview::load(r.path(), rev(&r, "HEAD")).is_err());
 }
 
@@ -370,13 +341,13 @@ fn a_conflict_after_stashing_names_the_entry_instead_of_restoring() {
     assert_eq!(catalog.stashed_for_revert.as_deref(), Some("stash@{0}"));
     assert_eq!(text(&r, "other"), "other\n");
     r.git(&["revert", "--abort"]);
-    // The test's git, without the system's `core.autocrlf`, as parterre's git checked out.
+    // The test's git, without the system's `core.autocrlf`, sees the files parterre's git
+    // checked out as changed.
     r.git(&["reset", "-q", "--hard"]);
     r.git(&["stash", "pop", "-q"]);
     assert_eq!(text(&r, "other"), "mine\n");
 }
 
-/// main, where a later commit undid `change` by hand.
 fn undone() -> TestRepo {
     let mut r = history();
     r.write("file", b"one\n");
@@ -390,7 +361,7 @@ fn nothing_to_revert_leaves_no_operation_in_progress() {
     let head = rev(&r, "HEAD");
     let p = preview(&r, "change");
     let report = done(execute(&r, plain(&p, false)));
-    let short = &rev(&r, "change").to_hex()[..7];
+    let short = rev(&r, "change").short(7);
     assert_eq!(
         report.attention.expect("said so").title,
         format!("Nothing to revert: {short}'s changes are already undone")
@@ -408,7 +379,7 @@ fn nothing_to_revert_after_stashing_still_offers_the_stash() {
     let report = done(execute(&r, plain(&p, true)));
     assert!(report.attention.is_some());
     let stash = report.stash.expect("stashed");
-    done(run(&r, Action::RestoreStash(stash.oid)));
+    done(common::execute(&r, Action::RestoreStash(stash.oid), None));
     assert_eq!(text(&r, "other"), "mine\n");
 }
 
@@ -419,7 +390,7 @@ fn an_untracked_file_in_the_way_is_a_refusal_not_nothing_to_revert() {
     r.commit("remove other");
     r.write("other", b"untracked\n");
     let p = preview(&r, "HEAD");
-    let (error, _) = failed(execute(&r, plain(&p, false)));
+    let error = failed(execute(&r, plain(&p, false)));
     assert!(!error.is_empty());
     assert_eq!(text(&r, "other"), "untracked\n");
     assert_eq!(Catalog::load(r.path()).unwrap().stuck(), None);
@@ -432,7 +403,7 @@ fn a_branch_that_moved_is_not_reverted() {
     r.write("new", b"new\n");
     r.commit_all("meanwhile");
     let head = rev(&r, "HEAD");
-    let (error, _) = failed(execute(&r, plain(&p, false)));
+    let error = failed(execute(&r, plain(&p, false)));
     assert!(error.contains("moved"), "{error}");
     assert_eq!(rev(&r, "HEAD"), head);
 }
@@ -446,7 +417,7 @@ fn a_detached_head_is_reverted_on() {
     let revert = plain(&p, false);
     assert_eq!(
         Action::Revert(Box::new(revert.clone())).label(),
-        format!("Revert {} in HEAD", &rev(&r, "change").to_hex()[..7])
+        format!("Revert {} in HEAD", rev(&r, "change").short(7))
     );
     done(execute(&r, revert));
     assert_eq!(text(&r, "file"), "one\n");

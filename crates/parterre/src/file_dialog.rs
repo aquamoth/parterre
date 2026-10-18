@@ -1,19 +1,18 @@
-//! System file dialogs that leave the window responsive.
-//!
 //! rfd's blocking dialogs hold up the event loop until they close, and after a few seconds the
-//! desktop (GNOME's Mutter, for one) offers to close parterre as "not responding". Instead, the
-//! dialog's future runs to completion on a worker thread, and the app picks up the answer in a
-//! later frame.
+//! desktop (GNOME's Mutter, for one) offers to close parterre as "not responding". So the async
+//! dialog runs to completion on a worker thread, and the app picks up the answer in a later frame.
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::Receiver;
 use std::task::{Context, Poll, Wake, Waker};
 
 use eframe::egui;
 
-/// A dialog that is open, and what its answer is for.
+use crate::worker;
+
+/// An open dialog, and what its answer is for.
 #[derive(Debug)]
 pub struct Pending<T> {
     pub what: T,
@@ -21,33 +20,30 @@ pub struct Pending<T> {
 }
 
 impl<T> Pending<T> {
-    /// Waits for `dialog` (from [`rfd::AsyncFileDialog`]) on a worker thread.
     pub fn start(
         what: T,
         dialog: impl Future<Output = Option<rfd::FileHandle>> + Send + 'static,
         ctx: &egui::Context,
     ) -> Pending<T> {
-        let (send, answer) = mpsc::channel();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let picked = block_on(dialog).map(|file| file.path().to_owned());
-            let _ = send.send(picked);
-            ctx.request_repaint();
-        });
+        let answer = worker::spawn(ctx, || block_on(dialog).map(|file| file.path().to_owned()));
         Pending { what, answer }
     }
 
-    /// `None` while the dialog is open; then what was picked, `Some(None)` if nothing.
+    /// `None` while the dialog is open, then `Some` of what was picked.
     pub fn answer(&self) -> Option<Option<PathBuf>> {
-        match self.answer.try_recv() {
-            Ok(picked) => Some(picked),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(None),
-        }
+        worker::received(&self.answer, || None)
     }
 }
 
-/// Runs `future` on this thread, sleeping while it waits.
+/// The system's folder picker, opened at `near` or the nearest folder above it that exists.
+pub fn pick_folder(ctx: &egui::Context, title: &str, near: &str) -> Pending<()> {
+    let mut dialog = rfd::AsyncFileDialog::new().set_title(title);
+    if let Some(dir) = Path::new(near).ancestors().find(|a| a.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    Pending::start((), dialog.pick_folder(), ctx)
+}
+
 fn block_on<F: Future>(future: F) -> F::Output {
     struct Unpark(std::thread::Thread);
     impl Wake for Unpark {
@@ -68,6 +64,8 @@ fn block_on<F: Future>(future: F) -> F::Output {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
     use super::*;
 
     #[test]

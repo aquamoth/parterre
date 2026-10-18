@@ -1,12 +1,10 @@
-//! The widths of a table's columns (#125): one column, the flexible one, takes what the others
-//! leave; the others are as wide as the window's layout says until the user drags their
-//! border, and then as wide as dragged. A border follows the pointer: left of the flexible
-//! column it sizes the column on its left, right of it the column on its right, and the
-//! flexible column takes up the difference. The widths the user picks last as long as the
-//! table's window is open.
+//! One column of a table, the flexible one, takes what the others leave; the others are as
+//! wide as the window's layout says until the user drags their border, and then as wide as
+//! dragged. A border follows the pointer: left of the flexible column it sizes the column on
+//! its left, right of it the column on its right, and the flexible column takes up the
+//! difference.
 
-/// The narrowest a dragged column gets.
-pub const MIN_WIDTH: f32 = 24.0;
+const MIN_DRAGGED_WIDTH: f32 = 24.0;
 
 /// The columns' x and widths, left to right.
 #[derive(Clone, Debug, PartialEq)]
@@ -22,21 +20,18 @@ impl Layout {
     }
 }
 
-/// The widths the user picked, by column; `None` where the layout decides.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ColumnWidths {
-    set: Vec<Option<f32>>,
+    picked: Vec<Option<f32>>,
 }
 
 impl ColumnWidths {
-    /// Column `i`'s width: the one picked, or else `default`.
     pub fn get(&self, i: usize, default: f32) -> f32 {
         self.picked(i).unwrap_or(default)
     }
 
-    /// The width picked for column `i`, if one was.
     pub fn picked(&self, i: usize) -> Option<f32> {
-        self.set.get(i).copied().flatten()
+        self.picked.get(i).copied().flatten()
     }
 
     /// The columns from `left`, `width` wide in all: column `flex` takes what the others leave,
@@ -74,8 +69,8 @@ impl ColumnWidths {
     }
 
     /// Border `border` of `layout` dragged to `pointer`: sizes its column so that the border is
-    /// under the pointer, as far as leaves the column [`MIN_WIDTH`] and the flexible column
-    /// `flex_min`.
+    /// under the pointer, as far as that leaves the column a minimum width and the flexible
+    /// column `flex_min`.
     pub fn drag(
         &mut self,
         layout: &Layout,
@@ -92,16 +87,16 @@ impl ColumnWidths {
             x + w - pointer
         };
         let room = (layout.w[flex] - flex_min).max(0.0);
-        let width = wanted.min(w + room).max(MIN_WIDTH.min(w));
-        if self.set.len() <= i {
-            self.set.resize(i + 1, None);
+        let width = wanted.min(w + room).max(MIN_DRAGGED_WIDTH.min(w));
+        if self.picked.len() <= i {
+            self.picked.resize(i + 1, None);
         }
-        self.set[i] = Some(width);
+        self.picked[i] = Some(width);
     }
 
     /// Puts the column that border `border` sizes back to the layout's width.
     pub fn reset(&mut self, border: usize, flex: usize) {
-        if let Some(w) = self.set.get_mut(Self::sized_by(border, flex)) {
+        if let Some(w) = self.picked.get_mut(Self::sized_by(border, flex)) {
             *w = None;
         }
     }
@@ -149,7 +144,7 @@ mod tests {
         let mut widths = ColumnWidths::default();
         let l = widths.layout(&DEFAULTS, 1, 60.0, 0.0, 500.0);
         widths.drag(&l, 0, 1, 60.0, -100.0);
-        assert_eq!(widths.picked(0), Some(MIN_WIDTH));
+        assert_eq!(widths.picked(0), Some(MIN_DRAGGED_WIDTH));
         widths.drag(&l, 0, 1, 60.0, 1000.0);
         let l = widths.layout(&DEFAULTS, 1, 60.0, 0.0, 500.0);
         assert_eq!(l.w[1], 60.0);
@@ -163,7 +158,12 @@ mod tests {
         widths.drag(&l, 2, 1, 60.0, 300.0);
         assert_eq!(widths.picked(3), Some(200.0));
         widths.reset(2, 1);
-        assert_eq!(widths, ColumnWidths { set: vec![None; 4] });
+        assert_eq!(
+            widths,
+            ColumnWidths {
+                picked: vec![None; 4]
+            }
+        );
         let l = widths.layout(&DEFAULTS, 1, 60.0, 0.0, 500.0);
         assert_eq!(l.w[3], 80.0);
     }

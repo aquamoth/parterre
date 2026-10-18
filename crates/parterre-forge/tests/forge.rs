@@ -1,4 +1,4 @@
-// The throwaway-repository helpers of parterre-core's tests, shared rather than copied.
+// parterre-core's test helpers, shared rather than copied.
 #[path = "../../parterre-core/tests/common/mod.rs"]
 mod common;
 
@@ -8,6 +8,27 @@ use parterre_core::revgraph::{self, GraphOptions};
 use parterre_forge as forge;
 use parterre_forge::github::{self, GithubRepo};
 use parterre_forge::{PullRequest, PullRequests, Remote};
+
+/// Each node's subject and pull requests, in a graph with remote branches hidden.
+fn labelled_nodes(r: &TestRepo, prs: &PullRequests) -> Vec<(String, Vec<usize>)> {
+    let options = GraphOptions {
+        show_pull_requests: true,
+        show_remote_branches: false,
+        ..GraphOptions::default()
+    };
+    let repo = r.load();
+    let heads: Vec<_> = prs.heads(&repo).into_iter().map(|(h, _)| h).collect();
+    let g = revgraph::build_with_pull_requests(&repo, &options, &heads);
+    g.nodes
+        .iter()
+        .map(|n| {
+            (
+                repo.commit(n.commit).subject.clone(),
+                n.pull_requests.clone(),
+            )
+        })
+        .collect()
+}
 
 #[test]
 fn finds_github_origins_through_insteadof() {
@@ -81,25 +102,8 @@ fn pull_requests_label_their_heads_in_the_graph() {
         }],
         upstreams,
     };
-    let options = GraphOptions {
-        show_pull_requests: true,
-        show_remote_branches: false,
-        ..GraphOptions::default()
-    };
     // With remote branches hidden, main stands for its upstream as the base.
-    let repo = r.load();
-    let heads: Vec<_> = prs.heads(&repo).into_iter().map(|(h, _)| h).collect();
-    let g = revgraph::build_with_pull_requests(&repo, &options, &heads);
-    let labelled: Vec<(String, Vec<usize>)> = g
-        .nodes
-        .iter()
-        .map(|n| {
-            (
-                repo.commit(n.commit).subject.clone(),
-                n.pull_requests.clone(),
-            )
-        })
-        .collect();
+    let labelled = labelled_nodes(&r, &prs);
     assert!(
         labelled.contains(&("B".to_owned(), vec![0])),
         "{labelled:?}"
@@ -107,9 +111,9 @@ fn pull_requests_label_their_heads_in_the_graph() {
     assert!(labelled.contains(&("C".to_owned(), vec![])));
 }
 
-/// My fork, cloned with the parent as `upstream`, with remote branches hidden: my pull request
-/// into the parent shows on my branch's commit, which only `origin/topic` has. Another fork's
-/// pull request, were GitHub to list one, brings none of its commits in.
+/// My fork, cloned with the parent as `upstream`: my pull request into the parent shows on my
+/// branch's commit, which only `origin/topic` has. Another fork's pull request, were GitHub to
+/// list one, brings none of its commits in.
 #[test]
 fn a_forks_own_pull_request_shows_with_remote_branches_hidden() {
     let mut r = TestRepo::new();
@@ -163,24 +167,7 @@ fn a_forks_own_pull_request_shows_with_remote_branches_hidden() {
         ],
         upstreams: forge::upstreams(&git).unwrap(),
     };
-    let options = GraphOptions {
-        show_pull_requests: true,
-        show_remote_branches: false,
-        ..GraphOptions::default()
-    };
-    let repo = r.load();
-    let heads: Vec<_> = prs.heads(&repo).into_iter().map(|(h, _)| h).collect();
-    let g = revgraph::build_with_pull_requests(&repo, &options, &heads);
-    let labelled: Vec<(String, Vec<usize>)> = g
-        .nodes
-        .iter()
-        .map(|n| {
-            (
-                repo.commit(n.commit).subject.clone(),
-                n.pull_requests.clone(),
-            )
-        })
-        .collect();
+    let labelled = labelled_nodes(&r, &prs);
     assert!(
         labelled.contains(&("D".to_owned(), vec![0])),
         "{labelled:?}"
@@ -242,9 +229,7 @@ fn canned_pull_requests_are_on_their_heads_on_origin() {
     );
 }
 
-/// Asks GitHub for parterre's open pull requests from its `main`, signed in as `gh` is.
-/// Needs the network and a signed-in `gh`, so only on request:
-/// `cargo test -p parterre-core --features github --test forge -- --ignored`.
+/// `cargo test -p parterre-forge --features github --test forge -- --ignored`
 #[cfg(feature = "github")]
 #[test]
 #[ignore = "needs the network and a signed-in gh"]
@@ -286,10 +271,13 @@ fn github_is_not_asked_without_fetched_branches() {
         "origin",
         "https://github.com/aquamoth/parterre.git",
     ]);
-    // No branch of origin fetched: nothing could be shown, so nothing is asked (not even for
-    // a token), and there is no error.
+    // Not even for a token.
     let prs = github::load(&Git::new(r.path())).expect("nothing to ask");
     assert!(prs.list.is_empty());
+}
+
+fn remote_branch(remote: &str, branch: &str) -> (String, String) {
+    (remote.to_owned(), branch.to_owned())
 }
 
 #[test]
@@ -301,14 +289,13 @@ fn a_remote_branch_proposed_by_an_open_pull_request_is_found_before_deleting_it(
     r.git(&["remote", "add", "elsewhere", "/srv/git/r"]);
     r.git(&["update-ref", "refs/remotes/origin/feature", &tip]);
     let canned = r#"[{"number": 12, "title": "Add feature", "head": "feature", "base": "main"}]"#;
-    let branch = |remote: &str, branch: &str| (remote.to_owned(), branch.to_owned());
     let found = forge::proposals(
         &Git::new(r.path()),
         &[
-            branch("origin", "feature"),
-            branch("origin", "main"),
-            branch("fork", "feature"),
-            branch("elsewhere", "feature"),
+            remote_branch("origin", "feature"),
+            remote_branch("origin", "main"),
+            remote_branch("fork", "feature"),
+            remote_branch("elsewhere", "feature"),
         ],
         Some(canned),
     );
@@ -322,7 +309,11 @@ fn a_remote_branch_proposed_by_an_open_pull_request_is_found_before_deleting_it(
     assert_eq!(found[3], forge::Proposed::NotOnForge);
     // Nothing on a forge: nothing asked.
     assert_eq!(
-        forge::proposals(&Git::new(r.path()), &[branch("elsewhere", "x")], None),
+        forge::proposals(
+            &Git::new(r.path()),
+            &[remote_branch("elsewhere", "x")],
+            None
+        ),
         [forge::Proposed::NotOnForge]
     );
 }
@@ -348,14 +339,13 @@ fn an_azure_devops_branch_proposed_by_an_active_pull_request_is_found_before_del
     r.git(&["remote", "add", "elsewhere", "/srv/git/r"]);
     r.git(&["update-ref", "refs/remotes/origin/feature", &tip]);
     let canned = r#"[{"number": 7, "title": "Add feature", "head": "feature", "base": "main"}]"#;
-    let branch = |remote: &str, branch: &str| (remote.to_owned(), branch.to_owned());
     let found = forge::proposals(
         &Git::new(r.path()),
         &[
-            branch("origin", "feature"),
-            branch("origin", "main"),
-            branch("ssh", "feature"),
-            branch("elsewhere", "feature"),
+            remote_branch("origin", "feature"),
+            remote_branch("origin", "main"),
+            remote_branch("ssh", "feature"),
+            remote_branch("elsewhere", "feature"),
         ],
         Some(canned),
     );
@@ -399,7 +389,7 @@ fn azure_devops_origins_have_pull_requests_on_their_heads() {
 
     let json = r#"[{"number": 7, "title": "Seven", "head": "topic", "base": "main"}]"#;
     let prs = origin.load_canned(&git, json).unwrap();
-    let repo = "o/My Project/r";
+    let repo_name = "o/My Project/r";
     assert_eq!(
         prs.list,
         [PullRequest {
@@ -409,9 +399,9 @@ fn azure_devops_origins_have_pull_requests_on_their_heads() {
             draft: false,
             head: parterre_core::Oid::from_hex(&pushed).unwrap(),
             head_branch: "topic".into(),
-            head_repo: Some(repo.into()),
+            head_repo: Some(repo_name.into()),
             base_branch: "main".into(),
-            base_repo: repo.into(),
+            base_repo: repo_name.into(),
             url: "https://dev.azure.com/o/My%20Project/_git/r/pullrequest/7".into(),
         }]
     );
@@ -420,11 +410,11 @@ fn azure_devops_origins_have_pull_requests_on_their_heads() {
         [
             Remote {
                 name: "origin".into(),
-                repo: repo.into(),
+                repo: repo_name.into(),
             },
             Remote {
                 name: "upstream".into(),
-                repo: repo.into(),
+                repo: repo_name.into(),
             },
         ]
     );
@@ -434,10 +424,8 @@ fn azure_devops_origins_have_pull_requests_on_their_heads() {
     assert!(heads[0].0.head.is_some(), "origin/topic is its head branch");
 }
 
-/// Asks Azure DevOps for the active pull requests of the repository `PARTERRE_AZURE_REPO`
-/// names (a remote URL), signed in as git is there. Needs the network and a sign-in, so only
-/// on request: `PARTERRE_AZURE_REPO=https://dev.azure.com/o/p/_git/r cargo test -p
-/// parterre-forge --features azure-devops --test forge -- --ignored azure`.
+/// `PARTERRE_AZURE_REPO=https://dev.azure.com/o/p/_git/r cargo test -p parterre-forge
+/// --features azure-devops --test forge -- --ignored azure`
 #[cfg(feature = "azure-devops")]
 #[test]
 #[ignore = "needs the network and a sign-in to Azure DevOps"]

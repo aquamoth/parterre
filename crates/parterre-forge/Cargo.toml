@@ -12,11 +12,9 @@ homepage.workspace = true
 readme = "README.md"
 
 [features]
-# Open pull requests and the user's repositories from GitHub's API (`github`): the HTTPS client.
-# Without it, loading them fails.
+# GitHub's API over HTTPS. Without it, loading pull requests and repositories fails.
 github = ["dep:ureq"]
-# Active pull requests and repositories from Azure DevOps' API (`azure-devops`), with the same
-# client. Without it, loading them fails.
+# Azure DevOps' API over HTTPS. Without it, loading its pull requests and repositories fails.
 azure-devops = ["dep:ureq"]
 
 [dependencies]

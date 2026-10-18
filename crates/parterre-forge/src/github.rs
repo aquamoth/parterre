@@ -1,45 +1,35 @@
-//! Open pull requests from GitHub (github.com only; no GitHub Enterprise yet), asked for the
-//! way t3code does: per branch, signed in, cached, and within a budget.
+//! Open pull requests from github.com (no GitHub Enterprise yet), asked for as t3code does:
 //!
-//! - **Which:** the pull requests the user can act on: those of the repository `origin` points
-//!   at and, if that is a fork, the fork's own ones into its parent (research §12). Only those
-//!   whose head branch is a branch of `origin` fetched here are asked for, since only they can
-//!   be shown; asking the parent for all of its open pull requests took 23 s for
-//!   pingdotgg/t3code.
-//! - **How:** one GraphQL request per 100 such branches, with a `pullRequests(headRefName:)`
-//!   connection per branch, for `origin` and its parent at once, and only the fields shown.
-//!   As t3code's `gh pr list --head <branch>`, the branch name is matched on GitHub and the
-//!   head repository here: another fork's `main` is not ours.
-//! - **Signed in only:** with the token of a signed-in `gh` (`gh auth token`), or not at all.
-//!   GitHub is never asked without one. `GH_TOKEN` and git's credential helpers (research §6)
-//!   can come later.
-//! - **Within a budget:** once fewer than a tenth of the hour's points are left, as t3code
-//!   keeps in reserve, or GitHub says to wait, nothing is asked until the limit resets
-//!   ([`pause`]). How often a repository is asked again is up to the caller:
-//!   [`super::fresh_for`] and [`super::retry_after`].
+//! - **Which:** those of `origin`'s repository and, if it is a fork, the fork's own into its
+//!   parent (research §12). Only those whose head is a fetched branch of `origin` are asked
+//!   for, since only they can be shown: all of pingdotgg/t3code's open pull requests took 23 s.
+//! - **How:** one GraphQL request per 100 such branches, a `pullRequests(headRefName:)`
+//!   connection per branch on `origin` and its parent, with only the fields shown. As with
+//!   t3code's `gh pr list --head <branch>`, GitHub matches the branch name and the head
+//!   repository is checked here: another fork's `main` is not ours.
+//! - **Signed in only:** with `gh auth token`'s token, or not at all.
+//! - **Within a budget:** once less than a tenth of the hour's points is left, as t3code keeps
+//!   in reserve, or GitHub says to wait, nothing is asked until the limit resets.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
+
+use super::{Forge, ForgeError, Proposed, PullRequest, PullRequests, Remote, RemoteUrl};
 #[cfg(feature = "github")]
-use std::fmt;
-use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use super::{Forge, ForgeError, Proposed, PullRequest, PullRequests, Remote, Token};
-use parterre_core::git::Git;
+use crate::http::{self, Token};
+use parterre_core::git::{Git, GitError};
 
 mod repositories;
 pub use repositories::{Protocol, repositories, repositories_canned};
 
-/// GitHub's GraphQL endpoint. Tokens are only ever sent here.
-#[cfg_attr(not(feature = "github"), allow(dead_code))]
-const GRAPHQL: &str = "https://api.github.com/graphql";
 const WEB: &str = "https://github.com/";
-/// Branches asked about in one request.
 const BRANCHES_PER_REQUEST: usize = 100;
-/// Open pull requests asked for per branch. As t3code: GitHub prices a connection of 100 like
-/// one of 1, and a name such as `main` can have many other forks' pull requests.
-const PER_BRANCH: usize = 100;
+/// As t3code: GitHub prices a connection of 100 like one of 1, and a name such as `main` can
+/// have many other forks' pull requests.
+const PULL_REQUESTS_PER_BRANCH: usize = 100;
+const GH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A repository on github.com.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GithubRepo {
     pub owner: String,
@@ -50,37 +40,20 @@ impl GithubRepo {
     /// The repository a remote URL points at, if it is on github.com: `https://github.com/o/r`,
     /// `git@github.com:o/r.git`, `ssh://git@ssh.github.com:443/o/r` and the like.
     pub fn from_url(url: &str) -> Option<GithubRepo> {
-        let url = url.trim();
-        let (host, path) = match url.split_once("://") {
-            Some((scheme, rest)) => {
-                let scheme = scheme.to_ascii_lowercase();
-                let scheme = scheme.strip_prefix("git+").unwrap_or(&scheme);
-                if !matches!(scheme, "https" | "http" | "ssh" | "git") {
-                    return None;
-                }
-                let (authority, path) = rest.split_once('/')?;
-                let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-                let host = host.split_once(':').map_or(host, |(h, _)| h);
-                (host, path)
+        let url = RemoteUrl::parse(url)?;
+        if let Some(scheme) = &url.scheme {
+            let scheme = scheme.strip_prefix("git+").unwrap_or(scheme);
+            if !matches!(scheme, "https" | "http" | "ssh" | "git") {
+                return None;
             }
-            // scp-like: [user@]host:path, with no slash before the colon.
-            None => {
-                let (authority, path) = url.split_once(':')?;
-                if authority.contains('/') {
-                    return None;
-                }
-                let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-                (host, path)
-            }
-        };
-        let host = host.to_ascii_lowercase();
+        }
         if !matches!(
-            host.as_str(),
+            url.host.as_str(),
             "github.com" | "www.github.com" | "ssh.github.com"
         ) {
             return None;
         }
-        let path = path.trim_matches('/');
+        let path = url.path.trim_matches('/');
         let path = path.strip_suffix(".git").unwrap_or(path);
         let (owner, name) = path.split_once('/')?;
         // Enterprise Managed Users' logins end in `_shortcode`.
@@ -100,26 +73,22 @@ impl GithubRepo {
         })
     }
 
-    /// `owner/name`, from a full name the API gave; `None` if it doesn't look like one.
     fn from_full_name(full_name: &str) -> Option<GithubRepo> {
         GithubRepo::from_url(&format!("{WEB}{full_name}"))
     }
 
-    /// `owner/name`.
     pub fn full_name(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
 }
 
-/// The GitHub repository `origin` points at, if any. Asks git only, not GitHub.
+/// Asks git only, not GitHub.
 pub fn origin(git: &Git) -> Option<GithubRepo> {
     let url = git.query(&["remote", "get-url", "origin"]).ok()??;
     GithubRepo::from_url(&url)
 }
 
-/// Loads the open pull requests for the repository `git` works on (see the module docs): no
-/// request if no branch of `origin` has been fetched, otherwise one per 100 of them, signed in
-/// with `gh`'s token. Run it on a worker thread.
+/// Asks nothing if no branch of `origin` has been fetched. Blocks: run it on a worker thread.
 pub fn load(git: &Git) -> Result<PullRequests, ForgeError> {
     pull_requests(git, |origin| {
         let branches = remote_branches(git, "origin")?;
@@ -130,14 +99,13 @@ pub fn load(git: &Git) -> Result<PullRequests, ForgeError> {
                 pause_until: None,
             });
         }
-        with_api(|api| open_pull_requests(api, origin, &branches))
+        with_api(|api| open_pull_requests(api, origin, &branches, HeadsFrom::Origin))
     })
 }
 
-/// For each branch of a GitHub repository, as `(repository, branch)`: whether an open pull
-/// request proposes it, into `origin`'s repository or the one it was forked from, a fork's
-/// too. Asks GitHub once, about these branches only ([`super::proposals`]); `canned` is
-/// `--pull-requests-from`'s list, used instead.
+/// For each `(repository, branch)`: whether an open pull request into `origin`'s repository
+/// or its parent proposes it, a fork's too. Asks GitHub once, about these branches only;
+/// `canned`, `--pull-requests-from`'s list, is used instead if given.
 pub(crate) fn proposals(
     git: &Git,
     branches: &[(&GithubRepo, &str)],
@@ -150,7 +118,7 @@ pub(crate) fn proposals(
             names.sort();
             names.dedup();
             origin(git).ok_or(ForgeError::NoForge).and_then(|origin| {
-                with_api(|api| open_pull_requests_from(api, &origin, &names, true))
+                with_api(|api| open_pull_requests(api, &origin, &names, HeadsFrom::AnyRepository))
                     .map(|found| found.list)
             })
         }
@@ -195,15 +163,16 @@ fn pull_requests(
     if let Some(until) = found.pause_until {
         pause(until);
     }
+    let origin_name = origin.full_name();
     let remotes = urls
         .iter()
         .filter_map(|(name, url)| {
-            let repo = GithubRepo::from_url(url)?;
+            let repo = GithubRepo::from_url(url)?.full_name();
             // A renamed repository answers under its new name; remotes may still use the old.
-            let repo = if repo.full_name().eq_ignore_ascii_case(&origin.full_name()) {
+            let repo = if repo.eq_ignore_ascii_case(&origin_name) {
                 found.name.clone()
             } else {
-                repo.full_name()
+                repo
             };
             Some(Remote {
                 name: name.clone(),
@@ -218,8 +187,7 @@ fn pull_requests(
     })
 }
 
-/// The branches of the remote `remote` (`refs/remotes/<remote>/*`, without `HEAD`).
-fn remote_branches(git: &Git, remote: &str) -> Result<Vec<String>, parterre_core::git::GitError> {
+fn remote_branches(git: &Git, remote: &str) -> Result<Vec<String>, GitError> {
     let prefix = format!("refs/remotes/{remote}/");
     let out = git.run(&["for-each-ref", "--format=%(refname)%00%(symref)", &prefix])?;
     Ok(out
@@ -239,28 +207,13 @@ fn remote_branches(git: &Git, remote: &str) -> Result<Vec<String>, parterre_core
 /// the repository.
 static PAUSED_UNTIL: Mutex<u64> = Mutex::new(0);
 
-#[cfg_attr(not(feature = "github"), allow(dead_code))]
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
-/// Asks GitHub nothing until `until` (Unix time).
+/// `until` is Unix time.
 fn pause(until: u64) {
-    let mut paused = PAUSED_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut paused = PAUSED_UNTIL.lock().unwrap_or_else(PoisonError::into_inner);
     *paused = (*paused).max(until);
 }
 
-/// How long GitHub is not to be asked yet, if at all.
-#[cfg_attr(not(feature = "github"), allow(dead_code))]
-fn paused_for() -> Option<Duration> {
-    let until = *PAUSED_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
-    let now = now();
-    (until > now).then(|| Duration::from_secs(until - now))
-}
-
-/// What GitHub's rate-limit headers said: points left of the hour's, and when they reset.
+/// GitHub's rate-limit headers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Quota {
     pub remaining: u64,
@@ -270,52 +223,46 @@ pub(crate) struct Quota {
 }
 
 impl Quota {
-    /// Until when to ask nothing more: the reset, once less than a tenth is left.
     fn pause_until(self) -> Option<u64> {
         (self.remaining * 10 < self.limit).then_some(self.reset)
     }
 }
 
-/// An answer's body, and the rate limit it reported.
 #[derive(Debug)]
-pub(crate) struct Answer {
+pub(crate) struct Response {
     pub body: String,
     pub quota: Option<Quota>,
 }
 
 /// GraphQL requests; a trait so that tests can answer them.
 pub(crate) trait Api {
-    fn post(&self, body: &str) -> Result<Answer, ForgeError>;
+    fn post(&self, body: &str) -> Result<Response, ForgeError>;
 }
 
-/// What [`open_pull_requests`] found.
 #[derive(Debug)]
 pub(crate) struct Found {
     /// `origin`'s `owner/name` as GitHub has it now.
     pub name: String,
-    /// Newest first.
     pub list: Vec<PullRequest>,
-    /// Ask nothing more until then (Unix time): the budget is nearly used up.
+    /// Unix time.
     pub pause_until: Option<u64>,
 }
 
-/// The open pull requests whose head is one of `branches` of `origin`: into `origin`, and into
-/// its parent if it is a fork.
-pub(crate) fn open_pull_requests(
-    api: &dyn Api,
-    origin: &GithubRepo,
-    branches: &[String],
-) -> Result<Found, ForgeError> {
-    open_pull_requests_from(api, origin, branches, false)
+/// Which pull requests from the branches asked about are kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeadsFrom {
+    Origin,
+    /// A fork's too.
+    AnyRepository,
 }
 
-/// [`open_pull_requests`], with the pull requests of every repository's `branches` when
-/// `any_head`, not only `origin`'s own: those of a fork among them.
-fn open_pull_requests_from(
+/// The open pull requests whose head is one of `branches`: into `origin`, and into its parent
+/// if it is a fork. By base repository, newest first.
+fn open_pull_requests(
     api: &dyn Api,
     origin: &GithubRepo,
     branches: &[String],
-    any_head: bool,
+    heads_from: HeadsFrom,
 ) -> Result<Found, ForgeError> {
     let mut found = Found {
         name: origin.full_name(),
@@ -323,43 +270,40 @@ fn open_pull_requests_from(
         pause_until: None,
     };
     for chunk in branches.chunks(BRANCHES_PER_REQUEST) {
-        let answer = api.post(&request(origin, chunk))?;
+        let response = api.post(&request(origin, chunk))?;
         found.pause_until = found
             .pause_until
-            .max(answer.quota.and_then(Quota::pause_until));
-        let repo = repository(&answer.body, origin)?;
+            .max(response.quota.and_then(Quota::pause_until));
+        let repo = repository(&response.body, origin)?;
         found.name = repo.name_with_owner.clone();
-        let ours = |pr: &json::PullRequest| {
-            any_head
-                || pr.head_repository.as_ref().is_some_and(|r| {
-                    r.name_with_owner
-                        .eq_ignore_ascii_case(&repo.name_with_owner)
-                })
+        let is_kept = |pr: &json::PullRequest| match heads_from {
+            HeadsFrom::AnyRepository => true,
+            HeadsFrom::Origin => pr.head_repository.as_ref().is_some_and(|r| {
+                r.name_with_owner
+                    .eq_ignore_ascii_case(&repo.name_with_owner)
+            }),
         };
-        let into =
-            |base: &str, connections: &std::collections::HashMap<String, json::Connection>| {
-                let base = GithubRepo::from_full_name(base)?;
-                Some(
-                    connections
-                        .values()
-                        .flat_map(|c| &c.nodes)
-                        .filter(|pr| ours(pr))
-                        .filter_map(|pr| pr.to_pull_request(&base))
-                        .collect::<Vec<_>>(),
-                )
+        let mut add = |base: &str, connections: &HashMap<String, json::Connection>| {
+            let Some(base) = GithubRepo::from_full_name(base) else {
+                return;
             };
-        found
-            .list
-            .extend(into(&repo.name_with_owner, &repo.connections).unwrap_or_default());
+            found.list.extend(
+                connections
+                    .values()
+                    .flat_map(|c| &c.nodes)
+                    .filter(|pr| is_kept(pr))
+                    .filter_map(|pr| pr.to_pull_request(&base)),
+            );
+        };
+        add(&repo.name_with_owner, &repo.connections);
         if let Some(parent) = &repo.parent {
-            found
-                .list
-                .extend(into(&parent.name_with_owner, &parent.connections).unwrap_or_default());
+            add(&parent.name_with_owner, &parent.connections);
         }
     }
     found.list.sort_by(|a, b| {
-        (&a.base_repo, std::cmp::Reverse(a.number))
-            .cmp(&(&b.base_repo, std::cmp::Reverse(b.number)))
+        a.base_repo
+            .cmp(&b.base_repo)
+            .then_with(|| b.number.cmp(&a.number))
     });
     found
         .list
@@ -367,14 +311,14 @@ fn open_pull_requests_from(
     Ok(found)
 }
 
-/// The GraphQL request, as JSON, for the pull requests of `branches`: a connection `b<i>` per
-/// branch, on `origin` and on its parent. Branch names go in as variables, never into the
-/// query text.
+/// A connection `b<i>` per branch, on `origin` and on its parent. Branch names go in as
+/// variables, never into the query text.
 fn request(origin: &GithubRepo, branches: &[String]) -> String {
     let connections: String = (0..branches.len())
         .map(|i| {
             format!(
-                "b{i}:pullRequests(states:OPEN,headRefName:$b{i},first:{PER_BRANCH}){{nodes{{...pr}}}}"
+                "b{i}:pullRequests(states:OPEN,headRefName:$b{i},\
+                 first:{PULL_REQUESTS_PER_BRANCH}){{nodes{{...pr}}}}"
             )
         })
         .collect();
@@ -396,43 +340,32 @@ fn request(origin: &GithubRepo, branches: &[String]) -> String {
     serde_json::json!({ "query": query, "variables": variables }).to_string()
 }
 
-/// The repository in an answer, or why there is none.
 fn repository(body: &str, origin: &GithubRepo) -> Result<json::Repository, ForgeError> {
-    let answer: json::Answer =
-        serde_json::from_str(body).map_err(|e| ForgeError::Parse(Forge::Github, e.to_string()))?;
+    let answer: json::Answer<json::Data> = super::parse_answer(Forge::Github, body)?;
     if let Some(repo) = answer.data.and_then(|d| d.repository) {
         return Ok(repo);
     }
-    let error = answer.errors.into_iter().next();
-    Err(match error {
+    Err(match answer.errors.into_iter().next() {
         Some(e) if e.kind.as_deref() == Some("NOT_FOUND") => ForgeError::NotFound {
             forge: Forge::Github,
             repo: origin.full_name(),
         },
-        Some(e) if e.kind.as_deref() == Some("RATE_LIMITED") => {
-            ForgeError::RateLimited { minutes: 60 }
-        }
-        Some(e) => ForgeError::Status {
-            forge: Forge::Github,
-            status: 200,
-            message: e.message,
-        },
+        Some(e) => e.into_forge_error(),
         None => ForgeError::Parse(Forge::Github, "no repository in the answer".into()),
     })
 }
 
-/// The API's JSON, as far as it is read.
 mod json {
     use std::collections::HashMap;
 
     use serde::Deserialize;
 
-    use super::{GithubRepo, WEB};
+    use super::{Forge, ForgeError, GithubRepo, WEB};
     use parterre_core::oid::Oid;
 
     #[derive(Debug, Deserialize)]
-    pub struct Answer {
-        pub data: Option<Data>,
+    pub struct Answer<D> {
+        pub data: Option<D>,
         #[serde(default)]
         pub errors: Vec<Error>,
     }
@@ -447,6 +380,20 @@ mod json {
         #[serde(rename = "type")]
         pub kind: Option<String>,
         pub message: String,
+    }
+
+    impl Error {
+        pub fn into_forge_error(self) -> ForgeError {
+            if self.kind.as_deref() == Some("RATE_LIMITED") {
+                ForgeError::RateLimited { minutes: 60 }
+            } else {
+                ForgeError::Status {
+                    forge: Forge::Github,
+                    status: 200,
+                    message: self.message,
+                }
+            }
+        }
     }
 
     #[derive(Debug, Deserialize)]
@@ -499,8 +446,8 @@ mod json {
     }
 
     impl PullRequest {
-        /// The pull request, into `base`, if its head is a commit id. Its page is built here,
-        /// not taken from the answer, so that only github.com is ever opened.
+        /// `None` if its head isn't a commit id. The URL is built here, not taken from the
+        /// answer, so that only github.com is ever opened.
         pub fn to_pull_request(&self, base: &GithubRepo) -> Option<crate::PullRequest> {
             Some(crate::PullRequest {
                 number: self.number,
@@ -525,10 +472,26 @@ mod json {
     }
 }
 
-/// The token of a signed-in `gh` (`gh auth token`): [`ForgeError::NoGh`] if `gh` isn't
-/// installed, [`ForgeError::NotSignedIn`] if it isn't signed in to github.com or doesn't answer
-/// within a few seconds.
-#[cfg_attr(not(feature = "github"), allow(dead_code))]
+/// What `gh` prints for `args`: [`ForgeError::NoGh`] if it isn't installed,
+/// [`ForgeError::NotSignedIn`] if it fails or doesn't answer within [`GH_TIMEOUT`].
+fn gh(args: &[&str]) -> Result<String, ForgeError> {
+    let mut cmd = std::process::Command::new("gh");
+    parterre_core::shell_path::apply(&mut cmd)
+        .args(args)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("NO_COLOR", "1");
+    match super::output_within(&mut cmd, "", GH_TIMEOUT) {
+        Ok(Some(out)) => Ok(out),
+        Ok(None) => Err(ForgeError::NotSignedIn),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ForgeError::NoGh),
+        Err(e) => Err(ForgeError::Network(
+            Forge::Github,
+            format!("could not run gh: {e}"),
+        )),
+    }
+}
+
+#[cfg(feature = "github")]
 fn gh_token() -> Result<Token, ForgeError> {
     let out = gh(&["auth", "token", "--hostname", "github.com"])?;
     let token = out.trim();
@@ -540,26 +503,6 @@ fn gh_token() -> Result<Token, ForgeError> {
     plausible
         .then(|| Token(token.to_owned()))
         .ok_or(ForgeError::NotSignedIn)
-}
-
-/// What `gh` prints for `args`: [`ForgeError::NoGh`] if it isn't installed,
-/// [`ForgeError::NotSignedIn`] if it fails or doesn't answer within a few seconds.
-#[cfg_attr(not(feature = "github"), allow(dead_code))]
-fn gh(args: &[&str]) -> Result<String, ForgeError> {
-    let mut cmd = std::process::Command::new("gh");
-    parterre_core::shell_path::apply(&mut cmd)
-        .args(args)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1");
-    match super::output_within(&mut cmd, "", Duration::from_secs(5)) {
-        Ok(Some(out)) => Ok(out),
-        Ok(None) => Err(ForgeError::NotSignedIn),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ForgeError::NoGh),
-        Err(e) => Err(ForgeError::Network(
-            Forge::Github,
-            format!("could not run gh: {e}"),
-        )),
-    }
 }
 
 /// Runs `calls` against the API, signed in with `gh`'s token; without one, or while the
@@ -580,8 +523,27 @@ fn with_api<T>(_: impl Fn(&dyn Api) -> Result<T, ForgeError>) -> Result<T, Forge
     Err(ForgeError::Unsupported(Forge::Github))
 }
 
-/// The API over HTTPS, with ureq.
 #[cfg(feature = "github")]
+fn paused_for() -> Option<Duration> {
+    let until = *PAUSED_UNTIL.lock().unwrap_or_else(PoisonError::into_inner);
+    let now = unix_now();
+    (until > now).then(|| Duration::from_secs(until - now))
+}
+
+#[cfg(feature = "github")]
+fn unix_now() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Tokens are only ever sent here.
+#[cfg(feature = "github")]
+const GRAPHQL: &str = "https://api.github.com/graphql";
+
+#[cfg(feature = "github")]
+#[derive(Debug)]
 struct Http {
     agent: ureq::Agent,
     token: Token,
@@ -591,24 +553,15 @@ struct Http {
 impl Http {
     fn new(token: Token) -> Http {
         Http {
-            agent: super::agent(),
+            agent: http::agent(),
             token,
         }
     }
 }
 
 #[cfg(feature = "github")]
-impl fmt::Debug for Http {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Http")
-            .field("token", &self.token)
-            .finish_non_exhaustive()
-    }
-}
-
-#[cfg(feature = "github")]
 impl Api for Http {
-    fn post(&self, body: &str) -> Result<Answer, ForgeError> {
+    fn post(&self, body: &str) -> Result<Response, ForgeError> {
         let Token(token) = &self.token;
         let mut response = self
             .agent
@@ -616,14 +569,8 @@ impl Api for Http {
             .header("Authorization", &format!("Bearer {token}"))
             .header("Content-Type", "application/json")
             .send(body)
-            .map_err(|e| ForgeError::Network(Forge::Github, e.to_string()))?;
-        let header = |name: &str| -> Option<u64> {
-            response
-                .headers()
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse().ok())
-        };
+            .map_err(http::network_error(Forge::Github))?;
+        let header = |name| http::number_header(&response, name);
         let quota = match (
             header("x-ratelimit-remaining"),
             header("x-ratelimit-limit"),
@@ -639,40 +586,22 @@ impl Api for Http {
         // GitHub's secondary limits say how long to wait.
         let retry_after = header("retry-after");
         let status = response.status().as_u16();
-        let body = response
-            .body_mut()
-            .with_config()
-            .limit(64 * 1024 * 1024)
-            .read_to_string()
-            .map_err(|e| ForgeError::Network(Forge::Github, e.to_string()))?;
+        let body = http::read_body(&mut response, Forge::Github)?;
         match status {
-            200..=299 => Ok(Answer { body, quota }),
+            200..=299 => Ok(Response { body, quota }),
             401 => Err(ForgeError::TokenRejected),
             403 | 429 if retry_after.is_some() || quota.is_some_and(|q| q.remaining == 0) => {
                 let until = match (retry_after, quota) {
-                    (Some(secs), _) => now() + secs,
+                    (Some(secs), _) => unix_now() + secs,
                     (None, Some(q)) => q.reset,
-                    (None, None) => now() + 60,
+                    (None, None) => unix_now() + 60,
                 };
                 pause(until);
                 Err(ForgeError::RateLimited {
-                    minutes: until.saturating_sub(now()).div_ceil(60),
+                    minutes: until.saturating_sub(unix_now()).div_ceil(60),
                 })
             }
-            _ => {
-                #[derive(serde::Deserialize)]
-                struct Message {
-                    message: String,
-                }
-                let message = serde_json::from_str::<Message>(&body)
-                    .map(|m| m.message)
-                    .unwrap_or_else(|_| body.chars().take(200).collect());
-                Err(ForgeError::Status {
-                    forge: Forge::Github,
-                    status,
-                    message,
-                })
-            }
+            _ => Err(http::status_error(Forge::Github, status, &body)),
         }
     }
 }
@@ -680,6 +609,7 @@ impl Api for Http {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fake::Fake;
 
     fn repo(owner: &str, name: &str) -> Option<GithubRepo> {
         Some(GithubRepo {
@@ -743,47 +673,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tokens_are_not_printed() {
-        let token = Token("gho_secret".into());
-        assert_eq!(format!("{token:?}"), "Token(***)");
-        assert!(!format!("{:?}", Some(token)).contains("secret"));
-    }
-
-    /// Answers every request with the next of `answers`, and keeps the requests.
-    struct Fake {
-        answers: std::cell::RefCell<Vec<Answer>>,
-        asked: std::cell::RefCell<Vec<serde_json::Value>>,
-    }
-
-    impl Fake {
-        fn new(bodies: &[&str], quota: Option<Quota>) -> Fake {
-            Fake {
-                answers: std::cell::RefCell::new(
-                    bodies
-                        .iter()
-                        .rev()
-                        .map(|b| Answer {
-                            body: (*b).to_owned(),
-                            quota,
-                        })
-                        .collect(),
-                ),
-                asked: std::cell::RefCell::new(Vec::new()),
-            }
+    impl Api for Fake<Response> {
+        fn post(&self, body: &str) -> Result<Response, ForgeError> {
+            self.answer(Forge::Github, body)
         }
     }
 
-    impl Api for Fake {
-        fn post(&self, body: &str) -> Result<Answer, ForgeError> {
-            self.asked
-                .borrow_mut()
-                .push(serde_json::from_str(body).expect("requests are JSON"));
-            self.answers
-                .borrow_mut()
-                .pop()
-                .ok_or_else(|| ForgeError::Network(Forge::Github, "no more answers".into()))
-        }
+    /// Answers each request with the next of `bodies`.
+    pub(super) fn fake(bodies: &[&str], quota: Option<Quota>) -> Fake<Response> {
+        Fake::new(bodies.iter().map(|body| {
+            Ok(Response {
+                body: (*body).to_owned(),
+                quota,
+            })
+        }))
+    }
+
+    pub(super) fn requests(api: &Fake<Response>) -> Vec<serde_json::Value> {
+        api.asked
+            .borrow()
+            .iter()
+            .map(|request| serde_json::from_str(request).expect("requests are JSON"))
+            .collect()
     }
 
     fn pr(number: u64, head_repo: Option<&str>, head: char) -> String {
@@ -808,6 +719,14 @@ mod tests {
         (0..n).map(|i| format!("topic-{i}")).collect()
     }
 
+    fn origins_own(
+        api: &dyn Api,
+        origin: &GithubRepo,
+        branches: &[String],
+    ) -> Result<Found, ForgeError> {
+        open_pull_requests(api, origin, branches, HeadsFrom::Origin)
+    }
+
     #[test]
     fn asks_for_each_branch_on_origin_and_its_parent() {
         let body = format!(
@@ -824,9 +743,9 @@ mod tests {
             pr(39, Some("me/fork"), 'd'),
             pr(3, None, 'e'),
         );
-        let api = Fake::new(&[&body], None);
+        let api = fake(&[&body], None);
         let origin = repo("me", "fork").unwrap();
-        let found = open_pull_requests(&api, &origin, &["topic".into(), "a\"b".into()]).unwrap();
+        let found = origins_own(&api, &origin, &["topic".into(), "a\"b".into()]).unwrap();
         assert_eq!(found.name, "Me/Fork");
         let got: Vec<(u64, &str, &str)> = found
             .list
@@ -842,8 +761,7 @@ mod tests {
         );
         assert_eq!(found.list[0].head.to_hex(), "a".repeat(40));
         assert_eq!(found.pause_until, None);
-        // Branch names are variables, never part of the query.
-        let asked = &api.asked.borrow()[0];
+        let asked = &requests(&api)[0];
         assert_eq!(asked["variables"]["owner"], "me");
         assert_eq!(asked["variables"]["b1"], "a\"b");
         let query = asked["query"].as_str().unwrap();
@@ -859,9 +777,10 @@ mod tests {
             pr(7, Some("o/r"), 'a'),
             pr(8, Some("someone/fork"), 'b'),
         );
-        let api = Fake::new(&[&body], None);
+        let api = fake(&[&body], None);
         let origin = repo("o", "r").unwrap();
-        let found = open_pull_requests_from(&api, &origin, &["topic".into()], true).unwrap();
+        let found =
+            open_pull_requests(&api, &origin, &["topic".into()], HeadsFrom::AnyRepository).unwrap();
         let heads: Vec<_> = found.list.iter().map(|p| p.head_repo.clone()).collect();
         assert_eq!(heads, [Some("someone/fork".into()), Some("o/r".into())]);
     }
@@ -869,11 +788,9 @@ mod tests {
     #[test]
     fn asks_about_a_hundred_branches_at_a_time() {
         let empty = r#"{"data":{"repository":{"nameWithOwner":"o/r","parent":null}}}"#;
-        let api = Fake::new(&[empty, empty, empty], None);
-        open_pull_requests(&api, &repo("o", "r").unwrap(), &branches(250)).unwrap();
-        let sizes: Vec<usize> = api
-            .asked
-            .borrow()
+        let api = fake(&[empty, empty, empty], None);
+        origins_own(&api, &repo("o", "r").unwrap(), &branches(250)).unwrap();
+        let sizes: Vec<usize> = requests(&api)
             .iter()
             .map(|a| a["variables"].as_object().unwrap().len() - 2)
             .collect();
@@ -888,15 +805,15 @@ mod tests {
             limit: 5000,
             reset: 1_900_000_000,
         };
-        let found = open_pull_requests(
-            &Fake::new(&[empty], Some(quota(500))),
+        let found = origins_own(
+            &fake(&[empty], Some(quota(500))),
             &repo("o", "r").unwrap(),
             &branches(1),
         )
         .unwrap();
         assert_eq!(found.pause_until, None);
-        let found = open_pull_requests(
-            &Fake::new(&[empty], Some(quota(499))),
+        let found = origins_own(
+            &fake(&[empty], Some(quota(499))),
             &repo("o", "r").unwrap(),
             &branches(1),
         )
@@ -910,13 +827,13 @@ mod tests {
         let missing = r#"{"data":{"repository":null},"errors":[{"type":"NOT_FOUND",
             "message":"Could not resolve to a Repository with the name 'me/gone'."}]}"#;
         assert!(matches!(
-            open_pull_requests(&Fake::new(&[missing], None), &origin, &branches(1)),
+            origins_own(&fake(&[missing], None), &origin, &branches(1)),
             Err(ForgeError::NotFound { .. })
         ));
-        let odd = open_pull_requests(&Fake::new(&["<html>"], None), &origin, &branches(1));
+        let odd = origins_own(&fake(&["<html>"], None), &origin, &branches(1));
         assert!(matches!(odd, Err(ForgeError::Parse(..))));
         let other = r#"{"errors":[{"type":"FORBIDDEN","message":"SAML enforcement"}]}"#;
-        match open_pull_requests(&Fake::new(&[other], None), &origin, &branches(1)) {
+        match origins_own(&fake(&[other], None), &origin, &branches(1)) {
             Err(e) => assert!(e.to_string().contains("SAML enforcement"), "{e}"),
             Ok(_) => panic!("an error was expected"),
         }

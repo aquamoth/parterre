@@ -62,8 +62,7 @@ ureq = { version = "3.4", default-features = false, features = [
 serde_json = "1"
 
 [workspace.lints.rust]
-# "deny", not "forbid", so the one Windows console call in crates/parterre/src/console.rs can
-# opt out locally.
+# "deny", not "forbid", so that the modules calling Windows and macOS APIs can opt out.
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
 

@@ -1,54 +1,42 @@
-//! The app icon: the revision graph planted as a parterre, seen from above. A tree of edges
-//! grows from a root at the bottom and forks twice into four commits in the label colours, on
-//! the slate of the dark theme. It is drawn in code so that the window icon and every packaged
-//! asset come from one source: `examples/icon_assets.rs` writes the SVG, the PNGs, the Windows
-//! `.ico` and the macOS `.icns` into `packaging/icon/`.
-//!
-//! Chosen on 2026-09-25 from four candidates; the prototype with all of them is on the branch
-//! `prototype/app-icon` (`packaging/icon-prototype/index.html`).
+//! The app icon is drawn in code so that the window icon and every packaged asset come from
+//! one source: `examples/icon_assets.rs` writes the SVG, the PNGs, the Windows `.ico` and the
+//! macOS `.icns` into `packaging/icon/`.
 
-/// Everything is designed in a 512 × 512 square.
-const CANVAS: f32 = 512.0;
-/// Corner radius of the tile: the 22.37 % of the side that macOS uses for its rounded squares.
+const CANVAS_SIZE: f32 = 512.0;
+/// The 22.37 % of the side that macOS rounds its squares' corners by.
 const TILE_RADIUS: f32 = 114.5;
 const EDGE_WIDTH: f32 = 28.0;
-/// Width of the ring around every node, in a colour that stands out from both the node and
-/// the tile.
-const RING: f32 = 8.0;
+const RING_WIDTH: f32 = 8.0;
 
-/// How far macOS insets an app icon: the rounded square fills 824 of 1024 points, the rest is
-/// transparent margin. Used for the `.icns`.
+/// The rounded square of a macOS app icon fills 824 of 1024 points; the rest is transparent.
 pub const MACOS_INSET: f32 = 100.0 / 1024.0;
 
 type Rgb = [u8; 3];
-/// Slate, the dark theme's canvas.
-const TILE: Rgb = [0x24, 0x30, 0x38];
-/// Hedge green.
-const EDGE: Rgb = [0x4c, 0x9a, 0x4a];
-/// Cream, for the rings.
-const INK: Rgb = [0xf6, 0xf1, 0xe7];
-/// Lavender, the app's colour for commits without a label.
-const PLAIN: Rgb = [0xe6, 0xe6, 0xff];
+/// The dark theme's canvas.
+const TILE_COLOR: Rgb = [0x24, 0x30, 0x38];
+const EDGE_COLOR: Rgb = [0x4c, 0x9a, 0x4a];
+const RING_COLOR: Rgb = [0xf6, 0xf1, 0xe7];
+/// The app's colour for commits without a label.
+const UNLABELLED_COLOR: Rgb = [0xe6, 0xe6, 0xff];
 /// The label colours: current branch, local branch, remote branch, tag.
-const TIPS: [Rgb; 4] = [
+const TIP_COLORS: [Rgb; 4] = [
     [0xc8, 0x00, 0x00],
     [0x00, 0xc8, 0x00],
     [0xff, 0xdc, 0xaa],
     [0xff, 0xe6, 0x00],
 ];
 
-type P = (f32, f32);
-/// A cubic Bézier: start, two control points, end.
-type Cubic = [P; 4];
+type Xy = (f32, f32);
+type Cubic = [Xy; 4];
 
-const ROOT: (P, f32) = ((256.0, 390.0), 30.0);
-const FORKS: [(P, f32); 2] = [((156.0, 236.0), 18.0), ((356.0, 236.0), 18.0)];
+const ROOT: (Xy, f32) = ((256.0, 390.0), 30.0);
+const FORKS: [(Xy, f32); 2] = [((156.0, 236.0), 18.0), ((356.0, 236.0), 18.0)];
 const TIP_Y: f32 = 132.0;
 const TIP_X: [f32; 4] = [106.0, 206.0, 306.0, 406.0];
 const TIP_RADIUS: f32 = 40.0;
 
-/// The edges, as the app draws them: out of the bottom centre of a node, into the top centre
-/// of the next, bending only in between.
+/// As the app draws edges: out of the bottom centre of a node, into the top centre of the
+/// next, bending only in between.
 const EDGES: [Cubic; 7] = [
     [
         (256.0, 390.0),
@@ -94,59 +82,61 @@ const EDGES: [Cubic; 7] = [
     ],
 ];
 
-/// Every node with its radius and fill: root, forks, then the four tips.
-fn nodes() -> impl Iterator<Item = (P, f32, Rgb)> {
-    std::iter::once((ROOT.0, ROOT.1, PLAIN))
-        .chain(FORKS.iter().map(|&(c, r)| (c, r, PLAIN)))
+/// Every node's centre, radius and fill: the root, the forks, then the four tips.
+fn nodes() -> impl Iterator<Item = (Xy, f32, Rgb)> {
+    std::iter::once((ROOT.0, ROOT.1, UNLABELLED_COLOR))
+        .chain(FORKS.iter().map(|&(c, r)| (c, r, UNLABELLED_COLOR)))
         .chain(
             TIP_X
                 .iter()
-                .zip(TIPS)
+                .zip(TIP_COLORS)
                 .map(|(&x, color)| ((x, TIP_Y), TIP_RADIUS, color)),
         )
 }
 
-/// The icon as `size` × `size` straight-alpha RGBA, the tile filling the square.
+/// Straight-alpha RGBA, the tile filling the square.
 pub fn render(size: u32) -> Vec<u8> {
     render_inset(size, 0.0)
 }
 
 /// Like [`render`], with the tile scaled into the square left after a transparent margin of
-/// `inset` × `size` on every side (see [`MACOS_INSET`]).
+/// `inset` × `size` on every side.
 pub fn render_inset(size: u32, inset: f32) -> Vec<u8> {
     let mut r = Raster::new(size, inset);
-    r.paint(TILE, (0.0, 0.0, CANVAS, CANVAS), |x, y| {
-        let cx = x.clamp(TILE_RADIUS, CANVAS - TILE_RADIUS);
-        let cy = y.clamp(TILE_RADIUS, CANVAS - TILE_RADIUS);
+    let tile = (0.0, 0.0, CANVAS_SIZE, CANVAS_SIZE);
+    r.paint(TILE_COLOR, tile, |x, y| {
+        let cx = x.clamp(TILE_RADIUS, CANVAS_SIZE - TILE_RADIUS);
+        let cy = y.clamp(TILE_RADIUS, CANVAS_SIZE - TILE_RADIUS);
         (x - cx).powi(2) + (y - cy).powi(2) <= TILE_RADIUS * TILE_RADIUS
     });
     for cubic in &EDGES {
-        r.cubic(EDGE, cubic, EDGE_WIDTH);
+        r.cubic(EDGE_COLOR, cubic, EDGE_WIDTH);
     }
     for (c, radius, color) in nodes() {
-        r.circle(INK, c, radius + RING / 2.0);
-        r.circle(color, c, radius - RING / 2.0);
+        r.circle(RING_COLOR, c, radius + RING_WIDTH / 2.0);
+        r.circle(color, c, radius - RING_WIDTH / 2.0);
     }
     r.finish()
 }
 
-/// The icon as an SVG document, drawn from the same tables as [`render`].
 pub fn svg() -> String {
     let hex = |c: Rgb| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
     let mut s = String::new();
-    s.push_str(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\" width=\"512\" height=\"512\">\n",
-    );
+    s.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {CANVAS_SIZE} {CANVAS_SIZE}\" \
+         width=\"{CANVAS_SIZE}\" height=\"{CANVAS_SIZE}\">\n",
+    ));
     // No "--" in here: XML forbids it inside a comment.
     s.push_str("<!-- Generated by crates/parterre-core/examples/icon_assets.rs ");
     s.push_str("from crates/parterre-core/src/icon.rs; edit the source, not this file. -->\n");
     s.push_str(&format!(
-        "<rect width=\"512\" height=\"512\" rx=\"{TILE_RADIUS}\" fill=\"{}\"/>\n",
-        hex(TILE)
+        "<rect width=\"{CANVAS_SIZE}\" height=\"{CANVAS_SIZE}\" rx=\"{TILE_RADIUS}\" \
+         fill=\"{}\"/>\n",
+        hex(TILE_COLOR)
     ));
     s.push_str(&format!(
         "<g fill=\"none\" stroke=\"{}\" stroke-width=\"{EDGE_WIDTH}\" stroke-linecap=\"round\">\n",
-        hex(EDGE)
+        hex(EDGE_COLOR)
     ));
     for [a, b, c, d] in &EDGES {
         s.push_str(&format!(
@@ -156,8 +146,8 @@ pub fn svg() -> String {
     }
     s.push_str("</g>\n");
     s.push_str(&format!(
-        "<g stroke=\"{}\" stroke-width=\"{RING}\">\n",
-        hex(INK)
+        "<g stroke=\"{}\" stroke-width=\"{RING_WIDTH}\">\n",
+        hex(RING_COLOR)
     ));
     for ((x, y), radius, color) in nodes() {
         s.push_str(&format!(
@@ -169,33 +159,32 @@ pub fn svg() -> String {
     s
 }
 
-/// Subsamples per pixel and axis. Shapes are painted opaquely at this resolution and the
-/// result is box-filtered down, which anti-aliases every edge and joins overlapping shapes
-/// of one colour without seams.
-const SS: u32 = 4;
+/// Shapes are painted opaquely at this many subpixels per pixel and axis, and the result is
+/// box-filtered down, which anti-aliases every edge and joins overlapping shapes of one colour
+/// without seams.
+const SUBSAMPLES: u32 = 4;
 
-/// A canvas at `SS` × the output resolution, addressed in design coordinates.
+/// A supersampled canvas, addressed in design coordinates.
 struct Raster {
     size: u32,
-    /// Side of the supersampled buffer.
-    n: u32,
-    /// Design units to subpixels.
+    sub_size: u32,
+    /// Subpixels per design unit.
     scale: f32,
-    /// Subpixel of design (0, 0).
+    /// The subpixel of design (0, 0).
     offset: f32,
     buf: Vec<[u8; 4]>,
 }
 
 impl Raster {
     fn new(size: u32, inset: f32) -> Self {
-        let n = size * SS;
-        let scale = n as f32 * (1.0 - 2.0 * inset) / CANVAS;
+        let sub_size = size * SUBSAMPLES;
+        let scale = sub_size as f32 * (1.0 - 2.0 * inset) / CANVAS_SIZE;
         Self {
             size,
-            n,
+            sub_size,
             scale,
-            offset: n as f32 * inset,
-            buf: vec![[0; 4]; (n * n) as usize],
+            offset: sub_size as f32 * inset,
+            buf: vec![[0; 4]; (sub_size * sub_size) as usize],
         }
     }
 
@@ -209,27 +198,27 @@ impl Raster {
     ) {
         let to_sub = |d: f32| d * self.scale + self.offset;
         let lo = |d: f32| (to_sub(d).floor().max(0.0)) as u32;
-        let hi = |d: f32| (to_sub(d).ceil().max(0.0) as u32).min(self.n);
+        let hi = |d: f32| (to_sub(d).ceil().max(0.0) as u32).min(self.sub_size);
         let px = [color[0], color[1], color[2], 255];
         for sy in lo(y0)..hi(y1) {
             let y = (sy as f32 + 0.5 - self.offset) / self.scale;
             for sx in lo(x0)..hi(x1) {
                 let x = (sx as f32 + 0.5 - self.offset) / self.scale;
                 if inside(x, y) {
-                    self.buf[(sy * self.n + sx) as usize] = px;
+                    self.buf[(sy * self.sub_size + sx) as usize] = px;
                 }
             }
         }
     }
 
-    fn circle(&mut self, color: Rgb, (cx, cy): P, r: f32) {
+    fn circle(&mut self, color: Rgb, (cx, cy): Xy, r: f32) {
         self.paint(color, (cx - r, cy - r, cx + r, cy + r), |x, y| {
             (x - cx).powi(2) + (y - cy).powi(2) <= r * r
         });
     }
 
-    /// A line from `a` to `b` with round ends.
-    fn segment(&mut self, color: Rgb, a: P, b: P, width: f32) {
+    /// With round ends.
+    fn segment(&mut self, color: Rgb, a: Xy, b: Xy, width: f32) {
         let (dx, dy) = (b.0 - a.0, b.1 - a.1);
         let len2 = (dx * dx + dy * dy).max(1e-6);
         let h = width / 2.0;
@@ -246,7 +235,7 @@ impl Raster {
         });
     }
 
-    /// A stroked cubic Bézier with round ends, as a chain of short segments.
+    /// As a chain of short segments.
     fn cubic(&mut self, color: Rgb, [p0, p1, p2, p3]: &Cubic, width: f32) {
         const STEPS: usize = 32;
         let at = |t: f32| {
@@ -273,9 +262,9 @@ impl Raster {
         for y in 0..self.size {
             for x in 0..self.size {
                 let mut sum = [0u32; 4];
-                for sy in y * SS..(y + 1) * SS {
-                    for sx in x * SS..(x + 1) * SS {
-                        let p = self.buf[(sy * self.n + sx) as usize];
+                for sy in y * SUBSAMPLES..(y + 1) * SUBSAMPLES {
+                    for sx in x * SUBSAMPLES..(x + 1) * SUBSAMPLES {
+                        let p = self.buf[(sy * self.sub_size + sx) as usize];
                         for (s, v) in sum.iter_mut().zip(p) {
                             *s += v as u32;
                         }
@@ -286,7 +275,7 @@ impl Raster {
                     out.extend([0, 0, 0, 0]);
                 } else {
                     out.extend(sum[..3].iter().map(|&c| (c * 255 / alpha) as u8));
-                    out.push((alpha / (SS * SS)) as u8);
+                    out.push((alpha / (SUBSAMPLES * SUBSAMPLES)) as u8);
                 }
             }
         }
@@ -322,7 +311,8 @@ pub fn ico(images: &[(u32, Vec<u8>)]) -> Vec<u8> {
 /// entries are only safe at 256.
 pub fn ico_dib(side: u32, rgba: &[u8]) -> Vec<u8> {
     assert_eq!(rgba.len(), (side * side * 4) as usize);
-    let mask_row = side.div_ceil(32) * 4; // bytes per row of the 1-bit mask, padded to 32 bits
+    // The 1-bit mask's rows are padded to 32 bits.
+    let mask_row_bytes = side.div_ceil(32) * 4;
     let mut out = Vec::new();
     // BITMAPINFOHEADER; the height counts both the colour bitmap and the mask.
     out.extend(40u32.to_le_bytes());
@@ -331,7 +321,7 @@ pub fn ico_dib(side: u32, rgba: &[u8]) -> Vec<u8> {
     out.extend(1u16.to_le_bytes()); // planes
     out.extend(32u16.to_le_bytes()); // bits per pixel
     out.extend(0u32.to_le_bytes()); // BI_RGB, uncompressed
-    out.extend((side * side * 4 + mask_row * side).to_le_bytes());
+    out.extend((side * side * 4 + mask_row_bytes * side).to_le_bytes());
     out.extend([0u8; 16]); // resolution and palette fields, unused
     // Colour rows, bottom-up, BGRA.
     for y in (0..side).rev() {
@@ -342,7 +332,7 @@ pub fn ico_dib(side: u32, rgba: &[u8]) -> Vec<u8> {
     }
     // Mask rows, bottom-up: a set bit means transparent, for readers that ignore alpha.
     for y in (0..side).rev() {
-        let mut row = vec![0u8; mask_row as usize];
+        let mut row = vec![0u8; mask_row_bytes as usize];
         for x in 0..side {
             if rgba[((y * side + x) * 4 + 3) as usize] == 0 {
                 row[(x / 8) as usize] |= 0x80 >> (x % 8);
@@ -415,7 +405,7 @@ mod tests {
     fn tips_are_in_label_colours() {
         let size = 512;
         let px = render(size);
-        for (x, color) in TIP_X.iter().zip(TIPS) {
+        for (x, color) in TIP_X.iter().zip(TIP_COLORS) {
             let p = ((TIP_Y as u32 * size + *x as u32) * 4) as usize;
             assert_eq!(&px[p..p + 3], &color);
         }

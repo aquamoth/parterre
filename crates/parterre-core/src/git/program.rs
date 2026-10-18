@@ -1,23 +1,18 @@
-//! Which `git` to run.
+//! On Windows parterre runs the real `git.exe` of Git for Windows,
+//! `<install>\<build>\bin\git.exe`, not the `cmd\` or `bin\` launcher PATH usually leads to:
+//! a launcher starts the real git as a second process, which makes each git call start about
+//! 40 ms later (#309). The real git does the launcher's work itself, putting its `usr\bin` on
+//! its children's PATH so that hooks, `sh` and `ssh` still run. The copy in `libexec\git-core`
+//! is slower to start.
 //!
-//! Everywhere but Windows that's plain `git`. On Windows it's the real `git.exe` of Git for
-//! Windows, `<install>\mingw64\bin\git.exe` (`clangarm64` or `mingw32` for other builds),
-//! found once: through the `git.exe` on PATH, which is usually the `cmd\git.exe` launcher,
-//! or when there is none, through the install the registry or the default folders name
-//! (a terminal opened before Git for Windows was installed, or an installer told to leave
-//! PATH alone). The launchers in `cmd\` and `bin\` start the real git as a second process,
-//! which on Windows costs more than the first: run directly, each git call starts about
-//! 40 ms sooner (#309). The real git.exe does the launcher's work itself, putting its
-//! `usr\bin` on its children's PATH so that hooks, `sh` and `ssh` still run. The copy in
-//! `libexec\git-core` is slower to start and isn't used.
-//!
-//! Some other `git.exe` on PATH, such as a package manager's shim, is run as found.
+//! With no `git.exe` on PATH (a terminal opened before Git for Windows was installed, or an
+//! installer told to leave PATH alone), the install the registry or the default folders name
+//! is run. Some other `git.exe` on PATH, such as a package manager's shim, is run as found.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// The program parterre runs for git, looked up once. Public for the test helpers, which build
-/// their repositories with the same git.
+/// Public for the test helpers, which build their repositories with the same git.
 pub fn program() -> &'static Path {
     static PROGRAM: OnceLock<PathBuf> = OnceLock::new();
     PROGRAM.get_or_init(find)
@@ -37,15 +32,14 @@ fn find() -> PathBuf {
     )
 }
 
-/// The folders an install may hold the real `git.exe` under `bin\` of, one per build; an
-/// install has one of them.
+/// An install has one of these builds, each with the real git in its `bin\`.
 #[cfg(any(windows, test))]
 const BUILD_DIRS: &[&str] = &["mingw64", "clangarm64", "mingw32"];
 
-/// The first `git.exe` on `path` (a PATH value), replaced by the real git of its install when
-/// it is a `cmd\` or `bin\` launcher; otherwise the real git, or else the launcher, of the
-/// first of `install_dirs` that has one. Plain `git` if there is none at all, so that
-/// spawning it fails with the usual error.
+/// The first `git.exe` on `path` (a PATH value), the real git of its install in place of a
+/// launcher; otherwise the real git, or else the launcher, of the first of `install_dirs` that
+/// has one. Plain `git` if there is none at all, so that spawning it fails with the usual
+/// error.
 #[cfg(any(windows, test))]
 fn locate(
     path: Option<&std::ffi::OsStr>,
@@ -132,12 +126,10 @@ mod tests {
         })
     }
 
-    /// `<install>\cmd\git.exe`, the launcher.
     fn launcher(install: &str) -> PathBuf {
         Path::new(install).join("cmd").join("git.exe")
     }
 
-    /// `<install>\<build>\bin\git.exe`, the real git.
     fn real(install: &str, build: &str) -> PathBuf {
         Path::new(install).join(build).join("bin").join("git.exe")
     }

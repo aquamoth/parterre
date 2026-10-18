@@ -1,15 +1,8 @@
-//! File diffs: what changed in one file between two versions of it.
-//!
-//! A diff compares two [`Version`]s, each a path at a revision; either can be missing (an added
-//! or a deleted file). Nothing here assumes "a commit and its parent", so comparing any two
-//! revisions reuses it. Git reads the versions ([`crate::git::Git::load_file_diff`], through
-//! the user's textconv filters) and decides what is binary; lines and words are compared here
-//! with `imara-diff` (histogram, then git's indent heuristic). Decided in #44, #45 and #46.
-//!
-//! [`FileDiff::new`] turns two texts into lines with their changed words, and into rows for the
-//! two forms the diff window draws: side by side and unified. [`fold`] collapses the unchanged
-//! stretches between changes.
+//! Git reads the two versions, through the user's textconv filters, and decides what is
+//! binary; lines and words are compared here with `imara-diff`: histogram, then git's indent
+//! heuristic (#44, #45, #46).
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::ops::Range;
 
@@ -19,33 +12,24 @@ use serde::{Deserialize, Serialize};
 use crate::changed_files::{ChangedFile, FileStatus};
 use crate::oid::Oid;
 
-/// The mode git gives a submodule's entry.
 pub const GITLINK_MODE: u32 = 0o160000;
-/// Tabs are expanded to multiples of this many columns.
-pub const TAB_WIDTH: usize = 4;
-/// Unchanged lines kept around a change when the rest is folded away, as git's default
-/// `diff.context`.
+const TAB_WIDTH: usize = 4;
+/// git's default `diff.context`.
 pub const CONTEXT_LINES: usize = 3;
-/// A removed line is paired with the most similar of this many added lines after the last
-/// pair ([`WordMode::Similar`]).
-const PAIRING_REACH: usize = 12;
-/// Share of their non-blank text two lines must have in common to be paired.
-const PAIRING_SIMILARITY: f32 = 0.5;
-/// Changes with more lines than this on a side get no word comparison: their lines are marked
-/// whole. Keeps pathological changes from stalling the window.
+const PAIRING_LOOKAHEAD: usize = 12;
+const MIN_PAIRING_SIMILARITY: f32 = 0.5;
+/// Larger changes are marked whole: comparing their words could stall the window.
 const MAX_WORD_DIFF_LINES: usize = 5_000;
 
-/// Where a version of a file is read from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Rev {
     Commit(Oid),
-    /// The files on disk, staged or not, as `git diff` reads them: through the file's clean
-    /// filter and line-ending conversion.
+    /// The files on disk, staged or not, as `git diff` reads them: through the clean filter and
+    /// line-ending conversion.
     WorkingTree,
 }
 
 impl Rev {
-    /// The commit, unless this is the working tree.
     pub fn commit(self) -> Option<Oid> {
         match self {
             Rev::Commit(oid) => Some(oid),
@@ -54,36 +38,27 @@ impl Rev {
     }
 }
 
-/// One version of a file: a path at a revision.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Version {
     pub rev: Rev,
     pub path: String,
 }
 
-/// What to compare: the old and new version of a file, and what git said about the change.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FileDiffSpec {
-    /// `None` for an added file.
     pub old: Option<Version>,
-    /// `None` for a deleted file.
     pub new: Option<Version>,
     pub status: FileStatus,
-    /// Old and new mode (0 where a side is missing).
+    /// Old and new; 0 for a missing side.
     pub modes: [u32; 2],
-    /// Git treats the file as binary.
     pub binary: bool,
 }
 
 impl FileDiffSpec {
-    /// The change a commit made to one of its changed files, against `parent` (`None` for a
-    /// root commit). Renamed and copied files take their old path on the old side.
     pub fn of_commit(commit: Oid, parent: Option<Oid>, file: &ChangedFile) -> FileDiffSpec {
         FileDiffSpec::between(parent.map(Rev::Commit), Rev::Commit(commit), file)
     }
 
-    /// A changed file of a comparison of `old` (`None` for nothing, as for a root commit) with
-    /// `new`. Renamed and copied files take their old path on the old side.
     pub fn between(old: Option<Rev>, new: Rev, file: &ChangedFile) -> FileDiffSpec {
         let old = match old {
             Some(rev) if file.status != FileStatus::Added => Some(Version {
@@ -105,7 +80,6 @@ impl FileDiffSpec {
         }
     }
 
-    /// True if a side is read from the working tree, and so can change after loading.
     pub fn reads_working_tree(&self) -> bool {
         [&self.old, &self.new]
             .into_iter()
@@ -113,12 +87,10 @@ impl FileDiffSpec {
             .any(|v| v.rev == Rev::WorkingTree)
     }
 
-    /// True if either side is a submodule.
     pub fn is_submodule(&self) -> bool {
         self.modes.contains(&GITLINK_MODE)
     }
 
-    /// The path the diff is about: the new one, or the old one of a deleted file.
     pub fn path(&self) -> &str {
         self.new
             .as_ref()
@@ -127,62 +99,57 @@ impl FileDiffSpec {
     }
 }
 
-/// What git gave for the two versions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Content {
-    /// Both versions as text (a missing side is empty).
+    /// A missing side is empty.
     Text {
         old: String,
         new: String,
-        /// Bytes that were not valid UTF-8, now shown as `\xNN`.
         invalid_bytes: usize,
     },
-    /// A binary file: only its sizes, where the side exists.
     Binary {
         old_size: Option<u64>,
         new_size: Option<u64>,
     },
-    /// A submodule: the commit it pointed at on each side.
-    Submodule { old: Option<Oid>, new: Option<Oid> },
+    Submodule {
+        old: Option<Oid>,
+        new: Option<Oid>,
+    },
 }
 
-/// A file diff's input, as loaded through git.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedDiff {
     pub spec: FileDiffSpec,
     pub content: Content,
-    /// The textconv driver and its command (`name: command`), when one converted the text.
+    /// `driver: command` of the textconv filter that converted the text.
     pub textconv: Option<String>,
 }
 
-/// UTF-8, with every byte that isn't valid UTF-8 written as `\xNN`. Also returns how many
-/// such bytes there were.
+/// Writes each byte that isn't valid UTF-8 as `\xNN`, and counts them.
 pub fn decode(bytes: &[u8]) -> (String, usize) {
     let mut out = String::with_capacity(bytes.len());
-    let mut bad = 0;
+    let mut invalid = 0;
     for chunk in bytes.utf8_chunks() {
         out.push_str(chunk.valid());
         for b in chunk.invalid() {
             let _ = write!(out, "\\x{b:02X}");
-            bad += 1;
+            invalid += 1;
         }
     }
-    (out, bad)
+    (out, invalid)
 }
 
-/// How changed words are found: which removed line is compared with which added line.
+/// Which removed line's words are compared with which added line's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WordMode {
-    /// Each removed line with the most similar of the next added lines, if they share at
-    /// least half their text. Paired lines share a row side by side; the other lines of a
-    /// change are marked whole.
+    /// Each removed line with the most similar added line close by. Paired lines share a row
+    /// side by side; the other lines of a change are marked whole.
     #[default]
     Similar,
     /// The n-th removed line of a change with its n-th added line.
     Position,
     /// All removed lines of a change with all its added lines, as one text.
     Block,
-    /// No changed words: only whole lines are marked.
     Off,
 }
 
@@ -202,79 +169,47 @@ impl WordMode {
             WordMode::Off => "Off",
         }
     }
-
-    pub fn description(self) -> &'static str {
-        match self {
-            WordMode::Similar => {
-                "Changed words: pair each removed line with the most similar added line"
-            }
-            WordMode::Position => {
-                "Changed words: pair the removed and added lines of a change in order"
-            }
-            WordMode::Block => {
-                "Changed words: compare a change's removed and added lines as one text"
-            }
-            WordMode::Off => "No changed words: mark whole lines only",
-        }
-    }
 }
 
-/// What counts as a change in whitespace.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Whitespace {
-    /// Every space, tab and line ending counts.
     #[default]
     Compare,
-    /// Like `git diff -b`: more or fewer blanks count as the same, and blanks at the end of a
-    /// line (a CR of a CRLF line ending included) don't count.
+    /// As `git diff -b`, which also ignores a CRLF line ending's CR.
     IgnoreChanges,
-    /// Like `git diff -w`: whitespace doesn't count at all.
+    /// As `git diff -w`.
     IgnoreAll,
 }
 
 impl Whitespace {
-    pub const ALL: [Whitespace; 3] = [
-        Whitespace::Compare,
-        Whitespace::IgnoreChanges,
-        Whitespace::IgnoreAll,
-    ];
-
-    pub fn description(self) -> &'static str {
+    /// Bytes: imara-diff's indent heuristic reads lines as bytes.
+    fn comparison_key(self, raw: &str) -> Cow<'_, [u8]> {
         match self {
-            Whitespace::Compare => "Compare whitespace: every space, tab and line ending counts",
-            Whitespace::IgnoreChanges => {
-                "Ignore whitespace changes (git diff -b): more or fewer blanks, and line endings, don't count"
-            }
-            Whitespace::IgnoreAll => "Ignore all whitespace (git diff -w)",
-        }
-    }
-
-    /// The key a line is compared by.
-    fn key(self, raw: &str) -> String {
-        match self {
-            Whitespace::Compare => raw.to_owned(),
+            Whitespace::Compare => Cow::Borrowed(raw.as_bytes()),
             Whitespace::IgnoreChanges => {
                 let mut out = String::with_capacity(raw.len());
-                let mut gap = false;
+                let mut after_blank = false;
                 for c in raw.trim_end().chars() {
                     if c.is_whitespace() {
-                        gap = true;
+                        after_blank = true;
                     } else {
-                        if gap {
+                        if after_blank {
                             out.push(' ');
                         }
-                        gap = false;
+                        after_blank = false;
                         out.push(c);
                     }
                 }
-                out
+                Cow::Owned(out.into_bytes())
             }
-            Whitespace::IgnoreAll => raw.chars().filter(|c| !c.is_whitespace()).collect(),
+            Whitespace::IgnoreAll => {
+                let solid: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+                Cow::Owned(solid.into_bytes())
+            }
         }
     }
 }
 
-/// How a diff is computed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct DiffOptions {
     pub words: WordMode,
@@ -288,29 +223,44 @@ pub enum LineKind {
     Added,
 }
 
-/// A line of one version.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffLine {
-    /// Line number in its version, from 1.
-    pub no: u32,
+    /// The line's index in its version.
+    pub index: u32,
     pub kind: LineKind,
-    /// The text to show: no line ending, tabs expanded.
+    /// As shown: no line ending, tabs expanded.
     pub text: String,
-    /// The line as it is in the file, without its ending: what copying gives.
+    /// As in the file, without the line ending.
     pub raw: String,
-    /// Changed words, as byte ranges of `text`, in order.
+    /// Changed words, as byte ranges of `text`.
     pub spans: Vec<Range<usize>>,
 }
 
-/// A row of a form: indexes into [`FileDiff::old`] and [`FileDiff::new`]. Side by side, a
-/// missing side is a filler; unified, a row has one side unless the line is the same in both.
+/// Indexes into [`FileDiff::old`] and [`FileDiff::new`]. Side by side, a missing side is a
+/// filler; unified, only an unchanged line has both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Row {
     pub old: Option<u32>,
     pub new: Option<u32>,
 }
 
-/// Line endings of a version.
+impl Row {
+    /// The version whose line the unified form shows: for an unchanged line, the new one.
+    pub fn unified_side(self) -> Side {
+        if self.new.is_some() {
+            Side::New
+        } else {
+            Side::Old
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Side {
+    Old,
+    New,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Endings {
     Lf,
@@ -319,7 +269,7 @@ pub enum Endings {
 }
 
 impl Endings {
-    pub fn name(self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
             Endings::Lf => "LF",
             Endings::Crlf => "CRLF",
@@ -327,44 +277,37 @@ impl Endings {
         }
     }
 
-    /// From the number of lines and of those ending in CRLF. A last line without an ending
-    /// doesn't make a file mixed. `None` for an empty text.
+    /// Only lines with an ending count, so an unterminated last line doesn't make a file mixed.
     fn of(lines: &[&str]) -> Option<Endings> {
-        let ended: Vec<&&str> = lines.iter().filter(|l| l.ends_with('\n')).collect();
-        if ended.is_empty() {
-            return None;
-        }
-        let crlf = ended.iter().filter(|l| l.ends_with("\r\n")).count();
-        Some(if crlf == 0 {
-            Endings::Lf
-        } else if crlf == ended.len() {
-            Endings::Crlf
+        let ended = lines.iter().filter(|l| l.ends_with('\n')).count();
+        let crlf = lines.iter().filter(|l| l.ends_with("\r\n")).count();
+        if ended == 0 {
+            None
+        } else if crlf == 0 {
+            Some(Endings::Lf)
+        } else if crlf == ended {
+            Some(Endings::Crlf)
         } else {
-            Endings::Mixed
-        })
+            Some(Endings::Mixed)
+        }
     }
 }
 
-/// Something the diff window says about a diff besides its lines.
+/// What the diff window says about a diff besides its lines.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Note {
-    /// Shown through a textconv filter (`name: command`).
     Textconv(String),
     LineEndings {
         old: Endings,
         new: Endings,
-        /// The whitespace setting ignores the difference.
         ignored: bool,
     },
     Mode {
         old: u32,
         new: u32,
     },
-    /// Bytes that are not valid UTF-8, shown as `\xNN`.
     InvalidUtf8(usize),
-    /// Both versions are the same text (a pure rename or mode change).
     Unchanged,
-    /// The versions differ in whitespace only, which the setting ignores.
     OnlyWhitespace,
 }
 
@@ -391,183 +334,175 @@ impl std::fmt::Display for Note {
     }
 }
 
-/// The lines of both versions, their changes, and the rows of both forms.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FileDiff {
     pub old: Vec<DiffLine>,
     pub new: Vec<DiffLine>,
-    /// Side by side: removed and added lines of a change share rows, paired lines ([`WordMode::Similar`])
-    /// on the same row.
+    /// Paired lines ([`WordMode::Similar`]) share a row.
     pub side: Vec<Row>,
-    /// Unified, in git's order: a change's removed lines, then its added lines.
+    /// In git's order: a change's removed lines, then its added lines.
     pub unified: Vec<Row>,
-    /// The first row of each change, in [`FileDiff::side`] and in [`FileDiff::unified`].
-    pub side_changes: Vec<usize>,
-    pub unified_changes: Vec<usize>,
-    /// Lines added and removed as shown (after textconv and the whitespace setting).
+    pub side_change_starts: Vec<usize>,
+    pub unified_change_starts: Vec<usize>,
+    /// As shown: after textconv and the whitespace setting.
     pub added: u32,
     pub removed: u32,
     pub old_endings: Option<Endings>,
     pub new_endings: Option<Endings>,
-    /// The widest line, in characters (tabs expanded).
+    /// In characters, tabs expanded.
     pub widest: usize,
 }
 
 impl FileDiff {
-    /// Compares `old` with `new`.
     pub fn new(old: &str, new: &str, options: DiffOptions) -> FileDiff {
-        let ws = options.whitespace;
-        let mode = options.words;
-        let ol: Vec<&str> = imara_diff::sources::lines(old).collect();
-        let nl: Vec<&str> = imara_diff::sources::lines(new).collect();
-        let mut input: InternedInput<String> = InternedInput::default();
-        input.update_before(ol.iter().map(|l| ws.key(l)));
-        input.update_after(nl.iter().map(|l| ws.key(l)));
-        let mut diff = Diff::compute(Algorithm::Histogram, &input);
-        diff.postprocess_lines(&input);
+        let old_lines: Vec<&str> = imara_diff::sources::lines(old).collect();
+        let new_lines: Vec<&str> = imara_diff::sources::lines(new).collect();
+        let whitespace = options.whitespace;
+        let mut input = InternedInput::default();
+        input.update_before(old_lines.iter().map(|&l| whitespace.comparison_key(l)));
+        input.update_after(new_lines.iter().map(|&l| whitespace.comparison_key(l)));
+        let mut line_diff = Diff::compute(Algorithm::Histogram, &input);
+        line_diff.postprocess_lines(&input);
 
-        let mut d = FileDiff {
-            added: diff.count_additions(),
-            removed: diff.count_removals(),
-            old_endings: Endings::of(&ol),
-            new_endings: Endings::of(&nl),
+        let mut diff = FileDiff {
+            added: line_diff.count_additions(),
+            removed: line_diff.count_removals(),
+            old_endings: Endings::of(&old_lines),
+            new_endings: Endings::of(&new_lines),
             ..FileDiff::default()
         };
-        let line = |raw: &str, i: usize, kind: LineKind, spans: &[Range<usize>]| {
-            let (text, spans) = display(raw, spans);
-            DiffLine {
-                no: i as u32 + 1,
-                kind,
-                text,
-                raw: without_ending(raw).to_owned(),
-                spans,
+        let (mut o, mut n) = (0, 0);
+        for hunk in line_diff.hunks() {
+            for (o, n) in (o..hunk.before.start).zip(n..) {
+                diff.push_unchanged(&old_lines, o, &new_lines, n);
             }
-        };
-        let (mut o, mut n) = (0usize, 0usize);
-        let same = |d: &mut FileDiff, o: usize, n: usize| {
-            d.old.push(line(ol[o], o, LineKind::Same, &[]));
-            d.new.push(line(nl[n], n, LineKind::Same, &[]));
-            let row = Row {
-                old: Some(o as u32),
-                new: Some(n as u32),
-            };
-            d.side.push(row);
-            d.unified.push(row);
-        };
-        for h in diff.hunks() {
-            while o < h.before.start as usize {
-                same(&mut d, o, n);
-                o += 1;
-                n += 1;
-            }
-            let rem = &ol[h.before.start as usize..h.before.end as usize];
-            let add = &nl[h.after.start as usize..h.after.end as usize];
-            let (rs, as_, pairs) = changed_words(rem, add, options);
-            d.side_changes.push(d.side.len());
-            d.unified_changes.push(d.unified.len());
-            for (i, r) in rem.iter().enumerate() {
-                d.old.push(line(r, o + i, LineKind::Removed, &rs[i]));
-            }
-            for (j, a) in add.iter().enumerate() {
-                d.new.push(line(a, n + j, LineKind::Added, &as_[j]));
-            }
-            let old_row = |i: usize| Some((o + i) as u32);
-            let new_row = |j: usize| Some((n + j) as u32);
-            d.unified.extend((0..rem.len()).map(|i| Row {
-                old: old_row(i),
-                new: None,
-            }));
-            d.unified.extend((0..add.len()).map(|j| Row {
-                old: None,
-                new: new_row(j),
-            }));
-            // Side by side: the lines between pairs share rows in order; each pair has a row.
-            let stops = pairs
-                .iter()
-                .copied()
-                .filter(|_| mode == WordMode::Similar)
-                .chain([(rem.len(), add.len())]);
-            let (mut i, mut j) = (0, 0);
-            for (pi, pj) in stops {
-                for k in 0..(pi - i).max(pj - j) {
-                    d.side.push(Row {
-                        old: (i + k < pi).then(|| old_row(i + k)).flatten(),
-                        new: (j + k < pj).then(|| new_row(j + k)).flatten(),
-                    });
-                }
-                if pi < rem.len() && pj < add.len() {
-                    d.side.push(Row {
-                        old: old_row(pi),
-                        new: new_row(pj),
-                    });
-                }
-                (i, j) = (pi + 1, pj + 1);
-            }
-            o = h.before.end as usize;
-            n = h.after.end as usize;
+            (o, n) = (hunk.before.end, hunk.after.end);
+            diff.push_change(&old_lines, hunk.before, &new_lines, hunk.after, options);
         }
-        while o < ol.len() && n < nl.len() {
-            same(&mut d, o, n);
-            o += 1;
-            n += 1;
+        let unchanged_tail = old_lines.len() - o as usize;
+        for (o, n) in (o..).zip(n..).take(unchanged_tail) {
+            diff.push_unchanged(&old_lines, o, &new_lines, n);
         }
-        d.widest = d
+        diff.widest = diff
             .old
             .iter()
-            .chain(&d.new)
+            .chain(&diff.new)
             .map(|l| l.text.chars().count())
             .max()
             .unwrap_or(0);
-        d
+        diff
     }
 
-    /// The text of `row` as a form shows it: side by side, one side's line (`None` for a
-    /// filler); unified, the line, which for an unchanged one is its new version.
-    pub fn line(&self, row: Row, side: Option<bool>) -> Option<&DiffLine> {
-        let old = row.old.map(|i| &self.old[i as usize]);
-        let new = row.new.map(|i| &self.new[i as usize]);
-        match side {
-            Some(true) => old,
-            Some(false) => new,
-            None => new.or(old),
+    fn push_unchanged(&mut self, old_lines: &[&str], o: u32, new_lines: &[&str], n: u32) {
+        self.old
+            .push(DiffLine::new(old_lines[o as usize], o, LineKind::Same, &[]));
+        self.new
+            .push(DiffLine::new(new_lines[n as usize], n, LineKind::Same, &[]));
+        let row = Row {
+            old: Some(o),
+            new: Some(n),
+        };
+        self.side.push(row);
+        self.unified.push(row);
+    }
+
+    fn push_change(
+        &mut self,
+        old_lines: &[&str],
+        removed: Range<u32>,
+        new_lines: &[&str],
+        added: Range<u32>,
+        options: DiffOptions,
+    ) {
+        let removed_lines = &old_lines[removed.start as usize..removed.end as usize];
+        let added_lines = &new_lines[added.start as usize..added.end as usize];
+        let words = changed_words(removed_lines, added_lines, options);
+        self.side_change_starts.push(self.side.len());
+        self.unified_change_starts.push(self.unified.len());
+        for ((raw, o), spans) in removed_lines
+            .iter()
+            .zip(removed.clone())
+            .zip(&words.removed)
+        {
+            self.old
+                .push(DiffLine::new(raw, o, LineKind::Removed, spans));
+        }
+        for ((raw, n), spans) in added_lines.iter().zip(added.clone()).zip(&words.added) {
+            self.new.push(DiffLine::new(raw, n, LineKind::Added, spans));
+        }
+        let old_row = |o| Row {
+            old: Some(o),
+            new: None,
+        };
+        let new_row = |n| Row {
+            old: None,
+            new: Some(n),
+        };
+        self.unified.extend(removed.clone().map(old_row));
+        self.unified.extend(added.clone().map(new_row));
+
+        // Side by side, the lines between two pairs share rows in order.
+        let old_index = |i: usize| removed.start + i as u32;
+        let new_index = |j: usize| added.start + j as u32;
+        let end = (removed_lines.len(), added_lines.len());
+        let (mut i, mut j) = (0, 0);
+        for (pair_i, pair_j) in words.pairs.into_iter().chain([end]) {
+            for k in 0..(pair_i - i).max(pair_j - j) {
+                self.side.push(Row {
+                    old: (i + k < pair_i).then(|| old_index(i + k)),
+                    new: (j + k < pair_j).then(|| new_index(j + k)),
+                });
+            }
+            if (pair_i, pair_j) != end {
+                self.side.push(Row {
+                    old: Some(old_index(pair_i)),
+                    new: Some(new_index(pair_j)),
+                });
+            }
+            (i, j) = (pair_i + 1, pair_j + 1);
         }
     }
 
-    /// True if a row shows a removed or an added line.
-    pub fn is_changed(&self, row: Row) -> bool {
+    pub fn line(&self, row: Row, side: Side) -> Option<&DiffLine> {
+        match side {
+            Side::Old => row.old.map(|i| &self.old[i as usize]),
+            Side::New => row.new.map(|i| &self.new[i as usize]),
+        }
+    }
+
+    fn is_changed(&self, row: Row) -> bool {
         let changed = |lines: &[DiffLine], i: Option<u32>| {
             i.is_some_and(|i| lines[i as usize].kind != LineKind::Same)
         };
         changed(&self.old, row.old) || changed(&self.new, row.new)
     }
 
-    /// What to say about the diff besides its lines.
     pub fn notes(&self, loaded: &LoadedDiff, whitespace: Whitespace) -> Vec<Note> {
         let mut notes = Vec::new();
         if let Some(driver) = &loaded.textconv {
             notes.push(Note::Textconv(driver.clone()));
         }
-        let both = loaded.spec.old.is_some() && loaded.spec.new.is_some();
+        let both_sides = loaded.spec.old.is_some() && loaded.spec.new.is_some();
         if let Content::Text {
             old,
             new,
             invalid_bytes,
         } = &loaded.content
         {
-            if both
-                && let (Some(a), Some(b)) = (self.old_endings, self.new_endings)
-                && a != b
+            if both_sides
+                && let (Some(old_endings), Some(new_endings)) = (self.old_endings, self.new_endings)
+                && old_endings != new_endings
             {
                 notes.push(Note::LineEndings {
-                    old: a,
-                    new: b,
+                    old: old_endings,
+                    new: new_endings,
                     ignored: whitespace != Whitespace::Compare,
                 });
             }
             if *invalid_bytes > 0 {
                 notes.push(Note::InvalidUtf8(*invalid_bytes));
             }
-            if both && self.added == 0 && self.removed == 0 {
+            if both_sides && self.added == 0 && self.removed == 0 {
                 notes.push(if old == new {
                     Note::Unchanged
                 } else {
@@ -575,81 +510,122 @@ impl FileDiff {
                 });
             }
         }
-        let [a, b] = loaded.spec.modes;
-        if both && a != b && a != 0 && b != 0 {
-            notes.push(Note::Mode { old: a, new: b });
+        let [old_mode, new_mode] = loaded.spec.modes;
+        if both_sides && old_mode != new_mode && old_mode != 0 && new_mode != 0 {
+            notes.push(Note::Mode {
+                old: old_mode,
+                new: new_mode,
+            });
         }
         notes
     }
 }
 
-/// The changed words of a change's removed and added lines, and which lines were paired.
-#[allow(clippy::type_complexity)]
-fn changed_words(
-    rem: &[&str],
-    add: &[&str],
-    options: DiffOptions,
-) -> (
-    Vec<Vec<Range<usize>>>,
-    Vec<Vec<Range<usize>>>,
-    Vec<(usize, usize)>,
-) {
-    let mut rs = vec![Vec::new(); rem.len()];
-    let mut as_ = vec![Vec::new(); add.len()];
-    let mixed = !rem.is_empty() && !add.is_empty();
-    if !mixed || options.words == WordMode::Off {
-        return (rs, as_, Vec::new());
-    }
-    let ws = options.whitespace;
-    if rem.len().max(add.len()) > MAX_WORD_DIFF_LINES {
-        return (
-            rem.iter().map(|l| whole(l)).collect(),
-            add.iter().map(|l| whole(l)).collect(),
-            Vec::new(),
-        );
-    }
-    let pairs: Vec<(usize, usize)> = match options.words {
-        WordMode::Similar => pair_similar(rem, add, ws),
-        WordMode::Position => (0..rem.len().min(add.len())).map(|i| (i, i)).collect(),
-        WordMode::Block | WordMode::Off => Vec::new(),
-    };
-    if options.words == WordMode::Block {
-        (rs, as_) = word_spans(rem, add, ws);
-    } else {
-        // Lines left unpaired in a change with both removals and additions are changed whole.
-        rs = rem.iter().map(|l| whole(l)).collect();
-        as_ = add.iter().map(|l| whole(l)).collect();
-        for &(i, j) in &pairs {
-            let (a, b) = word_spans(&rem[i..=i], &add[j..=j], ws);
-            rs[i] = a.into_iter().next().unwrap_or_default();
-            as_[j] = b.into_iter().next().unwrap_or_default();
+impl DiffLine {
+    fn new(raw: &str, index: u32, kind: LineKind, changed: &[Range<usize>]) -> DiffLine {
+        let (text, spans) = display(raw, changed);
+        DiffLine {
+            index,
+            kind,
+            text,
+            raw: without_ending(raw).to_owned(),
+            spans,
         }
     }
-    (rs, as_, pairs)
+
+    pub fn raw_offset(&self, col: usize) -> usize {
+        raw_offset(&self.raw, col)
+    }
 }
 
-/// Words: runs of letters, digits and `_`; runs of spaces and tabs; any other character on its
-/// own (a line ending too).
+type LineSpans = Vec<Range<usize>>;
+
+struct ChangedWords {
+    removed: Vec<LineSpans>,
+    added: Vec<LineSpans>,
+    pairs: Vec<(usize, usize)>,
+}
+
+impl ChangedWords {
+    fn unmarked(removed: &[&str], added: &[&str]) -> ChangedWords {
+        ChangedWords {
+            removed: vec![Vec::new(); removed.len()],
+            added: vec![Vec::new(); added.len()],
+            pairs: Vec::new(),
+        }
+    }
+
+    fn whole_lines(removed: &[&str], added: &[&str]) -> ChangedWords {
+        ChangedWords {
+            removed: removed.iter().map(|l| non_blank_span(l)).collect(),
+            added: added.iter().map(|l| non_blank_span(l)).collect(),
+            pairs: Vec::new(),
+        }
+    }
+}
+
+fn changed_words(removed: &[&str], added: &[&str], options: DiffOptions) -> ChangedWords {
+    if options.words == WordMode::Off || removed.is_empty() || added.is_empty() {
+        return ChangedWords::unmarked(removed, added);
+    }
+    if removed.len().max(added.len()) > MAX_WORD_DIFF_LINES {
+        return ChangedWords::whole_lines(removed, added);
+    }
+    let whitespace = options.whitespace;
+    if options.words == WordMode::Block {
+        let (removed, added) = word_spans(removed, added, whitespace);
+        return ChangedWords {
+            removed,
+            added,
+            pairs: Vec::new(),
+        };
+    }
+    let pairs = if options.words == WordMode::Similar {
+        pair_similar(removed, added, whitespace)
+    } else {
+        (0..removed.len().min(added.len()))
+            .map(|i| (i, i))
+            .collect()
+    };
+    let mut words = ChangedWords {
+        pairs,
+        ..ChangedWords::whole_lines(removed, added)
+    };
+    for &(i, j) in &words.pairs {
+        let (r, a) = word_spans(&removed[i..=i], &added[j..=j], whitespace);
+        words.removed[i] = r.into_iter().next().unwrap_or_default();
+        words.added[j] = a.into_iter().next().unwrap_or_default();
+    }
+    words
+}
+
 fn words(line: &str) -> Vec<&str> {
-    let class = |c: char| {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Class {
+        Word,
+        Blank,
+        Other,
+    }
+    let class_of = |c: char| {
         if c.is_alphanumeric() || c == '_' {
-            0
+            Class::Word
         } else if c == ' ' || c == '\t' {
-            1
+            Class::Blank
         } else {
-            2
+            Class::Other
         }
     };
     let mut out = Vec::new();
     let mut start = 0;
-    let mut prev: Option<u8> = None;
+    let mut prev = None;
     for (i, c) in line.char_indices() {
-        let k = class(c);
-        if !(prev == Some(k) && k != 2) && i > start {
+        let class = class_of(c);
+        let extends_run = prev == Some(class) && class != Class::Other;
+        if !extends_run && i > start {
             out.push(&line[start..i]);
             start = i;
         }
-        prev = Some(k);
+        prev = Some(class);
     }
     if start < line.len() {
         out.push(&line[start..]);
@@ -657,134 +633,143 @@ fn words(line: &str) -> Vec<&str> {
     out
 }
 
-/// Compares the words of `before` with those of `after` (each a list of raw lines, endings
-/// included) and returns the changed byte ranges of every line. When whitespace is ignored,
-/// blank words are left out of the comparison.
-#[allow(clippy::type_complexity)]
+/// Blank words are left out of the comparison when whitespace doesn't count.
 fn word_spans(
     before: &[&str],
     after: &[&str],
-    ws: Whitespace,
-) -> (Vec<Vec<Range<usize>>>, Vec<Vec<Range<usize>>>) {
-    type Located = (usize, Range<usize>);
-    fn tokens<'a>(lines: &[&'a str], ws: Whitespace) -> (Vec<&'a str>, Vec<Located>) {
-        let mut toks = Vec::new();
-        let mut at = Vec::new();
-        for (li, line) in lines.iter().enumerate() {
-            let mut off = 0;
-            for w in words(line) {
-                if ws == Whitespace::Compare || !w.trim().is_empty() {
-                    toks.push(w);
-                    at.push((li, off..off + w.len()));
-                }
-                off += w.len();
-            }
-        }
-        (toks, at)
-    }
-    let (bt, bat) = tokens(before, ws);
-    let (at_, aat) = tokens(after, ws);
-    let mut input: InternedInput<&str> = InternedInput::default();
-    input.update_before(bt.iter().copied());
-    input.update_after(at_.iter().copied());
+    whitespace: Whitespace,
+) -> (Vec<LineSpans>, Vec<LineSpans>) {
+    let before_words = located_words(before, whitespace);
+    let after_words = located_words(after, whitespace);
+    let mut input = InternedInput::default();
+    input.update_before(before_words.iter().map(|w| w.text));
+    input.update_after(after_words.iter().map(|w| w.text));
     let diff = Diff::compute(Algorithm::Histogram, &input);
-    let collect = |n: usize, at: &[Located], toks: &[&str], changed: &dyn Fn(u32) -> bool| {
-        let mut spans: Vec<Vec<Range<usize>>> = vec![Vec::new(); n];
-        for (i, (li, r)) in at.iter().enumerate() {
-            if !changed(i as u32) || toks[i].trim_end_matches(['\n', '\r']).is_empty() {
-                continue;
-            }
-            let v = &mut spans[*li];
-            match v.last_mut() {
-                Some(last) if last.end == r.start => last.end = r.end,
-                _ => v.push(r.clone()),
-            }
-        }
-        spans
-    };
     (
-        collect(before.len(), &bat, &bt, &|i| diff.is_removed(i)),
-        collect(after.len(), &aat, &at_, &|i| diff.is_added(i)),
+        changed_spans(before.len(), &before_words, |i| diff.is_removed(i)),
+        changed_spans(after.len(), &after_words, |i| diff.is_added(i)),
     )
 }
 
-/// Pairs removed lines with added lines, in order: each removed line takes the most similar of
-/// the next [`PAIRING_REACH`] added lines after the last pair, if they share enough text.
-fn pair_similar(rem: &[&str], add: &[&str], ws: Whitespace) -> Vec<(usize, usize)> {
+struct LocatedWord<'a> {
+    text: &'a str,
+    line: usize,
+    range: Range<usize>,
+}
+
+fn located_words<'a>(lines: &[&'a str], whitespace: Whitespace) -> Vec<LocatedWord<'a>> {
+    let mut located = Vec::new();
+    for (line, text) in lines.iter().enumerate() {
+        let mut offset = 0;
+        for word in words(text) {
+            if whitespace == Whitespace::Compare || !word.trim().is_empty() {
+                located.push(LocatedWord {
+                    text: word,
+                    line,
+                    range: offset..offset + word.len(),
+                });
+            }
+            offset += word.len();
+        }
+    }
+    located
+}
+
+/// Line endings are never marked, and adjacent changed words merge into one span.
+fn changed_spans(
+    line_count: usize,
+    words: &[LocatedWord],
+    is_changed: impl Fn(u32) -> bool,
+) -> Vec<LineSpans> {
+    let mut spans: Vec<LineSpans> = vec![Vec::new(); line_count];
+    for (i, word) in (0..).zip(words) {
+        if !is_changed(i) || word.text.trim_end_matches(['\n', '\r']).is_empty() {
+            continue;
+        }
+        let line = &mut spans[word.line];
+        match line.last_mut() {
+            Some(last) if last.end == word.range.start => last.end = word.range.end,
+            _ => line.push(word.range.clone()),
+        }
+    }
+    spans
+}
+
+/// Greedy and in order, so that paired lines keep their order side by side.
+fn pair_similar(removed: &[&str], added: &[&str], whitespace: Whitespace) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
-    let mut from = 0;
-    for (i, r) in rem.iter().enumerate() {
+    let mut first_free = 0;
+    for (i, r) in removed.iter().enumerate() {
         let mut best: Option<(f32, usize)> = None;
-        for (j, a) in add.iter().enumerate().skip(from).take(PAIRING_REACH) {
-            let sim = similarity(r, a, ws);
-            if sim >= PAIRING_SIMILARITY && best.is_none_or(|(b, _)| sim > b) {
-                best = Some((sim, j));
+        for (j, a) in added
+            .iter()
+            .enumerate()
+            .skip(first_free)
+            .take(PAIRING_LOOKAHEAD)
+        {
+            let score = similarity(r, a, whitespace);
+            if score >= MIN_PAIRING_SIMILARITY && best.is_none_or(|(top, _)| score > top) {
+                best = Some((score, j));
             }
         }
         if let Some((_, j)) = best {
             pairs.push((i, j));
-            from = j + 1;
+            first_free = j + 1;
         }
     }
     pairs
 }
 
-/// The share of two lines' non-blank characters that their word comparison keeps, from 0 to 1.
-fn similarity(a: &str, b: &str, ws: Whitespace) -> f32 {
-    let (x, y) = word_spans(&[a], &[b], ws);
-    let solid = |line: &str, spans: &[Range<usize>]| {
-        let count = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
-        let total = count(line);
-        let changed: usize = spans.iter().map(|s| count(&line[s.clone()])).sum();
+/// The share of the two lines' non-blank characters that their word comparison keeps, from 0
+/// to 1.
+fn similarity(a: &str, b: &str, whitespace: Whitespace) -> f32 {
+    let (a_spans, b_spans) = word_spans(&[a], &[b], whitespace);
+    let non_blank = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
+    let kept_and_total = |line: &str, changed: &[Range<usize>]| {
+        let total = non_blank(line);
+        let changed: usize = changed.iter().map(|r| non_blank(&line[r.clone()])).sum();
         (total.saturating_sub(changed), total)
     };
-    let (ka, ta) = solid(a, &x[0]);
-    let (kb, tb) = solid(b, &y[0]);
-    if ta + tb == 0 {
+    let (a_kept, a_total) = kept_and_total(a, &a_spans[0]);
+    let (b_kept, b_total) = kept_and_total(b, &b_spans[0]);
+    if a_total + b_total == 0 {
         1.0
     } else {
-        (ka + kb) as f32 / (ta + tb) as f32
+        (a_kept + b_kept) as f32 / (a_total + b_total) as f32
     }
 }
 
-/// A line's non-blank text as one span: the whole line is changed.
-fn whole(raw: &str) -> Vec<Range<usize>> {
+fn non_blank_span(raw: &str) -> LineSpans {
     let body = raw.trim_end();
     let start = body.len() - body.trim_start().len();
-    if start < body.len() {
-        std::iter::once(start..body.len()).collect()
-    } else {
-        Vec::new()
-    }
+    (start < body.len())
+        .then_some(start..body.len())
+        .into_iter()
+        .collect()
 }
 
-/// A line without its ending (`\n` or `\r\n`).
 fn without_ending(raw: &str) -> &str {
     let body = raw.strip_suffix('\n').unwrap_or(raw);
     body.strip_suffix('\r').unwrap_or(body)
 }
 
-impl DiffLine {
-    /// Where display column `col` (a character of [`DiffLine::text`]) falls in
-    /// [`DiffLine::raw`], as a byte offset ([`raw_offset`]).
-    pub fn raw_offset(&self, col: usize) -> usize {
-        raw_offset(&self.raw, col)
+fn next_column(col: usize, c: char) -> usize {
+    if c == '\t' {
+        col + TAB_WIDTH - col % TAB_WIDTH
+    } else {
+        col + 1
     }
 }
 
-/// Where display column `col` (a character of the line as [`display`] shows it) falls in the
-/// `raw` line, as a byte offset. A column inside a tab's run of spaces counts as after the tab.
+/// The byte offset in `raw` of display column `col`. A column inside a tab's spaces counts as
+/// after the tab.
 pub fn raw_offset(raw: &str, col: usize) -> usize {
     let mut at = 0;
     for (i, c) in raw.char_indices() {
         if at >= col {
             return i;
         }
-        at += if c == '\t' {
-            TAB_WIDTH - at % TAB_WIDTH
-        } else {
-            1
-        };
+        at = next_column(at, c);
         if at > col {
             return i + c.len_utf8();
         }
@@ -792,79 +777,62 @@ pub fn raw_offset(raw: &str, col: usize) -> usize {
     raw.len()
 }
 
-/// The display column (a character of the line as [`display`] shows it) where byte `offset` of
-/// the `raw` line falls: the other way from [`raw_offset`]. A tab ends at the next tab stop.
+/// The display column of byte `offset` of `raw`: the inverse of [`raw_offset`].
 pub fn display_column(raw: &str, offset: usize) -> usize {
-    let mut col = 0;
-    for (i, c) in raw.char_indices() {
-        if i >= offset {
-            break;
-        }
-        col += if c == '\t' {
-            TAB_WIDTH - col % TAB_WIDTH
-        } else {
-            1
-        };
-    }
-    col
+    raw.char_indices()
+        .take_while(|&(i, _)| i < offset)
+        .fold(0, |col, (_, c)| next_column(col, c))
 }
 
-/// The display form of a raw line, and its spans moved along: the line ending dropped and tabs
-/// expanded to multiples of [`TAB_WIDTH`].
-pub fn display(raw: &str, spans: &[Range<usize>]) -> (String, Vec<Range<usize>>) {
+/// `raw` as shown, line ending dropped and tabs expanded, with `spans` moved along.
+pub fn display(raw: &str, spans: &[Range<usize>]) -> (String, LineSpans) {
     let (text, map) = display_map(raw);
-    let end = map.len() - 1;
+    let last = map.len() - 1;
     let spans = spans
         .iter()
         .filter_map(|r| {
-            let s = map[r.start.min(end)];
-            let e = map[r.end.min(end)];
-            (e > s).then_some(s..e)
+            let start = map[r.start.min(last)];
+            let end = map[r.end.min(last)];
+            (end > start).then_some(start..end)
         })
         .collect();
     (text, spans)
 }
 
-/// The display form of a raw line, and where each byte of the line (its ending dropped)
-/// lands in it, plus the end: what [`display`] moves spans by.
+/// `raw` as shown, and for each byte of `raw` (its ending dropped), plus its end, the byte of
+/// the shown text it lands on.
 pub fn display_map(raw: &str) -> (String, Vec<usize>) {
     let body = without_ending(raw);
     let mut text = String::with_capacity(body.len());
     let mut map = Vec::with_capacity(body.len() + 1);
     let mut col = 0;
     for c in body.chars() {
-        for _ in 0..c.len_utf8() {
-            map.push(text.len());
-        }
+        map.extend(std::iter::repeat_n(text.len(), c.len_utf8()));
+        let next = next_column(col, c);
         if c == '\t' {
-            let n = TAB_WIDTH - col % TAB_WIDTH;
-            text.extend(std::iter::repeat_n(' ', n));
-            col += n;
+            text.extend(std::iter::repeat_n(' ', next - col));
         } else {
             text.push(c);
-            col += 1;
         }
+        col = next;
     }
     map.push(text.len());
     (text, map)
 }
 
-/// A row of a form as the window shows it: a line row, or a fold standing for hidden rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shown {
     Row(usize),
-    /// Unchanged rows folded away; the fold is known by its first row.
     Fold(Range<usize>),
 }
 
-/// The rows to show when unchanged stretches are folded: [`CONTEXT_LINES`] rows are kept on
-/// each side of a change, and rows whose line of the new version lies in `open` stay shown
-/// (folds opened by hand; kept by line, so they outlast a change of form or options). What is
-/// left folds, but runs of fewer than two rows never do, since the fold would take as much room.
+/// Folds unchanged stretches beyond [`CONTEXT_LINES`] of a change. `open` holds lines of the
+/// new version opened by hand: lines, not rows, so that they stay open in the other form and
+/// under other options. A single row never folds: its fold would take as much room.
 pub fn fold(rows: &[Row], diff: &FileDiff, open: &[Range<u32>]) -> Vec<Shown> {
     let is_open = |row: Row| row.new.is_some_and(|n| open.iter().any(|r| r.contains(&n)));
-    let mut shown = Vec::with_capacity(rows.len().min(4096));
-    let hide = |shown: &mut Vec<Shown>, run: Range<usize>| {
+    let mut shown = Vec::new();
+    let push_hidden = |shown: &mut Vec<Shown>, run: Range<usize>| {
         if run.len() < 2 {
             shown.extend(run.map(Shown::Row));
         } else {
@@ -884,37 +852,36 @@ pub fn fold(rows: &[Row], diff: &FileDiff, open: &[Range<u32>]) -> Vec<Shown> {
         }
         let keep_before = if start > 0 { CONTEXT_LINES } else { 0 };
         let keep_after = if i < rows.len() { CONTEXT_LINES } else { 0 };
-        // Within the stretch, even when it is shorter than the context on both sides.
+        // Clamped: the stretch can be shorter than the context on both sides.
         let from = (start + keep_before).min(i);
         let hidden = from..i.saturating_sub(keep_after).max(from);
         shown.extend((start..hidden.start).map(Shown::Row));
         let mut run = hidden.start;
         for r in hidden.clone() {
             if is_open(rows[r]) {
-                hide(&mut shown, run..r);
+                push_hidden(&mut shown, run..r);
                 shown.push(Shown::Row(r));
                 run = r + 1;
             }
         }
-        hide(&mut shown, run..hidden.end);
+        push_hidden(&mut shown, run..hidden.end);
         shown.extend((hidden.end..i).map(Shown::Row));
     }
     shown
 }
 
-/// The lines of the new version a fold stands for, to open it with [`fold`].
+/// The new version's lines of a fold, for [`fold`]'s `open`.
 pub fn fold_lines(rows: &[Row], hidden: &Range<usize>) -> Option<Range<u32>> {
     let first = rows.get(hidden.start)?.new?;
     let last = rows.get(hidden.end.checked_sub(1)?)?.new?;
     Some(first..last + 1)
 }
 
-/// A place a query was found in a diff ([`find`]): a row of a form, the version of the line it
-/// is in, and display columns of the line's text.
+/// `columns` are display columns of the line's text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
     pub row: usize,
-    pub old: bool,
+    pub side: Side,
     pub columns: Range<usize>,
 }
 
@@ -924,35 +891,48 @@ impl crate::find::Place for Found {
     }
 }
 
-/// Every place `query` occurs in the lines a form's `rows` show, as [`crate::find::find`]
-/// finds them in the lines as in the file, in reading order. Side by side, a row's old line
-/// comes before its new one, and an unchanged line counts once, as its new version, unless its
-/// versions differ (in whitespace that doesn't count). Unified, each row shows one line.
-pub fn find(diff: &FileDiff, rows: &[Row], side_by_side: bool, query: &str) -> Vec<Found> {
+/// Finds in the side-by-side rows' lines as in the file, in reading order. An unchanged line
+/// counts once, as its new version, unless its versions differ in whitespace that doesn't count.
+pub fn find_side_by_side(diff: &FileDiff, query: &str) -> Vec<Found> {
     let mut lines = Vec::new();
-    for (r, &row) in rows.iter().enumerate() {
-        let old = row.old.map(|i| &diff.old[i as usize]);
-        let new = row.new.map(|i| &diff.new[i as usize]);
-        if side_by_side {
-            if let Some(o) = old
-                && !(o.kind == LineKind::Same && new.is_some_and(|n| n.raw == o.raw))
-            {
-                lines.push((r, true, o));
-            }
-            if let Some(n) = new {
-                lines.push((r, false, n));
-            }
-        } else if let Some(line) = new.or(old) {
-            lines.push((r, new.is_none(), line));
+    for (r, &row) in diff.side.iter().enumerate() {
+        let old = diff.line(row, Side::Old);
+        let new = diff.line(row, Side::New);
+        if let Some(o) = old
+            && !(o.kind == LineKind::Same && new.is_some_and(|n| n.raw == o.raw))
+        {
+            lines.push((r, Side::Old, o));
+        }
+        if let Some(n) = new {
+            lines.push((r, Side::New, n));
         }
     }
+    found_in(&lines, query)
+}
+
+/// Finds in the unified rows' lines as in the file, in reading order.
+pub fn find_unified(diff: &FileDiff, query: &str) -> Vec<Found> {
+    let lines: Vec<_> = diff
+        .unified
+        .iter()
+        .enumerate()
+        .filter_map(|(r, &row)| {
+            let side = row.unified_side();
+            Some((r, side, diff.line(row, side)?))
+        })
+        .collect();
+    found_in(&lines, query)
+}
+
+/// `lines`: each with its row and version.
+fn found_in(lines: &[(usize, Side, &DiffLine)], query: &str) -> Vec<Found> {
     crate::find::find(lines.iter().map(|(_, _, l)| &l.raw), query)
         .into_iter()
         .map(|m| {
-            let (row, old, line) = lines[m.line];
+            let (row, side, line) = lines[m.line];
             let columns =
                 display_column(&line.raw, m.range.start)..display_column(&line.raw, m.range.end);
-            Found { row, old, columns }
+            Found { row, side, columns }
         })
         .collect()
 }
@@ -965,7 +945,6 @@ mod tests {
         DiffOptions { words, whitespace }
     }
 
-    /// The side-by-side rows as `(old text, new text)`, `""` for a filler.
     fn side(d: &FileDiff) -> Vec<(String, String)> {
         let text = |lines: &[DiffLine], i: Option<u32>| {
             i.map_or(String::new(), |i| lines[i as usize].text.clone())
@@ -1008,7 +987,7 @@ mod tests {
     fn identical_texts_have_no_changes() {
         let d = FileDiff::new("a\nb\n", "a\nb\n", DiffOptions::default());
         assert_eq!((d.added, d.removed), (0, 0));
-        assert!(d.side_changes.is_empty());
+        assert!(d.side_change_starts.is_empty());
         assert_eq!(d.side.len(), 2);
         assert_eq!(d.unified.len(), 2);
     }
@@ -1022,9 +1001,8 @@ mod tests {
         );
         assert_eq!((d.added, d.removed), (1, 1));
         assert_eq!(marked(&d), ["-let x = [1];", "+let x = [2];"]);
-        assert_eq!(d.side_changes, [0]);
-        assert_eq!(d.unified_changes, [0]);
-        // Unified: removed, then added, then the same line with both numbers.
+        assert_eq!(d.side_change_starts, [0]);
+        assert_eq!(d.unified_change_starts, [0]);
         assert_eq!(
             d.unified,
             [
@@ -1049,7 +1027,6 @@ mod tests {
         let old = "    total = price * qty;\n    tax = total * rate;\n";
         let new = "    total = price * quantity;\n    log(total);\n    tax = total * vat_rate;\n";
         let d = FileDiff::new(old, new, DiffOptions::default());
-        // Each edited line sits beside its new version; the inserted line gets a filler.
         assert_eq!(
             side(&d),
             [
@@ -1081,10 +1058,8 @@ mod tests {
         let old = "    total = price * qty;\n    tax = total * rate;\n";
         let new = "    total = price * quantity;\n    log(total);\n    tax = total * vat_rate;\n";
         let d = FileDiff::new(old, new, opts(WordMode::Position, Whitespace::Compare));
-        // Rows by position: the second old line beside the inserted line.
         assert_eq!(side(&d)[1].0, "    tax = total * rate;");
         assert_eq!(side(&d)[1].1, "    log(total);");
-        // The unpaired third new line is changed whole.
         assert_eq!(marked(&d)[4], "+    [tax = total * vat_rate;]");
     }
 
@@ -1095,7 +1070,7 @@ mod tests {
             "a b\nc\n",
             opts(WordMode::Block, Whitespace::Compare),
         );
-        // Only the break between b and c changed; no word of the text did.
+        // Only the break between b and c changed.
         assert!(marked(&d).iter().all(|l| !l.contains("[a")));
     }
 
@@ -1115,9 +1090,7 @@ mod tests {
         let old = format!("{f}\nfn main() {{\n    helper();\n}}\n");
         let new = format!("fn main() {{\n    helper();\n}}\n\n{f}");
         let d = FileDiff::new(&old, &new, DiffOptions::default());
-        // Histogram keeps `main` in place: the function is removed above it and added below,
-        // each a change of its own with no words to compare.
-        assert_eq!(d.side_changes.len(), 2);
+        assert_eq!(d.side_change_starts.len(), 2);
         assert_eq!(
             marked(&d),
             [
@@ -1195,7 +1168,6 @@ mod tests {
         assert_eq!(&l.raw[l.raw_offset(4)..l.raw_offset(9)], "ab\tc");
         assert_eq!(l.raw_offset(10), l.raw.len());
         assert_eq!(l.raw_offset(99), l.raw.len());
-        // And back: a byte offset of the raw line as a column.
         assert_eq!(display_column(&l.raw, 0), 0);
         assert_eq!(display_column(&l.raw, 1), 4);
         assert_eq!(display_column(&l.raw, 3), 6);
@@ -1238,7 +1210,6 @@ mod tests {
         assert_eq!(shown[8], Shown::Fold(18..30));
         assert_eq!(shown.len(), 9);
 
-        // An expanded fold shows its rows again.
         let lines = fold_lines(&d.side, &(18..30)).unwrap();
         assert_eq!(lines, 18..30);
         let open = fold(&d.side, &d, &[lines]);
@@ -1313,7 +1284,11 @@ mod tests {
         let old = numbered(30).replace("line 15\n", "line  15\n");
         let new = numbered(30).replace("line 5\n", "line five\n");
         let open = std::slice::from_ref(&(10..20));
-        for ws in Whitespace::ALL {
+        for ws in [
+            Whitespace::Compare,
+            Whitespace::IgnoreChanges,
+            Whitespace::IgnoreAll,
+        ] {
             let d = FileDiff::new(&old, &new, opts(WordMode::Similar, ws));
             for rows in [&d.side, &d.unified] {
                 let shown = fold(rows, &d, open);
@@ -1440,21 +1415,27 @@ mod tests {
             ..file.clone()
         };
         assert!(FileDiffSpec::of_commit(c, Some(p), &deleted).new.is_none());
-        // A root commit has nothing to compare with.
         assert!(FileDiffSpec::of_commit(c, None, &file).old.is_none());
     }
 
-    /// The places found, as row, version and the text found there.
     fn places(d: &FileDiff, side_by_side: bool, query: &str) -> Vec<(usize, char, String)> {
-        let rows = if side_by_side { &d.side } else { &d.unified };
-        find(d, rows, side_by_side, query)
+        let (rows, found) = if side_by_side {
+            (&d.side, find_side_by_side(d, query))
+        } else {
+            (&d.unified, find_unified(d, query))
+        };
+        found
             .into_iter()
             .map(|f| {
-                let line = d.line(rows[f.row], Some(f.old)).unwrap();
+                let line = d.line(rows[f.row], f.side).unwrap();
                 let text = line.text.chars().collect::<Vec<_>>()[f.columns]
                     .iter()
                     .collect();
-                (f.row, if f.old { '-' } else { '+' }, text)
+                let sign = match f.side {
+                    Side::Old => '-',
+                    Side::New => '+',
+                };
+                (f.row, sign, text)
             })
             .collect()
     }
@@ -1464,8 +1445,6 @@ mod tests {
         let old = "same foo\nwas foo\n\tFoo\n";
         let new = "same foo\nnow FOO foo\n\tFoo\n";
         let d = FileDiff::new(old, new, opts(WordMode::Position, Whitespace::Compare));
-        // Side by side: a row's old line before its new one; an unchanged line once, as its
-        // new version. Columns are of the text as shown, tabs expanded.
         assert_eq!(
             places(&d, true, "foo"),
             [
@@ -1476,8 +1455,7 @@ mod tests {
                 (2, '+', "Foo".into()),
             ]
         );
-        assert_eq!(find(&d, &d.side, true, "foo")[4].columns, 4..7);
-        // Unified: each row's one line.
+        assert_eq!(find_side_by_side(&d, "foo")[4].columns, 4..7);
         assert_eq!(
             places(&d, false, "foo"),
             [
@@ -1490,12 +1468,12 @@ mod tests {
         );
         // Found as in the file: a tab is a tab.
         assert_eq!(places(&d, true, "\tf"), [(2, '+', "    F".into())]);
-        assert!(find(&d, &d.side, true, "").is_empty());
+        assert!(find_side_by_side(&d, "").is_empty());
 
-        // Stepping goes by row.
-        let found = find(&d, &d.side, true, "foo");
+        let found = find_side_by_side(&d, "foo");
         assert_eq!(crate::find::first_from(&found, 2), Some(4));
-        assert_eq!(crate::find::step(&found, None, false, 1), Some(0));
+        let previous = crate::find::Step::Previous;
+        assert_eq!(crate::find::step(&found, None, previous, 1), Some(0));
     }
 
     #[test]

@@ -1,11 +1,10 @@
 mod common;
 
-use common::TestRepo;
-use parterre_core::git::CommitNote;
+use common::{TestRepo, feature_merge};
 use parterre_core::revgraph::{self, GraphOptions, PullRequestHead, RevGraph, Simplification};
-use parterre_core::{Head, RefKind, Repo};
+use parterre_core::{CommitIx, Head, RefKind, Repo};
 
-/// Subjects of the graph's nodes, sorted, for order-independent comparison.
+/// Sorted.
 fn node_subjects(repo: &Repo, g: &RevGraph) -> Vec<String> {
     let mut s: Vec<String> = g
         .nodes
@@ -16,7 +15,7 @@ fn node_subjects(repo: &Repo, g: &RevGraph) -> Vec<String> {
     s
 }
 
-/// Edges as (child subject, parent subject, first_parent, hidden), sorted.
+/// As (child subject, parent subject, first_parent, hidden), sorted.
 fn edge_list(repo: &Repo, g: &RevGraph) -> Vec<(String, String, bool, u32)> {
     let subject = |node: u32| repo.commit(g.nodes[node as usize].commit).subject.clone();
     let mut e: Vec<_> = g
@@ -46,47 +45,15 @@ fn edge(c: &str, p: &str, first: bool, hidden: u32) -> (String, String, bool, u3
     (c.into(), p.into(), first, hidden)
 }
 
-/// main: A - B - C ------- M
-///            \           /
-/// feature:    D ------- E
-fn feature_merge() -> TestRepo {
-    let mut r = TestRepo::new();
-    r.commit("A");
-    r.commit("B");
-    r.branch("feature");
-    r.commit("D");
-    r.commit("E");
-    r.checkout("main");
-    r.commit("C");
-    r.merge("feature", "M");
-    r
-}
-
-#[test]
-fn loads_commits_refs_and_head() {
-    let r = feature_merge();
-    r.git(&["tag", "-a", "-m", "annotated", "v1", "HEAD~1"]);
-    let repo = r.load();
-    assert_eq!(repo.commits.len(), 6);
-    assert!(
-        matches!(&repo.head, Head::Branch { name, target: Some(_) } if name == "refs/heads/main")
-    );
-    let names: Vec<(&str, RefKind, bool)> = repo
-        .refs
+/// The subjects of the commits collapsed into the first edge of the node with subject `child`.
+fn collapsed_subjects(repo: &Repo, g: &RevGraph, child: &str) -> Vec<String> {
+    let subject = |c: CommitIx| repo.commit(c).subject.clone();
+    let e = g
+        .edges
         .iter()
-        .map(|r| (r.name.as_str(), r.kind, r.annotated))
-        .collect();
-    assert!(names.contains(&("main", RefKind::LocalBranch, false)));
-    assert!(names.contains(&("feature", RefKind::LocalBranch, false)));
-    assert!(names.contains(&("v1", RefKind::Tag, true)));
-    let merge = repo.head_commit().unwrap();
-    assert_eq!(repo.commit(merge).parents.len(), 2);
-    let tag = repo.refs.iter().find(|r| r.name == "v1").unwrap();
-    assert_eq!(
-        repo.commit(tag.target).subject,
-        "C",
-        "annotated tags are peeled"
-    );
+        .position(|e| subject(g.nodes[e.child as usize].commit) == child)
+        .unwrap();
+    g.collapsed(e).iter().copied().map(subject).collect()
 }
 
 #[test]
@@ -257,20 +224,12 @@ fn forks_mode_forks_a_branch_off_where_it_last_merged_its_base() {
             edge("F3", "D", false, 2),
         ]
     );
-    let subject = |c: parterre_core::CommitIx| repo.commit(c).subject.clone();
-    let collapsed = |child: &str| -> Vec<String> {
-        let e = g
-            .edges
-            .iter()
-            .position(|e| subject(g.nodes[e.child as usize].commit) == child)
-            .unwrap();
-        g.collapsed(e).iter().copied().map(subject).collect()
-    };
-    assert_eq!(collapsed("F3"), ["F2", "F1"]);
-    assert_eq!(collapsed("D"), ["C", "B"]);
+    assert_eq!(collapsed_subjects(&repo, &g, "F3"), ["F2", "F1"]);
+    assert_eq!(collapsed_subjects(&repo, &g, "D"), ["C", "B"]);
+    let subject = |c: CommitIx| repo.commit(c).subject.clone();
     let shown_as = |s: &str| {
         let c = (0..repo.commits.len() as u32)
-            .map(parterre_core::CommitIx)
+            .map(CommitIx)
             .find(|&c| subject(c) == s)
             .unwrap();
         subject(g.nodes[g.represented_by(c).unwrap() as usize].commit)
@@ -470,7 +429,7 @@ fn filters_limit_history_to_matching_refs() {
     );
 }
 
-/// Labels of the graph's nodes, by node subject.
+/// By node subject.
 fn labels(repo: &Repo, g: &RevGraph) -> Vec<(String, Vec<String>)> {
     let mut v: Vec<(String, Vec<String>)> = g
         .nodes
@@ -567,83 +526,17 @@ fn hidden_branches_vanish_only_as_leaves() {
 }
 
 #[test]
-fn reads_full_commit_messages_committers_and_notes() {
-    let mut r = TestRepo::new();
-    r.commit("Subject line\n\nBody paragraph\n\tsecond line\nNotes:");
-    // Amended by someone else, later: the author stays, the committer changes.
-    r.set_clock(5);
-    r.git(&["config", "user.name", "Other"]);
-    r.git(&["commit", "-q", "--amend", "--allow-empty", "--no-edit"]);
-    r.git(&["notes", "add", "-m", "First note", "-m", "  indented"]);
-    r.git(&["notes", "--ref=review", "add", "-m", "Looks good"]);
-    r.git(&["config", "notes.displayRef", "refs/notes/review"]);
-    let repo = r.load();
-    let c = repo.head_commit().unwrap();
-    assert_eq!(repo.commit(c).subject, "Subject line");
-    let d = parterre_core::git::Git::new(r.path())
-        .details(&repo.commit(c).oid)
-        .unwrap();
-    assert_eq!(
-        d.message,
-        "Subject line\n\nBody paragraph\n\tsecond line\nNotes:"
-    );
-    assert_eq!(d.author_date, "2023-11-14 22:14:20 +0000");
-    assert_eq!(d.committer_date, "2023-11-14 22:18:20 +0000");
-    assert_eq!(
-        (d.committer_name.as_str(), d.committer_email.as_str()),
-        ("Other", "test@example.com")
-    );
-    let note = |heading: &str, text: &str| CommitNote {
-        heading: heading.to_owned(),
-        text: text.to_owned(),
-    };
-    assert_eq!(
-        d.notes,
-        [
-            note("Notes", "First note\n\n  indented"),
-            note("Notes (review)", "Looks good")
-        ]
-    );
-}
-
-#[test]
-fn commits_without_notes_have_none() {
-    let mut r = TestRepo::new();
-    r.commit("Plain");
-    let repo = r.load();
-    let c = repo.head_commit().unwrap();
-    let d = parterre_core::git::Git::new(r.path())
-        .details(&repo.commit(c).oid)
-        .unwrap();
-    assert_eq!(d.message, "Plain");
-    assert!(d.notes.is_empty());
-}
-
-#[test]
 fn lists_commits_collapsed_into_an_edge() {
     let r = feature_merge();
     let repo = r.load();
     let g = revgraph::build(&repo, &with_mode(Simplification::BranchesAndMerges));
-    let subject = |c: parterre_core::CommitIx| repo.commit(c).subject.clone();
-    // E -> B collapses D.
-    let e_to_b = g
-        .edges
-        .iter()
-        .position(|e| subject(g.nodes[e.child as usize].commit) == "E")
-        .unwrap();
-    let hidden: Vec<String> = g.collapsed(e_to_b).iter().copied().map(subject).collect();
-    assert_eq!(hidden, ["D"]);
+    // E -> B
+    assert_eq!(collapsed_subjects(&repo, &g, "E"), ["D"]);
 
     let g = revgraph::build(&repo, &with_mode(Simplification::Decorated));
-    // E -> A collapses D and B (newest first).
-    let e_to_a = g
-        .edges
-        .iter()
-        .position(|e| subject(g.nodes[e.child as usize].commit) == "E")
-        .unwrap();
-    assert_eq!(g.edges[e_to_a].hidden, 2);
-    let hidden: Vec<String> = g.collapsed(e_to_a).iter().copied().map(subject).collect();
-    assert_eq!(hidden, ["D", "B"]);
+    assert_eq!(edge_list(&repo, &g)[0], edge("E", "A", true, 2));
+    // Newest first.
+    assert_eq!(collapsed_subjects(&repo, &g, "E"), ["D", "B"]);
 }
 
 /// main: A - B - C - M - E
@@ -666,81 +559,11 @@ fn an_edge_holds_both_sides_of_a_hidden_merge() {
     let g = revgraph::build(&repo, &with_mode(Simplification::Decorated));
     // As `git log A..E` lists them (#290).
     assert_eq!(edge_list(&repo, &g), [edge("E", "A", true, 4)]);
-    let subject = |c: parterre_core::CommitIx| repo.commit(c).subject.clone();
+    let subject = |c: CommitIx| repo.commit(c).subject.clone();
     let mut hidden: Vec<String> = g.collapsed(0).iter().copied().map(subject).collect();
     assert_eq!(hidden[0], "M");
     hidden.sort();
     assert_eq!(hidden, ["B", "C", "D", "M"]);
-}
-
-#[test]
-fn tags_of_tags_are_peeled_to_their_commit() {
-    let mut r = TestRepo::new();
-    r.commit("A");
-    r.git(&["tag", "-a", "-m", "one", "t1"]);
-    r.git(&["tag", "-a", "-m", "two", "t2", "t1"]);
-    r.commit("B");
-    let repo = r.load();
-    let t2 = repo
-        .refs
-        .iter()
-        .find(|r| r.name == "t2")
-        .expect("nested tag loaded");
-    assert_eq!(repo.commit(t2.target).subject, "A");
-    assert!(t2.annotated);
-}
-
-#[test]
-fn separator_characters_in_subjects_and_names_are_harmless() {
-    let mut r = TestRepo::new();
-    r.git(&["config", "user.name", "Wei\x1fZhang"]);
-    r.commit("subject with \x1e record and \x1f unit separators");
-    r.commit("second");
-    let repo = r.load();
-    assert_eq!(repo.commits.len(), 2);
-    let first = repo.commits.iter().find(|c| c.parents.is_empty()).unwrap();
-    assert_eq!(
-        first.subject,
-        "subject with \x1e record and \x1f unit separators"
-    );
-    assert_eq!(first.author_name, "Wei\x1fZhang");
-    assert!(first.commit_time > 0);
-}
-
-#[test]
-fn empty_repository_loads_without_commits() {
-    let r = TestRepo::new();
-    let repo = r.load();
-    assert!(repo.commits.is_empty());
-    assert!(matches!(repo.head, Head::Branch { target: None, .. }));
-    let g = revgraph::build(&repo, &GraphOptions::default());
-    assert!(g.nodes.is_empty());
-}
-
-#[test]
-fn loads_from_inside_the_git_directory() {
-    let mut r = TestRepo::new();
-    r.commit("A");
-    let repo = parterre_core::git::load_repo(&r.path().join(".git")).expect("load from .git");
-    assert_eq!(repo.commits.len(), 1);
-}
-
-#[test]
-fn notes_are_not_walked() {
-    let mut r = TestRepo::new();
-    r.commit("A");
-    r.git(&["notes", "add", "-m", "a note"]);
-    let repo = r.load();
-    assert_eq!(
-        repo.commits.len(),
-        1,
-        "the notes commit is not part of the history"
-    );
-    assert!(
-        repo.refs
-            .iter()
-            .all(|r| !r.full_name.starts_with("refs/notes/"))
-    );
 }
 
 /// main: A - B - C           origin/main at C
@@ -768,7 +591,7 @@ fn pull_request_head(repo: &Repo, subject: &str, base: &str) -> PullRequestHead 
         .commits
         .iter()
         .position(|c| c.subject == subject)
-        .map(|i| parterre_core::CommitIx(i as u32))
+        .map(|i| CommitIx(i as u32))
         .unwrap();
     PullRequestHead {
         commit,
@@ -780,7 +603,7 @@ fn pull_request_head(repo: &Repo, subject: &str, base: &str) -> PullRequestHead 
     }
 }
 
-/// Subjects of the nodes that carry pull requests, with the pull requests' indices.
+/// The subjects of the nodes that carry pull requests, with the pull requests' indices.
 fn pull_request_nodes(repo: &Repo, g: &RevGraph) -> Vec<(String, Vec<usize>)> {
     g.nodes
         .iter()

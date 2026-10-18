@@ -1,34 +1,18 @@
-//! Reduction of the full commit graph to a revision graph: only "interesting" commits become
-//! nodes, and the uninteresting history between them is collapsed into edges.
+//! Reduces the commit graph to a revision graph, as TortoiseGit does
+//! (`docs/research/tortoisegit-revision-graph.md`): only some commits become nodes, and the
+//! history between them collapses into edges. Every mode makes one pass over the commits,
+//! parents first, that decides whether each commit is kept and, for a hidden one, which kept
+//! commits stand for it.
 //!
-//! The reduction mirrors TortoiseGit (see `docs/research/tortoisegit-revision-graph.md`):
+//! An edge holds the commits of its child that none of the ends of the child's edges has, as
+//! `git log D..F3` lists them: across hidden merges both sides, and in the forks mode the own
+//! commits of a branch hung off its latest merge of its base.
 //!
-//! * [`Simplification::Decorated`] is TortoiseGit's default view, i.e. what
-//!   `git log --simplify-by-decoration` keeps: commits with refs, roots, and merges that still
-//!   join two independent kept lines. Parents are rewritten to their nearest kept ancestor and,
-//!   as git's `simplify_merges` does, a parent that is an ancestor of another parent is dropped.
-//! * [`Simplification::Forks`] keeps labelled commits and the commits where their histories
-//!   fork apart: the same reduction run from the tips down (a fork is a merge, seen backwards).
-//!   Merges are not nodes: a hidden commit stands for all its nearest kept ancestors, so a
-//!   branch that merged its base back in forks off at its latest such merge, as if rebased.
-//!   Not in TortoiseGit.
-//! * [`Simplification::BranchesAndMerges`] is TortoiseGit's "Show branchings and merges": also
-//!   keeps every merge, fork point and tip, and every commit whose only child is a merge.
-//! * [`Simplification::AllCommits`] keeps everything.
-//!
-//! In every mode an edge holds the commits of its child that none of the child's edges' ends
-//! has, as `git log D..F3` lists them: across hidden merges, both sides, and in the forks mode
-//! the own commits of a branch hung off its latest merge of its base.
-//!
-//! In the decorated mode, an undecorated root commit with an empty tree counts as unchanged
-//! ("TREESAME") to git: it only appears as the end point of an edge, and merge parents leading
-//! to it are dropped, so merges that join otherwise empty histories disappear (their commits
-//! are collapsed into the merge's other edge). One deliberate
-//! difference: git also hides such a root when it carries a tag or branch; parterre shows it,
-//! rather than silently dropping a label.
-//!
-//! All modes share one pass over the commits in parents-first order that decides whether each
-//! commit is kept and, for hidden commits, which kept commit represents them.
+//! In the decorated and forks modes, an undecorated root commit with an empty tree counts as
+//! unchanged ("TREESAME") to git: it only appears as the end of an edge, and merge parents
+//! leading to it are dropped, so merges that join otherwise empty histories disappear (their
+//! commits go to the merge's other edge). Unlike git, parterre shows such a root when it carries
+//! a tag or branch, rather than silently dropping a label.
 
 use std::collections::BinaryHeap;
 
@@ -37,17 +21,22 @@ use serde::{Deserialize, Serialize};
 use crate::pattern::BranchPatterns;
 use crate::repo::{CommitIx, GitRef, RefKind, Repo};
 
-/// How aggressively history is collapsed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Simplification {
-    /// Commits with refs, roots and merges joining independent lines (TortoiseGit default).
+    /// What `git log --simplify-by-decoration` keeps, TortoiseGit's default: commits with refs,
+    /// roots, and merges that still join two independent kept lines. Parents are rewritten to
+    /// their nearest kept ancestor and, as git's `simplify_merges` does, a parent that is an
+    /// ancestor of another parent is dropped.
     #[default]
     Decorated,
-    /// Additionally the commits where labelled commits' histories fork apart.
+    /// Labelled commits and the commits where their histories fork apart: the same reduction
+    /// run from the tips down (a fork is a merge, seen backwards). Merges are not nodes: a
+    /// hidden commit stands for all its nearest kept ancestors, so a branch that merged its base
+    /// back in forks off at its latest such merge, as if rebased.
     Forks,
-    /// Additionally every merge, fork point and merge source ("Show branchings and merges").
+    /// TortoiseGit's "Show branchings and merges": also every merge, fork point and tip, and
+    /// every commit whose only child is a merge.
     BranchesAndMerges,
-    /// Every commit is a node.
     AllCommits,
 }
 
@@ -69,7 +58,6 @@ impl Simplification {
     }
 }
 
-/// Which parts of the repository the graph shows.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GraphOptions {
@@ -83,27 +71,25 @@ pub struct GraphOptions {
     pub show_stash: bool,
     /// Refs outside heads/remotes/tags/stash, e.g. `refs/pull/*` or tool checkpoints.
     pub show_other_refs: bool,
-    /// Follow only first parents: merged-in side branches without refs of their own vanish.
+    /// Merged-in side branches without refs of their own vanish.
     pub first_parent_only: bool,
-    /// Show only the history of HEAD (TortoiseGit's "Current branch" filter). Other refs are
-    /// still shown where they point into that history.
+    /// Only HEAD's history (TortoiseGit's "Current branch"). Other refs still show where they
+    /// point into it.
     pub current_branch_only: bool,
     /// Only refs whose name contains one of these comma-separated words (case-insensitive)
     /// start history; empty = all. Refs on commits shown anyway are always labelled.
     pub ref_filter: String,
     /// Branches matching these wildcards (see [`BranchPatterns`]) do not start history, so
     /// they vanish unless a shown ref's history contains them; there they keep their labels.
-    /// Not in TortoiseGit.
     pub hide_branches: String,
-    /// Label the heads of open pull requests (see [`PullRequestHead`]). Not in TortoiseGit.
+    /// See [`PullRequestHead`].
     pub show_pull_requests: bool,
-    /// Show the other worktrees (see [`Repo::worktrees`]): the branches they have checked
-    /// out, even where the local-branch switch or [`GraphOptions::hide_branches`] would hide
-    /// them, and the detached HEADs, which start history like branches. Not in TortoiseGit.
+    /// The other worktrees (see [`Repo::worktrees`]): the branches they have checked out, even
+    /// where the local-branch switch or [`GraphOptions::hide_branches`] would hide them, and
+    /// the detached HEADs, which start history like branches.
     pub show_worktrees: bool,
-    /// Show how local branches differ from their upstreams (see [`Repo::upstreams`]). In the
-    /// graph itself, the commit a branch was rebased from is a node while that lasts. Not in
-    /// TortoiseGit.
+    /// How local branches differ from their upstreams (see [`Repo::upstreams`]). In the graph
+    /// itself, the commit a branch was rebased from is a node while that lasts.
     pub show_upstreams: bool,
 }
 
@@ -129,30 +115,24 @@ impl Default for GraphOptions {
 }
 
 impl GraphOptions {
-    /// True if a ref with this display name passes [`GraphOptions::ref_filter`].
+    /// Whether a ref with this display name passes [`GraphOptions::ref_filter`].
     pub fn filter_matches(&self, name: &str) -> bool {
-        let words: Vec<String> = self
+        let name = name.to_lowercase();
+        let mut words = self
             .ref_filter
             .split(',')
-            .map(|w| w.trim().to_lowercase())
+            .map(str::trim)
             .filter(|w| !w.is_empty())
-            .collect();
-        let name = name.to_lowercase();
-        words.is_empty() || words.iter().any(|w| name.contains(w.as_str()))
+            .peekable();
+        words.peek().is_none() || words.any(|w| name.contains(&w.to_lowercase()))
     }
 
-    /// True if the shown ref `r` starts history: it is HEAD's branch, or passes the filters
-    /// and is not among `hidden`, the parsed [`GraphOptions::hide_branches`].
-    pub fn starts_history(&self, r: &GitRef, hidden: &BranchPatterns) -> bool {
-        r.is_head
-            || (!self.current_branch_only
-                && self.filter_matches(&r.name)
-                && !hidden.matches(r.kind, &r.name))
+    fn starts_history(&self, r: &GitRef, hidden: &BranchPatterns) -> bool {
+        r.is_head || (self.name_starts_history(&r.name) && !hidden.matches(r.kind, &r.name))
     }
 
-    /// True if something named `name` that no hide list applies to (a worktree) starts
-    /// history: it passes the name filter, and not only the current branch is shown.
-    pub fn starts_history_named(&self, name: &str) -> bool {
+    /// For worktrees, which no hide list applies to.
+    fn name_starts_history(&self, name: &str) -> bool {
         !self.current_branch_only && self.filter_matches(name)
     }
 
@@ -173,22 +153,20 @@ pub struct RevNode {
     pub commit: CommitIx,
     /// Indices into [`Repo::refs`] of the visible refs on this commit, in display order.
     pub refs: Vec<usize>,
-    /// True if HEAD points at this commit (directly or through its branch).
     pub is_head: bool,
-    /// True if the node has more than one parent edge.
+    /// More than one parent edge, whatever the commit's parents.
     pub is_merge: bool,
     /// Indices into the [`PullRequestHead`]s given to [`build_with_pull_requests`] of the pull
     /// requests whose head this commit is, in the order given.
     pub pull_requests: Vec<usize>,
     /// Indices into [`Repo::worktrees`] of the other worktrees whose detached HEAD this
-    /// commit is, while worktrees are shown. (A worktree on a branch is shown by the branch.)
+    /// commit is, while worktrees are shown. A worktree on a branch is shown by the branch.
     pub worktrees: Vec<usize>,
 }
 
-/// Where an open pull request is shown: its head commit, if that is in the repository, the
-/// refs of its base branch, and the remote-tracking branch of its head branch, if fetched
-/// (indices into [`Repo::refs`]). It is shown as a label on its head, which it makes a node, as
-/// a tag does.
+/// An open pull request: its head commit, if that is in the repository, the refs of its base
+/// branch, and the remote-tracking branch of its head branch, if fetched (indices into
+/// [`Repo::refs`]). It labels its head, which it makes a node, as a tag does.
 ///
 /// Its head branch starts history as that branch would with remote branches shown, whether
 /// they are or not: the name filter, the hide list and "current branch only" apply to it, the
@@ -204,31 +182,24 @@ pub struct PullRequestHead {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RevEdge {
-    /// Node index of the newer end.
     pub child: u32,
-    /// Node index of the older end.
     pub parent: u32,
-    /// True if the edge follows the child's first-parent line.
     pub first_parent: bool,
-    /// Number of commits collapsed into this edge.
+    /// The number of commits collapsed into the edge.
     pub hidden: u32,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct RevGraph {
     pub nodes: Vec<RevNode>,
-    /// Edges grouped by child in node order, each child's first-parent edge first.
+    /// Grouped by child in node order, each child's first-parent edge first.
     pub edges: Vec<RevEdge>,
-    /// Node index of every commit that is a node.
     node_of: Vec<Option<u32>>,
-    /// For every visible commit, the node that stands for it (itself, or the nearest kept
-    /// ancestor it was collapsed into).
     represented_by: Vec<Option<u32>>,
-    /// The commits collapsed into each edge, newest first.
     edge_commits: Vec<Vec<CommitIx>>,
-    /// Number of commits reachable from the visible refs.
+    /// The number of commits reachable from the visible refs.
     pub visible_commits: usize,
-    /// Number of branches left out because they match [`GraphOptions::hide_branches`].
+    /// The number of branches left out because they match [`GraphOptions::hide_branches`].
     pub hidden_branches: usize,
 }
 
@@ -253,21 +224,17 @@ impl RevGraph {
         self.represented_by.get(commit.ix()).copied().flatten()
     }
 
-    /// The nodes that grow out of `roots`: the roots and every node whose first-parent line
-    /// leads back to one of them. This is the subtree of the tree formed by each node's first
-    /// edge (its first-parent edge where it has one), so a branch that forks off a root is
-    /// included, while a merge that merely pulls a branch in is not: it belongs to the line it
-    /// was merged into. Sorted.
+    /// The nodes that grow out of `roots`, sorted: the roots and every node whose first-parent
+    /// line leads back to one of them. This is the subtree of the tree formed by each node's
+    /// first edge (its first-parent edge where it has one), so a branch that forks off a root
+    /// is included, while a merge that merely pulls a branch in is not: it belongs to the line
+    /// it was merged into.
     pub fn subtree(&self, roots: &[usize]) -> Vec<usize> {
         let n = self.nodes.len();
         let mut children: Vec<Vec<u32>> = vec![Vec::new(); n];
-        let mut previous = None;
-        for e in &self.edges {
-            // Edges come grouped by child, first-parent edge first.
-            if previous != Some(e.child) {
-                children[e.parent as usize].push(e.child);
-            }
-            previous = Some(e.child);
+        for group in self.edges.chunk_by(|a, b| a.child == b.child) {
+            let first = group[0];
+            children[first.parent as usize].push(first.child);
         }
         let mut inside = vec![false; n];
         let mut stack: Vec<usize> = roots.iter().copied().filter(|&r| r < n).collect();
@@ -288,13 +255,18 @@ impl RevGraph {
 
 const NO_REP: u32 = u32::MAX;
 
-/// Builds the revision graph for `repo` under `options`.
+/// A kept commit that a commit's parent leads to.
+#[derive(Clone, Copy, Debug)]
+struct Link {
+    target: u32,
+    first_parent: bool,
+}
+
 pub fn build(repo: &Repo, options: &GraphOptions) -> RevGraph {
     build_with_pull_requests(repo, options, &[])
 }
 
-/// Builds the revision graph for `repo` under `options`, with the heads of open pull requests
-/// as labels if [`GraphOptions::show_pull_requests`] is on.
+/// With the heads of open pull requests as labels, if [`GraphOptions::show_pull_requests`].
 pub fn build_with_pull_requests(
     repo: &Repo,
     options: &GraphOptions,
@@ -314,7 +286,6 @@ pub fn build_with_pull_requests(
         })
         .collect();
 
-    // Visible refs, which commits they decorate, and per-commit parent restrictions.
     let mut refs_on: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut decorated = vec![false; n];
     let mut first_parent_only = vec![options.first_parent_only; n];
@@ -340,10 +311,8 @@ pub fn build_with_pull_requests(
         }
     };
 
-    // Commits reachable from the refs that start history (visible, passing the filters and
-    // not hidden), and from other worktrees' detached HEADs. Worktrees pass the hide list
-    // (which is for bulk branches nobody checks out) but not the name filter or "current
-    // branch only".
+    // Worktrees pass the hide list, which is for bulk branches nobody checks out, but not the
+    // name filter or "current branch only".
     let hidden = BranchPatterns::parse(&options.hide_branches);
     let unhidden = BranchPatterns::default();
     let starts_history = |i: usize| {
@@ -356,13 +325,12 @@ pub fn build_with_pull_requests(
         .enumerate()
         .filter(|(_, w)| options.show_worktrees && !w.open && w.branch.is_none())
         .filter_map(|(k, w)| Some((k, w.head?.ix())))
-        .filter(|&(k, c)| c < n && options.starts_history_named(&repo.worktrees[k].name()))
+        .filter(|&(k, c)| c < n && options.name_starts_history(&repo.worktrees[k].name()))
         .collect();
-    // Pull requests whose branches aren't on the hide list; their head branches start history.
+    let hidden_ref = |i: usize| hidden.matches(repo.refs[i].kind, &repo.refs[i].name);
     let shown_pull_requests: Vec<bool> = pull_requests
         .iter()
         .map(|pr| {
-            let hidden_ref = |i: usize| hidden.matches(repo.refs[i].kind, &repo.refs[i].name);
             options.show_pull_requests
                 && pr.commit.ix() < n
                 && (pr.bases.is_empty() || pr.bases.iter().any(|&i| !hidden_ref(i)))
@@ -399,11 +367,10 @@ pub fn build_with_pull_requests(
             options.shows(r.kind)
                 && !visible[r.target.ix()]
                 && hidden.matches(r.kind, &r.name)
-                && options.starts_history(r, &BranchPatterns::default())
+                && options.starts_history(r, &unhidden)
         })
         .count();
 
-    // Pull requests label their heads.
     let mut pulls_on: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (k, pr) in pull_requests.iter().enumerate() {
         let c = pr.commit.ix();
@@ -413,7 +380,6 @@ pub fn build_with_pull_requests(
         }
     }
 
-    // Detached worktrees label their HEADs, and make them nodes, as branches do.
     let mut worktrees_on: Vec<Vec<usize>> = vec![Vec::new(); n];
     for &(k, c) in &detached {
         worktrees_on[c].push(k);
@@ -430,94 +396,64 @@ pub fn build_with_pull_requests(
         }
     }
 
-    // Child counts, merge children, and a parents-first order (reverse Kahn from the tips).
-    let mut children = vec![0u32; n];
-    let mut child_is_merge = vec![false; n];
+    let mut child_count = vec![0u32; n];
+    let mut has_merge_child = vec![false; n];
     for c in (0..n).filter(|&c| visible[c]) {
         let ps = parents_of(c);
         for p in ps {
-            children[p.ix()] += 1;
-            child_is_merge[p.ix()] |= ps.len() > 1;
+            child_count[p.ix()] += 1;
+            has_merge_child[p.ix()] |= ps.len() > 1;
         }
     }
-    let order = parents_first_order(n, &visible, &children, &parents_of);
+    let order = parents_first_order(n, &visible, &child_count, &parents_of);
 
-    // In the forks mode, the commits where labelled histories fork apart: the decorated
-    // reduction of the reversed graph, children first.
     let mode = options.simplification;
     let simplified = matches!(mode, Simplification::Decorated | Simplification::Forks);
-    let mut fork = vec![false; n];
-    if mode == Simplification::Forks {
-        let mut kids: Vec<Vec<u32>> = vec![Vec::new(); n];
-        for &c in &order {
-            for p in parents_of(c) {
-                kids[p.ix()].push(c as u32);
-            }
-        }
-        let mut rep = vec![NO_REP; n];
-        let mut kept_edges: Vec<Vec<(u32, u32, bool)>> = vec![Vec::new(); n];
-        let mut ancestry = Ancestry::new(n);
-        let mut candidates: Vec<(u32, u32, bool)> = Vec::new();
-        for &c in order.iter().rev() {
-            candidates.clear();
-            for &k in &kids[c] {
-                let target = rep[k as usize];
-                if !candidates.iter().any(|&(t, _, _)| t == target) {
-                    candidates.push((target, 0, false));
-                }
-            }
-            if candidates.len() > 1 {
-                ancestry.drop_redundant(&mut candidates, &kept_edges);
-            }
-            fork[c] = candidates.len() > 1;
-            if fork[c] || decorated[c] || candidates.is_empty() {
-                rep[c] = c as u32;
-                ancestry.add(c, &candidates);
-                kept_edges[c] = candidates.clone();
-            } else {
-                rep[c] = candidates[0].0;
-            }
-        }
-    }
+    let fork = if mode == Simplification::Forks {
+        fork_points(n, &order, &decorated, &parents_of)
+    } else {
+        vec![false; n]
+    };
 
-    // Kept commits and representatives, in one parents-first pass.
     let treesame_root = |c: usize| {
         simplified && parents_of(c).is_empty() && repo.commits[c].empty_tree && !decorated[c]
     };
     let mut rep = vec![NO_REP; n];
-    let mut depth = vec![0u32; n];
-    let mut kept_edges: Vec<Vec<(u32, u32, bool)>> = vec![Vec::new(); n];
+    let mut kept_edges: Vec<Vec<Link>> = vec![Vec::new(); n];
     let mut ancestry = Ancestry::new(n);
-    let mut candidates: Vec<(u32, u32, bool)> = Vec::new();
+    let mut candidates: Vec<Link> = Vec::new();
     // In the forks mode merges are not nodes: a hidden commit stands for all its nearest kept
     // ancestors, so the nodes above a merge reach both sides.
-    let mut reach: Vec<Vec<(u32, u32, bool)>> = vec![Vec::new(); n];
+    let mut reach: Vec<Vec<Link>> = vec![Vec::new(); n];
     for &c in &order {
         let ps = parents_of(c);
         candidates.clear();
         for (k, p) in ps.iter().enumerate() {
             let p = p.ix();
             if mode == Simplification::Forks && rep[p] != p as u32 {
-                for &(t, d, first) in &reach[p] {
-                    if !candidates.iter().any(|&(x, _, _)| x == t) {
-                        candidates.push((t, d, k == 0 && first));
+                for link in &reach[p] {
+                    if !candidates.iter().any(|x| x.target == link.target) {
+                        candidates.push(Link {
+                            target: link.target,
+                            first_parent: k == 0 && link.first_parent,
+                        });
                     }
                 }
                 continue;
             }
             let target = rep[p];
-            if target != NO_REP && !candidates.iter().any(|&(t, _, _)| t == target) {
-                candidates.push((target, depth[p], k == 0));
+            if target != NO_REP && !candidates.iter().any(|x| x.target == target) {
+                candidates.push(Link {
+                    target,
+                    first_parent: k == 0,
+                });
             }
         }
         if simplified && candidates.len() > 1 {
             ancestry.drop_redundant(&mut candidates, &kept_edges);
             // git's mark_treesame_root_parents, keeping one if that would leave none.
-            if candidates
-                .iter()
-                .any(|&(t, _, _)| !treesame_root(t as usize))
-            {
-                candidates.retain(|&(t, _, _)| !treesame_root(t as usize));
+            if candidates.iter().any(|x| !treesame_root(x.target as usize)) {
+                candidates.retain(|x| !treesame_root(x.target as usize));
             } else {
                 candidates.truncate(1);
             }
@@ -525,22 +461,19 @@ pub fn build_with_pull_requests(
         let kept = match mode {
             Simplification::AllCommits => true,
             Simplification::BranchesAndMerges => {
-                decorated[c] || ps.len() != 1 || children[c] != 1 || child_is_merge[c]
+                decorated[c] || ps.len() != 1 || child_count[c] != 1 || has_merge_child[c]
             }
             Simplification::Decorated => decorated[c] || ps.is_empty() || candidates.len() > 1,
             Simplification::Forks => decorated[c] || fork[c] || ps.is_empty(),
         };
         if kept || candidates.is_empty() {
             rep[c] = c as u32;
-            depth[c] = 0;
             ancestry.add(c, &candidates);
             kept_edges[c] = candidates.clone();
         } else {
-            let (target, d, _) = candidates[0];
-            rep[c] = target;
-            depth[c] = d + 1;
+            rep[c] = candidates[0].target;
             if mode == Simplification::Forks {
-                reach[c] = candidates.iter().map(|&(t, d, f)| (t, d + 1, f)).collect();
+                reach[c] = candidates.clone();
             }
         }
     }
@@ -548,23 +481,22 @@ pub fn build_with_pull_requests(
     // Treesame roots are only shown where an edge ends on them.
     let mut referenced = vec![false; n];
     for c in (0..n).filter(|&c| rep[c] == c as u32) {
-        for &(t, _, _) in &kept_edges[c] {
-            referenced[t as usize] = true;
+        for link in &kept_edges[c] {
+            referenced[link.target as usize] = true;
         }
     }
     let is_node =
         |c: usize| visible[c] && rep[c] == c as u32 && (referenced[c] || !treesame_root(c));
 
-    // Nodes in commit order (git log order: newest first, roughly).
+    // In commit order: git log's, newest first, roughly.
     let mut node_of = vec![None; n];
     let mut nodes = Vec::new();
     for c in (0..n).filter(|&c| is_node(c)) {
         node_of[c] = Some(nodes.len() as u32);
         let mut refs = std::mem::take(&mut refs_on[c]);
-        // HEAD first, then TortoiseGit's order: by full ref name (heads, remotes, stash, tags).
         refs.sort_by(|&a, &b| crate::repo::cmp_refs_for_display(&repo.refs[a], &repo.refs[b]));
         nodes.push(RevNode {
-            commit: CommitIx(c as u32),
+            commit: CommitIx::new(c),
             refs,
             is_head: Some(c) == head,
             is_merge: kept_edges[c].len() > 1,
@@ -577,11 +509,11 @@ pub fn build_with_pull_requests(
     for (ni, node) in nodes.iter().enumerate() {
         let mut out: Vec<RevEdge> = kept_edges[node.commit.ix()]
             .iter()
-            .map(|&(target, hidden, first_parent)| RevEdge {
+            .map(|link| RevEdge {
                 child: ni as u32,
-                parent: node_of[target as usize].expect("representatives are nodes"),
-                first_parent,
-                hidden,
+                parent: node_of[link.target as usize].expect("representatives are nodes"),
+                first_parent: link.first_parent,
+                hidden: 0,
             })
             .collect();
         out.sort_by_key(|e| !e.first_parent);
@@ -601,68 +533,56 @@ pub fn build_with_pull_requests(
     // those no end of its edges has, each on the edge of the parent it is reached through (else
     // the child's first edge).
     let mut edge_commits: Vec<Vec<CommitIx>> = vec![Vec::new(); edges.len()];
-    {
-        let mut pos = vec![0u32; n];
-        for (i, &c) in order.iter().enumerate() {
-            pos[c] = i as u32;
-        }
-        let mut walk = OwnCommits::new(n);
-        let mut own = Vec::new();
-        let mut start = 0;
-        while start < edges.len() {
-            let child = edges[start].child;
-            let end = start
-                + edges[start..]
-                    .iter()
-                    .take_while(|e| e.child == child)
-                    .count();
-            let x = nodes[child as usize].commit.ix();
-            let ps = parents_of(x);
-            let target = |e: &RevEdge| nodes[e.parent as usize].commit.ix() as u32;
-            let through = |k: usize, t: u32| {
-                let p = ps[k].ix();
-                if rep[p] == p as u32 || mode != Simplification::Forks {
-                    rep[p] == t
-                } else {
-                    reach[p].iter().any(|&(r, _, _)| r == t)
-                }
-            };
-            let origin: Vec<Option<usize>> = edges[start..end]
-                .iter()
-                .map(|e| (0..ps.len()).find(|&k| through(k, target(e))))
-                .collect();
-            let targets: Vec<usize> = edges[start..end]
-                .iter()
-                .map(|e| target(e) as usize)
-                .collect();
-            walk.run(
-                ps,
-                &targets,
-                &pos,
-                |c| node_of[c].is_none(),
-                &parents_of,
-                &mut own,
-            );
-            for &(c, k) in &own {
-                let e = start + origin.iter().position(|&o| o == Some(k)).unwrap_or(0);
-                edge_commits[e].push(CommitIx(c as u32));
+    let mut pos = vec![0u32; n];
+    for (i, &c) in order.iter().enumerate() {
+        pos[c] = i as u32;
+    }
+    let mut walk = OwnCommits::new(n);
+    let mut own = Vec::new();
+    let mut start = 0;
+    for group in edges.chunk_by(|a, b| a.child == b.child) {
+        let ps = parents_of(nodes[group[0].child as usize].commit.ix());
+        let target = |e: &RevEdge| nodes[e.parent as usize].commit.ix() as u32;
+        let through = |k: usize, t: u32| {
+            let p = ps[k].ix();
+            if rep[p] == p as u32 || mode != Simplification::Forks {
+                rep[p] == t
+            } else {
+                reach[p].iter().any(|link| link.target == t)
             }
-            start = end;
+        };
+        let origin: Vec<Option<usize>> = group
+            .iter()
+            .map(|e| (0..ps.len()).find(|&k| through(k, target(e))))
+            .collect();
+        let targets: Vec<usize> = group.iter().map(|e| target(e) as usize).collect();
+        walk.run(
+            ps,
+            &targets,
+            &pos,
+            |c| node_of[c].is_none(),
+            &parents_of,
+            &mut own,
+        );
+        for &(c, k) in &own {
+            let e = start + origin.iter().position(|&o| o == Some(k)).unwrap_or(0);
+            edge_commits[e].push(CommitIx::new(c));
         }
-        // A commit on several edges is shown as its representative if one of them ends there,
-        // else as the end of the first.
-        let mut settled = vec![false; n];
-        for (e, commits) in edges.iter().zip(&edge_commits) {
-            for c in commits {
-                settled[c.ix()] |= represented_by[c.ix()] == Some(e.parent);
-            }
+        start += group.len();
+    }
+    // A commit on several edges is shown as its representative if one of them ends there,
+    // else as the end of the first.
+    let mut settled = vec![false; n];
+    for (e, commits) in edges.iter().zip(&edge_commits) {
+        for c in commits {
+            settled[c.ix()] |= represented_by[c.ix()] == Some(e.parent);
         }
-        for (e, commits) in edges.iter_mut().zip(&edge_commits) {
-            e.hidden = commits.len() as u32;
-            for c in commits {
-                if !std::mem::replace(&mut settled[c.ix()], true) {
-                    represented_by[c.ix()] = Some(e.parent);
-                }
+    }
+    for (e, commits) in edges.iter_mut().zip(&edge_commits) {
+        e.hidden = commits.len() as u32;
+        for c in commits {
+            if !std::mem::replace(&mut settled[c.ix()], true) {
+                represented_by[c.ix()] = Some(e.parent);
             }
         }
     }
@@ -678,14 +598,13 @@ pub fn build_with_pull_requests(
     }
 }
 
-/// Visible commits ordered so that every commit comes after all of its parents.
 fn parents_first_order<'a>(
     n: usize,
     visible: &[bool],
-    children: &[u32],
+    child_count: &[u32],
     parents_of: &impl Fn(usize) -> &'a [CommitIx],
 ) -> Vec<usize> {
-    let mut pending = children.to_vec();
+    let mut pending = child_count.to_vec();
     let mut stack: Vec<usize> = (0..n)
         .rev()
         .filter(|&c| visible[c] && pending[c] == 0)
@@ -703,6 +622,51 @@ fn parents_first_order<'a>(
     }
     order.reverse();
     order
+}
+
+/// The commits where labelled histories fork apart: the decorated reduction of the reversed
+/// graph, children first.
+fn fork_points<'a>(
+    n: usize,
+    order: &[usize],
+    decorated: &[bool],
+    parents_of: &impl Fn(usize) -> &'a [CommitIx],
+) -> Vec<bool> {
+    let mut children: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for &c in order {
+        for p in parents_of(c) {
+            children[p.ix()].push(c as u32);
+        }
+    }
+    let mut fork = vec![false; n];
+    let mut rep = vec![NO_REP; n];
+    let mut kept_edges: Vec<Vec<Link>> = vec![Vec::new(); n];
+    let mut ancestry = Ancestry::new(n);
+    let mut candidates: Vec<Link> = Vec::new();
+    for &c in order.iter().rev() {
+        candidates.clear();
+        for &k in &children[c] {
+            let target = rep[k as usize];
+            if !candidates.iter().any(|x| x.target == target) {
+                candidates.push(Link {
+                    target,
+                    first_parent: false,
+                });
+            }
+        }
+        if candidates.len() > 1 {
+            ancestry.drop_redundant(&mut candidates, &kept_edges);
+        }
+        fork[c] = candidates.len() > 1;
+        if fork[c] || decorated[c] || candidates.is_empty() {
+            rep[c] = c as u32;
+            ancestry.add(c, &candidates);
+            kept_edges[c] = candidates.clone();
+        } else {
+            rep[c] = candidates[0].target;
+        }
+    }
+    fork
 }
 
 /// A node's own commits, found as git's merge-base walk does: history is painted down from
@@ -789,12 +753,14 @@ impl OwnCommits {
     }
 }
 
-/// Ancestry queries among kept commits, used to drop redundant merge parents.
+/// Ancestry among kept commits.
 struct Ancestry {
-    /// Longest distance to a root over kept edges; an ancestor always has a smaller value.
+    /// The longest distance to a root over kept edges; an ancestor always has a smaller one.
     generation: Vec<u32>,
+    /// The search that last reached every commit.
     stamp: Vec<u32>,
     search: u32,
+    stack: Vec<u32>,
 }
 
 impl Ancestry {
@@ -803,53 +769,49 @@ impl Ancestry {
             generation: vec![0; n],
             stamp: vec![0; n],
             search: 0,
+            stack: Vec::new(),
         }
     }
 
-    fn add(&mut self, c: usize, parents: &[(u32, u32, bool)]) {
+    fn add(&mut self, c: usize, parents: &[Link]) {
         self.generation[c] = parents
             .iter()
-            .map(|&(p, _, _)| self.generation[p as usize] + 1)
+            .map(|link| self.generation[link.target as usize] + 1)
             .max()
             .unwrap_or(0);
     }
 
-    /// Removes candidates that are ancestors of other candidates (git's `simplify_merges`).
-    fn drop_redundant(
-        &mut self,
-        candidates: &mut Vec<(u32, u32, bool)>,
-        edges: &[Vec<(u32, u32, bool)>],
-    ) {
-        let targets: Vec<u32> = candidates.iter().map(|c| c.0).collect();
-        let redundant: Vec<bool> = targets
+    /// Drops candidates that are ancestors of other candidates, as git's `simplify_merges`.
+    fn drop_redundant(&mut self, candidates: &mut Vec<Link>, edges: &[Vec<Link>]) {
+        let targets: Vec<u32> = candidates.iter().map(|link| link.target).collect();
+        let keep: Vec<bool> = targets
             .iter()
             .map(|&a| {
-                targets
+                !targets
                     .iter()
                     .any(|&b| a != b && self.is_ancestor(a, b, edges))
             })
             .collect();
-        let mut i = 0;
-        candidates.retain(|_| {
-            i += 1;
-            !redundant[i - 1]
-        });
+        let mut keep = keep.into_iter();
+        candidates.retain(|_| keep.next() == Some(true));
     }
 
-    /// True if kept commit `a` is a proper ancestor of kept commit `b`.
-    fn is_ancestor(&mut self, a: u32, b: u32, edges: &[Vec<(u32, u32, bool)>]) -> bool {
+    /// Whether kept commit `a` is a proper ancestor of kept commit `b`.
+    fn is_ancestor(&mut self, a: u32, b: u32, edges: &[Vec<Link>]) -> bool {
         let floor = self.generation[a as usize];
         self.search += 1;
-        let mut stack = vec![b];
-        while let Some(x) = stack.pop() {
-            for &(p, _, _) in &edges[x as usize] {
+        self.stack.clear();
+        self.stack.push(b);
+        while let Some(x) = self.stack.pop() {
+            for link in &edges[x as usize] {
+                let p = link.target;
                 if p == a {
                     return true;
                 }
                 let pi = p as usize;
                 if self.generation[pi] > floor && self.stamp[pi] != self.search {
                     self.stamp[pi] = self.search;
-                    stack.push(p);
+                    self.stack.push(p);
                 }
             }
         }

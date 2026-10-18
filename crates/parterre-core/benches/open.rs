@@ -11,8 +11,7 @@
 //! ```
 //!
 //! Run from a shell whose PATH is the user's (PowerShell, not Git Bash, on Windows), so that
-//! git is found the way it is for them. More of what the app does belongs here as it is
-//! measured: opening a diff, say (#309).
+//! git is found the way it is for them.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -27,9 +26,7 @@ fn repository() -> (PathBuf, Option<tempfile::TempDir>) {
     }
     let dir = tempfile::tempdir().expect("tempdir");
     let git = |args: &[&str]| {
-        // Plain `git`: building the repository isn't measured, and the bench then compiles
-        // against older trees too, for a baseline.
-        let out = Command::new("git")
+        let out = Command::new(parterre_core::git::program())
             .current_dir(dir.path())
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")

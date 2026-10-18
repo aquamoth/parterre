@@ -1,22 +1,20 @@
-//! Pan and zoom: the mapping between world (layout) coordinates and the screen.
-
-use eframe::egui::{Pos2, Rect, Vec2, pos2};
+use eframe::egui::{Pos2, Rect, Vec2};
 
 pub const MIN_ZOOM: f32 = 0.02;
 pub const MAX_ZOOM: f32 = 4.0;
-/// Panning and zooming keep at least this fraction of the canvas (along each axis) covered by
-/// the graph, or all of the graph if it is smaller, so that it can't be lost off screen.
-pub const KEEP_IN_SIGHT: f32 = 0.1;
+/// The fraction of the canvas, along each axis, that panning and zooming keep covered by the
+/// graph (or all of a smaller graph), so that it can't be lost off screen.
+const KEEP_IN_SIGHT: f32 = 0.1;
+const FIT_MARGIN: f32 = 24.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct View {
-    /// World coordinate shown at the top-left corner of the canvas.
+    /// The world coordinate at the canvas's top left corner.
     pub offset: Vec2,
-    /// The graph's zoom, as shown: at 1.0 a world unit takes a point at 100% text size.
+    /// As shown: at 1.0 a world unit takes a point at 100% text size.
     pub zoom: f32,
-    /// The text size (egui's zoom factor) the graph is drawn under. Points grow with it, so
-    /// the graph is drawn that many times smaller in points and keeps its size on screen: the
-    /// text size and the graph's zoom are separate.
+    /// egui's zoom factor. Points grow with it, so the graph is drawn that many times smaller in
+    /// points to keep its size on screen: the text size and the graph's zoom are separate.
     pub text_size: f32,
 }
 
@@ -31,8 +29,7 @@ impl Default for View {
 }
 
 impl View {
-    /// Points per world unit.
-    pub fn scale(self) -> f32 {
+    pub fn points_per_world_unit(self) -> f32 {
         self.zoom / self.text_size
     }
 
@@ -43,11 +40,11 @@ impl View {
     }
 
     pub fn to_screen(self, canvas: Rect, world: Pos2) -> Pos2 {
-        canvas.min + (world.to_vec2() - self.offset) * self.scale()
+        canvas.min + (world.to_vec2() - self.offset) * self.points_per_world_unit()
     }
 
     pub fn to_world(self, canvas: Rect, screen: Pos2) -> Pos2 {
-        pos2(0.0, 0.0) + self.offset + (screen - canvas.min) / self.scale()
+        Pos2::ZERO + self.offset + (screen - canvas.min) / self.points_per_world_unit()
     }
 
     pub fn rect_to_screen(self, canvas: Rect, world: Rect) -> Rect {
@@ -57,7 +54,6 @@ impl View {
         )
     }
 
-    /// The part of the world currently visible.
     pub fn visible_world(self, canvas: Rect) -> Rect {
         Rect::from_min_max(
             self.to_world(canvas, canvas.min),
@@ -65,33 +61,32 @@ impl View {
         )
     }
 
-    /// Multiplies the zoom by `factor`, keeping the world point under `anchor` fixed.
+    /// Keeps the world point under `anchor` where it is.
     pub fn zoom_around(&mut self, canvas: Rect, anchor: Pos2, factor: f32) {
         let world = self.to_world(canvas, anchor);
         self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-        self.offset = world.to_vec2() - (anchor - canvas.min) / self.scale();
+        self.offset = world.to_vec2() - (anchor - canvas.min) / self.points_per_world_unit();
     }
 
     pub fn pan_screen(&mut self, delta: Vec2) {
-        self.offset -= delta / self.scale();
+        self.offset -= delta / self.points_per_world_unit();
     }
 
-    /// Places `world` at the given fraction of the canvas (0.5, 0.5 = centre).
+    /// `fraction` of the canvas: (0.5, 0.5) is its centre.
     pub fn show_at(&mut self, canvas: Rect, world: Pos2, fraction: Vec2) {
         let screen_offset = canvas.size() * fraction;
-        self.offset = world.to_vec2() - screen_offset / self.scale();
+        self.offset = world.to_vec2() - screen_offset / self.points_per_world_unit();
     }
 
-    /// Pans back as far as needed to keep [`KEEP_IN_SIGHT`] of `world` (the graph) on the
-    /// canvas, but never further than where the view was `before` panning or zooming: a view
-    /// already further off (after the graph changed, say) can come back, but not drift further
-    /// away, and doesn't jump.
+    /// Pans back as far as needed to keep `KEEP_IN_SIGHT` of the graph's `world` on the canvas,
+    /// but no further than where the view was `before`: a view already further off (after the
+    /// graph changed, say) can come back, but not drift further away, and doesn't jump.
     pub fn keep_in_sight(&mut self, canvas: Rect, world: Rect, before: View) {
         if !canvas.is_positive() || !world.is_finite() || world.is_negative() {
             return;
         }
         let axis = |i: usize, v: View| {
-            let visible = canvas.size()[i] / v.scale();
+            let visible = canvas.size()[i] / v.points_per_world_unit();
             let keep = (KEEP_IN_SIGHT * visible).min(world.size()[i]).max(0.0);
             // Offsets that keep `keep` of the graph between the canvas edges.
             (world.min[i] + keep - visible, world.max[i] - keep)
@@ -100,17 +95,15 @@ impl View {
             // How far off (in points) `before` was, which is allowed to stay.
             let (lo, hi) = axis(i, before);
             let off = before.offset[i];
-            let slack = (lo - off).max(off - hi).max(0.0) * before.scale();
+            let slack = (lo - off).max(off - hi).max(0.0) * before.points_per_world_unit();
             let (lo, hi) = axis(i, *self);
-            let slack = slack / self.scale();
+            let slack = slack / self.points_per_world_unit();
             self.offset[i] = self.offset[i].clamp(lo - slack, hi + slack);
         }
     }
 
-    /// Zooms and pans so `world` fills the canvas, never zooming in beyond `max_zoom`.
     pub fn fit(&mut self, canvas: Rect, world: Rect, max_zoom: f32) {
-        let margin = 24.0;
-        let avail = (canvas.size() - Vec2::splat(2.0 * margin)).max(Vec2::splat(1.0));
+        let avail = (canvas.size() - Vec2::splat(2.0 * FIT_MARGIN)).max(Vec2::splat(1.0));
         let size = world.size().max(Vec2::splat(1.0));
         let scale = (avail.x / size.x).min(avail.y / size.y);
         self.zoom = (scale * self.text_size).clamp(MIN_ZOOM, max_zoom.min(MAX_ZOOM));
@@ -121,7 +114,7 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eframe::egui::vec2;
+    use eframe::egui::{pos2, vec2};
 
     fn canvas() -> Rect {
         Rect::from_min_size(pos2(10.0, 20.0), Vec2::new(800.0, 600.0))
@@ -216,8 +209,7 @@ mod tests {
         Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 2000.0))
     }
 
-    /// The part of the graph on the canvas, in points along x and y.
-    fn in_sight(v: View) -> Vec2 {
+    fn graph_size_in_sight(v: View) -> Vec2 {
         let shown = v.rect_to_screen(canvas(), graph()).intersect(canvas());
         shown.size().max(Vec2::ZERO)
     }
@@ -230,7 +222,7 @@ mod tests {
             let mut w = v;
             w.pan_screen(delta);
             w.keep_in_sight(canvas(), graph(), v);
-            let seen = in_sight(w);
+            let seen = graph_size_in_sight(w);
             assert!(
                 seen.x >= 80.0 - 1e-3 && seen.y >= 60.0 - 1e-3,
                 "{delta:?}: {seen:?}"
@@ -269,7 +261,7 @@ mod tests {
         let before = v;
         v.zoom_around(canvas(), canvas().center(), 3.0);
         v.keep_in_sight(canvas(), graph(), before);
-        assert!(in_sight(v).x >= 80.0 - 1e-3);
+        assert!(graph_size_in_sight(v).x >= 80.0 - 1e-3);
     }
 
     #[test]

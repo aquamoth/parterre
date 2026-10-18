@@ -1,7 +1,3 @@
-//! Text helpers for the windows, free of any GUI: web links in commit messages, paths cut at
-//! the start, counts with thousands separators (and line numbers typed with them), and the word
-//! under a double-click.
-
 use std::ops::Range;
 
 /// The byte ranges of the plain `http://` and `https://` URLs in `text`.
@@ -36,12 +32,12 @@ pub fn find_urls(text: &str) -> Vec<Range<usize>> {
             }
             end -= last.len_utf8();
         }
-        // Nothing after the scheme: not a link.
         let scheme_len = if text[start..].starts_with("https") {
-            8
+            "https://".len()
         } else {
-            7
+            "http://".len()
         };
+        // Nothing after the scheme: not a link.
         if end > start + scheme_len {
             urls.push(start..end);
         }
@@ -50,7 +46,7 @@ pub fn find_urls(text: &str) -> Vec<Range<usize>> {
     urls
 }
 
-/// Offset of the next `http://` or `https://` that starts a word.
+/// The offset of the next `http://` or `https://` that starts a word.
 fn next_scheme(text: &str) -> Option<usize> {
     let mut from = 0;
     while let Some(i) = text[from..].find("http") {
@@ -63,7 +59,7 @@ fn next_scheme(text: &str) -> Option<usize> {
         if word_start && (rest.starts_with("http://") || rest.starts_with("https://")) {
             return Some(at);
         }
-        from = at + 4;
+        from = at + "http".len();
     }
     None
 }
@@ -121,31 +117,50 @@ pub fn line_number(text: &str, lines: usize) -> Option<usize> {
     (1..=lines).contains(&n).then(|| n - 1)
 }
 
+/// `1 file`, `2 files`.
+pub fn plural(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+}
+
+pub fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 /// The word (or run of blanks, or other character) at character `col` of `text`, as a range
 /// of characters; the last character's when `col` is past the end. `None` for an empty text.
 pub fn word_at(text: &str, col: usize) -> Option<Range<usize>> {
-    let text: Vec<char> = text.chars().collect();
-    let col = col.min(text.len().checked_sub(1)?);
+    #[derive(PartialEq)]
+    enum Class {
+        Word,
+        Blank,
+        Other,
+    }
     let class = |c: char| {
         if c.is_alphanumeric() || c == '_' {
-            0
+            Class::Word
         } else if c.is_whitespace() {
-            1
+            Class::Blank
         } else {
-            2
+            Class::Other
         }
     };
-    let k = class(text[col]);
-    if k == 2 {
+    let text: Vec<char> = text.chars().collect();
+    let col = col.min(text.len().checked_sub(1)?);
+    let here = class(text[col]);
+    if here == Class::Other {
         return Some(col..col + 1);
     }
     let start = (0..col)
         .rev()
-        .take_while(|&i| class(text[i]) == k)
+        .take_while(|&i| class(text[i]) == here)
         .last()
         .unwrap_or(col);
     let end = (col..text.len())
-        .take_while(|&i| class(text[i]) == k)
+        .take_while(|&i| class(text[i]) == here)
         .last()
         .unwrap_or(col)
         + 1;
@@ -227,6 +242,15 @@ mod tests {
         ] {
             assert_eq!(line_number(text, 100_000), None, "{text:?}");
         }
+    }
+
+    #[test]
+    fn plurals_and_capitals() {
+        assert_eq!(plural(1, "file"), "1 file");
+        assert_eq!(plural(0, "commit"), "0 commits");
+        assert_eq!(capitalized("a rebase"), "A rebase");
+        assert_eq!(capitalized("ärende"), "Ärende");
+        assert_eq!(capitalized(""), "");
     }
 
     #[test]

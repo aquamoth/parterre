@@ -1,4 +1,3 @@
-//! Cloning into a new folder (#358), from a local repository standing in for a remote.
 mod common;
 
 use common::TestRepo;

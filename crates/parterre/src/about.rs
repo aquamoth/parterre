@@ -1,25 +1,21 @@
-//! What the About dialog (`app::about`) and macOS's own About panel (`macos::about_panel`) say:
-//! the links, the copyright and the version, and where the third-party notices are (#351).
-
 use std::path::{Path, PathBuf};
 
-/// parterre's own words for itself; it names no other product (#349).
+/// Names no other product (#349).
 pub const TAGLINE: &str = "A revision graph viewer";
 pub const WEBSITE: &str = env!("CARGO_PKG_REPOSITORY");
 pub const ISSUES: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/issues");
 pub const PRIVACY: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/blob/main/docs/privacy.md");
 pub const CONTACT: &str = "parterre@trustfall.se";
 pub const MAIL: &str = "mailto:parterre@trustfall.se";
-/// NOTICE, with its additional terms, and the GPL's text linked from it.
+/// NOTICE rather than LICENSE: it adds terms to the GPL, and links the GPL's text.
 #[cfg(any(target_os = "macos", test))]
 const LICENSE_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/blob/main/NOTICE");
 
-// Paths chosen by build.rs.
 pub const NOTICE: &str = include_str!(env!("PARTERRE_NOTICE"));
 pub const LICENSE: &str = include_str!(env!("PARTERRE_LICENSE"));
 
-/// The file cargo-about writes, which every release package ships.
-const THIRD_PARTY: &str = "THIRD-PARTY-NOTICES.html";
+/// Written by cargo-about, and shipped in every release package.
+const THIRD_PARTY_NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.html";
 
 /// NOTICE's copyright line as a person writes it: `© 2026 Trustfall AB`.
 pub fn copyright() -> String {
@@ -27,17 +23,12 @@ pub fn copyright() -> String {
 }
 
 fn copyright_of(notice: &str) -> String {
-    let line = notice
-        .lines()
-        .find(|line| line.starts_with("Copyright"))
-        .unwrap_or_default();
-    let holder = line.split(" <").next().unwrap_or_default();
-    let holder = holder.trim_start_matches("Copyright").trim_start();
+    let line = crate::notice::copyright_line(notice);
+    let holder = line.trim_start_matches("Copyright").trim_start();
     format!("© {}", holder.trim_start_matches("(C)").trim_start())
 }
 
-/// [`crate::VERSION`] as macOS's About panel shows it, `Version 0.7.0 (a1b2c3d)`: the version,
-/// and the commit if it is in parentheses.
+/// `0.7.0 (a1b2c3d)` as `("0.7.0", "a1b2c3d")`; a version without a commit as `(version, "")`.
 #[cfg(any(target_os = "macos", test))]
 pub fn version_and_commit(version: &str) -> (&str, &str) {
     version
@@ -46,8 +37,8 @@ pub fn version_and_commit(version: &str) -> (&str, &str) {
         .unwrap_or((version, ""))
 }
 
-/// The text under macOS's About panel: the tagline, the links, the licence, and the
-/// third-party notices at `notices` (a URL) if they are installed.
+/// The text under macOS's About panel, linking the third-party notices at the URL `notices`
+/// if they are installed.
 #[cfg(any(target_os = "macos", test))]
 pub fn credits_html(notices: Option<&str>) -> String {
     let notices = notices
@@ -64,7 +55,6 @@ pub fn credits_html(notices: Option<&str>) -> String {
     )
 }
 
-/// What a bug report wants to know: parterre's version, git's and the system.
 pub fn build_info() -> String {
     let git = parterre_core::git::version().unwrap_or_else(|| "not found".into());
     format!(
@@ -75,24 +65,25 @@ pub fn build_info() -> String {
     )
 }
 
-/// The third-party notices installed with this parterre, if there are any: none when it was
-/// built from source (`cargo install`, a checkout).
+/// `None` for a build from source (`cargo install`, a checkout), which has no notices.
 pub fn third_party_notices() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    beside(&exe).into_iter().find(|path| path.is_file())
+    third_party_notices_places(&exe)
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
-/// Where packages put the notices, for the program at `exe`: next to it (the archives and the
-/// MSI), in the app bundle's Resources (macOS), or in the doc folder of the prefix it is in
-/// (`/usr/bin` → `/usr/share/doc/parterre`, the .deb and .rpm).
-fn beside(exe: &Path) -> Vec<PathBuf> {
+fn third_party_notices_places(exe: &Path) -> Vec<PathBuf> {
     let Some(dir) = exe.parent() else {
         return Vec::new();
     };
-    let mut places = vec![dir.join(THIRD_PARTY)];
+    // Beside the program: the archives and the MSI.
+    let mut places = vec![dir.join(THIRD_PARTY_NOTICES_FILE)];
     if let Some(up) = dir.parent() {
-        places.push(up.join("Resources").join(THIRD_PARTY));
-        places.push(up.join("share/doc/parterre").join(THIRD_PARTY));
+        // The macOS app bundle.
+        places.push(up.join("Resources").join(THIRD_PARTY_NOTICES_FILE));
+        // The .deb and .rpm: `/usr/bin` → `/usr/share/doc/parterre`.
+        places.push(up.join("share/doc/parterre").join(THIRD_PARTY_NOTICES_FILE));
     }
     places
 }
@@ -131,13 +122,13 @@ mod tests {
 
     #[test]
     fn notices_are_looked_for_where_each_package_puts_them() {
-        let places = beside(Path::new("/usr/bin/parterre"));
+        let places = third_party_notices_places(Path::new("/usr/bin/parterre"));
         assert!(places.contains(&PathBuf::from("/usr/bin/THIRD-PARTY-NOTICES.html")));
         assert!(places.contains(&PathBuf::from(
             "/usr/share/doc/parterre/THIRD-PARTY-NOTICES.html"
         )));
         let bundle = Path::new("/Applications/parterre.app/Contents/MacOS/parterre");
-        assert!(beside(bundle).contains(&PathBuf::from(
+        assert!(third_party_notices_places(bundle).contains(&PathBuf::from(
             "/Applications/parterre.app/Contents/Resources/THIRD-PARTY-NOTICES.html"
         )));
     }

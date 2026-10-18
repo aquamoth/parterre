@@ -1,11 +1,8 @@
-//! Noticing ref changes (automatic reload) against real repositories.
-
 mod common;
 
-use common::TestRepo;
+use common::{TestRepo, git_in};
 use parterre_core::watch::RefStorage;
 
-/// Runs `change` and reports whether the fingerprint moved.
 fn changes(storage: &RefStorage, change: impl FnOnce()) -> bool {
     let before = storage.fingerprint();
     change();
@@ -92,18 +89,7 @@ fn fingerprint_follows_other_worktrees() {
     let wt_arg = wt.to_string_lossy().into_owned();
     let storage = RefStorage::locate(r.path()).expect("locate");
     let in_wt = |args: &[&str]| {
-        let out = std::process::Command::new(parterre_core::git::program())
-            .current_dir(&wt)
-            .args(args)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
-            .expect("run git");
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        git_in(&wt, args);
     };
 
     assert!(changes(&storage, || {

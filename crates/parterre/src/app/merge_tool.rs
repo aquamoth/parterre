@@ -1,7 +1,5 @@
-//! *Open in merge tool*: starts `git mergetool` on a conflicted file and leaves it to the user.
-//! The tool is the one git's config names; when none is usable, a picker lists the installed
-//! ones, and *Remember this choice* writes it to the global git config. Without it, the choice
-//! lasts until parterre closes. Parterre has no setting of its own.
+//! Parterre keeps no merge tool setting of its own: git's config names the tool, and one picked
+//! without *Remember this choice* lasts until parterre closes.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -12,8 +10,8 @@ use parterre_core::git::Git;
 use parterre_core::merge_tool::{self, Configured, Detected, Tool};
 
 use crate::dialogs::{self, Answer, Dialog};
+use crate::worker;
 
-/// A file to open, and the window it was asked from.
 #[derive(Clone, Debug)]
 struct File {
     root: PathBuf,
@@ -23,12 +21,9 @@ struct File {
 
 #[derive(Debug, Default)]
 pub struct MergeTools {
-    /// Picked without remembering it: used until parterre closes.
-    session: Option<Tool>,
-    /// Asking git which tool, for a file.
+    picked_for_session: Option<Tool>,
     detecting: Option<(File, mpsc::Receiver<Result<Detected, String>>)>,
     picker: Option<Picker>,
-    /// Why the last file didn't open, for the app to show.
     pub error: Option<String>,
 }
 
@@ -38,28 +33,21 @@ struct Picker {
     detected: Detected,
     chosen: usize,
     remember: bool,
-    fresh: bool,
-    /// Why *Open terminal* failed.
-    failed: Option<String>,
+    just_opened: bool,
+    terminal_error: Option<String>,
 }
 
 impl MergeTools {
-    /// Opens `path` of the worktree at `root` in the merge tool, asking which one first if
-    /// none is usable.
     pub fn open(&mut self, ctx: &egui::Context, root: PathBuf, path: String, opener: ViewportId) {
         crate::usage::action(crate::usage::Action::OpenMergeTool);
         let file = File { root, path, opener };
-        if let Some(tool) = self.session.clone() {
+        if let Some(tool) = self.picked_for_session.clone() {
             self.start(&file, &tool);
             return;
         }
-        let (tx, rx) = mpsc::channel();
-        let worker_root = file.root.clone();
-        let worker_ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let detected = merge_tool::detect(&Git::new(worker_root)).map_err(|e| e.to_string());
-            let _ = tx.send(detected);
-            worker_ctx.request_repaint();
+        let root = file.root.clone();
+        let rx = worker::spawn(ctx, move || {
+            merge_tool::detect(&Git::new(root)).map_err(|e| e.to_string())
         });
         self.detecting = Some((file, rx));
     }
@@ -70,83 +58,79 @@ impl MergeTools {
         }
     }
 
-    /// Takes what git said, and shows the picker while it is needed.
     pub fn show(&mut self, ctx: &egui::Context) {
-        if let Some((_, rx)) = &self.detecting {
+        if let Some((file, rx)) = self.detecting.take() {
             match rx.try_recv() {
-                Ok(result) => {
-                    let (file, _) = self.detecting.take().expect("detecting");
-                    match result {
-                        Ok(detected) => match detected.usable() {
-                            Some(tool) => self.start(&file, &tool),
-                            None => {
-                                self.picker = Some(Picker {
-                                    file,
-                                    detected,
-                                    chosen: 0,
-                                    remember: false,
-                                    fresh: true,
-                                    failed: None,
-                                })
-                            }
-                        },
-                        Err(e) => self.error = Some(format!("Could not find a merge tool: {e}")),
-                    }
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => self.detecting = None,
+                Ok(Ok(detected)) => match detected.usable() {
+                    Some(tool) => self.start(&file, &tool),
+                    None => self.picker = Some(Picker::new(file, detected)),
+                },
+                Ok(Err(e)) => self.error = Some(format!("Could not find a merge tool: {e}")),
+                Err(mpsc::TryRecvError::Empty) => self.detecting = Some((file, rx)),
+                Err(mpsc::TryRecvError::Disconnected) => {}
             }
         }
-        let Some(picker) = &mut self.picker else {
+        let Some(mut picker) = self.picker.take() else {
             return;
         };
         match picker.show(ctx) {
-            Answer::Open => {}
-            Answer::Cancel => self.picker = None,
-            Answer::Primary => {
-                let picker = self.picker.take().expect("shown");
-                let Some(tool) = picker.detected.installed.get(picker.chosen).cloned() else {
-                    return;
-                };
-                if picker.remember {
-                    let terminal = matches!(
-                        picker.detected.configured,
-                        Configured::Unusable { terminal: true, .. }
-                    );
-                    if let Err(e) =
-                        merge_tool::remember(&Git::new(&picker.file.root), &tool, terminal)
-                    {
-                        self.error = Some(format!("Could not remember {}: {e}", tool.name));
-                    }
-                }
-                self.session = Some(tool.clone());
-                self.start(&picker.file, &tool);
+            Answer::Open => self.picker = Some(picker),
+            Answer::Cancel => {}
+            Answer::Primary => self.pick(picker),
+        }
+    }
+
+    fn pick(&mut self, picker: Picker) {
+        let Some(tool) = picker.detected.installed.get(picker.chosen).cloned() else {
+            return;
+        };
+        if picker.remember {
+            let git = Git::new(&picker.file.root);
+            if let Err(e) = merge_tool::remember(&git, &tool, picker.terminal_tool_configured()) {
+                self.error = Some(format!("Could not remember {}: {e}", tool.name));
             }
         }
+        self.start(&picker.file, &tool);
+        self.picked_for_session = Some(tool);
     }
 }
 
 impl Picker {
+    fn new(file: File, detected: Detected) -> Picker {
+        Picker {
+            file,
+            detected,
+            chosen: 0,
+            remember: false,
+            just_opened: true,
+            terminal_error: None,
+        }
+    }
+
+    fn terminal_tool_configured(&self) -> bool {
+        matches!(
+            self.detected.configured,
+            Configured::Unusable { terminal: true, .. }
+        )
+    }
+
     fn show(&mut self, ctx: &egui::Context) -> Answer {
         let why = match &self.detected.configured {
             Configured::None => "No merge tool configured".to_owned(),
             Configured::Unusable { why, .. } => why.clone(),
             Configured::Usable(name) => format!("{name} is configured"),
         };
-        let terminal = matches!(
-            self.detected.configured,
-            Configured::Unusable { terminal: true, .. }
-        );
+        let terminal = self.terminal_tool_configured();
         let tools = &self.detected.installed;
         let chosen = &mut self.chosen;
         let remember = &mut self.remember;
         let root = &self.file.root;
-        let failed = &mut self.failed;
+        let terminal_error = &mut self.terminal_error;
         let shown = Dialog::new("merge-tool", "Merge tool")
             .screen(crate::usage::Screen::MergeTool)
             .modal()
             .opener(self.file.opener)
-            .raise(self.fresh)
+            .raise(self.just_opened)
             .show(ctx, |ui| {
                 ui.label(format!("{why}."));
                 ui.add_space(6.0);
@@ -156,12 +140,12 @@ impl Picker {
                     ui.add_space(6.0);
                     if ui.button("Open terminal").clicked() {
                         crate::usage::action(crate::usage::Action::OpenTerminal);
-                        *failed = crate::file_manager::open_terminal(root).err();
+                        *terminal_error = crate::file_manager::open_terminal(root).err();
                     }
-                    if let Some(e) = failed {
+                    if let Some(e) = terminal_error {
                         ui.label(RichText::new(e.as_str()).color(ui.visuals().error_fg_color));
                     }
-                    return dialogs::actions(ui, "", false, false, false);
+                    return dialogs::close_only(ui);
                 }
                 dialogs::fields(ui, |ui| {
                     for (i, tool) in tools.iter().enumerate() {
@@ -176,9 +160,9 @@ impl Picker {
                         .collect();
                 ui.checkbox(remember, "Remember this choice")
                     .on_hover_text(commands.join("\n"));
-                dialogs::actions(ui, "Open", true, false, false)
+                dialogs::actions(ui, dialogs::Primary::new("Open"))
             });
-        self.fresh = false;
+        self.just_opened = false;
         if shown.should_close() {
             Answer::Cancel
         } else {

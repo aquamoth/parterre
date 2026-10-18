@@ -1,8 +1,4 @@
-//! The log query: which commits the log window lists, and in what order.
-//!
-//! A [`LogQuery`] is the tips to walk back from plus the commits to leave out (with everything
-//! they reach). [`LogQuery::run`] turns the in-memory [`Repo`] snapshot into the ordered list
-//! without asking git again. It knows nothing about the revision graph.
+//! The log walks the [`Repo`] snapshot rather than ask git again.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
@@ -11,23 +7,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::repo::{Commit, CommitIx, GitRef, RefKind, Repo};
 
-/// What the log lists: the commits reachable from any of `tips` but from none of `exclude`,
-/// like `git log <tips> ^<exclude>`.
-///
-/// Built with [`LogQuery::commit`] or [`LogQuery::range`]. It is `non_exhaustive` so that
-/// future filters (date range, author, text) can become new fields, defaulting to "no
-/// filter", without breaking callers.
+/// As `git log <tips> ^<exclude>`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LogQuery {
-    /// Where the walk starts. Their ancestors are listed too.
     pub tips: Vec<CommitIx>,
-    /// Commits left out together with all their ancestors.
     pub exclude: Vec<CommitIx>,
 }
 
 impl LogQuery {
-    /// One node: the commit and all its ancestors, like `git log <commit>`.
     pub fn commit(commit: CommitIx) -> LogQuery {
         LogQuery {
             tips: vec![commit],
@@ -35,30 +23,17 @@ impl LogQuery {
         }
     }
 
-    /// Two nodes, in selection order: `first..second`, the commits reachable from `second` but
-    /// not from `first`, as TortoiseGit does. Unrelated histories give all of `second`'s
-    /// history; `first` itself is never listed.
-    ///
-    /// Deliberate deviation from TortoiseGit (decided in #28): when `second` is an ancestor of
-    /// `first`, where TortoiseGit shows an empty list, the two are swapped so the commits in
-    /// between are shown. Diverged pairs keep the selection order.
-    ///
-    /// The range label (`first..second`) reads `exclude[0]..tips[0]` of the result, which
-    /// reflects the swap.
+    /// `first..second`, as TortoiseGit does, except when `second` is an ancestor of `first`:
+    /// rather than nothing, the two are swapped to show the commits between (#28).
     pub fn range(repo: &Repo, first: CommitIx, second: CommitIx) -> LogQuery {
-        let (first, second) = if first != second && is_ancestor(repo, second, first) {
-            (second, first)
-        } else {
-            (first, second)
-        };
+        let (first, second) = ancestor_first(repo, first, second);
         LogQuery {
             tips: vec![second],
             exclude: vec![first],
         }
     }
 
-    /// The log for selected nodes' commits, in selection order: one gives [`LogQuery::commit`],
-    /// two give [`LogQuery::range`], none or three and more give nothing (decided in #28).
+    /// `selected` must be in selection order, which sets a range's direction (#28).
     pub fn for_selection(repo: &Repo, selected: &[CommitIx]) -> Option<LogQuery> {
         match *selected {
             [one] => Some(LogQuery::commit(one)),
@@ -67,9 +42,7 @@ impl LogQuery {
         }
     }
 
-    /// What the query shows, as TortoiseGit labels it: `main` for one tip, `feature/x..main`
-    /// for a range. A commit is named by its first ref that `show` accepts, else by its short
-    /// hash. `refs` is [`Repo::refs_by_commit`].
+    /// `refs` is [`Repo::refs_by_commit`].
     pub fn label(
         &self,
         repo: &Repo,
@@ -83,8 +56,7 @@ impl LogQuery {
         }
     }
 
-    /// The commits the query selects, newest first by committer date, never a parent before
-    /// any of its children: the order of `git log --date-order`.
+    /// In `git log --date-order` order.
     pub fn run(&self, repo: &Repo) -> Vec<CommitIx> {
         let options = LogOptions {
             order: LogOrder::Date,
@@ -93,11 +65,7 @@ impl LogQuery {
         self.list(repo, &options).commits
     }
 
-    /// The commits the query selects under `options`, in their order, each with the parents
-    /// the log shows for it.
-    ///
-    /// Runs in O(n log n) over the commits reachable from the tips, with a few flat arrays the
-    /// size of the snapshot.
+    /// O(n log n) in the commits reachable from the tips.
     pub fn list(&self, repo: &Repo, options: &LogOptions) -> LogList {
         let n = repo.commits.len();
         let walk_parents = |c: CommitIx| -> &[CommitIx] {
@@ -161,11 +129,9 @@ impl LogQuery {
                 }
             }
         }
-        let fork = |c: CommitIx, children: &[u32]| children[c.ix()] > 1;
+        // Before the sort below counts `children` down.
         let forks: Vec<bool> = if options.branchings_only {
-            (0..n)
-                .map(|c| fork(CommitIx(c as u32), &children))
-                .collect()
+            children.iter().map(|&count| count > 1).collect()
         } else {
             Vec::new()
         };
@@ -276,52 +242,41 @@ impl LogQuery {
     }
 }
 
-/// Which commits the log walks and how it orders them: TortoiseGit's All Branches and walk
-/// behaviour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogOptions {
-    /// Also walk from every branch, remote branch and tag, and from HEAD (`git log --branches
-    /// --remotes --tags HEAD`); a range's exclusions still apply.
+    /// `git log --branches --remotes --tags HEAD`; a range's exclusions still apply.
     pub all_branches: bool,
-    /// Follow only first parents (`--first-parent`).
     pub first_parent: bool,
-    /// Leave out merges (`--no-merges`).
     pub no_merges: bool,
-    /// List only the commits where history branches or joins, and those with refs: forks,
-    /// merges, roots and tips (the revision graph's "Branchings and merges").
+    /// Only forks, merges, roots, and commits with refs, as the revision graph's "Branchings
+    /// and merges".
     pub branchings_only: bool,
     pub order: LogOrder,
 }
 
-/// The order of the log.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LogOrder {
-    /// `git log --topo-order`, TortoiseGit's default: a branch's commits stay together.
+    /// TortoiseGit's default.
     #[default]
     Topological,
-    /// `git log --date-order`: newest first, never a parent before its children.
     Date,
 }
 
-/// The result of [`LogQuery::list`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LogList {
-    /// The listed commits, in order.
     pub commits: Vec<CommitIx>,
-    /// For each listed commit, the parents the log shows: its parents in the walk, where one
-    /// that is left out (a merge with [`LogOptions::no_merges`], say) is replaced by the
-    /// listed commits it stands for. Always listed below the commit.
+    /// Per commit, its parents in the walk, where one left out (a merge with
+    /// [`LogOptions::no_merges`], say) is replaced by the listed commits it stands for. Always
+    /// listed below the commit.
     pub parents: Vec<Vec<CommitIx>>,
-    /// For each listed commit, true if some of its history is outside the log: a parent in a
-    /// range's excluded part.
+    /// Per commit, whether a parent is outside the log, in a range's excluded part.
     pub outside: Vec<bool>,
 }
 
-/// The label of a [`LogQuery`]: `to` alone, or `from..to` for a range.
+/// `to`, or `from..to` for a range.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogLabel {
-    /// The excluded end of a range.
     pub from: Option<String>,
     pub to: String,
 }
@@ -335,8 +290,8 @@ impl std::fmt::Display for LogLabel {
     }
 }
 
-/// A commit's name in labels: its first ref that `show` accepts, else its short hash. `refs`
-/// is [`Repo::refs_by_commit`].
+/// The commit's first ref that `show` accepts, else its short hash. `refs` is
+/// [`Repo::refs_by_commit`].
 pub fn commit_name(
     repo: &Repo,
     refs: &[Vec<usize>],
@@ -353,8 +308,7 @@ pub fn commit_name(
         )
 }
 
-/// True if `ancestor` is reachable from `descendant` through parent links (a commit counts as
-/// its own ancestor, as in `git merge-base --is-ancestor`).
+/// A commit is its own ancestor, as in `git merge-base --is-ancestor`.
 pub fn is_ancestor(repo: &Repo, ancestor: CommitIx, descendant: CommitIx) -> bool {
     if ancestor == descendant {
         return true;
@@ -375,6 +329,19 @@ pub fn is_ancestor(repo: &Repo, ancestor: CommitIx, descendant: CommitIx) -> boo
         }
     }
     false
+}
+
+/// `first` and `second` in that order, unless `second` is an ancestor of `first`.
+pub(crate) fn ancestor_first(
+    repo: &Repo,
+    first: CommitIx,
+    second: CommitIx,
+) -> (CommitIx, CommitIx) {
+    if is_ancestor(repo, second, first) {
+        (second, first)
+    } else {
+        (first, second)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -405,31 +372,28 @@ impl PartialOrd for Ready {
     }
 }
 
-/// The fewest hex digits a find query needs to match the start of a hash, as git's shortest
-/// abbreviation; fewer would match a sixteenth of the commits a digit.
-pub const FIND_HASH_MIN: usize = 4;
+/// git's shortest abbreviation: fewer digits would match too many commits.
+const MIN_HASH_QUERY_DIGITS: usize = 4;
 
-/// Where a find query occurs in a commit's row of the log ([`find_in`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Found {
-    /// How many hex digits of the hash, from its start, the query is.
-    pub hash: usize,
-    /// Where in the subject, as byte ranges ([`crate::find::find`]).
+    /// How many of the hash's first digits the query matches; 0 for none.
+    pub hash_digits: usize,
+    /// Byte ranges.
     pub subject: Vec<std::ops::Range<usize>>,
 }
 
 impl Found {
     pub fn is_empty(&self) -> bool {
-        self.hash == 0 && self.subject.is_empty()
+        self.hash_digits == 0 && self.subject.is_empty()
     }
 }
 
-/// Where `query` occurs in `commit`: the start of its hash, if the query (blanks around it
-/// left out) is at least [`FIND_HASH_MIN`] hex digits, in either case; and every place in its
-/// subject, ignoring case, as the other finds do.
+/// The query, trimmed, matches the hash's start from `MIN_HASH_QUERY_DIGITS` digits on, and
+/// the subject anywhere.
 pub fn find_in(commit: &Commit, query: &str) -> Found {
     let hex = query.trim().to_ascii_lowercase();
-    let hash = if hex.len() >= FIND_HASH_MIN
+    let hash_digits = if hex.len() >= MIN_HASH_QUERY_DIGITS
         && hex.bytes().all(|b| b.is_ascii_hexdigit())
         && commit.oid.to_hex().starts_with(&hex)
     {
@@ -437,7 +401,7 @@ pub fn find_in(commit: &Commit, query: &str) -> Found {
     } else {
         0
     };
-    let subject = if query.trim().is_empty() {
+    let subject = if hex.is_empty() {
         Vec::new()
     } else {
         crate::find::find([&commit.subject], query)
@@ -445,10 +409,13 @@ pub fn find_in(commit: &Commit, query: &str) -> Found {
             .map(|m| m.range)
             .collect()
     };
-    Found { hash, subject }
+    Found {
+        hash_digits,
+        subject,
+    }
 }
 
-/// The rows of a log's `commits` that `query` occurs in ([`find_in`]).
+/// The rows of `commits` that `query` occurs in.
 pub fn find(repo: &Repo, commits: &[CommitIx], query: &str) -> Vec<usize> {
     if query.trim().is_empty() {
         return Vec::new();
@@ -694,16 +661,16 @@ mod tests {
         // The subject anywhere, ignoring case, every place in it.
         assert_eq!(find(&repo, &rows, "PARSE"), [0, 1]);
         let places = find_in(repo.commit(CommitIx(1)), "parse");
-        assert_eq!(places.hash, 0);
+        assert_eq!(places.hash_digits, 0);
         assert_eq!(places.subject, [0..5, 8..13, 15..20]);
 
         // A hash by its start, from 4 hex digits, ignoring case and blanks around it.
         assert_eq!(find(&repo, &rows, " DEADB "), [0]);
-        assert_eq!(find_in(repo.commit(CommitIx(0)), "DEADB").hash, 5);
+        assert_eq!(find_in(repo.commit(CommitIx(0)), "DEADB").hash_digits, 5);
         assert_eq!(find(&repo, &rows, "0123"), [1]);
         // Shorter, or not at the start: only the subjects count ("dead" is in commit 2's).
         assert_eq!(find(&repo, &rows, "dead"), [0, 2]);
-        assert_eq!(find_in(repo.commit(CommitIx(0)), "dead").hash, 4);
+        assert_eq!(find_in(repo.commit(CommitIx(0)), "dead").hash_digits, 4);
         assert_eq!(find(&repo, &rows, "abcd"), [2]);
         assert_eq!(find(&repo, &rows, "dea"), [2]);
         // Not the author.

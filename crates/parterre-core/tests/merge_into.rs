@@ -1,25 +1,18 @@
-//! Merging the open worktree's branch into another, as a pull request does, against real,
-//! disposable repositories: when it's offered, where each step runs (the other branch's
-//! worktree, or none), the rebase methods, the message, and every way it can stop, refuse or
-//! keep changes aside.
 mod common;
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
-use common::{TestRepo, read_text};
+use common::{TestRepo, done, failed, git_fails, git_in, git_with_system_config, read_text, rev};
 use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck};
+use parterre_core::branches::{Action, Catalog, GitOperation, Outcome, Stuck};
 use parterre_core::merge::{self, Method, Preview};
-use parterre_util::CancelTree;
+use parterre_core::worktree_folder::same_path_on_disk;
 
-/// `main`, checked out in the main worktree, with a commit of its own; `feature`, checked out
-/// in a linked worktree, the open one, with two; both from `base`.
+/// `main` in the main worktree, and `feature` in a linked one, the open one.
 struct Pr {
     r: TestRepo,
     _dir: tempfile::TempDir,
-    /// The open worktree, on `feature`.
-    wt: PathBuf,
+    open_worktree: PathBuf,
 }
 
 impl Pr {
@@ -43,85 +36,47 @@ impl Pr {
         more(&mut r);
         r.checkout("main");
         let dir = tempfile::tempdir().unwrap();
-        let wt = dir.path().join("feature");
-        r.git(&["worktree", "add", "-q", wt.to_str().unwrap(), "feature"]);
-        Pr { r, _dir: dir, wt }
+        let open_worktree = dir.path().join("feature");
+        let folder = open_worktree.to_str().unwrap();
+        r.git(&["worktree", "add", "-q", folder, "feature"]);
+        Pr {
+            r,
+            _dir: dir,
+            open_worktree,
+        }
     }
 
-    fn rev(&self, rev: &str) -> Oid {
-        Oid::from_hex(&self.r.git(&["rev-parse", rev])).unwrap()
+    fn rev(&self, name: &str) -> Oid {
+        rev(&self.r, name)
     }
 
-    /// Git in the open worktree.
-    fn here(&self, args: &[&str]) -> String {
-        let out = Command::new(parterre_core::git::program())
-            .current_dir(&self.wt)
-            .args(args)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    fn git_here(&self, args: &[&str]) -> String {
+        git_in(&self.open_worktree, args)
     }
 
     fn preview(&self, into: &str) -> Preview {
-        Preview::load_into(&self.wt, into).unwrap()
+        Preview::load_into(&self.open_worktree, into).unwrap()
     }
 
     fn execute(&self, merge: merge::Merge) -> Outcome {
-        Branches::new(&self.wt).execute(
-            Action::Merge(Box::new(merge)),
-            None,
-            &CancelTree::default(),
-        )
+        common::execute(&self.open_worktree, Action::Merge(Box::new(merge)), None)
     }
 
     fn offered(&self, at: &str) -> Option<String> {
-        let repo = parterre_core::git::load_repo(&self.wt).unwrap();
-        let catalog = Catalog::load(&self.wt).unwrap();
+        let repo = parterre_core::git::load_repo(&self.open_worktree).unwrap();
+        let catalog = Catalog::load(&self.open_worktree).unwrap();
         merge::offered_into(&repo, &catalog, self.rev(at)).map(str::to_owned)
     }
 
-    /// The main worktree's uncommitted changes, as parterre's git sees them: with the system
-    /// config, whose `core.autocrlf` it checked the files out with (#182).
     fn main_status(&self) -> String {
-        let out = Command::new(parterre_core::git::program())
-            .current_dir(self.r.path())
-            .args(["status", "--porcelain"])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .output()
-            .unwrap();
-        assert!(out.status.success());
-        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        git_with_system_config(self.r.path(), &["status", "--porcelain"])
+            .trim()
+            .to_owned()
     }
 }
 
-/// The merge `p` would run with git's message, by `method`, without stashing.
 fn plain(p: &Preview, method: Method) -> merge::Merge {
     p.merge("feature".into(), method, false, &p.message.clone())
-}
-
-fn done(out: Outcome) -> Report {
-    match out {
-        Outcome::Done(report) => report,
-        other => panic!("expected it done: {other:?}"),
-    }
-}
-
-fn failed(out: Outcome) -> String {
-    match out {
-        Outcome::Failed { error, .. } => error.to_string(),
-        other => panic!("expected a failure: {other:?}"),
-    }
-}
-
-fn same(a: &Path, b: &Path) -> bool {
-    std::fs::canonicalize(a).unwrap() == std::fs::canonicalize(b).unwrap()
 }
 
 fn main_folder(pr: &Pr) -> String {
@@ -144,7 +99,7 @@ fn it_is_offered_into_branches_that_lack_the_open_branchs_commits() {
     pr.r.git(&["branch", "has-it", "feature"]);
     assert_eq!(pr.offered("has-it"), None);
     // A detached HEAD has no branch to merge.
-    pr.here(&["checkout", "-q", "--detach"]);
+    pr.git_here(&["checkout", "-q", "--detach"]);
     assert_eq!(pr.offered("main"), None);
 }
 
@@ -152,7 +107,7 @@ fn it_is_offered_into_branches_that_lack_the_open_branchs_commits() {
 fn a_branch_that_already_has_the_open_branchs_commits_has_no_preview() {
     let pr = Pr::new();
     pr.r.git(&["branch", "has-it", "feature"]);
-    let error = Preview::load_into(&pr.wt, "has-it")
+    let error = Preview::load_into(&pr.open_worktree, "has-it")
         .unwrap_err()
         .to_string();
     assert_eq!(error, "Branch has-it already has feature's commits.");
@@ -162,7 +117,7 @@ fn a_branch_that_already_has_the_open_branchs_commits_has_no_preview() {
 fn only_merging_into_another_branch_offers_the_rebase_methods() {
     let pr = Pr::new();
     assert_eq!(pr.preview("main").methods(), Method::ALL);
-    let incoming = Preview::load(&pr.wt, pr.rev("main"), "main").unwrap();
+    let incoming = Preview::load(&pr.open_worktree, pr.rev("main"), "main").unwrap();
     assert_eq!(
         incoming.methods(),
         [Method::FastForward, Method::MergeCommit]
@@ -176,11 +131,14 @@ fn the_preview_finds_where_the_branch_is_checked_out() {
     assert_eq!(p.branch, "main");
     assert_eq!(p.head, pr.rev("main"));
     assert_eq!(p.theirs, pr.rev("feature"));
-    assert!(!p.fast_forward);
-    assert_eq!((p.replays, p.merges), (2, 0));
+    assert!(!p.can_fast_forward);
+    assert_eq!((p.replays, p.flattened_merges), (2, 0));
     let out = p.outgoing.as_ref().unwrap();
     assert_eq!(out.source, "feature");
-    assert!(same(out.worktree.as_deref().unwrap(), pr.r.path()));
+    assert!(same_path_on_disk(
+        out.worktree.as_deref().unwrap(),
+        pr.r.path()
+    ));
     assert_eq!(p.message, "Merge branch 'feature'");
     pr.r.git(&["branch", "release", "main"]);
     let p = pr.preview("release");
@@ -188,7 +146,6 @@ fn the_preview_finds_where_the_branch_is_checked_out() {
     assert_eq!(p.message, "Merge branch 'feature' into release");
 }
 
-/// What `git merge` itself writes, merging feature into `into` where it's checked out.
 fn gits_message(pr: &Pr, into: &str) -> String {
     pr.r.checkout(into);
     pr.r.git(&["merge", "-q", "--no-ff", "--no-edit", "feature"]);
@@ -249,7 +206,7 @@ fn rebase_and_fast_forward_into_a_branch_checked_out_elsewhere() {
     assert_eq!(pr.rev("main"), pr.rev("feature"));
     assert_eq!(read_text(&pr.r.path().join("two")), "two\n");
     assert_eq!(pr.main_status(), "");
-    assert_eq!(pr.here(&["branch", "--show-current"]), "feature");
+    assert_eq!(pr.git_here(&["branch", "--show-current"]), "feature");
 }
 
 #[test]
@@ -284,7 +241,7 @@ fn a_fast_forward_of_a_branch_checked_out_nowhere_moves_its_ref() {
     let pr = Pr::new();
     pr.r.git(&["branch", "release", "main~1"]);
     let p = pr.preview("release");
-    assert!(p.fast_forward);
+    assert!(p.can_fast_forward);
     assert_eq!(p.default_method(), Method::FastForward);
     // On top already, with no merges: a rebase would replay nothing.
     assert_eq!(
@@ -341,13 +298,12 @@ fn a_merge_commit_into_a_branch_checked_out_nowhere_switches_here_and_back() {
         ]
     );
     done(pr.execute(merge));
-    assert_eq!(pr.here(&["branch", "--show-current"]), "feature");
+    assert_eq!(pr.git_here(&["branch", "--show-current"]), "feature");
     assert_eq!(pr.rev("release^1"), pr.rev("main"));
     assert_eq!(pr.rev("release^2"), pr.rev("feature"));
 }
 
-/// As [`Pr::new`], with a third commit on feature that adds `mine` too: it conflicts with
-/// main's.
+/// feature adds `mine` too, conflicting with main's.
 fn conflicting() -> Pr {
     Pr::with(|r| {
         r.write("mine", b"theirs\n");
@@ -375,8 +331,8 @@ fn a_rebase_that_conflicts_stops_in_the_open_worktree() {
         feature,
         "the branch moves when it's done"
     );
-    let here = Catalog::load(&pr.wt).unwrap();
-    assert_eq!(here.stuck(), Some(Stuck::InProgress("a rebase")));
+    let here = Catalog::load(&pr.open_worktree).unwrap();
+    assert_eq!(here.stuck(), Some(Stuck::InProgress(GitOperation::Rebase)));
     assert_eq!(pr.main_status(), "");
 }
 
@@ -398,8 +354,8 @@ fn a_merge_commit_that_conflicts_stops_in_the_branchs_worktree() {
     assert_eq!(pr.rev("main"), mine);
     assert_eq!(pr.rev("feature"), feature);
     let there = Catalog::load(pr.r.path()).unwrap();
-    assert_eq!(there.stuck(), Some(Stuck::InProgress("a merge")));
-    assert_eq!(Catalog::load(&pr.wt).unwrap().stuck(), None);
+    assert_eq!(there.stuck(), Some(Stuck::InProgress(GitOperation::Merge)));
+    assert_eq!(Catalog::load(&pr.open_worktree).unwrap().stuck(), None);
 }
 
 #[test]
@@ -415,16 +371,16 @@ fn a_merge_commit_into_a_branch_checked_out_nowhere_that_conflicts_stays_on_it()
             .message
             .contains("This worktree is on release now")
     );
-    assert_eq!(pr.here(&["branch", "--show-current"]), "release");
-    let here = Catalog::load(&pr.wt).unwrap();
-    assert_eq!(here.stuck(), Some(Stuck::InProgress("a merge")));
+    assert_eq!(pr.git_here(&["branch", "--show-current"]), "release");
+    let here = Catalog::load(&pr.open_worktree).unwrap();
+    assert_eq!(here.stuck(), Some(Stuck::InProgress(GitOperation::Merge)));
     assert_eq!(pr.rev("release"), pr.rev("main"));
 }
 
 #[test]
 fn uncommitted_changes_here_need_the_stash_for_what_changes_this_worktree() {
     let pr = Pr::new();
-    std::fs::write(pr.wt.join("one"), "edited\n").unwrap();
+    std::fs::write(pr.open_worktree.join("one"), "edited\n").unwrap();
     pr.r.git(&["branch", "release", "main"]);
     let p = pr.preview("main");
     assert!(p.dirty);
@@ -459,15 +415,15 @@ fn uncommitted_changes_here_need_the_stash_for_what_changes_this_worktree() {
     let report = done(pr.execute(stashed));
     assert!(report.attention.is_none(), "{:?}", report.attention);
     assert_eq!(pr.rev("main"), pr.rev("feature"));
-    assert_eq!(read_text(&pr.wt.join("one")), "edited\n");
-    assert_eq!(pr.here(&["stash", "list"]), "");
+    assert_eq!(read_text(&pr.open_worktree.join("one")), "edited\n");
+    assert_eq!(pr.git_here(&["stash", "list"]), "");
 }
 
 #[test]
 fn rebase_auto_stash_ticks_the_box_and_unticking_says_no_autostash() {
     let pr = Pr::new();
     pr.r.git(&["config", "rebase.autoStash", "true"]);
-    std::fs::write(pr.wt.join("one"), "edited\n").unwrap();
+    std::fs::write(pr.open_worktree.join("one"), "edited\n").unwrap();
     let p = pr.preview("main");
     assert!(p.auto_stash);
     let rebase = |stash| {
@@ -483,14 +439,14 @@ fn changes_the_autostash_cant_put_back_stay_in_the_stash() {
     // main changes base, which the open worktree has changed too.
     pr.r.write("base", b"main's base\n");
     pr.r.git(&["commit", "-q", "-am", "main's base"]);
-    std::fs::write(pr.wt.join("base"), "my base\n").unwrap();
+    std::fs::write(pr.open_worktree.join("base"), "my base\n").unwrap();
     let p = pr.preview("main");
     let report = done(pr.execute(p.merge("feature".into(), Method::RebaseFastForward, true, "")));
     let attention = report.attention.expect("an orange notice");
     assert_eq!(attention.title, "Merged feature into main");
     assert!(attention.message.contains("stash entry"), "{attention:?}");
     assert_eq!(pr.rev("main"), pr.rev("feature"));
-    assert_eq!(pr.here(&["stash", "list"]).lines().count(), 1);
+    assert_eq!(pr.git_here(&["stash", "list"]).lines().count(), 1);
 }
 
 #[test]
@@ -526,14 +482,7 @@ fn a_branch_whose_worktree_has_an_operation_in_progress_takes_no_merge() {
     pr.r.write("mine", b"side\n");
     pr.r.commit_all("side mine");
     pr.r.checkout("main");
-    let out = Command::new(parterre_core::git::program())
-        .current_dir(pr.r.path())
-        .args(["merge", "-q", "side"])
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "the merge conflicts");
+    git_fails(pr.r.path(), &["merge", "-q", "side"]);
     let p = pr.preview("main");
     let why = format!(
         "main's worktree {} has a merge in progress.",
@@ -582,16 +531,16 @@ fn a_rebase_that_would_replay_nothing_is_unavailable() {
 fn a_merge_inside_the_branch_makes_the_rebase_worth_it() {
     let pr = Pr::new();
     // feature2: on top of main, with a merge inside, which the rebase flattens.
-    pr.here(&["switch", "-q", "-c", "feature2", "main"]);
-    pr.here(&["switch", "-q", "-c", "side"]);
-    std::fs::write(pr.wt.join("side"), "side\n").unwrap();
-    pr.here(&["add", "side"]);
-    pr.here(&["commit", "-q", "-m", "side"]);
-    pr.here(&["switch", "-q", "feature2"]);
-    pr.here(&["merge", "-q", "--no-ff", "-m", "Merge side", "side"]);
-    let p = Preview::load_into(&pr.wt, "main").unwrap();
-    assert!(p.fast_forward);
-    assert_eq!((p.replays, p.merges), (1, 1));
+    pr.git_here(&["switch", "-q", "-c", "feature2", "main"]);
+    pr.git_here(&["switch", "-q", "-c", "side"]);
+    std::fs::write(pr.open_worktree.join("side"), "side\n").unwrap();
+    pr.git_here(&["add", "side"]);
+    pr.git_here(&["commit", "-q", "-m", "side"]);
+    pr.git_here(&["switch", "-q", "feature2"]);
+    pr.git_here(&["merge", "-q", "--no-ff", "-m", "Merge side", "side"]);
+    let p = Preview::load_into(&pr.open_worktree, "main").unwrap();
+    assert!(p.can_fast_forward);
+    assert_eq!((p.replays, p.flattened_merges), (1, 1));
     assert_eq!(p.unavailable(Method::RebaseFastForward, "feature2"), None);
 }
 

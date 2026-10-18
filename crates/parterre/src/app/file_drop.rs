@@ -1,8 +1,3 @@
-//! Opening a repository by dropping its folder on the window (#335), from Finder, Explorer or
-//! a file manager: any folder inside the repository, or a file (its folder), as *Open folder…*
-//! takes. While something is dragged over the window, the window says what a drop opens. Of
-//! several, the first. A modal dialog clears both (`dialogs::ModalLock`): no drop then.
-
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Color32, FontId, Stroke, StrokeKind};
@@ -11,7 +6,7 @@ use super::ParterreApp;
 use crate::widgets;
 
 impl ParterreApp {
-    /// Opens what was dropped on the window this frame, or shows what a drop would open.
+    // No modal check needed: `dialogs::ModalLock` clears hovered and dropped files.
     pub(super) fn file_drop(&mut self, ctx: &egui::Context) {
         let (hovered, dropped) = ctx.input(|i| {
             (
@@ -22,14 +17,13 @@ impl ParterreApp {
         if let Some(path) = dropped {
             self.open_folder(&dropped_folder(&path));
         } else if let Some(path) = hovered {
-            // Some platforms don't say what is dragged until it is dropped.
+            // Some platforms don't tell what is dragged until it is dropped.
             let name = path.map(|p| super::name_and_place(&dropped_folder(&p)).0);
             paint_drop_target(ctx, name.as_deref());
         }
     }
 }
 
-/// The folder a dropped path opens: a folder itself, a file the folder it is in.
 fn dropped_folder(path: &Path) -> PathBuf {
     if path.is_file()
         && let Some(parent) = path.parent()
@@ -39,7 +33,6 @@ fn dropped_folder(path: &Path) -> PathBuf {
     path.to_owned()
 }
 
-/// Over the whole window: an outline in the accent colour and what a drop opens.
 fn paint_drop_target(ctx: &egui::Context, name: Option<&str>) {
     let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("file-drop"));
     let painter = ctx.layer_painter(layer);
@@ -87,7 +80,7 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         assert_eq!(dropped_folder(&file), dir.path());
         assert_eq!(dropped_folder(dir.path()), dir.path());
-        // Gone by now, or never there: as dropped, for opening to say why it can't.
+        // Kept as is, for opening to say why it can't.
         let gone = dir.path().join("gone");
         assert_eq!(dropped_folder(&gone), gone);
     }

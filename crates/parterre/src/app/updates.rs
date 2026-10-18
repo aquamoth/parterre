@@ -1,32 +1,25 @@
-//! The update check (#258): while a newer release is out, the menus offer *Download X.Y.Z*,
-//! and the first time it hears of a version a dialog says so, once (#345). Settings › Privacy
-//! turns it off. Decided in #226 and #344.
-
 use eframe::egui;
 use parterre_telemetry::{Download, Update, UpdateCheck};
 
-use super::ParterreApp;
+use super::{Note, ParterreApp};
 use crate::dialogs::{self, Dialog};
 use crate::widgets;
 
-/// Storage key for the newest release the new-release dialog told of (#345): it never tells
-/// of the same one twice.
-pub const TOLD_KEY: &str = "parterre-release-told";
+pub const RELEASE_TOLD_KEY: &str = "parterre-release-told";
 
-/// The release told of, as [`ParterreApp::save`] stores it: an `Option`, so read as one. Read
-/// as a `String`, `Some("1.0.0")` didn't parse and every start told of it again (#382).
-pub fn told(storage: &dyn eframe::Storage) -> Option<String> {
-    eframe::get_value::<Option<String>>(storage, TOLD_KEY).flatten()
+/// Read as the `Option` the app's [`eframe::App::save`] stores: read as a `String`, `Some("1.0.0")`
+/// didn't parse and every start told of the same release again (#382).
+pub fn release_told(storage: &dyn eframe::Storage) -> Option<String> {
+    eframe::get_value::<Option<String>>(storage, RELEASE_TOLD_KEY).flatten()
 }
 
 impl ParterreApp {
-    /// Starts or stops asking GitHub as the setting says, once the first-run prompt is answered:
-    /// nothing is sent before (#223). Scripted runs don't ask: their pictures would depend on
-    /// it. `--newer-release` answers for them.
     pub(super) fn update_check(&mut self, ctx: &egui::Context) {
         let prompting = self.telemetry.prompt.is_some();
+        // Scripted runs never ask, or their screenshots would depend on it: `--newer-release`
+        // stands in.
         if !self.settings.check_for_updates
-            || self.automation.is_active()
+            || self.automation.is_scripted()
             || !parterre_telemetry::may_check_for_updates(prompting)
         {
             self.update_check = None;
@@ -34,21 +27,20 @@ impl ParterreApp {
             let ctx = ctx.clone();
             self.update_check = UpdateCheck::start(crate::VERSION, move || ctx.request_repaint());
         }
-        // Told of once, as soon as it is heard of: closing the dialog is enough.
         if let Some(update) = self.update_check.as_mut().and_then(|c| c.newer())
-            && tells(&mut self.release_told, &update.version)
+            && tell_once(&mut self.release_told, &update.version)
         {
             self.release_dialog = Some(update.clone());
         }
     }
 
-    /// The new-release dialog, while it is open: the version, this one's, the release notes,
-    /// and *Download* as the menu has it.
     pub(super) fn release_dialog(&mut self, ctx: &egui::Context) {
+        const CLOSE: &str = "Close";
+        const DOWNLOAD: &str = "Download";
         let Some(update) = &self.release_dialog else {
             return;
         };
-        let this = crate::VERSION.split(' ').next().unwrap_or(crate::VERSION);
+        let this_version = crate::VERSION.split(' ').next().unwrap_or(crate::VERSION);
         let shown = Dialog::new("new-release", "New release")
             .screen(crate::usage::Screen::NewRelease)
             .width(360.0)
@@ -60,21 +52,23 @@ impl ParterreApp {
                             .size(16.0)
                             .strong(),
                     );
-                    ui.label(format!("This is {this}."));
+                    ui.label(format!("This is {this_version}."));
                     if ui.link("Release notes").clicked() {
                         answer = ReleaseAnswer::Notes;
                     }
                 });
                 ui.separator();
                 let widths = [
-                    widgets::text_button_width(ui, "Close"),
-                    widgets::filled_button_width(ui, "Download", 90.0),
+                    widgets::text_button_width(ui, CLOSE),
+                    widgets::filled_button_width(ui, DOWNLOAD, dialogs::PRIMARY_MIN_WIDTH),
                 ];
-                crate::dialogs::button_row(ui, &widths, |ui| {
-                    if widgets::text_button(ui, "Close").clicked() {
+                dialogs::button_row(ui, &widths, |ui| {
+                    if widgets::text_button(ui, CLOSE).clicked() {
                         answer = ReleaseAnswer::Close;
                     }
-                    if widgets::primary_button(ui, "Download", 90.0).clicked() {
+                    let download =
+                        widgets::primary_button(ui, DOWNLOAD, dialogs::PRIMARY_MIN_WIDTH);
+                    if download.clicked() {
                         answer = ReleaseAnswer::Download;
                     }
                 });
@@ -83,17 +77,13 @@ impl ParterreApp {
                 }
                 answer
             });
-        let answer = if shown.should_close() {
-            ReleaseAnswer::Close
-        } else {
-            shown.inner
-        };
+        let answer = shown.or_closed(ReleaseAnswer::Close);
         match answer {
             ReleaseAnswer::Open => {}
             ReleaseAnswer::Close => self.release_dialog = None,
             ReleaseAnswer::Notes => {
                 if let Err(e) = crate::browser::open(&update.notes()) {
-                    self.status = Some((e, true));
+                    self.status = Some(Note::Error(e));
                 }
             }
             ReleaseAnswer::Download => {
@@ -104,46 +94,40 @@ impl ParterreApp {
         }
     }
 
-    /// The newer release the menu offers, if any.
     pub(super) fn newer_release(&mut self) -> Option<Update> {
         if !self.settings.check_for_updates {
             return None;
         }
-        match &self.automation.newer_release {
+        match &self.automation.canned_newer_release {
             Some(update) => Some(update.clone()),
             None => self.update_check.as_mut()?.newer().cloned(),
         }
     }
 
-    /// *Download*: the release's file for this channel in the browser, or on the cargo channel
-    /// the command copied.
     pub(super) fn download(&mut self, ctx: &egui::Context, download: &Download) {
         crate::usage::action(crate::usage::Action::DownloadUpdate);
         match download {
             Download::Open(url) => {
                 if let Err(e) = crate::browser::open(url) {
-                    self.status = Some((e, true));
+                    self.status = Some(Note::Error(e));
                 }
             }
             Download::Copy(command) => {
                 ctx.copy_text((*command).to_owned());
-                self.status = Some((format!("Copied: {command}"), false));
+                self.status = Some(Note::Info(format!("Copied: {command}")));
             }
         }
     }
 }
 
-/// Whether the new-release dialog tells of version `newer`: not if it told of it before.
-/// Remembers it in `told`.
-fn tells(told: &mut Option<String>, newer: &str) -> bool {
-    if told.as_deref() == Some(newer) {
+fn tell_once(told: &mut Option<String>, version: &str) -> bool {
+    if told.as_deref() == Some(version) {
         return false;
     }
-    *told = Some(newer.to_owned());
+    *told = Some(version.to_owned());
     true
 }
 
-/// What was done in the new-release dialog this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReleaseAnswer {
     Open,
@@ -154,16 +138,15 @@ enum ReleaseAnswer {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOLD_KEY, tells, told};
+    use super::{RELEASE_TOLD_KEY, release_told, tell_once};
     use eframe::Storage as _;
 
     #[test]
     fn each_release_is_told_of_once() {
         let mut told = None;
-        assert!(tells(&mut told, "0.8.0"));
-        assert!(!tells(&mut told, "0.8.0"));
-        // A still newer one is told of again.
-        assert!(tells(&mut told, "0.9.0"));
+        assert!(tell_once(&mut told, "0.8.0"));
+        assert!(!tell_once(&mut told, "0.8.0"));
+        assert!(tell_once(&mut told, "0.9.0"));
         assert_eq!(told.as_deref(), Some("0.9.0"));
     }
 
@@ -186,13 +169,13 @@ mod tests {
     #[test]
     fn the_release_told_of_is_remembered_across_starts() {
         let mut storage = Memory::default();
-        assert_eq!(told(&storage), None);
-        eframe::set_value(&mut storage, TOLD_KEY, &Some("1.0.0".to_owned()));
-        assert_eq!(told(&storage).as_deref(), Some("1.0.0"));
+        assert_eq!(release_told(&storage), None);
+        eframe::set_value(&mut storage, RELEASE_TOLD_KEY, &Some("1.0.0".to_owned()));
+        assert_eq!(release_told(&storage).as_deref(), Some("1.0.0"));
         // As 1.0.0-rc1 stored it.
-        storage.set_string(TOLD_KEY, r#"Some("1.0.0")"#.to_owned());
-        assert_eq!(told(&storage).as_deref(), Some("1.0.0"));
-        eframe::set_value(&mut storage, TOLD_KEY, &None::<String>);
-        assert_eq!(told(&storage), None);
+        storage.set_string(RELEASE_TOLD_KEY, r#"Some("1.0.0")"#.to_owned());
+        assert_eq!(release_told(&storage).as_deref(), Some("1.0.0"));
+        eframe::set_value(&mut storage, RELEASE_TOLD_KEY, &None::<String>);
+        assert_eq!(release_told(&storage), None);
     }
 }

@@ -1,20 +1,20 @@
-//! Resetting the open worktree's branch: what each of git's modes would do to its files and what
-//! it would lose, and running one. Git decides what it refuses: `read-tree -m -u -n` is its own
-//! dry run of `reset --keep`. The rest is predicted from status, diff and the target's tree, to
-//! show the modes side by side before any of them runs.
+//! Git decides what a reset refuses: `read-tree -m -u -n` is its own dry run of `reset --keep`.
+//! The rest is predicted from status, diff and the target's tree, to show the modes side by
+//! side before any of them runs.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use crate::Oid;
-use crate::branches::{Catalog, Error, Report, io_error, lost_commits, run};
+use crate::branches::{Catalog, Error, Report, io_error, lost_commits};
 use crate::changed_files::{ChangedFile, FileStatus, compare_paths};
 use crate::file_diff::{DiffOptions, FileDiff, FileDiffSpec, Rev};
 use crate::git::{Git, GitError};
+use crate::operation::{refuse_if_moved, run_or_fail, verify_commit};
+use crate::text::{capitalized, plural};
 use parterre_util::CancelTree;
 
-/// git's modes, without `--merge`: that one is for aborting a merge, which is left to the
-/// command line.
+/// Without `--merge`, which is for aborting a merge: that's left to the command line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Mode {
     Soft,
@@ -46,29 +46,26 @@ impl Mode {
     }
 }
 
-/// A reset the user agreed to, with what they saw it lose. It runs only while that's still
-/// what it loses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reset {
     pub branch: String,
-    /// Where the branch was.
     pub head: Oid,
     pub target: Oid,
     pub mode: Mode,
-    pub commits: Vec<Oid>,
-    /// Files whose changes are lost, by path.
-    pub files: Vec<String>,
+    pub lost_commits: Vec<Oid>,
+    pub lost_files: Vec<String>,
 }
 
-/// The command a reset runs.
 pub fn command(mode: Mode, target: Oid) -> Vec<String> {
     vec!["reset".into(), mode.flag().into(), target.to_hex()]
 }
 
-/// The branch a reset to `target` would move, or why there's no reset to offer: only the open
-/// worktree's branch is reset, not a detached HEAD (which includes a branch being rebased), not
-/// while an operation is in progress, and not to the commit it's at.
+/// The branch a reset to `target` would move, or why there's no reset to offer.
 pub fn branch(catalog: &Catalog, target: Oid) -> Result<&str, String> {
+    branch_and_head(catalog, target).map(|(branch, _)| branch)
+}
+
+fn branch_and_head(catalog: &Catalog, target: Oid) -> Result<(&str, Oid), String> {
     if !catalog.has_working_tree {
         return Err("This repository has no working tree.".into());
     }
@@ -81,7 +78,7 @@ pub fn branch(catalog: &Catalog, target: Oid) -> Result<&str, String> {
     if head == target {
         return Err(format!("Branch {branch} is already there."));
     }
-    if let Some(what) = catalog
+    if let Some(operation) = catalog
         .worktrees
         .iter()
         .find(|w| w.open)
@@ -89,13 +86,12 @@ pub fn branch(catalog: &Catalog, target: Oid) -> Result<&str, String> {
     {
         return Err(format!(
             "{} is in progress. Finish or abort it first.",
-            capitalized(what)
+            capitalized(operation.name())
         ));
     }
-    Ok(branch)
+    Ok((branch, head))
 }
 
-/// How a file differs, as one of `git status --short`'s letters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Change {
     Added,
@@ -121,15 +117,11 @@ impl Change {
     }
 }
 
-/// What of a file's uncommitted changes is gone afterwards: not on disk, staged or committed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lost {
-    /// The staged version, which differed from the file on disk.
     StagedVersion,
-    /// The changes on disk.
     Changes,
     StagedVersionAndChanges,
-    /// An untracked file the target overwrites.
     Untracked,
 }
 
@@ -148,9 +140,7 @@ impl Lost {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileOutcome {
     pub path: String,
-    /// Afterwards, staged against the new HEAD: `git status --short`'s first letter.
     pub staged: Option<Change>,
-    /// Afterwards, on disk against the index: its second letter.
     pub unstaged: Option<Change>,
     pub untracked: bool,
     /// Its file on disk is rewritten.
@@ -158,13 +148,11 @@ pub struct FileOutcome {
     pub lost: Option<Lost>,
     /// Git names it in its refusal.
     pub refused: bool,
-    /// Lines added and removed on disk, now to afterwards; `None` for a binary file.
+    /// Lines added and removed on disk; `None` for a binary file.
     pub lines: Option<(u32, u32)>,
 }
 
 impl FileOutcome {
-    /// What it is afterwards and what's lost of it, in words: "Modified, not staged; lost:
-    /// staged version".
     pub fn words(&self) -> String {
         let mut parts = Vec::new();
         match (self.staged, self.unstaged) {
@@ -192,12 +180,25 @@ impl FileOutcome {
 /// What's on disk at a path, against its staged version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Disk {
-    /// As staged (or absent, when nothing is).
+    /// Or absent, where nothing is staged.
     AsStaged,
     Modified,
     Deleted,
-    /// A file with nothing staged at its path.
     Untracked,
+}
+
+/// The file on disk against the target's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToTarget {
+    Same,
+    /// Lines added and removed; `None` for a binary file.
+    Differs(Option<(u32, u32)>),
+}
+
+impl ToTarget {
+    fn differs(self) -> bool {
+        self != ToTarget::Same
+    }
 }
 
 /// One path the reset concerns, as it is now. Versions are blob ids.
@@ -208,30 +209,46 @@ struct Entry {
     index: Option<String>,
     disk: Disk,
     target: Option<String>,
-    /// Its mode in the target, else in HEAD or the index.
     mode: u32,
-    /// Lines added and removed going from the file on disk to the target's (`None` when
-    /// binary); `None` outside when they're the same.
-    to_target: Option<Option<(u32, u32)>>,
+    to_target: ToTarget,
 }
 
 impl Entry {
-    fn staged(&self) -> bool {
+    /// As HEAD has it, staged and on disk, and in the target too.
+    fn new(path: &str, blob: Option<String>, mode: u32) -> Entry {
+        Entry {
+            path: path.to_owned(),
+            head: blob.clone(),
+            index: blob.clone(),
+            disk: Disk::AsStaged,
+            target: blob,
+            mode,
+            to_target: ToTarget::Same,
+        }
+    }
+
+    fn is_staged(&self) -> bool {
         self.index != self.head
     }
 
-    /// Changed on disk or staged: what Keep and Mixed leave on disk as it is.
-    fn local(&self) -> bool {
-        self.staged() || self.disk != Disk::AsStaged
+    fn has_local_changes(&self) -> bool {
+        self.is_staged() || self.disk != Disk::AsStaged
+    }
+
+    fn on_disk(&self) -> OnDisk<'_> {
+        match self.disk {
+            Disk::AsStaged => self.index.as_deref().map_or(OnDisk::Absent, OnDisk::Blob),
+            Disk::Deleted => OnDisk::Absent,
+            Disk::Modified | Disk::Untracked => OnDisk::Other,
+        }
     }
 }
 
-/// The file on disk, for `git status`.
 #[derive(Clone, Copy, Debug)]
 enum OnDisk<'a> {
     Absent,
     Blob(&'a str),
-    /// There, its content unknown: changed since it was staged, or untracked.
+    /// Changed since it was staged, or untracked: its blob id is unknown.
     Other,
 }
 
@@ -260,65 +277,52 @@ fn status(
     }
 }
 
-/// What resetting the open worktree's branch to a commit would do in each mode.
 #[derive(Clone, Debug)]
 pub struct Preview {
     pub branch: String,
     pub head: Oid,
     pub target: Oid,
-    /// Commits the branch leaves behind, and gains.
     pub behind: usize,
     pub ahead: usize,
-    /// Commits nothing reaches afterwards: lost in every mode, even when their changes stay
-    /// in the files.
-    pub commits: Vec<Oid>,
+    /// Lost in every mode, even when their changes stay in the files.
+    pub lost_commits: Vec<Oid>,
     entries: Vec<Entry>,
-    /// Git's refusal of `--keep`, from its dry run.
     keep_refusal: Option<String>,
-    /// Parterre's own refusal, of every mode.
     refusal: Option<String>,
 }
 
 impl Preview {
-    /// Reads the open worktree at `path`.
     pub fn load(path: &Path, target: Oid) -> Result<Preview, Error> {
         let catalog = Catalog::load(path)?;
         Preview::with_catalog(&catalog, target)
     }
 
     fn with_catalog(catalog: &Catalog, target: Oid) -> Result<Preview, Error> {
-        let branch = branch(catalog, target).map_err(Error::Invalid)?.to_owned();
-        let head = catalog.head.expect("checked by branch()");
+        let (branch, head) = branch_and_head(catalog, target).map_err(Error::Invalid)?;
+        let branch = branch.to_owned();
         let git = Git::new(&catalog.root);
-        let (h, t) = (head.to_hex(), target.to_hex());
-        if git
-            .query(&[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("{t}^{{commit}}"),
-            ])?
-            .is_none()
-        {
-            return Err(Error::Invalid(
-                "The commit is no longer in the repository. Reload and try again.".into(),
-            ));
-        }
+        verify_commit(&git, target)?;
+        let (head_hex, target_hex) = (head.to_hex(), target.to_hex());
         // Files only touched since git last looked count as changed to `--keep`, and to its dry
         // run: refresh first, as `git status` does.
         git.query(&["update-index", "-q", "--refresh"])?;
         let refusal = catalog
             .in_use_elsewhere(&branch)
             .map(|p| format!("Branch {branch} is in use by {}.", p.display()));
-        let keep_refusal = match git.run(&["read-tree", "-m", "-u", "-n", &h, &t]) {
+        let keep_refusal = match git.run(&["read-tree", "-m", "-u", "-n", &head_hex, &target_hex]) {
             Ok(_) => None,
             Err(GitError::Failed { stderr, .. }) => Some(stderr),
             Err(e) => return Err(e.into()),
         };
-        let counts = git.run(&["rev-list", "--left-right", "--count", &format!("{h}...{t}")])?;
+        let counts = git.run(&[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{head_hex}...{target_hex}"),
+        ])?;
         let mut counts = counts.split_whitespace().map(|n| n.parse().unwrap_or(0));
         let (behind, ahead) = (counts.next().unwrap_or(0), counts.next().unwrap_or(0));
-        let commits = lost_commits(
+        let lost_commits = lost_commits(
             &git,
             catalog,
             head,
@@ -326,26 +330,24 @@ impl Preview {
             &[catalog.root.as_path()],
             Some(target),
         )?;
-        let entries = entries(&git, &catalog.root, &h, &t)?;
+        let entries = entries(&git, &catalog.root, &head_hex, &target_hex)?;
         Ok(Preview {
             branch,
             head,
             target,
             behind,
             ahead,
-            commits,
+            lost_commits,
             entries,
             keep_refusal,
             refusal,
         })
     }
 
-    /// Parterre's own refusal, of every mode: the branch is in use in another worktree too.
     pub fn blocked(&self) -> Option<&str> {
         self.refusal.as_deref()
     }
 
-    /// Why `mode` can't run: git's refusal, or parterre's.
     pub fn refusal(&self, mode: Mode) -> Option<&str> {
         self.refusal.as_deref().or(match mode {
             Mode::Keep => self.keep_refusal.as_deref(),
@@ -353,7 +355,7 @@ impl Preview {
         })
     }
 
-    /// Every file the reset concerns, as `mode` leaves it, in path order.
+    /// In path order.
     pub fn files(&self, mode: Mode) -> Vec<FileOutcome> {
         let refusal = self.refusal(mode);
         self.entries
@@ -365,7 +367,6 @@ impl Preview {
             .collect()
     }
 
-    /// The paths whose changes `mode` loses.
     pub fn lost_files(&self, mode: Mode) -> Vec<String> {
         self.files(mode)
             .into_iter()
@@ -375,10 +376,9 @@ impl Preview {
     }
 
     pub fn loses(&self, mode: Mode) -> bool {
-        !self.commits.is_empty() || !self.lost_files(mode).is_empty()
+        !self.lost_commits.is_empty() || !self.lost_files(mode).is_empty()
     }
 
-    /// The first of Keep, Mixed and Soft that runs and loses nothing, else Keep.
     pub fn default_mode(&self) -> Mode {
         [Mode::Keep, Mode::Mixed, Mode::Soft]
             .into_iter()
@@ -386,48 +386,35 @@ impl Preview {
             .unwrap_or(Mode::Keep)
     }
 
-    /// The reset in `mode`, with what it loses now.
     pub fn reset(&self, mode: Mode) -> Reset {
         Reset {
             branch: self.branch.clone(),
             head: self.head,
             target: self.target,
             mode,
-            commits: self.commits.clone(),
-            files: self.lost_files(mode),
+            lost_commits: self.lost_commits.clone(),
+            lost_files: self.lost_files(mode),
         }
     }
 
-    /// The file as a changed-files row: the lines `mode` changes on disk.
     pub fn changed_file(&self, outcome: &FileOutcome) -> ChangedFile {
-        let spec = self.diff(outcome);
-        let (added, removed) = match outcome.lines {
-            Some((a, r)) => (Some(a), Some(r)),
-            None => (None, None),
-        };
-        ChangedFile {
-            path: outcome.path.clone(),
-            old_path: None,
-            status: spec.status,
-            modes: spec.modes,
-            added,
-            removed,
-        }
+        self.compared(outcome).0
     }
 
-    /// The diff to show for a file: for one `mode` rewrites, the file now against the target's;
-    /// otherwise what stays uncommitted afterwards, the target's against the file.
+    /// For a file the mode rewrites, the file now against the target's; otherwise what stays
+    /// uncommitted afterwards, the target's against the file.
     pub fn diff(&self, outcome: &FileOutcome) -> FileDiffSpec {
+        let (file, from, to) = self.compared(outcome);
+        FileDiffSpec::between(Some(from), to, &file)
+    }
+
+    fn compared(&self, outcome: &FileOutcome) -> (ChangedFile, Rev, Rev) {
         let e = self
             .entries
             .iter()
             .find(|e| e.path == outcome.path)
             .expect("an outcome of this preview");
-        let on_disk = match e.disk {
-            Disk::AsStaged => e.index.is_some(),
-            Disk::Modified | Disk::Untracked => true,
-            Disk::Deleted => false,
-        };
+        let on_disk = !matches!(e.on_disk(), OnDisk::Absent);
         let in_target = e.target.is_some();
         let (old, new, from, to) = if outcome.updated {
             (
@@ -457,35 +444,34 @@ impl Preview {
             added: outcome.lines.map(|l| l.0),
             removed: outcome.lines.map(|l| l.1),
         };
-        FileDiffSpec::between(Some(from), to, &file)
+        (file, from, to)
     }
 
-    /// What the reset does to the branch: "Moves main back 2 commits from 12a207f to 600e826."
     pub fn movement(&self, abbrev: usize) -> String {
-        let (b, from, to) = (
+        let (branch, from, to) = (
             &self.branch,
             self.head.short(abbrev),
             self.target.short(abbrev),
         );
         match (self.behind, self.ahead) {
             (n, 0) => format!(
-                "Moves {b} back {} from {from} to {to}.",
+                "Moves {branch} back {} from {from} to {to}.",
                 plural(n, "commit")
             ),
             (0, n) => format!(
-                "Moves {b} forward {} from {from} to {to}.",
+                "Moves {branch} forward {} from {from} to {to}.",
                 plural(n, "commit")
             ),
-            (l, g) => format!(
-                "Moves {b} from {from} to {to}, on another line: it leaves {} behind and gains {g}.",
-                plural(l, "commit")
+            (left, gained) => format!(
+                "Moves {branch} from {from} to {to}, on another line: it leaves {} behind and \
+                 gains {gained}.",
+                plural(left, "commit")
             ),
         }
     }
 
-    /// What `mode` does here, in plain words.
     pub fn help(&self, mode: Mode, abbrev: usize) -> String {
-        let (b, to) = (&self.branch, self.target.short(abbrev));
+        let (branch, to) = (&self.branch, self.target.short(abbrev));
         let n = self.behind;
         let last = if n == 1 {
             "the last commit".to_owned()
@@ -504,14 +490,14 @@ impl Preview {
                 format!("Undo {last} and drop {its} changes, and all your uncommitted changes.")
             }
             Mode::Soft => {
-                format!("Move {b} to {to}; your files and what's staged stay as they are.")
+                format!("Move {branch} to {to}; your files and what's staged stay as they are.")
             }
             Mode::Mixed => {
-                format!("Move {b} to {to}; your files stay as they are, nothing stays staged.")
+                format!("Move {branch} to {to}; your files stay as they are, nothing stays staged.")
             }
-            Mode::Keep => {
-                format!("Move {b} to {to} and update your files, keeping your uncommitted changes.")
-            }
+            Mode::Keep => format!(
+                "Move {branch} to {to} and update your files, keeping your uncommitted changes."
+            ),
             Mode::Hard => {
                 format!("Make your files exactly {to}, dropping all uncommitted changes.")
             }
@@ -519,14 +505,8 @@ impl Preview {
     }
 }
 
-/// A file as it is now, for a mode that doesn't run.
 fn unchanged(e: &Entry, refusal: &str) -> FileOutcome {
-    let disk = match e.disk {
-        Disk::AsStaged => e.index.as_deref().map_or(OnDisk::Absent, OnDisk::Blob),
-        Disk::Deleted => OnDisk::Absent,
-        Disk::Modified | Disk::Untracked => OnDisk::Other,
-    };
-    let (staged, unstaged, untracked) = status(e.head.as_deref(), e.index.as_deref(), disk);
+    let (staged, unstaged, untracked) = status(e.head.as_deref(), e.index.as_deref(), e.on_disk());
     FileOutcome {
         path: e.path.clone(),
         staged,
@@ -539,26 +519,22 @@ fn unchanged(e: &Entry, refusal: &str) -> FileOutcome {
     }
 }
 
-/// A file as `mode` leaves it: HEAD at the target; Soft keeps the index and the files, Mixed
-/// the files, Keep the files with uncommitted changes, and Hard nothing.
+/// HEAD moves to the target; Soft keeps the index and the files, Mixed the files, Keep the
+/// files with uncommitted changes, and Hard nothing.
 fn outcome(e: &Entry, mode: Mode) -> FileOutcome {
     let (target, index) = (e.target.as_deref(), e.index.as_deref());
-    let now = match e.disk {
-        Disk::AsStaged => index.map_or(OnDisk::Absent, OnDisk::Blob),
-        Disk::Deleted => OnDisk::Absent,
-        Disk::Modified | Disk::Untracked => OnDisk::Other,
-    };
+    let now = e.on_disk();
     let as_target = target.map_or(OnDisk::Absent, OnDisk::Blob);
     let ((staged, unstaged, untracked), updated) = match mode {
         Mode::Soft => (status(target, index, now), false),
         Mode::Mixed => (status(target, target, now), false),
-        Mode::Keep if e.local() => (status(target, target, now), false),
+        Mode::Keep if e.has_local_changes() => (status(target, target, now), false),
         Mode::Keep => (status(target, target, as_target), e.head != e.target),
-        Mode::Hard => (status(target, target, as_target), e.to_target.is_some()),
+        Mode::Hard => (status(target, target, as_target), e.to_target.differs()),
     };
     // A staged version is lost when it differs from the file on disk and the target's, and
     // the index goes; changes on disk when Hard writes over them.
-    let staged_lost = e.staged()
+    let staged_lost = e.is_staged()
         && index.is_some()
         && index != target
         && match mode {
@@ -568,7 +544,7 @@ fn outcome(e: &Entry, mode: Mode) -> FileOutcome {
         };
     let changes_lost = mode == Mode::Hard
         && matches!(e.disk, Disk::Modified | Disk::Untracked)
-        && e.to_target.is_some();
+        && e.to_target.differs();
     let lost = match (staged_lost, changes_lost) {
         _ if changes_lost && e.disk == Disk::Untracked => Some(Lost::Untracked),
         (true, true) => Some(Lost::StagedVersionAndChanges),
@@ -584,16 +560,15 @@ fn outcome(e: &Entry, mode: Mode) -> FileOutcome {
         updated,
         lost,
         refused: false,
-        lines: if updated {
-            e.to_target.unwrap_or(Some((0, 0)))
-        } else {
-            Some((0, 0))
+        lines: match e.to_target {
+            ToTarget::Differs(lines) if updated => lines,
+            _ => Some((0, 0)),
         },
     }
 }
 
-/// A `--raw -z` entry: modes, blob ids (`None` where the side is missing or not hashed, as the
-/// working tree's) and path.
+/// A `--raw -z` entry. A blob id is `None` where its side is missing or not hashed, as the
+/// working tree's.
 struct Raw {
     modes: [u32; 2],
     blobs: [Option<String>; 2],
@@ -639,10 +614,18 @@ fn numstat(out: &str) -> HashMap<String, Option<(u32, u32)>> {
         .collect()
 }
 
-/// The paths a reset concerns: those the commits moved away from changed, staged and modified
-/// files, and untracked files in the target's way.
-fn entries(git: &Git, root: &Path, h: &str, t: &str) -> Result<Vec<Entry>, Error> {
-    let changed = raw(&git.run(&["diff-tree", "-r", "--raw", "-z", "--no-abbrev", h, t])?)?;
+/// The paths the commits moved away from changed, staged and modified files, and untracked
+/// files in the target's way.
+fn entries(git: &Git, root: &Path, head: &str, target: &str) -> Result<Vec<Entry>, Error> {
+    let changed = raw(&git.run(&[
+        "diff-tree",
+        "-r",
+        "--raw",
+        "-z",
+        "--no-abbrev",
+        head,
+        target,
+    ])?)?;
     let staged = raw(&git.run(&[
         "diff",
         "--cached",
@@ -650,79 +633,63 @@ fn entries(git: &Git, root: &Path, h: &str, t: &str) -> Result<Vec<Entry>, Error
         "-z",
         "--no-renames",
         "--no-abbrev",
-        h,
+        head,
         "--",
     ])?)?;
     let unstaged = raw(&git.run(&["diff", "--raw", "-z", "--no-renames", "--no-abbrev", "--"])?)?;
     let untracked = git.run(&["ls-files", "--others", "--exclude-standard", "-z"])?;
-    let to_target =
-        numstat(&git.run(&["diff", "--numstat", "-z", "--no-renames", "-R", t, "--"])?);
+    let to_target = numstat(&git.run(&[
+        "diff",
+        "--numstat",
+        "-z",
+        "--no-renames",
+        "-R",
+        target,
+        "--",
+    ])?);
 
+    let newer_mode = |r: &Raw| {
+        if r.modes[1] != 0 {
+            r.modes[1]
+        } else {
+            r.modes[0]
+        }
+    };
     let mut map: HashMap<String, Entry> = HashMap::new();
     for r in &changed {
-        let e = map.entry(r.path.clone()).or_insert_with(|| Entry {
-            path: r.path.clone(),
-            head: r.blobs[0].clone(),
-            index: r.blobs[0].clone(),
-            disk: Disk::AsStaged,
-            target: r.blobs[1].clone(),
-            mode: if r.modes[1] != 0 {
-                r.modes[1]
-            } else {
-                r.modes[0]
-            },
-            to_target: None,
-        });
+        let e = map
+            .entry(r.path.clone())
+            .or_insert_with(|| Entry::new(&r.path, r.blobs[0].clone(), newer_mode(r)));
         e.target = r.blobs[1].clone();
     }
     for r in &staged {
-        let e = map.entry(r.path.clone()).or_insert_with(|| Entry {
-            path: r.path.clone(),
-            head: r.blobs[0].clone(),
-            index: r.blobs[0].clone(),
-            disk: Disk::AsStaged,
-            target: r.blobs[0].clone(),
-            mode: if r.modes[1] != 0 {
-                r.modes[1]
-            } else {
-                r.modes[0]
-            },
-            to_target: None,
-        });
+        let e = map
+            .entry(r.path.clone())
+            .or_insert_with(|| Entry::new(&r.path, r.blobs[0].clone(), newer_mode(r)));
         e.index = r.blobs[1].clone();
     }
     for r in &unstaged {
-        let e = map.entry(r.path.clone()).or_insert_with(|| Entry {
-            path: r.path.clone(),
-            head: r.blobs[0].clone(),
-            index: r.blobs[0].clone(),
-            disk: Disk::AsStaged,
-            target: r.blobs[0].clone(),
-            mode: r.modes[0],
-            to_target: None,
-        });
+        let e = map
+            .entry(r.path.clone())
+            .or_insert_with(|| Entry::new(&r.path, r.blobs[0].clone(), r.modes[0]));
         e.disk = if r.modes[1] == 0 {
             Disk::Deleted
         } else {
             Disk::Modified
         };
     }
-    for path in in_the_way(git, t, untracked.split('\0').filter(|p| !p.is_empty()))? {
-        let e = map.entry(path.clone()).or_insert_with(|| Entry {
-            path: path.clone(),
-            head: None,
-            index: None,
-            disk: Disk::AsStaged,
-            target: None,
-            mode: 0o100644,
-            to_target: None,
-        });
+    for path in in_the_way(git, target, untracked.split('\0').filter(|p| !p.is_empty()))? {
+        let e = map
+            .entry(path.clone())
+            .or_insert_with(|| Entry::new(&path, None, 0o100644));
         e.disk = Disk::Untracked;
-        e.to_target = overwritten(git, root, t, &path, e.target.as_deref())?;
+        e.to_target = overwritten(git, root, target, &path, e.target.as_deref())?;
     }
     for e in map.values_mut() {
         if e.disk != Disk::Untracked {
-            e.to_target = to_target.get(&e.path).copied();
+            e.to_target = to_target
+                .get(&e.path)
+                .map_or(ToTarget::Same, |&lines| ToTarget::Differs(lines));
         }
     }
     let mut entries: Vec<Entry> = map.into_values().collect();
@@ -730,11 +697,11 @@ fn entries(git: &Git, root: &Path, h: &str, t: &str) -> Result<Vec<Entry>, Error
     Ok(entries)
 }
 
-/// The untracked files a reset to `t` writes over: where the target has something at their
-/// path, or a file where they have a folder.
+/// The untracked files a reset to `target` writes over: where the target has something at
+/// their path, or a file where they have a folder.
 fn in_the_way<'a>(
     git: &Git,
-    t: &str,
+    target: &str,
     untracked: impl Iterator<Item = &'a str>,
 ) -> Result<Vec<String>, Error> {
     let untracked: Vec<&str> = untracked.collect();
@@ -749,90 +716,70 @@ fn in_the_way<'a>(
             continue;
         }
         asked.push((i, true, (*path).to_owned()));
-        let mut at = 0;
-        while let Some(slash) = path[at..].find('/') {
-            at += slash;
-            asked.push((i, false, path[..at].to_owned()));
-            at += 1;
+        for (slash, _) in path.match_indices('/') {
+            asked.push((i, false, path[..slash].to_owned()));
         }
     }
-    let input: String = asked.iter().map(|(_, _, p)| format!("{t}:{p}\n")).collect();
-    let out = git.run_with_input(&["cat-file", "--batch-check=%(objecttype)"], input)?;
-    let mut way = vec![false; untracked.len()];
-    for (path, _) in untracked
+    let input: String = asked
         .iter()
-        .enumerate()
-        .filter(|(_, p)| p.contains('\n'))
-    {
-        way[path] = true;
-    }
-    for ((i, whole, _), answer) in asked.iter().zip(out.lines()) {
+        .map(|(_, _, p)| format!("{target}:{p}\n"))
+        .collect();
+    let out = git.run_with_input(&["cat-file", "--batch-check=%(objecttype)"], input)?;
+    let mut in_way: Vec<bool> = untracked.iter().map(|p| p.contains('\n')).collect();
+    for ((i, is_whole_path, _), answer) in asked.iter().zip(out.lines()) {
         let kind = answer.trim();
-        if kind.ends_with(" missing") {
-            continue;
-        }
-        if *whole || kind == "blob" {
-            way[*i] = true;
+        if !kind.ends_with(" missing") && (*is_whole_path || kind == "blob") {
+            in_way[*i] = true;
         }
     }
     Ok(untracked
         .iter()
-        .zip(way)
+        .zip(in_way)
         .filter(|(_, w)| *w)
         .map(|(p, _)| (*p).to_owned())
         .collect())
 }
 
-/// Lines added and removed when the target writes over an untracked file (`None` inside when
-/// either is binary), or `None` when it writes the same: the same once git has cleaned the file
-/// as it would on `git add`, so only its line endings differing (`core.autocrlf`) is no loss.
+/// `Same` where the target has what git makes of the file on `git add`, so line endings alone
+/// (`core.autocrlf`) are no loss.
 fn overwritten(
     git: &Git,
     root: &Path,
-    t: &str,
+    target: &str,
     path: &str,
-    target: Option<&str>,
-) -> Result<Option<Option<(u32, u32)>>, Error> {
+    target_blob: Option<&str>,
+) -> Result<ToTarget, Error> {
     let file = root.join(path);
     let now = match std::fs::read(&file) {
         Ok(bytes) => bytes,
         // A folder where the target has a file, or gone since.
-        Err(_) if !file.is_file() => return Ok(Some(None)),
+        Err(_) if !file.is_file() => return Ok(ToTarget::Differs(None)),
         Err(e) => return Err(io_error(&file, e)),
     };
-    if let Some(target) = target
-        && git.run(&["hash-object", "--", path])?.trim() == target
+    if let Some(blob) = target_blob
+        && git.run(&["hash-object", "--", path])?.trim() == blob
     {
-        return Ok(None);
+        return Ok(ToTarget::Same);
     }
-    let after = match target {
-        Some(_) => git.run_bytes(&["cat-file", "blob", &format!("{t}:{path}")])?,
+    let after = match target_blob {
+        Some(_) => git.run_bytes(&["cat-file", "blob", &format!("{target}:{path}")])?,
         None => Vec::new(),
     };
     if now.contains(&0) || after.contains(&0) {
-        return Ok(Some(None));
+        return Ok(ToTarget::Differs(None));
     }
-    // Lines that differ only in their endings aren't changes.
     let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).replace("\r\n", "\n");
     let diff = FileDiff::new(&text(&now), &text(&after), DiffOptions::default());
-    Ok(Some(Some((diff.added, diff.removed))))
+    Ok(ToTarget::Differs(Some((diff.added, diff.removed))))
 }
 
-/// Runs `reset` if the branch is still where it was and the reset still loses what was agreed
-/// to; git has the last word on what it refuses.
 pub(crate) fn execute(
     catalog: &Catalog,
     reset: &Reset,
     cancel: &CancelTree,
     report: &mut Report,
 ) -> Result<(), Error> {
-    if catalog.current.as_deref() != Some(reset.branch.as_str()) || catalog.head != Some(reset.head)
-    {
-        return Err(Error::Invalid(format!(
-            "Branch {} moved, or is no longer checked out here. Reload and try again.",
-            reset.branch
-        )));
-    }
+    refuse_if_moved(catalog, &reset.branch, reset.head)?;
     let preview = Preview::with_catalog(catalog, reset.target)?;
     if let Some(refusal) = &preview.refusal {
         return Err(Error::Invalid(refusal.clone()));
@@ -843,23 +790,7 @@ pub(crate) fn execute(
         ));
     }
     let git = Git::new(&catalog.root);
-    let args = command(reset.mode, reset.target);
-    if !run(&git, args, cancel, report)? {
-        return Err(Error::Failed(report.steps.last().unwrap().output.clone()));
-    }
-    Ok(())
-}
-
-fn plural(n: usize, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
-}
-
-fn capitalized(s: &str) -> String {
-    let mut chars = s.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
+    run_or_fail(&git, command(reset.mode, reset.target), cancel, report)
 }
 
 #[cfg(test)]
@@ -874,12 +805,10 @@ mod tests {
             disk,
             target: target.map(str::to_owned),
             mode: 0o100644,
-            to_target: Some(Some((1, 1))),
+            to_target: ToTarget::Differs(Some((1, 1))),
         }
     }
 
-    /// The correction on "Research: moving a branch pointer" (#170): a file staged as S and
-    /// edited to W since loses S in Mixed, Keep and Hard, and keeps it in Soft.
     #[test]
     fn a_partially_staged_file_loses_its_staged_version_unless_soft() {
         let e = entry(Some("h"), Some("s"), Disk::Modified, Some("h"));

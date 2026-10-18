@@ -1,24 +1,34 @@
-//! Crossing minimisation: ordering items within their layers.
-//!
-//! Starts from a depth-first order that keeps first-parent lines together, then applies
-//! layer-by-layer median sweeps (Eades & Wormald; Gansner et al.) with transposition,
-//! keeping the best ordering seen, as measured by an exact crossing count (Barth, Jünger &
-//! Mutzel). Several runs from perturbed starting orders are made, as OGDF does.
+//! Crossing minimisation. Starts from a depth-first order that keeps first-parent lines
+//! together, then applies layer-by-layer median sweeps (Eades & Wormald; Gansner et al.) with
+//! transposition, keeping the best ordering seen by an exact crossing count (Barth, Jünger &
+//! Mutzel). As OGDF's `SugiyamaLayout` does, several runs are made, all but the first from a
+//! randomly perturbed copy of the depth-first order, and the best is kept.
 
-use super::{LayeredGraph, LayoutInput};
+use super::LayoutInput;
+use super::layered::LayeredGraph;
+use super::trunk::Side;
 
-/// Maximum number of down+up sweep pairs per run.
+/// Per run, each a sweep down and one up.
 const MAX_SWEEPS: usize = 24;
-/// Stop a run after this many sweeps without improvement.
-const PATIENCE: usize = 4;
-/// Transpose passes per sweep at most.
+const MAX_SWEEPS_WITHOUT_IMPROVEMENT: usize = 4;
 const MAX_TRANSPOSE_PASSES: usize = 8;
 
-/// Orders every layer to reduce crossings and returns the number of crossings left.
-///
-/// Like OGDF's `SugiyamaLayout` (15 runs by default), several runs are made from different
-/// starting orders and the best result is kept: the first run starts from the depth-first
-/// order, later ones from randomly perturbed copies of it. Large graphs get fewer runs.
+#[derive(Clone, Copy)]
+enum Neighbours {
+    Above,
+    Below,
+}
+
+impl Neighbours {
+    fn of(self, g: &LayeredGraph, item: usize) -> &[(u32, f32)] {
+        match self {
+            Neighbours::Above => g.up(item),
+            Neighbours::Below => g.down(item),
+        }
+    }
+}
+
+/// Returns the crossings left.
 pub fn minimize_crossings(g: &mut LayeredGraph, input: &LayoutInput) -> u64 {
     initial_order(g, input);
     if g.layers.len() < 2 {
@@ -34,7 +44,7 @@ pub fn minimize_crossings(g: &mut LayeredGraph, input: &LayoutInput) -> u64 {
     let transpose = items <= 40_000;
 
     let start = g.layers.clone();
-    let mut best = g.layers.clone();
+    let mut best = Vec::new();
     let mut best_crossings = u64::MAX;
     let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
     for run in 0..runs {
@@ -56,7 +66,6 @@ pub fn minimize_crossings(g: &mut LayeredGraph, input: &LayoutInput) -> u64 {
     best_crossings
 }
 
-/// One run of alternating median sweeps (with transposition), keeping the best ordering.
 fn sweep_run(g: &mut LayeredGraph, transpose: bool) -> u64 {
     g.update_positions();
     let mut best = g.layers.clone();
@@ -68,10 +77,10 @@ fn sweep_run(g: &mut LayeredGraph, transpose: bool) -> u64 {
             break;
         }
         for l in 1..g.layers.len() {
-            reorder_layer(g, l, true, sweep, &mut scratch);
+            reorder_layer(g, l, Neighbours::Above, sweep, &mut scratch);
         }
         for l in (0..g.layers.len() - 1).rev() {
-            reorder_layer(g, l, false, sweep, &mut scratch);
+            reorder_layer(g, l, Neighbours::Below, sweep, &mut scratch);
         }
         if transpose {
             transpose_all(g);
@@ -83,7 +92,7 @@ fn sweep_run(g: &mut LayeredGraph, transpose: bool) -> u64 {
             stale = 0;
         } else {
             stale += 1;
-            if stale >= PATIENCE {
+            if stale >= MAX_SWEEPS_WITHOUT_IMPROVEMENT {
                 break;
             }
         }
@@ -93,8 +102,7 @@ fn sweep_run(g: &mut LayeredGraph, transpose: bool) -> u64 {
     best_crossings
 }
 
-/// Randomly swaps some neighbouring items in every layer, so that a run explores a different
-/// part of the search space while keeping most of the depth-first structure.
+/// Swaps random neighbouring items in every layer, keeping most of the depth-first structure.
 fn perturb(g: &mut LayeredGraph, rng: &mut XorShift) {
     for layer in &mut g.layers {
         let n = layer.len();
@@ -103,37 +111,42 @@ fn perturb(g: &mut LayeredGraph, rng: &mut XorShift) {
         }
         for _ in 0..n.div_ceil(3) {
             let i = (rng.next() % (n as u64 - 1)) as usize;
-            if !g.side.is_empty() && g.side[layer[i] as usize] != g.side[layer[i + 1] as usize] {
-                continue;
+            if same_side(&g.side, layer[i], layer[i + 1]) {
+                layer.swap(i, i + 1);
             }
-            layer.swap(i, i + 1);
         }
     }
     g.update_positions();
 }
 
-/// Swaps adjacent items wherever that reduces crossings with both neighbouring layers, until
-/// no swap helps (the "transpose" heuristic of Gansner et al.).
+/// Items never swap across the trunk.
+fn same_side(side: &[Side], a: u32, b: u32) -> bool {
+    side.is_empty() || side[a as usize] == side[b as usize]
+}
+
+/// Gansner et al.'s transpose heuristic: swaps adjacent items wherever that reduces crossings
+/// with both neighbouring layers, until no swap helps.
 fn transpose_all(g: &mut LayeredGraph) {
-    let mut up_a = Vec::new();
-    let mut up_b = Vec::new();
+    let mut around_a = Vec::new();
+    let mut around_b = Vec::new();
     for _ in 0..MAX_TRANSPOSE_PASSES {
         let mut improved = false;
         for l in 0..g.layers.len() {
             for i in 0..g.layers[l].len().saturating_sub(1) {
-                let (a, b) = (g.layers[l][i] as usize, g.layers[l][i + 1] as usize);
-                if !g.side.is_empty() && g.side[a] != g.side[b] {
+                let (a, b) = (g.layers[l][i], g.layers[l][i + 1]);
+                if !same_side(&g.side, a, b) {
                     continue;
                 }
-                let mut keep = 0;
-                let mut swap = 0;
-                for up in [true, false] {
-                    neighbour_positions(g, a, up, &mut up_a);
-                    neighbour_positions(g, b, up, &mut up_b);
-                    keep += pair_crossings(&up_a, &up_b);
-                    swap += pair_crossings(&up_b, &up_a);
+                let (a, b) = (a as usize, b as usize);
+                let mut crossings_kept = 0;
+                let mut crossings_swapped = 0;
+                for neighbours in [Neighbours::Above, Neighbours::Below] {
+                    neighbour_positions(g, a, neighbours, &mut around_a);
+                    neighbour_positions(g, b, neighbours, &mut around_b);
+                    crossings_kept += pair_crossings(&around_a, &around_b);
+                    crossings_swapped += pair_crossings(&around_b, &around_a);
                 }
-                if swap < keep {
+                if crossings_swapped < crossings_kept {
                     g.layers[l].swap(i, i + 1);
                     g.pos[a] = (i + 1) as u32;
                     g.pos[b] = i as u32;
@@ -147,8 +160,12 @@ fn transpose_all(g: &mut LayeredGraph) {
     }
 }
 
-fn neighbour_positions(g: &LayeredGraph, item: usize, up: bool, out: &mut Vec<u32>) {
-    let list = if up { g.up(item) } else { g.down(item) };
+fn neighbour_positions(g: &LayeredGraph, item: usize, neighbours: Neighbours, out: &mut Vec<u32>) {
+    // Matched here: [`Neighbours::of`] isn't inlined, which makes transposing 6% slower.
+    let list = match neighbours {
+        Neighbours::Above => g.up(item),
+        Neighbours::Below => g.down(item),
+    };
     out.clear();
     out.extend(list.iter().map(|&(nb, _)| g.pos[nb as usize]));
     out.sort_unstable();
@@ -168,7 +185,7 @@ fn pair_crossings(left: &[u32], right: &[u32]) -> u64 {
     count
 }
 
-/// Small deterministic PRNG (layouts must be reproducible).
+/// Deterministic: layouts must be reproducible.
 struct XorShift(u64);
 
 impl XorShift {
@@ -185,15 +202,16 @@ impl XorShift {
 /// Depth-first from the tips (priority nodes first), descending into first parents before
 /// other parents, so that each first-parent line forms a contiguous left-to-right band.
 fn initial_order(g: &mut LayeredGraph, input: &LayoutInput) {
-    let n_items = g.items.len();
-    let mut seq = vec![u32::MAX; n_items];
+    let mut seq = vec![u32::MAX; g.items.len()];
     let mut next = 0u32;
 
     let mut starts: Vec<u32> = input.priority.clone();
     let mut by_age: Vec<u32> = (0..g.node_count as u32).collect();
     by_age.sort_by_key(|&v| {
-        let time = input.times.get(v as usize).copied().unwrap_or(0);
-        (g.items[v as usize].layer, std::cmp::Reverse(time))
+        (
+            g.items[v as usize].layer,
+            std::cmp::Reverse(input.time(v as usize)),
+        )
     });
     starts.extend(by_age);
 
@@ -231,14 +249,13 @@ fn initial_order(g: &mut LayeredGraph, input: &LayoutInput) {
             layer.sort_by_key(|&i| {
                 let s = side[i as usize];
                 let k = seq[i as usize] as i64;
-                (s, if s < 0 { -k } else { k })
+                (s, if s == Side::Left { -k } else { k })
             });
         }
     }
     g.update_positions();
 }
 
-/// Reusable buffers for [`reorder_layer`].
 #[derive(Default)]
 struct Scratch {
     values: Vec<f32>,
@@ -246,12 +263,12 @@ struct Scratch {
     movable: Vec<(f32, usize, u32)>,
 }
 
-/// Reorders layer `l` by the median position of each item's neighbours in the adjacent layer
-/// (above when sweeping down). Items without such neighbours keep their slot.
+/// Orders layer `l` by the median position of each item's `neighbours`. Items without any
+/// keep their slot.
 fn reorder_layer(
     g: &mut LayeredGraph,
     l: usize,
-    sweeping_down: bool,
+    neighbours: Neighbours,
     sweep: usize,
     s: &mut Scratch,
 ) {
@@ -260,14 +277,13 @@ fn reorder_layer(
     }
     s.keys.clear();
     for &i in &g.layers[l] {
-        let neighbours = if sweeping_down {
-            g.up(i as usize)
-        } else {
-            g.down(i as usize)
-        };
         s.values.clear();
-        s.values
-            .extend(neighbours.iter().map(|&(nb, _)| g.pos[nb as usize] as f32));
+        s.values.extend(
+            neighbours
+                .of(g, i as usize)
+                .iter()
+                .map(|&(nb, _)| g.pos[nb as usize] as f32),
+        );
         s.keys.push(median(&mut s.values));
     }
     s.movable.clear();
@@ -291,7 +307,7 @@ fn reorder_layer(
             layer[slot] = movable.next().expect("one movable item per keyed slot").2;
         }
     }
-    // Each side of the trunk stays on its side.
+    // Items never move across the trunk.
     if !g.side.is_empty() {
         let side = &g.side;
         layer.sort_by_key(|&i| side[i as usize]);
@@ -324,8 +340,7 @@ fn median(values: &mut [f32]) -> Option<f32> {
     })
 }
 
-/// Total number of edge crossings between all adjacent layer pairs.
-pub fn total_crossings(g: &LayeredGraph) -> u64 {
+fn total_crossings(g: &LayeredGraph) -> u64 {
     let mut edges: Vec<(u32, u32)> = Vec::new();
     let mut total = 0;
     for l in 0..g.layers.len().saturating_sub(1) {
@@ -340,8 +355,8 @@ pub fn total_crossings(g: &LayeredGraph) -> u64 {
     total
 }
 
-/// Counts crossings among edges between two layers, given as (upper pos, lower pos), by
-/// counting inversions of the lower positions with a Fenwick tree.
+/// Crossings among edges between two layers, given as (upper pos, lower pos): inversions of
+/// the lower positions, counted with a Fenwick tree.
 fn bilayer_crossings(edges: &mut [(u32, u32)], lower_len: usize) -> u64 {
     edges.sort_unstable();
     let mut tree = vec![0u64; lower_len + 1];
@@ -370,11 +385,9 @@ mod tests {
 
     #[test]
     fn counts_bilayer_crossings() {
-        // Upper 0 -> lower 1, upper 1 -> lower 0: one crossing.
         assert_eq!(bilayer_crossings(&mut [(0, 1), (1, 0)], 2), 1);
         // Shared endpoints do not cross.
         assert_eq!(bilayer_crossings(&mut [(0, 0), (0, 1), (1, 1)], 2), 0);
-        // Complete reversal of three edges: three crossings.
         assert_eq!(bilayer_crossings(&mut [(0, 2), (1, 1), (2, 0)], 3), 3);
     }
 

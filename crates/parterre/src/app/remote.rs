@@ -1,13 +1,9 @@
-//! Keeping branches and their remotes in step (#181): *Pull*, *Push* and *Set upstream…* in the
-//! node menu, the question before pulling a diverged branch, the upstream dialog, and the
-//! window with git's output while a fetch, pull or push runs. Deleting remote branches (#318):
-//! what the question before it says, and the open pull requests that refuse it.
-
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use eframe::egui::{self, Align, Layout, RichText, Ui, ViewportId, vec2};
-use parterre_core::branches::{Action, Catalog, command_text};
+use parterre_core::branches::{Action, Catalog, LocalBranch, command_text};
 use parterre_core::git::Git;
 use parterre_core::remote::{
     self, Diverged, Live, Pull, PushState, Reconcile, RemoteBranchTip, SetUpstream,
@@ -15,8 +11,20 @@ use parterre_core::remote::{
 use parterre_core::{Oid, Repo};
 use parterre_forge::{self as forge, Proposed};
 
-use super::branches::{Request, Target, capitalized, loading_reason, target_menu_named};
-use crate::{dialogs, menu, widgets};
+use super::branches::{Request, Target, operation_item, target_menu_named};
+use crate::{dialogs, menu, widgets, worker};
+
+/// Pulling the current branch, where [`remote::pull_offered`] offers it at `commit`, and the
+/// branch.
+pub(super) fn pull_at(catalog: &Catalog, commit: Oid) -> Option<(&LocalBranch, Request)> {
+    let branch = remote::pull_offered(catalog, commit)?;
+    let pull = Pull {
+        branch: branch.name.clone(),
+        head: catalog.head?,
+        how: None,
+    };
+    Some((branch, Request::Run(Action::Pull(Box::new(pull)))))
+}
 
 /// *Pull* on the open worktree's branch or its upstream, *Push* and *Set upstream…* for the
 /// local branches at `commit`, after a separator; nothing without a remote.
@@ -28,32 +36,19 @@ pub(super) fn section(
     busy: bool,
 ) -> Option<Request> {
     let locals: Vec<_> = catalog.locals.iter().filter(|b| b.tip == commit).collect();
-    let pull = remote::pull_offered(catalog, commit).zip(catalog.head);
+    let pull = pull_at(catalog, commit);
     if (locals.is_empty() && pull.is_none()) || catalog.remote_names.is_empty() {
         return None;
     }
     let mut request = None;
     menu::separator(ui);
-    if let Some((branch, head)) = pull {
-        let stuck = catalog.stuck().map(|s| s.reason());
-        let upstream = branch.upstream.clone().unwrap_or_default();
-        let response = ui
-            .add_enabled(
-                !busy && stuck.is_none(),
-                egui::Button::new(format!("Pull {}", branch.name)),
-            )
-            .on_hover_text(format!("From {upstream}"));
-        let response = match stuck {
-            Some(reason) => response.on_disabled_hover_text(capitalized(&reason)),
-            None => response.on_disabled_hover_text(loading_reason(true)),
-        };
-        if response.clicked() {
-            request = Some(Request::Run(Action::Pull(Box::new(Pull {
-                branch: branch.name.clone(),
-                head,
-                how: None,
-            }))));
-            ui.close();
+    if let Some((branch, pull)) = pull {
+        let upstream = branch.upstream.as_deref().unwrap_or_default();
+        if operation_item(ui, format!("Pull {}", branch.name), catalog, busy)
+            .on_hover_text(format!("From {upstream}"))
+            .clicked()
+        {
+            request = Some(pull);
         }
     }
     if locals.is_empty() {
@@ -125,7 +120,7 @@ pub(super) fn network_window(
 ) -> bool {
     let steps = live.steps();
     // git's output comes from another thread.
-    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    ctx.request_repaint_after(Duration::from_millis(100));
     let shown = dialogs::Dialog::new("network-operation", title)
         .screen(crate::usage::Screen::Network)
         .width(560.0)
@@ -160,10 +155,10 @@ pub(super) fn network_window(
 }
 
 /// How to pull a branch that has diverged from its upstream, when git's config doesn't say:
-/// merge or rebase, as `git pull` itself asks. Remembers nothing.
+/// merge or rebase, as `git pull` itself asks.
 #[derive(Debug)]
 pub struct PullDialog {
-    pub diverged: Diverged,
+    diverged: Diverged,
     how: Reconcile,
     pub opener: ViewportId,
     fresh: bool,
@@ -183,7 +178,6 @@ impl PullDialog {
         self.diverged.pull(self.how)
     }
 
-    /// `busy` while another Git operation runs.
     pub fn show(&mut self, ctx: &egui::Context, busy: bool) -> dialogs::Answer {
         let d = &self.diverged;
         let title = format!("Pull {} into {}", d.upstream, d.pull.branch);
@@ -212,24 +206,19 @@ impl PullDialog {
                     }
                 }
                 dialogs::command_box(ui, &[command_text(&d.command(self.how))]);
-                dialogs::actions(ui, "Pull", !busy, false, false)
+                dialogs::actions(ui, dialogs::Primary::new("Pull").enabled(!busy))
             });
         self.fresh = false;
-        if shown.should_close() {
-            dialogs::Answer::Cancel
-        } else {
-            shown.inner
-        }
+        shown.answer()
     }
 }
 
 /// A local branch's upstream: one of the remote-tracking branches, or none.
 #[derive(Debug)]
 pub struct SetUpstreamDialog {
-    pub branch: String,
+    branch: String,
     upstream: Option<String>,
-    /// What it is now.
-    current: Option<String>,
+    configured: Option<String>,
     choices: Vec<String>,
     pub opener: ViewportId,
     fresh: bool,
@@ -239,7 +228,7 @@ impl SetUpstreamDialog {
     /// Its upstream to start with: the one it has, else its own name on the first remote that
     /// has it.
     pub fn new(catalog: &Catalog, branch: String, opener: ViewportId) -> Self {
-        let current = catalog
+        let configured = catalog
             .locals
             .iter()
             .find(|b| b.name == branch)
@@ -257,8 +246,8 @@ impl SetUpstreamDialog {
             .map(|r| format!("{r}/{branch}"))
             .find(|n| choices.contains(n));
         SetUpstreamDialog {
-            upstream: current.clone().or(own),
-            current,
+            upstream: configured.clone().or(own),
+            configured,
             choices,
             branch,
             opener,
@@ -266,8 +255,7 @@ impl SetUpstreamDialog {
         }
     }
 
-    /// The upstream chosen, once one is.
-    fn set(&self) -> Option<SetUpstream> {
+    fn chosen(&self) -> Option<SetUpstream> {
         Some(SetUpstream {
             branch: self.branch.clone(),
             upstream: self.upstream.clone()?,
@@ -275,10 +263,9 @@ impl SetUpstreamDialog {
     }
 
     pub fn action(&self) -> Option<Action> {
-        self.set().map(|set| Action::SetUpstream(Box::new(set)))
+        self.chosen().map(|set| Action::SetUpstream(Box::new(set)))
     }
 
-    /// `busy` while another Git operation runs.
     pub fn show(&mut self, ctx: &egui::Context, busy: bool) -> dialogs::Answer {
         let title = format!("Set upstream of {}", self.branch);
         let shown = dialogs::Dialog::new("set-upstream", &title)
@@ -297,37 +284,33 @@ impl SetUpstreamDialog {
                         &self.choices,
                     );
                     // An upstream pruned from the remote isn't among the choices.
-                    if let Some(current) = &self.current
-                        && !self.choices.contains(current)
+                    if let Some(configured) = &self.configured
+                        && !self.choices.contains(configured)
                     {
-                        ui.weak(format!("Now {current}, which is gone."));
+                        ui.weak(format!("Now {configured}, which is gone."));
                     }
                 });
-                let set = self.set();
-                let commands: Vec<String> = set
+                let chosen = self.chosen();
+                let commands: Vec<String> = chosen
                     .iter()
                     .map(|set| command_text(&remote::set_upstream_command(set)))
                     .collect();
                 dialogs::command_box(ui, &commands);
-                let changed = set.is_some() && self.upstream != self.current;
-                dialogs::actions(ui, "Set", changed && !busy, false, false)
+                let changed = chosen.is_some() && self.upstream != self.configured;
+                dialogs::actions(ui, dialogs::Primary::new("Set").enabled(changed && !busy))
             });
         self.fresh = false;
-        if shown.should_close() {
-            dialogs::Answer::Cancel
-        } else {
-            shown.inner
-        }
+        shown.answer()
     }
 }
 
 /// The open pull requests of remote branches about to be deleted, being asked for.
 #[derive(Debug)]
 pub struct PullRequestCheck {
-    rx: Option<std::sync::mpsc::Receiver<Vec<Proposed>>>,
+    rx: Option<mpsc::Receiver<Vec<Proposed>>>,
     /// One for each branch, once asked.
     found: Option<Vec<Proposed>>,
-    branches: usize,
+    branch_count: usize,
 }
 
 impl PullRequestCheck {
@@ -337,35 +320,33 @@ impl PullRequestCheck {
         branches: &[RemoteBranchTip],
         canned: Option<Arc<str>>,
     ) -> PullRequestCheck {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let ctx = ctx.clone();
         let named: Vec<(String, String)> = branches
             .iter()
             .map(|b| (b.remote.clone(), b.branch.clone()))
             .collect();
-        std::thread::spawn(move || {
-            let found = forge::proposals(&Git::new(&path), &named, canned.as_deref());
-            let _ = tx.send(found);
-            ctx.request_repaint();
+        let rx = worker::spawn(ctx, move || {
+            forge::proposals(&Git::new(&path), &named, canned.as_deref())
         });
         PullRequestCheck {
             rx: Some(rx),
             found: None,
-            branches: branches.len(),
+            branch_count: branches.len(),
         }
     }
 
     fn poll(&mut self) {
-        let Some(rx) = &self.rx else { return };
-        match rx.try_recv() {
-            Ok(found) => self.found = Some(found),
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                let why = Proposed::Unknown("the check stopped unexpectedly".into());
-                self.found = Some(vec![why; self.branches]);
-            }
+        let stopped = || {
+            let why = Proposed::Unknown("the check stopped unexpectedly".into());
+            vec![why; self.branch_count]
+        };
+        if let Some(found) = self
+            .rx
+            .as_ref()
+            .and_then(|rx| worker::received(rx, stopped))
+        {
+            self.found = Some(found);
+            self.rx = None;
         }
-        self.rx = None;
     }
 
     /// Deleting may go ahead: the check is done, and no branch has an open pull request.
@@ -402,8 +383,7 @@ pub(super) fn deletion_notes(
             [one] => {
                 ui.label(format!("{one} loses its upstream."));
             }
-            many => {
-                let (last, rest) = many.split_last().expect("several");
+            [rest @ .., last] => {
                 ui.label(format!(
                     "{} and {last} lose their upstream.",
                     rest.join(", ")
@@ -446,7 +426,7 @@ mod tests {
     use parterre_core::remote::{Live, Pull, Push, RemoteBranchTip};
 
     use super::super::branches::Request;
-    use super::super::tool_harness::{Harness, collect, git, load, menu, write};
+    use super::super::tool_harness::{Harness, git, load, menu, run_frame, write};
 
     /// A bare `origin`, and a clone of it on `main` at one commit, tracking `origin/main`.
     fn cloned() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -704,14 +684,9 @@ mod tests {
         let ctx = egui::Context::default();
         let mut texts = Vec::new();
         for _ in 0..3 {
-            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            texts = run_frame(&ctx, egui::RawInput::default(), |ui| {
                 super::network_window(ui.ctx(), "Fetch", &live, egui::ViewportId::ROOT);
             });
-            output.textures_delta.clear();
-            texts.clear();
-            for clipped in &output.shapes {
-                collect(&clipped.shape, &mut texts);
-            }
         }
         let texts: Vec<_> = texts.into_iter().map(|(t, _)| t).collect();
         for text in [

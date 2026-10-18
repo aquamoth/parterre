@@ -1,6 +1,3 @@
-//! parterre: a standalone TortoiseGit-style revision graph viewer.
-
-// Release builds on Windows are GUI-subsystem apps (no console window); see `console`.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod about;
@@ -20,6 +17,7 @@ mod keys;
 #[cfg(target_os = "macos")]
 mod macos;
 mod menu;
+mod notice;
 mod raster;
 mod record;
 mod render;
@@ -34,31 +32,33 @@ mod text_size;
 mod theme;
 mod upstreams;
 mod usage;
-// Runs in build.rs; compiled here only for its tests.
-#[cfg(test)]
-mod version;
 mod view;
 mod widgets;
-// Runs in build.rs; compiled here only for its tests.
+mod worker;
+
+// Run in build.rs; compiled here only for their tests.
+#[cfg(test)]
+mod version;
 #[cfg(test)]
 mod win_resource;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
+use anyhow::Context as _;
 use clap::{Parser, ValueEnum};
 use eframe::egui;
 use parterre_core::file_diff::{Whitespace, WordMode};
-use parterre_core::layout::Direction;
+use parterre_core::layout::{Direction, Trunk};
 use parterre_core::log_layout::LogLayout;
 use parterre_core::physics::DragModel;
 use parterre_core::revgraph::Simplification;
 
 use crate::automation::Automation;
+use crate::settings::{DiffForm, Look, Settings};
 use crate::theme::ThemeChoice;
 
-/// This build's version: `0.5.0-rc1 (a1b2c3d)` for a tagged release,
-/// `0.5.1-dev.3+a1b2c3d` three commits after `v0.5.0`.
 const VERSION: &str = env!("PARTERRE_VERSION");
 
 /// Show the revision graph of a git repository: how its branches and tags relate.
@@ -71,11 +71,11 @@ struct Cli {
 
     /// Which commits to show.
     #[arg(long, value_enum)]
-    mode: Option<Mode>,
+    mode: Option<ModeArg>,
 
     /// Where the newest commits go.
     #[arg(long, value_enum)]
-    direction: Option<Dir>,
+    direction: Option<DirectionArg>,
 
     /// Overall look: "modern" (curved, bundled edges) or "classic" (straight, separate edges).
     #[arg(long, value_enum)]
@@ -146,7 +146,7 @@ struct Cli {
 
     /// Colour theme.
     #[arg(long, value_enum)]
-    theme: Option<Theme>,
+    theme: Option<ThemeArg>,
 
     /// Text size of every window (1 = 100%, 0.5 to 3); the graph keeps its own zoom.
     #[arg(long, value_name = "SIZE")]
@@ -264,7 +264,7 @@ enum LogLayoutArg {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum Mode {
+enum ModeArg {
     /// Commits with refs, and merges joining them (the default).
     Labelled,
     /// Also where labelled commits' histories fork apart.
@@ -289,7 +289,7 @@ enum LookArg {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum Dir {
+enum DirectionArg {
     Top,
     Bottom,
     Left,
@@ -297,7 +297,7 @@ enum Dir {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum Theme {
+enum ThemeArg {
     System,
     Light,
     Dark,
@@ -314,102 +314,65 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
 fn main() -> ExitCode {
     startup::begin();
     console::attach_parent();
-    let mut cli = Cli::parse();
-    if let Some(id) = cli.highlight.as_deref() {
-        return ExitCode::from(parterre_highlight::serve(id));
+    let cli = Cli::parse();
+    if let Some(language) = cli.highlight.as_deref() {
+        return ExitCode::from(parterre_highlight::serve(language));
     }
+    match run(cli) {
+        Ok(()) if automation::failed() => ExitCode::FAILURE,
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("parterre: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(mut cli: Cli) -> Result<(), String> {
     cli.path = cli.path.take().map(repair_quoted_root);
     // Started from the Dock, the shell's PATH is read while the window comes up (#326).
     parterre_core::shell_path::start();
-    let script = match cli.script.as_deref().map(read_script).transpose() {
-        Ok(script) => script,
-        Err(e) => {
-            eprintln!("parterre: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let record = match cli.record.as_deref().map(record::Format::of).transpose() {
-        Ok(format) => cli.record.clone().zip(format),
-        Err(e) => {
-            eprintln!("parterre: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let canned_pull_requests = match &cli.pull_requests_from {
-        Some(path) => match std::fs::read_to_string(path) {
-            Ok(json) => Some(json),
-            Err(e) => {
-                eprintln!("parterre: could not read {}: {e}", path.display());
-                return ExitCode::FAILURE;
-            }
-        },
+    let script = cli.script.as_deref().map(read_script).transpose()?;
+    let record = match &cli.record {
+        Some(path) => Some((path.clone(), record::Format::of(path)?)),
         None => None,
     };
-    let canned_repositories = match &cli.github_repositories_from {
-        Some(path) => match std::fs::read_to_string(path) {
-            Ok(json) => match parterre_forge::github::repositories_canned(&json) {
-                Ok(_) => Some(json),
-                Err(e) => {
-                    eprintln!("parterre: {}: {e}", path.display());
-                    return ExitCode::FAILURE;
-                }
-            },
-            Err(e) => {
-                eprintln!("parterre: could not read {}: {e}", path.display());
-                return ExitCode::FAILURE;
-            }
-        },
-        None => None,
-    };
+    let canned_pull_requests = cli
+        .pull_requests_from
+        .as_deref()
+        .map(read_file)
+        .transpose()?;
+    let canned_repositories = cli
+        .github_repositories_from
+        .as_deref()
+        .map(read_canned_repositories)
+        .transpose()?;
     if let Some(version) = &cli.newer_release
         && parterre_telemetry::Version::parse(version).is_none()
     {
-        eprintln!("parterre: --newer-release {version}: not a version");
-        return ExitCode::FAILURE;
+        return Err(format!("--newer-release {version}: not a version"));
     }
     let scripted = cli.screenshot.is_some() || script.is_some();
-    // The repository loads on a thread of its own while the window comes up, which hides most
-    // of the load behind the window's own start (#309); the window shows why if it fails.
-    // Started from a menu or file manager with none named, the current directory is tried.
+    // Loading while the window comes up hides most of the load behind the window's own start
+    // (#309).
     let opening = app::Opening::start(cli.path.clone());
-    // An export has no window to wait in, and a scripted run says why it failed and stops
-    // before any window: those wait for the load here.
-    let (repo, opening) = if cli.export.is_some() || scripted {
-        match opening.wait() {
-            Ok(repo) => (repo, None),
-            Err(e) => {
-                eprintln!("parterre: {e}");
-                return ExitCode::FAILURE;
-            }
-        }
+    // An export has no window to wait in, and a scripted run fails before opening one.
+    if let Some(path) = &cli.export {
+        return export_headless(&cli, opening.wait()?, path);
+    }
+    let (repo, opening) = if scripted {
+        (opening.wait()?, None)
     } else {
         (None, Some(opening))
     };
 
-    if let Some(path) = cli.export.clone() {
-        let Some(repo) = repo else {
-            eprintln!("parterre: not in a git repository; name one to export");
-            return ExitCode::FAILURE;
-        };
-        let mut settings = settings::Settings::default();
-        apply_cli(&cli, &mut settings);
-        let zoom = cli.zoom.unwrap_or(1.0);
-        return match export_headless(&std::sync::Arc::new(repo), &settings, &path, zoom) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("parterre: could not write {}: {e}", path.display());
-                ExitCode::FAILURE
-            }
-        };
-    }
-
-    // A screenshot run exits by itself and reports where it saved, as a recording does; an
-    // interactive window must not be tied to the terminal it was started from.
-    if !scripted && record.is_none() && !startup::enabled() {
+    let interactive = !scripted && record.is_none();
+    // Scripted and recorded runs report to the terminal; an interactive window must outlive it.
+    if interactive && !startup::enabled() {
         console::detach();
     }
 
-    let (w, h) = cli.window_size.unwrap_or((1400.0, 900.0));
+    let (width, height) = cli.window_size.unwrap_or((1400.0, 900.0));
     // On Wayland a vsync'ed swap of a hidden window blocks the whole app (egui#5145); see
     // `frame_pacing`. eframe reads this once, when it creates the GL context.
     let vsync = !frame_pacing::wayland_session();
@@ -421,20 +384,18 @@ fn main() -> ExitCode {
                     .map_or_else(|| app::window_title(repo.as_ref()), app::Opening::title),
             )
             .with_app_id(settings::APP_ID)
-            .with_inner_size([w, h])
+            .with_inner_size([width, height])
             .with_min_inner_size([400.0, 300.0])
-            .with_icon(std::sync::Arc::new(icon::icon())),
+            .with_icon(Arc::new(icon::icon())),
         persistence_path: settings::storage_file(),
         ..Default::default()
     };
     options.glow_options.vsync = vsync;
     // An interactive window on Windows comes up cloaked, and unmaximized until it is: see
-    // `reveal`. The builder hook runs after eframe has restored the saved window state. A
-    // scripted or recorded run paints from its first frame on and is left to eframe.
+    // `reveal`. The builder hook runs after eframe has restored the saved window state.
+    // Scripted and recorded runs paint from their first frame on and are left to eframe.
     #[cfg(windows)]
-    let interactive = !scripted && record.is_none();
-    #[cfg(windows)]
-    let maximized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let maximized = Arc::new(std::sync::atomic::AtomicBool::new(false));
     #[cfg(windows)]
     if interactive {
         let maximized = maximized.clone();
@@ -446,16 +407,15 @@ fn main() -> ExitCode {
         }));
     }
     let mut automation = Automation::default();
-    automation.fit = cli.fit;
-    automation.zoom = cli.zoom;
-    automation.pull_requests = canned_pull_requests;
-    automation.github_repositories = canned_repositories;
-    automation.newer_release = cli
+    automation.start_fitted = cli.fit;
+    automation.start_zoom = cli.zoom;
+    automation.canned_pull_requests = canned_pull_requests;
+    automation.canned_github_repositories = canned_repositories;
+    automation.canned_newer_release = cli
         .newer_release
         .as_deref()
         .and_then(parterre_telemetry::Update::to);
-    // `--screenshot` alone is a script of one step.
-    if script.is_some() || cli.screenshot.is_some() {
+    if scripted {
         let mut runner = automation::Runner::new(script.unwrap_or_default());
         if let Some(path) = cli.screenshot.clone() {
             runner.push_screenshot(path);
@@ -463,11 +423,11 @@ fn main() -> ExitCode {
         automation.script = Some(runner);
     }
     automation.record = record.map(|(path, format)| record::Recorder::new(path, format));
-    let overrides = move |s: &mut settings::Settings| apply_cli(&cli, s);
+    let overrides = move |s: &mut Settings| apply_cli(&cli, s);
     // Before the window: Finder's request to open a folder comes as parterre starts (#336).
     #[cfg(target_os = "macos")]
     macos::listen();
-    let result = eframe::run_native(
+    eframe::run_native(
         settings::APP_ID,
         options,
         Box::new(move |cc| {
@@ -483,19 +443,11 @@ fn main() -> ExitCode {
                 cc, repo, opening, overrides, automation, vsync, reveal,
             )))
         }),
-    );
-    match result {
-        Ok(()) if automation::failed() => ExitCode::FAILURE,
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("parterre: {e}");
-            ExitCode::FAILURE
-        }
-    }
+    )
+    .map_err(|e| e.to_string())
 }
 
-/// The steps of a workflow script, from a file or (`-`) standard input.
-fn read_script(path: &std::path::Path) -> Result<Vec<script::Line>, String> {
+fn read_script(path: &Path) -> Result<Vec<script::Line>, String> {
     let text = if path.as_os_str() == "-" {
         std::io::read_to_string(std::io::stdin())
     } else {
@@ -505,34 +457,45 @@ fn read_script(path: &std::path::Path) -> Result<Vec<script::Line>, String> {
     script::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Applies command-line options on top of the stored settings.
-fn apply_cli(cli: &Cli, s: &mut settings::Settings) {
+fn read_file(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("could not read {}: {e}", path.display()))
+}
+
+fn read_canned_repositories(path: &Path) -> Result<String, String> {
+    let json = read_file(path)?;
+    parterre_forge::github::repositories_canned(&json)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(json)
+}
+
+fn apply_cli(cli: &Cli, s: &mut Settings) {
     if let Some(mode) = cli.mode {
         s.graph.simplification = match mode {
-            Mode::Labelled => Simplification::Decorated,
-            Mode::Forks => Simplification::Forks,
-            Mode::Branches => Simplification::BranchesAndMerges,
-            Mode::All => Simplification::AllCommits,
+            ModeArg::Labelled => Simplification::Decorated,
+            ModeArg::Forks => Simplification::Forks,
+            ModeArg::Branches => Simplification::BranchesAndMerges,
+            ModeArg::All => Simplification::AllCommits,
         };
     }
-    if let Some(dir) = cli.direction {
-        s.layout.direction = match dir {
-            Dir::Top => Direction::NewestTop,
-            Dir::Bottom => Direction::NewestBottom,
-            Dir::Left => Direction::NewestLeft,
-            Dir::Right => Direction::NewestRight,
+    if let Some(direction) = cli.direction {
+        s.layout.direction = match direction {
+            DirectionArg::Top => Direction::NewestTop,
+            DirectionArg::Bottom => Direction::NewestBottom,
+            DirectionArg::Left => Direction::NewestLeft,
+            DirectionArg::Right => Direction::NewestRight,
         };
     }
-    match cli.look {
-        Some(LookArg::Modern) => settings::Look::Modern.apply(s),
-        Some(LookArg::Classic) => settings::Look::Classic.apply(s),
-        None => {}
+    if let Some(look) = cli.look {
+        match look {
+            LookArg::Modern => Look::Modern,
+            LookArg::Classic => Look::Classic,
+        }
+        .apply(s);
     }
-    if let Some(w) = cli.max_row_width {
-        s.layout.max_layer_width = w;
+    if let Some(width) = cli.max_row_width {
+        s.layout.max_layer_width = width;
     }
     if let Some(trunk) = cli.trunk {
-        use parterre_core::layout::Trunk;
         s.layout.trunk = match trunk {
             TrunkArg::Centred => Trunk::Centred,
             TrunkArg::Alternating => Trunk::Alternating,
@@ -583,8 +546,8 @@ fn apply_cli(cli: &Cli, s: &mut settings::Settings) {
     }
     if let Some(form) = cli.diff_form {
         s.diff_window.form = match form {
-            DiffFormArg::Side => settings::DiffForm::SideBySide,
-            DiffFormArg::Unified => settings::DiffForm::Unified,
+            DiffFormArg::Side => DiffForm::SideBySide,
+            DiffFormArg::Unified => DiffForm::Unified,
         };
     }
     if let Some(words) = cli.diff_words {
@@ -595,8 +558,8 @@ fn apply_cli(cli: &Cli, s: &mut settings::Settings) {
             DiffWordsArg::Off => WordMode::Off,
         };
     }
-    if let Some(ws) = cli.diff_whitespace {
-        s.diff_window.whitespace = match ws {
+    if let Some(whitespace) = cli.diff_whitespace {
+        s.diff_window.whitespace = match whitespace {
             DiffWhitespaceArg::Compare => Whitespace::Compare,
             DiffWhitespaceArg::IgnoreChanges => Whitespace::IgnoreChanges,
             DiffWhitespaceArg::IgnoreAll => Whitespace::IgnoreAll,
@@ -613,17 +576,16 @@ fn apply_cli(cli: &Cli, s: &mut settings::Settings) {
     }
     if let Some(theme) = cli.theme {
         s.theme = match theme {
-            Theme::System => ThemeChoice::System,
-            Theme::Light => ThemeChoice::Light,
-            Theme::Dark => ThemeChoice::Dark,
+            ThemeArg::System => ThemeChoice::System,
+            ThemeArg::Light => ThemeChoice::Light,
+            ThemeArg::Dark => ThemeChoice::Dark,
         };
     }
 }
 
-/// Undoes a quirk of Windows command lines: a quoted path ending in a backslash, as Explorer
-/// passes the root of a drive (`"C:\"`), arrives with the backslash taken as escaping the
-/// closing quote (`C:"`). No Windows path can contain a quote, so a trailing one is put back
-/// as the backslash. Elsewhere a quote is a valid character and is left alone.
+/// Windows passes a quoted path ending in a backslash, such as Explorer's `"C:\"` for a drive's
+/// root, with the backslash escaping the closing quote: `C:"`. No Windows path can hold a
+/// quote, so a trailing one stands for the backslash. Elsewhere a quote is a valid character.
 fn repair_quoted_root(path: PathBuf) -> PathBuf {
     if !cfg!(windows) {
         return path;
@@ -634,25 +596,31 @@ fn repair_quoted_root(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Lays the graph out without a window and writes it as SVG, PNG or WebP (by the extension).
-/// PNG and WebP are drawn at `zoom`, one pixel per point.
 fn export_headless(
-    repo: &std::sync::Arc<parterre_core::Repo>,
-    settings: &settings::Settings,
-    path: &std::path::Path,
+    cli: &Cli,
+    repo: Option<parterre_core::Repo>,
+    path: &Path,
+) -> Result<(), String> {
+    let repo = repo.ok_or("not in a git repository; name one to export")?;
+    let mut settings = Settings::default();
+    apply_cli(cli, &mut settings);
+    let zoom = cli.zoom.unwrap_or(1.0);
+    write_export(&Arc::new(repo), &settings, path, zoom)
+        .map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+fn write_export(
+    repo: &Arc<parterre_core::Repo>,
+    settings: &Settings,
+    path: &Path,
     zoom: f32,
 ) -> anyhow::Result<()> {
     // Checked before the layout, which can take seconds.
-    anyhow::ensure!(
-        export::Format::from_path(path).is_some(),
-        "unknown format: name the file .svg, .png or .webp"
-    );
+    let format = export::Format::from_path(path)
+        .context("unknown format: name the file .svg, .png or .webp")?;
     let scene = scene::Scene::headless(repo, settings);
-    let palette = theme::Palette::new(
-        settings.theme == theme::ThemeChoice::Dark,
-        &settings.branch_colors,
-    );
-    let what = export::write(path, &scene, settings, &palette, zoom, 1.0)?;
+    let palette = theme::Palette::new(settings.theme == ThemeChoice::Dark, &settings.branch_colors);
+    let what = export::write(path, format, &scene, settings, &palette, zoom, 1.0)?;
     eprintln!(
         "wrote {} ({} nodes; {what})",
         path.display(),
@@ -668,7 +636,6 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn repairs_a_quoted_drive_root() {
-        // Explorer's `"%V"` on the background of C:\ gives `"C:\"`, which arrives as `C:"`.
         assert_eq!(
             repair_quoted_root(PathBuf::from("C:\"")),
             PathBuf::from("C:\\")

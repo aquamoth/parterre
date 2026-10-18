@@ -1,7 +1,5 @@
-//! What parterre does with macOS itself, through AppKit: folders opened from Finder (dropped on
-//! the Dock icon, *Open With*, #336, and the *Revision Graph* service, #337), the clipboard for
-//! the menu bar's Paste, *Install Command Line Tool…* (#341), the input method's indicator
-//! (#342), and the About panel (#351). The menu bar is `app::menu_bar::macos`.
+//! What parterre does with macOS itself, through AppKit. The menu bar is
+//! `app::menu_bar::macos`.
 
 // AppKit's API is Objective-C, called through objc2: every call is `unsafe` to Rust.
 #![allow(unsafe_code)]
@@ -25,17 +23,13 @@ use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSObjectProtocol, NSString, NSURL,
 };
 
-/// Folders Finder asked parterre to open, not taken yet.
-static OPENED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+static FOLDERS_TO_OPEN: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 thread_local! {
-    /// The handler of Finder's requests, alive while parterre runs.
-    static HANDLER: RefCell<Option<Retained<Opener>>> = const { RefCell::new(None) };
-    /// For a repaint once a folder comes in.
-    static CONTEXT: RefCell<Option<egui::Context>> = const { RefCell::new(None) };
+    static OPENER: RefCell<Option<Retained<Opener>>> = const { RefCell::new(None) };
+    static CONTEXT_TO_WAKE: RefCell<Option<egui::Context>> = const { RefCell::new(None) };
 }
 
-/// Apple event codes (four-character codes) of the open-documents event.
 const CORE_EVENT_CLASS: u32 = u32::from_be_bytes(*b"aevt");
 const OPEN_DOCUMENTS: u32 = u32::from_be_bytes(*b"odoc");
 const DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
@@ -48,7 +42,7 @@ define_class!(
     struct Opener;
 
     impl Opener {
-        /// As NSApplication's own handlers are in: from here on Finder's requests are parterre's.
+        /// Where NSApplication installs its own handlers, so that parterre's replace them.
         #[unsafe(method(willFinishLaunching:))]
         fn will_finish_launching(&self, _notification: &NSNotification) {
             let Some(mtm) = MainThreadMarker::new() else {
@@ -90,7 +84,7 @@ define_class!(
                 .filter_map(|d| d.fileURLValue())
                 .filter_map(|url| url.path())
                 .map(|p| PathBuf::from(p.to_string()));
-            opened(paths);
+            queue_folders(paths);
         }
 
         /// The *Revision Graph* service, on folders chosen in Finder (`NSServices` in
@@ -109,7 +103,7 @@ define_class!(
                 let url = NSURL::URLWithString(&url)?;
                 Some(PathBuf::from(url.path()?.to_string()))
             });
-            opened(paths);
+            queue_folders(paths);
         }
     }
 
@@ -124,20 +118,19 @@ impl Opener {
     }
 }
 
-/// Queues `paths` for the window, and wakes it.
-fn opened(paths: impl Iterator<Item = PathBuf>) {
-    let mut queued = OPENED.lock().unwrap_or_else(|e| e.into_inner());
+fn queue_folders(paths: impl Iterator<Item = PathBuf>) {
+    let mut queued = FOLDERS_TO_OPEN.lock().unwrap_or_else(|e| e.into_inner());
     queued.extend(paths);
     drop(queued);
-    CONTEXT.with_borrow(|ctx| {
+    CONTEXT_TO_WAKE.with_borrow(|ctx| {
         if let Some(ctx) = ctx {
             ctx.request_repaint();
         }
     });
 }
 
-/// Takes Finder's requests to open folders from the start: call before the window is made.
-/// AppKit asks before parterre's first frame when it starts parterre to open a folder.
+/// Call before the window is made: AppKit asks before parterre's first frame when it starts
+/// parterre to open a folder.
 pub fn listen() {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
@@ -145,7 +138,7 @@ pub fn listen() {
     let opener = Opener::new(mtm);
     let center = NSNotificationCenter::defaultCenter();
     // SAFETY: the selector is Opener's, taking the notification; the observer lives on in
-    // HANDLER.
+    // OPENER.
     unsafe {
         center.addObserver_selector_name_object(
             &opener,
@@ -154,21 +147,20 @@ pub fn listen() {
             None,
         );
     }
-    HANDLER.with_borrow_mut(|h| *h = Some(opener));
+    OPENER.with_borrow_mut(|h| *h = Some(opener));
 }
 
 /// The folders Finder asked parterre to open since the last call. `ctx` is woken when more
 /// come.
 pub fn take_opened(ctx: &egui::Context) -> Vec<PathBuf> {
-    CONTEXT.with_borrow_mut(|c| {
+    CONTEXT_TO_WAKE.with_borrow_mut(|c| {
         if c.is_none() {
             *c = Some(ctx.clone());
         }
     });
-    std::mem::take(&mut *OPENED.lock().unwrap_or_else(|e| e.into_inner()))
+    std::mem::take(&mut *FOLDERS_TO_OPEN.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
-/// The text on the clipboard.
 pub fn clipboard_text() -> Option<String> {
     let pasteboard = NSPasteboard::generalPasteboard();
     // SAFETY: an AppKit constant.
@@ -176,10 +168,10 @@ pub fn clipboard_text() -> Option<String> {
     Some(text.to_string())
 }
 
-/// The input method's indicator, the bubble macOS shows at the text cursor (#342): only while a
-/// text field has the keyboard. Otherwise the window's input context is deactivated, which
-/// AppKit keeps active for any view taking text, as winit's does whether or not a field has the
-/// keyboard, and which shows the indicator where the last text field was.
+/// Shows the input method's indicator, the bubble at the text cursor (#342), only while a text
+/// field has the keyboard. AppKit keeps the input context active for any view taking text, as
+/// winit's does whether or not a field has the keyboard, and shows the indicator where the last
+/// text field was.
 #[derive(Debug, Default)]
 pub struct InputMethod {
     active: Option<bool>,
@@ -187,10 +179,10 @@ pub struct InputMethod {
 
 impl InputMethod {
     pub fn update(&mut self, frame: &eframe::Frame, text_focus: bool) {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         if self.active == Some(text_focus) {
             return;
         }
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let Ok(handle) = frame.window_handle() else {
             return;
         };
@@ -212,18 +204,15 @@ impl InputMethod {
 }
 
 pub mod cli {
-    //! *Install Command Line Tool…* (#341): `/usr/local/bin/parterre`, a link to the program in
-    //! parterre.app, so that a new copy of the app keeps it working. Asks for an administrator's
-    //! password, through macOS's own prompt, when `/usr/local/bin` can't be written.
+    //! *Install Command Line Tool…* (#341): a link to the program in parterre.app, so that a new
+    //! copy of the app keeps it working.
 
     use std::path::Path;
     use std::sync::mpsc::{Receiver, channel};
 
-    /// Where the link goes.
-    pub const LINK: &str = "/usr/local/bin/parterre";
+    const LINK: &str = "/usr/local/bin/parterre";
 
-    /// Starts installing the link to the running program; the answer comes on the receiver,
-    /// what to say in the status bar, or why it failed.
+    /// The answer comes on the receiver: what to say in the status bar, or why it failed.
     pub fn install() -> Receiver<Result<String, String>> {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -268,7 +257,7 @@ pub mod cli {
         std::os::unix::fs::symlink(program, link)
     }
 
-    /// The same, as an administrator: macOS asks for the password.
+    /// macOS asks for the password.
     fn link_as_administrator(program: &Path) -> Result<(), String> {
         const SCRIPT: &str = r#"on run argv
     do shell script "mkdir -p /usr/local/bin && ln -sfn " & quoted form of item 1 of argv & " /usr/local/bin/parterre" with prompt "parterre wants to put its command line tool in /usr/local/bin." with administrator privileges
@@ -292,10 +281,9 @@ end run"#;
     }
 }
 
-/// *About parterre*: macOS's own About panel (#351). AppKit takes the name, the icon and the
-/// copyright from the app bundle (Info.plist's `NSHumanReadableCopyright`, which
-/// `packaging/macos/build-dmg.sh` fills in from NOTICE); parterre gives the version and the
-/// credits under it.
+/// macOS's own About panel (#351). AppKit takes the name, the icon and the copyright from the
+/// app bundle (Info.plist's `NSHumanReadableCopyright`, which `packaging/macos/build-dmg.sh`
+/// fills in from NOTICE); parterre gives the version and the credits under it.
 pub fn about_panel() {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
@@ -315,19 +303,18 @@ pub fn about_panel() {
             None,
         )
     };
+    let string = |s: &str| -> Retained<AnyObject> {
+        Retained::into_super(Retained::into_super(NSString::from_str(s)))
+    };
     let mut keys = Vec::new();
-    let mut values: Vec<Retained<AnyObject>> = Vec::new();
+    let mut values = Vec::new();
     // SAFETY: AppKit's constants.
     unsafe {
         keys.push(NSAboutPanelOptionApplicationVersion);
-        values.push(Retained::into_super(Retained::into_super(
-            NSString::from_str(version),
-        )));
+        values.push(string(version));
         // Without one, the panel shows CFBundleVersion, which is the version again.
         keys.push(NSAboutPanelOptionVersion);
-        values.push(Retained::into_super(Retained::into_super(
-            NSString::from_str(commit),
-        )));
+        values.push(string(commit));
         if let Some(credits) = credits {
             keys.push(NSAboutPanelOptionCredits);
             values.push(Retained::into_super(Retained::into_super(credits)));

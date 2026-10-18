@@ -1,37 +1,31 @@
-//! Export of the whole graph as SVG, PNG or WebP (TortoiseGit: "Save graph as...").
-
 use std::fmt::Write as _;
 use std::path::Path;
 
 use eframe::egui::epaint::Primitive;
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, TextureId, Vec2, ViewportId, vec2};
+use parterre_core::glyphs::{self, Glyph, Part};
 
 use crate::raster::{self, PixelRect};
 use crate::render::{
     ARROW_LEN, Marks, arrowhead_points, edge_path, node_rows, paint_scene, pull_request_label,
-    row_colors, row_worktree, worktree_glyph, worktree_label,
+    row_colors, worktree_glyph, worktree_label,
 };
 use crate::scene::{CORNER_RADIUS, FONT_SIZE, MARGIN_X, RowKind, Scene};
 use crate::settings::Settings;
 use crate::theme::Palette;
 use crate::view::{MAX_ZOOM, MIN_ZOOM, View};
-use parterre_core::glyphs::{self, Glyph, Part};
 
-/// What a file is written as, chosen by its extension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Svg,
     Png,
-    /// Lossless: the same pixels as PNG, in a smaller file.
     WebP,
 }
 
 impl Format {
     pub const ALL: [Format; 3] = [Format::Svg, Format::Png, Format::WebP];
 
-    /// SVG for `.svg` or no extension (as before PNG existed), PNG for `.png`, WebP for
-    /// `.webp`, and `None` for anything else. TortoiseGit writes JPEG, BMP, GIF, WMF and
-    /// Graphviz but not WebP; parterre only these three.
+    /// No extension means SVG, as before PNG existed.
     pub fn from_path(path: &Path) -> Option<Format> {
         let Some(ext) = path.extension() else {
             return Some(Format::Svg);
@@ -49,7 +43,6 @@ impl Format {
         }
     }
 
-    /// The name in menus and dialogs.
     pub fn name(self) -> &'static str {
         match self {
             Format::Svg => "SVG",
@@ -58,9 +51,8 @@ impl Format {
         }
     }
 
-    /// Longest side of an image in this format, in pixels: many PNG decoders stop at 16 bits,
-    /// and WebP can't hold more than 14.
-    fn max_side(self) -> f64 {
+    /// Many PNG decoders stop at 16 bits, and WebP can't hold more than 14.
+    fn max_side_px(self) -> f64 {
         match self {
             Format::Svg | Format::Png => 65_535.0,
             Format::WebP => 16_383.0,
@@ -68,40 +60,47 @@ impl Format {
     }
 }
 
-/// Writes the scene to `path` in the format its extension names. `zoom` and
-/// `pixels_per_point` only matter for PNG and WebP. Returns what was written, for the status line.
+/// Returns what was written, for the status line. `zoom` and `pixels_per_point` only matter for
+/// PNG and WebP.
 pub fn write(
     path: &Path,
+    format: Format,
     scene: &Scene,
     settings: &Settings,
     palette: &Palette,
     zoom: f32,
     pixels_per_point: f32,
 ) -> anyhow::Result<String> {
-    match Format::from_path(path) {
-        Some(Format::Svg) => {
+    let encoding = match format {
+        Format::Svg => {
             std::fs::write(path, to_svg(scene, settings, palette))?;
-            Ok("SVG at 100%".into())
+            return Ok("SVG at 100%".into());
         }
-        Some(format @ (Format::Png | Format::WebP)) => {
-            let size = raster_size(scene, format, zoom, pixels_per_point);
-            let encoding = match format {
-                Format::WebP => image::ImageFormat::WebP,
-                _ => image::ImageFormat::Png,
-            };
-            to_image(scene, settings, palette, &size).save_with_format(path, encoding)?;
-            Ok(format!("{} {}", format.name(), size.describe()))
-        }
-        None => anyhow::bail!("unknown format: name the file .svg, .png or .webp"),
-    }
+        Format::Png => image::ImageFormat::Png,
+        Format::WebP => image::ImageFormat::WebP,
+    };
+    let size = raster_size(scene, format, zoom, pixels_per_point);
+    to_image(scene, settings, palette, &size).save_with_format(path, encoding)?;
+    Ok(format!("{} {}", format.name(), size.describe()))
 }
 
-const MARGIN: f32 = 20.0;
+const GRAPH_MARGIN: f32 = 20.0;
 const EDGE_WIDTH: f32 = 2.0;
 
-/// Renders the scene at 100% as a standalone SVG document.
-pub fn to_svg(scene: &Scene, settings: &Settings, palette: &Palette) -> String {
-    let bounds = scene.bounds().expand(MARGIN);
+fn export_bounds(scene: &Scene) -> Rect {
+    scene.bounds().expand(GRAPH_MARGIN)
+}
+
+fn svg_points(points: &[Pos2]) -> String {
+    let points: Vec<String> = points
+        .iter()
+        .map(|p| format!("{:.1},{:.1}", p.x, p.y))
+        .collect();
+    points.join(" ")
+}
+
+fn to_svg(scene: &Scene, settings: &Settings, palette: &Palette) -> String {
+    let bounds = export_bounds(scene);
     let origin = bounds.min.to_vec2();
     let map = |p: Pos2| p - origin;
     let mut svg = String::new();
@@ -127,23 +126,15 @@ pub fn to_svg(scene: &Scene, settings: &Settings, palette: &Palette) -> String {
         let Some(path) = edge_path(scene, e, settings.edge_style, map, None) else {
             continue;
         };
-        let points: Vec<String> = path
-            .iter()
-            .map(|p| format!("{:.1},{:.1}", p.x, p.y))
-            .collect();
-        let _ = writeln!(svg, r#"<polyline points="{}"/>"#, points.join(" "));
+        let _ = writeln!(svg, r#"<polyline points="{}"/>"#, svg_points(&path));
         if let Some(head) = arrowhead_points(&path, settings.arrows, ARROW_LEN) {
             heads.extend(head);
         }
     }
     svg.push_str("</g>\n");
     let _ = writeln!(svg, r#"<g fill="{}">"#, hex(palette.edge));
-    for tri in heads {
-        let pts: Vec<String> = tri
-            .iter()
-            .map(|p| format!("{:.1},{:.1}", p.x, p.y))
-            .collect();
-        let _ = writeln!(svg, r#"<polygon points="{}"/>"#, pts.join(" "));
+    for triangle in heads {
+        let _ = writeln!(svg, r#"<polygon points="{}"/>"#, svg_points(&triangle));
     }
     svg.push_str("</g>\n");
 
@@ -166,15 +157,13 @@ pub fn to_svg(scene: &Scene, settings: &Settings, palette: &Palette) -> String {
                 hex(fill),
                 hex(border)
             );
-            // Pull requests' numbers are right-aligned, after their glyph; worktrees' names
-            // follow theirs.
             let (x, anchor) = match row.kind {
                 RowKind::PullRequest { .. } => {
                     let (end, icon) = pull_request_label(row_rect, row.width, 1.0);
                     svg.push_str(&svg_glyph(glyphs::PULL_REQUEST, icon, text));
                     (end.x, "end")
                 }
-                _ => match row_worktree(row) {
+                _ => match row.worktree() {
                     Some(c) => {
                         let (start, icon) = worktree_label(row_rect, 1.0);
                         svg.push_str(&svg_glyph(worktree_glyph(c), icon, text));
@@ -183,7 +172,6 @@ pub fn to_svg(scene: &Scene, settings: &Settings, palette: &Palette) -> String {
                     None => (row_rect.min.x + MARGIN_X, "start"),
                 },
             };
-            // A detached worktree's name is in italics.
             let style = if row.is_detached_worktree() {
                 r#" font-style="italic""#
             } else {
@@ -203,66 +191,52 @@ pub fn to_svg(scene: &Scene, settings: &Settings, palette: &Palette) -> String {
     svg
 }
 
-/// Largest image written, in pixels: 100 megapixels, which take 300 MB while being drawn (the
-/// whole image is held in memory for encoding).
-pub const MAX_PIXELS: f64 = 100e6;
+/// The whole image is held in memory for encoding: 100 megapixels take 300 MB.
+const MAX_PIXELS: f64 = 100e6;
 
-/// Size and scale of a PNG or WebP export.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RasterSize {
-    pub width: u32,
-    pub height: u32,
-    /// The zoom it is drawn at: the one asked for, or less to stay within the limits.
-    pub zoom: f32,
-    pub pixels_per_point: f32,
-    /// Whether the zoom had to be lowered to stay within [`MAX_PIXELS`] and `max_side`.
-    pub reduced: bool,
-    /// Longest side the format allows, in pixels.
-    pub max_side: f64,
+struct RasterSize {
+    width: u32,
+    height: u32,
+    zoom: f32,
+    pixels_per_point: f32,
+    zoom_reduced: bool,
+    max_side_px: f64,
 }
 
 impl RasterSize {
-    /// "1234 × 5678 px at 100%", and why the zoom is lower if it is.
-    pub fn describe(&self) -> String {
+    fn describe(&self) -> String {
         let mut s = format!(
             "{} × {} px at {:.0}%",
             self.width,
             self.height,
             self.zoom * 100.0
         );
-        if self.reduced {
+        if self.zoom_reduced {
             let _ = write!(
                 s,
                 ", scaled down to stay within {:.0} megapixels and {:.0} px a side",
                 MAX_PIXELS / 1e6,
-                self.max_side
+                self.max_side_px
             );
         }
         s
     }
 }
 
-/// The world rectangle an export covers: the graph plus a margin.
-fn export_bounds(scene: &Scene) -> Rect {
-    scene.bounds().expand(MARGIN)
-}
-
-/// The size of a PNG or WebP of the scene at `zoom` (1 = 100%) on a display with
-/// `pixels_per_point`.
-///
 /// Deliberately unlike TortoiseGit, which draws raster exports at the current zoom with no
 /// limit and shows "not enough memory" when Windows cannot allocate the bitmap: parterre
 /// lowers the zoom instead, so that an export always gives a picture.
-pub fn raster_size(scene: &Scene, format: Format, zoom: f32, pixels_per_point: f32) -> RasterSize {
+fn raster_size(scene: &Scene, format: Format, zoom: f32, pixels_per_point: f32) -> RasterSize {
     fit(
         export_bounds(scene).size(),
         zoom,
         pixels_per_point,
-        format.max_side(),
+        format.max_side_px(),
     )
 }
 
-fn fit(world: Vec2, zoom: f32, pixels_per_point: f32, max_side: f64) -> RasterSize {
+fn fit(world: Vec2, zoom: f32, pixels_per_point: f32, max_side_px: f64) -> RasterSize {
     let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     let scale = f64::from(zoom * pixels_per_point);
     let (w, h) = (
@@ -273,9 +247,9 @@ fn fit(world: Vec2, zoom: f32, pixels_per_point: f32, max_side: f64) -> RasterSi
     // rounding up.
     let (a, b, c) = (w * h, w + h, 1.0 - MAX_PIXELS);
     let fit = ((-b + (b * b - 4.0 * a * c).sqrt()) / (2.0 * a))
-        .min((max_side - 1.0) / w)
-        .min((max_side - 1.0) / h);
-    let (scale, reduced) = if fit < 1.0 {
+        .min((max_side_px - 1.0) / w)
+        .min((max_side_px - 1.0) / h);
+    let (scale, zoom_reduced) = if fit < 1.0 {
         (scale * fit, true)
     } else {
         (scale, false)
@@ -285,19 +259,15 @@ fn fit(world: Vec2, zoom: f32, pixels_per_point: f32, max_side: f64) -> RasterSi
         height: (f64::from(world.y) * scale).ceil().max(1.0) as u32,
         zoom: (scale / f64::from(pixels_per_point)) as f32,
         pixels_per_point,
-        reduced,
-        max_side,
+        zoom_reduced,
+        max_side_px,
     }
 }
 
-/// Side of the square tiles an image is drawn in, in pixels. Each tile is one egui pass, so only
-/// the shapes near it are tessellated at a time.
-const TILE: u32 = 2048;
+/// Each tile is one egui pass, so only the shapes near it are tessellated at a time.
+const TILE_SIDE_PX: u32 = 2048;
 
-/// Draws the scene as the window would at `size.zoom` (the same painting code, rasterised on
-/// the CPU by [`raster`]): the whole graph as currently arranged, without selection or hover
-/// marks.
-pub fn to_image(
+fn to_image(
     scene: &Scene,
     settings: &Settings,
     palette: &Palette,
@@ -310,16 +280,17 @@ pub fn to_image(
     // A context of its own, so that the fonts are rasterised for this scale and the window's
     // context is left alone. The theme decides how glyph coverage becomes alpha.
     let ctx = egui::Context::default();
-    ctx.set_theme(if palette.dark {
+    ctx.set_theme(if palette.is_dark {
         egui::Theme::Dark
     } else {
         egui::Theme::Light
     });
     let mut atlas = raster::Texture::default();
     let marks = Marks::default();
-    for ty in (0..size.height).step_by(TILE as usize) {
-        for tx in (0..size.width).step_by(TILE as usize) {
-            let (tw, th) = (TILE.min(size.width - tx), TILE.min(size.height - ty));
+    for ty in (0..size.height).step_by(TILE_SIDE_PX as usize) {
+        for tx in (0..size.width).step_by(TILE_SIDE_PX as usize) {
+            let tw = TILE_SIDE_PX.min(size.width - tx);
+            let th = TILE_SIDE_PX.min(size.height - ty);
             let canvas = Rect::from_min_size(Pos2::ZERO, vec2(tw as f32, th as f32) / ppp);
             let view = View {
                 offset: world + vec2(tx as f32, ty as f32) / (ppp * size.zoom),
@@ -363,16 +334,11 @@ pub fn to_image(
                     continue;
                 };
                 // Rounded as egui's glow painter rounds its scissor rectangle.
+                let to_px = |points: f32| (points * ppp).round() as i64;
                 let c = clipped.clip_rect;
                 let clip = PixelRect {
-                    min: [
-                        (c.min.x * ppp).round() as i64,
-                        (c.min.y * ppp).round() as i64,
-                    ],
-                    max: [
-                        (c.max.x * ppp).round() as i64,
-                        (c.max.y * ppp).round() as i64,
-                    ],
+                    min: [to_px(c.min.x), to_px(c.min.y)],
+                    max: [to_px(c.max.x), to_px(c.max.y)],
                 };
                 raster::draw_mesh(&mut img, origin, tile.intersect(clip), ppp, mesh, &atlas);
             }
@@ -381,8 +347,7 @@ pub fn to_image(
     img
 }
 
-/// SVG path of a rectangle with individually rounded corners (inset by half a pixel so the
-/// 1 px border stays inside, as on screen).
+/// Inset by half a pixel, so that the 1 px border stays inside, as on screen.
 fn rounded_rect(r: Rect, c: CornerRadius) -> String {
     let r = r.shrink(0.5);
     let (x0, y0, x1, y1) = (r.min.x, r.min.y, r.max.x, r.max.y);
@@ -401,8 +366,7 @@ fn rounded_rect(r: Rect, c: CornerRadius) -> String {
     )
 }
 
-/// A toolbar glyph drawn into `rect` in `color`, as an SVG group. Its paths are SVG path data
-/// already.
+/// A glyph's paths are SVG path data already.
 fn svg_glyph(glyph: Glyph, rect: Rect, color: Color32) -> String {
     let color = hex(color);
     let mut g = format!(
@@ -489,7 +453,7 @@ mod tests {
     fn png_keeps_the_zoom_when_it_fits() {
         let s = fit(vec2(3000.0, 4000.0), 1.0, 2.0, 65_535.0);
         assert_eq!(
-            (s.width, s.height, s.zoom, s.reduced),
+            (s.width, s.height, s.zoom, s.zoom_reduced),
             (6000, 8000, 1.0, false)
         );
     }
@@ -497,7 +461,7 @@ mod tests {
     #[test]
     fn png_scales_down_to_the_pixel_limit() {
         let s = fit(vec2(24_000.0, 8_000.0), 1.0, 1.0, 65_535.0);
-        assert!(s.reduced);
+        assert!(s.zoom_reduced);
         let pixels = f64::from(s.width) * f64::from(s.height);
         assert!(pixels <= MAX_PIXELS, "{pixels}");
         assert!(pixels > 0.99 * MAX_PIXELS, "{pixels}");
@@ -507,17 +471,21 @@ mod tests {
     fn png_scales_down_to_the_side_limit() {
         // A tall all-commits view: few pixels, but too tall.
         let s = fit(vec2(600.0, 640_000.0), 1.0, 1.0, 65_535.0);
-        assert!(s.reduced);
+        assert!(s.zoom_reduced);
         assert!(f64::from(s.height) <= 65_535.0);
         assert!(f64::from(s.height) > 65_535.0 - 2.0);
         // WebP allows less: Apps in the Classic look, 24,232 px wide at 100%.
-        let s = fit(vec2(24_232.0, 3_745.0), 1.0, 1.0, Format::WebP.max_side());
-        assert!(s.reduced);
+        let s = fit(
+            vec2(24_232.0, 3_745.0),
+            1.0,
+            1.0,
+            Format::WebP.max_side_px(),
+        );
+        assert!(s.zoom_reduced);
         assert!(f64::from(s.width) <= 16_383.0);
     }
 
-    /// A chain of three commits, each a node with its hash.
-    fn chain() -> Scene {
+    fn chain_of_three_commits() -> Scene {
         use parterre_core::repo::{Commit, CommitIx, Head};
         let commits = (0..3u32)
             .map(|i| Commit {
@@ -546,7 +514,7 @@ mod tests {
 
     #[test]
     fn png_draws_the_boxes_and_their_text() {
-        let scene = chain();
+        let scene = chain_of_three_commits();
         assert_eq!(scene.node_count(), 3);
         let palette = Palette::light();
         let size = raster_size(&scene, Format::Png, 1.0, 1.0);

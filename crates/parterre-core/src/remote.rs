@@ -1,9 +1,6 @@
-//! Keeping local branches and their remotes in step (#181): fetching every remote, pulling the
-//! open worktree's branch, pushing a local branch to its own name on a remote, with a
-//! lease-guarded force push, and setting a branch's upstream.
-//!
-//! The network commands run with `--progress`, their output streamed to a [`Live`] for the
-//! dialog that shows it. Parterre asks git before each step and never parses what it prints.
+//! Keeping local branches and their remotes in step (#181). The network commands run with
+//! `--progress`, their output streamed to a [`Live`]. Parterre asks git before each step rather
+//! than read what the porcelain prints.
 
 use std::io::Read;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -11,10 +8,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use parterre_util::CancelTree;
 
 use crate::branches::{
-    Attention, Catalog, Deletion, Error, LocalBranch, Report, Step, Stuck, Warning, all_commits,
+    Action, Attention, Catalog, Deletion, Error, LocalBranch, Report, Step, Warning, all_commits,
     lost_commits, same_losses,
 };
 use crate::git::{Git, GitError};
+use crate::operation::{git_args, in_progress, refuse_if_moved_or_stuck, run_or_fail, stopped};
+use crate::upstream::Side;
 use crate::{Oid, Repo};
 
 /// Said after a network command fails: parterre has no prompt of its own yet.
@@ -61,14 +60,13 @@ pub struct Pull {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diverged {
     pub pull: Pull,
-    /// The upstream's short name, `origin/main`.
+    /// `origin/main`.
     pub upstream: String,
     pub ahead: usize,
     pub behind: usize,
 }
 
 impl Diverged {
-    /// The pull `how` runs.
     pub fn pull(&self, how: Reconcile) -> Pull {
         Pull {
             how: Some(how),
@@ -121,13 +119,12 @@ impl Push {
         format!("{}/{}", self.remote, self.to)
     }
 
-    /// That remote-tracking branch in full: `refs/remotes/origin/main`.
-    fn tracking(&self) -> String {
+    /// `refs/remotes/origin/main`.
+    fn tracking_ref(&self) -> String {
         format!("refs/remotes/{}", self.remote_branch())
     }
 }
 
-/// `git branch --set-upstream-to`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SetUpstream {
     pub branch: String,
@@ -164,20 +161,16 @@ pub enum PushState {
     Force,
 }
 
-fn words(s: &[&str]) -> Vec<String> {
-    s.iter().map(|s| (*s).to_owned()).collect()
-}
-
 pub(crate) fn fetch_command() -> Vec<String> {
-    words(&["fetch", "--progress", "--all", "--prune"])
+    git_args(&["fetch", "--progress", "--all", "--prune"])
 }
 
 fn fetch_remote_command(remote: &str) -> Vec<String> {
-    words(&["fetch", "--progress", "--prune", remote])
+    git_args(&["fetch", "--progress", "--prune", remote])
 }
 
 pub(crate) fn pull_command(how: Option<Reconcile>) -> Vec<String> {
-    let mut args = words(&["pull", "--progress"]);
+    let mut args = git_args(&["pull", "--progress"]);
     args.extend(how.map(|h| h.flag().to_owned()));
     args
 }
@@ -187,7 +180,7 @@ pub(crate) fn pull_command(how: Option<Reconcile>) -> Vec<String> {
 /// name takes `--force-if-includes`, but git checks that against the reflog of the local branch
 /// named like the remote's, so a push to another name leases that tip instead.
 pub(crate) fn push_command(catalog: &Catalog, push: &Push, force: Option<Oid>) -> Vec<String> {
-    let mut args = words(&["push", "--progress"]);
+    let mut args = git_args(&["push", "--progress"]);
     let has_upstream = catalog
         .locals
         .iter()
@@ -202,9 +195,8 @@ pub(crate) fn push_command(catalog: &Catalog, push: &Push, force: Option<Oid>) -
         }
         Some(theirs) => {
             args.push(format!(
-                "--force-with-lease=refs/heads/{}:{}",
-                push.to,
-                theirs.to_hex()
+                "--force-with-lease=refs/heads/{}:{theirs}",
+                push.to
             ));
         }
         None => {}
@@ -218,30 +210,31 @@ pub(crate) fn push_command(catalog: &Catalog, push: &Push, force: Option<Oid>) -
     args
 }
 
-/// `git branch --set-upstream-to=…`.
 pub fn set_upstream_command(set: &SetUpstream) -> Vec<String> {
-    vec![
-        "branch".into(),
-        format!("--set-upstream-to=refs/remotes/{}", set.upstream),
-        "--".into(),
-        set.branch.clone(),
-    ]
+    set_upstream_args(&set.branch, &set.upstream)
+}
+
+/// `git branch --set-upstream-to` for local branch `branch`, to remote-tracking branch
+/// `upstream`.
+pub(crate) fn set_upstream_args(branch: &str, upstream: &str) -> Vec<String> {
+    git_args(&[
+        "branch",
+        &format!("--set-upstream-to=refs/remotes/{upstream}"),
+        "--",
+        branch,
+    ])
 }
 
 /// Deletes the branch on its remote, only if it is still where the last fetch saw it.
 pub(crate) fn delete_remote_command(b: &RemoteBranchTip) -> Vec<String> {
-    vec![
-        "push".into(),
-        "--progress".into(),
-        format!(
-            "--force-with-lease=refs/heads/{}:{}",
-            b.branch,
-            b.tip.to_hex()
-        ),
-        b.remote.clone(),
-        "--delete".into(),
-        b.branch.clone(),
-    ]
+    git_args(&[
+        "push",
+        "--progress",
+        &format!("--force-with-lease=refs/heads/{}:{}", b.branch, b.tip),
+        &b.remote,
+        "--delete",
+        &b.branch,
+    ])
 }
 
 /// Pushing local branch `branch` to each remote, by name, with what each would do by the
@@ -265,7 +258,7 @@ pub fn push_targets(repo: &Repo, catalog: &Catalog, branch: &str) -> Vec<(Push, 
         .into_iter()
         .map(|remote| {
             let push = Push::new(branch, &remote);
-            let state = match tip(&push.tracking()) {
+            let state = match tip(&push.tracking_ref()) {
                 None => PushState::New,
                 Some(theirs) if repo.reaches(theirs, local) => PushState::UpToDate,
                 Some(theirs) if repo.reaches(local, theirs) => PushState::Ahead,
@@ -294,7 +287,6 @@ pub fn pull_offered(catalog: &Catalog, commit: Oid) -> Option<&LocalBranch> {
     (catalog.head == Some(commit) || at_upstream()).then_some(branch)
 }
 
-/// `git fetch --all --prune`.
 pub(crate) fn fetch(
     catalog: &Catalog,
     cancel: &CancelTree,
@@ -313,8 +305,7 @@ pub(crate) fn fetch(
 
 /// Fetches the upstream's remote, then pulls, unless the branch has diverged and neither git's
 /// config nor the user says how to reconcile it: then the user is asked, with nothing changed
-/// but the fetch.
-/// A stop on conflicts comes back as [`Report::attention`].
+/// but the fetch. A stop on conflicts comes back as [`Report::attention`].
 pub(crate) fn pull(
     catalog: &Catalog,
     pull: &Pull,
@@ -323,17 +314,7 @@ pub(crate) fn pull(
     live: Option<&Live>,
 ) -> Result<Option<Diverged>, Error> {
     let branch = pull.branch.as_str();
-    if !catalog.has_working_tree
-        || catalog.current.as_deref() != Some(branch)
-        || catalog.head != Some(pull.head)
-    {
-        return Err(Error::Invalid(format!(
-            "Branch {branch} moved, or is no longer checked out here. Reload and try again."
-        )));
-    }
-    if let Some(stuck) = catalog.stuck() {
-        return Err(Error::Invalid(format!("{}.", stuck.reason())));
-    }
+    refuse_if_moved_or_stuck(catalog, branch, pull.head)?;
     let Some(upstream) = catalog
         .locals
         .iter()
@@ -367,23 +348,14 @@ pub(crate) fn pull(
             }
         }
     }
-    let ok = run_live(&git, pull_command(pull.how), cancel, report, live)?;
+    let pulled = run_live(&git, pull_command(pull.how), cancel, report, live)?;
     let after = Catalog::load(&catalog.root)?;
-    if let Some(stuck) = after.stuck() {
-        let n = after.conflicted.len();
-        let title = match (stuck, n) {
-            (_, 1..) => format!("Pull stopped on conflicts in {}", plural(n, "file")),
-            (Stuck::InProgress(_), 0) => "Pull stopped".to_owned(),
-            (Stuck::Conflicts, 0) => unreachable!("conflicts without conflicted files"),
-        };
-        report.attention = Some(Attention {
-            title,
-            message: "Finish or abort it with git, or go to another worktree.".into(),
-        });
+    if after.stuck().is_some() {
+        report.attention = Some(in_progress(stopped("Pull", after.conflicted.len())));
         return Ok(None);
     }
-    if !ok {
-        return Err(Error::Failed(last_output(report)));
+    if !pulled {
+        return Err(Error::Failed(report.last_output()));
     }
     Ok(None)
 }
@@ -394,7 +366,7 @@ pub(crate) fn pull(
 /// to say whether the remote has commits the branch lacks.
 pub(crate) fn push(
     catalog: &Catalog,
-    action: &crate::branches::Action,
+    action: &Action,
     push: &Push,
     approval: Option<&Warning>,
     cancel: &CancelTree,
@@ -418,18 +390,18 @@ pub(crate) fn push(
         )));
     }
     let git = Git::new(&catalog.root);
-    let tracking = push.tracking();
+    let tracking = push.tracking_ref();
     let theirs_name = push.remote_branch();
-    let theirs = remote_tip(&git, &tracking)?;
+    let theirs = git.resolve_commit(&tracking)?;
     if let Some(theirs) = theirs
-        && is_ancestor(&git, push.tip, theirs)?
+        && git.is_ancestor(push.tip, theirs)?
     {
         return Err(Error::Invalid(format!(
             "{theirs_name} has every commit of {branch}: there's nothing to push."
         )));
     }
     let force = match theirs {
-        Some(theirs) if !is_ancestor(&git, theirs, push.tip)? => Some(theirs),
+        Some(theirs) if !git.is_ancestor(theirs, push.tip)? => Some(theirs),
         _ => None,
     };
     if force.is_some() {
@@ -437,13 +409,12 @@ pub(crate) fn push(
         let approved =
             approval.is_some_and(|w| w.action == *action && w.head == theirs && w.commits == lost);
         if !approved {
-            let repo = Arc::new(git.load()?);
             return Ok(Some(Warning {
                 action: action.clone(),
                 commits: lost,
                 replaced,
                 deletions: Vec::new(),
-                repo: Some(repo),
+                repo: Some(Arc::new(git.load()?)),
                 changed: false,
                 commands: vec![push_command(catalog, push, force)],
                 head: theirs,
@@ -460,26 +431,16 @@ pub(crate) fn push(
              them. Take them into {branch} first."
         )));
     }
-    if run_live(
-        &git,
-        push_command(catalog, push, force),
-        cancel,
-        report,
-        live,
-    )? {
+    let command = push_command(catalog, push, force);
+    if run_live(&git, command, cancel, report, live)? {
         return Ok(None);
     }
-    let pushed = last_output(report);
-    if !run_live(
-        &git,
-        fetch_remote_command(&push.remote),
-        cancel,
-        report,
-        live,
-    )? {
-        return Err(Error::Failed(format!("{pushed}\n\n{NO_PROMPT}")));
+    let pushed = report.last_output();
+    let fetch = fetch_remote_command(&push.remote);
+    if !run_live(&git, fetch, cancel, report, live)? {
+        return Err(failed_without_prompt(&pushed));
     }
-    match remote_tip(&git, &tracking)? {
+    match git.resolve_commit(&tracking)? {
         // The lease held, so it was `--force-if-includes`: the remote's commits were fetched,
         // but never on the branch.
         now if force.is_some() && push.to == push.branch && now == theirs => {
@@ -488,7 +449,7 @@ pub(crate) fn push(
                  them. Take them into {branch} first.\n\n{pushed}"
             )))
         }
-        Some(now) if !is_ancestor(&git, now, push.tip)? => Err(Error::Failed(format!(
+        Some(now) if !git.is_ancestor(now, push.tip)? => Err(Error::Failed(format!(
             "{theirs_name} has commits you don't have."
         ))),
         _ => Err(Error::Failed(pushed)),
@@ -501,61 +462,16 @@ pub(crate) fn push(
 /// one already gone there is as asked, and comes back as [`Report::attention`].
 pub(crate) fn delete_remote_branches(
     catalog: &Catalog,
-    action: &crate::branches::Action,
+    action: &Action,
     branches: &[RemoteBranchTip],
     approval: Option<&Warning>,
     cancel: &CancelTree,
     report: &mut Report,
     live: Option<&Live>,
 ) -> Result<Option<Warning>, Error> {
-    if branches.is_empty() {
-        return Err(Error::Invalid("Choose a remote branch to delete.".into()));
-    }
-    for (i, b) in branches.iter().enumerate() {
-        let name = b.name();
-        if branches[..i].contains(b) {
-            return Err(Error::Invalid(format!(
-                "Remote branch {name} is listed twice."
-            )));
-        }
-        if !catalog.remote_names.contains(&b.remote)
-            || !catalog
-                .remotes
-                .iter()
-                .any(|r| r.name == name && r.tip == b.tip)
-        {
-            return Err(Error::Invalid(format!(
-                "Remote branch {name} moved or is gone since. Reload and try again."
-            )));
-        }
-    }
+    check_remote_branches(catalog, branches)?;
     let git = Git::new(&catalog.root);
-    // A remote's `HEAD` naming one of them goes with it.
-    let excluded: Vec<String> = branches
-        .iter()
-        .flat_map(|b| {
-            let name = b.name();
-            let head = catalog
-                .remote_defaults
-                .contains(&name)
-                .then(|| format!("refs/remotes/{}/HEAD", b.remote));
-            std::iter::once(format!("refs/remotes/{name}")).chain(head)
-        })
-        .collect();
-    let deletions = branches
-        .iter()
-        .map(|b| {
-            Ok(Deletion {
-                name: b.name(),
-                path: None,
-                commits: lost_commits(&git, catalog, b.tip, &excluded, &[], None)?,
-                files: Vec::new(),
-                refusal: None,
-                branch: None,
-                head: Some(b.tip),
-            })
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+    let deletions = remote_branch_losses(&git, catalog, branches)?;
     let commits = all_commits(&deletions);
     let approved = approval.is_some_and(|w| {
         w.action == *action && w.commits == commits && same_losses(&w.deletions, &deletions)
@@ -578,24 +494,19 @@ pub(crate) fn delete_remote_branches(
             deleted.push(b.name());
             continue;
         }
-        let pushed = last_output(report);
-        let Some(now) = ls_remote(&git, b, cancel)? else {
-            return Err(Error::Failed(format!("{pushed}\n\n{NO_PROMPT}")));
-        };
+        let pushed = report.last_output();
         let (name, remote) = (b.name(), &b.remote);
-        match now {
+        match ls_remote(&git, b, cancel)? {
+            OnRemote::Unknown => return Err(failed_without_prompt(&pushed)),
             // Someone deleted it first: as asked.
-            None => {
-                gone.push(name);
-                continue;
-            }
-            Some(tip) if tip == b.tip => {
-                let went = went(&deleted, &gone);
+            OnRemote::Gone => gone.push(name),
+            OnRemote::At(tip) if tip == b.tip => {
+                let went = went_so_far(&deleted, &gone);
                 return Err(Error::Failed(format!("{pushed}{went}")));
             }
-            Some(_) => {
+            OnRemote::At(_) => {
                 report.suggest_fetch = true;
-                let went = went(&deleted, &gone);
+                let went = went_so_far(&deleted, &gone);
                 return Err(Error::Failed(format!(
                     "{name} moved on {remote} since the last fetch. Fetch, and look again.{went}"
                 )));
@@ -619,8 +530,62 @@ pub(crate) fn delete_remote_branches(
     Ok(None)
 }
 
+/// Each remote branch is listed once, and is where it was offered.
+fn check_remote_branches(catalog: &Catalog, branches: &[RemoteBranchTip]) -> Result<(), Error> {
+    if branches.is_empty() {
+        return Err(Error::Invalid("Choose a remote branch to delete.".into()));
+    }
+    for (i, b) in branches.iter().enumerate() {
+        let name = b.name();
+        if branches[..i].contains(b) {
+            return Err(Error::Invalid(format!(
+                "Remote branch {name} is listed twice."
+            )));
+        }
+        if !catalog.remote_names.contains(&b.remote)
+            || !catalog
+                .remotes
+                .iter()
+                .any(|r| r.name == name && r.tip == b.tip)
+        {
+            return Err(Error::Invalid(format!(
+                "Remote branch {name} moved or is gone since. Reload and try again."
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// What deleting the remote branches would lose: the commits only each reaches once they're
+/// all gone.
+fn remote_branch_losses(
+    git: &Git,
+    catalog: &Catalog,
+    branches: &[RemoteBranchTip],
+) -> Result<Vec<Deletion>, Error> {
+    // A remote's `HEAD` naming one of them goes with it.
+    let excluded: Vec<String> = branches
+        .iter()
+        .flat_map(|b| {
+            let name = b.name();
+            let head = catalog
+                .remote_defaults
+                .contains(&name)
+                .then(|| format!("refs/remotes/{}/HEAD", b.remote));
+            std::iter::once(format!("refs/remotes/{name}")).chain(head)
+        })
+        .collect();
+    branches
+        .iter()
+        .map(|b| {
+            let commits = lost_commits(git, catalog, b.tip, &excluded, &[], None)?;
+            Ok(Deletion::of_branch(b.name(), b.tip, commits))
+        })
+        .collect()
+}
+
 /// What a remote deletion that stopped partway did, as sentences after its error.
-fn went(deleted: &[String], gone: &[String]) -> String {
+fn went_so_far(deleted: &[String], gone: &[String]) -> String {
     let said = |names: &[String], one: &str, many: &str| match names {
         [] => String::new(),
         [name] => format!(" {name} {one}."),
@@ -630,31 +595,32 @@ fn went(deleted: &[String], gone: &[String]) -> String {
         + &said(gone, "was already gone", "were already gone")
 }
 
-/// Where the branch is on its remote now (`ls-remote`): `None` if git couldn't ask, `Some(None)`
-/// if the remote has no such branch.
-fn ls_remote(
-    git: &Git,
-    b: &RemoteBranchTip,
-    cancel: &CancelTree,
-) -> Result<Option<Option<Oid>>, Error> {
-    let args: Vec<String> = ["ls-remote", &b.remote, &format!("refs/heads/{}", b.branch)]
-        .map(str::to_owned)
-        .to_vec();
-    let mut command = network_command(git, &args);
-    let child = cancel.start(&mut command).map_err(|e| match e {
-        parterre_util::Start::Cancelled => Error::Cancelled,
-        parterre_util::Start::Spawn(e) => GitError::Spawn(e).into(),
-    })?;
+/// Where a branch is on its remote now.
+enum OnRemote {
+    /// git couldn't ask.
+    Unknown,
+    Gone,
+    At(Oid),
+}
+
+fn ls_remote(git: &Git, b: &RemoteBranchTip, cancel: &CancelTree) -> Result<OnRemote, Error> {
+    let args = git_args(&["ls-remote", &b.remote, &format!("refs/heads/{}", b.branch)]);
+    let child = cancel.start(&mut network_command(git, &args))?;
     let out = child.wait_with_output();
     if cancel.finish() {
         return Err(Error::Cancelled);
     }
     let out = out.map_err(GitError::Spawn)?;
     if !out.status.success() {
-        return Ok(None);
+        return Ok(OnRemote::Unknown);
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    Ok(Some(text.split_whitespace().next().and_then(Oid::from_hex)))
+    Ok(
+        match text.split_whitespace().next().and_then(Oid::from_hex) {
+            Some(tip) => OnRemote::At(tip),
+            None => OnRemote::Gone,
+        },
+    )
 }
 
 /// The remote's commits a force push would replace, split into those with no copy on the
@@ -668,18 +634,16 @@ fn lost_and_replaced(
     let full = format!("refs/heads/{branch}");
     let upstreams = crate::upstream::load(git, &repo, &[(full, tracking.to_owned())]);
     let (mut lost, mut replaced) = (Vec::new(), Vec::new());
-    for u in &upstreams {
-        for &(c, side) in &u.commits {
-            let oid = repo.commit(c).oid;
-            match side {
-                crate::upstream::Side::Ahead => {}
-                crate::upstream::Side::Replaced => replaced.push(oid),
-                crate::upstream::Side::Behind | crate::upstream::Side::Lost => lost.push(oid),
-            }
+    for &(c, side) in upstreams.iter().flat_map(|u| &u.commits) {
+        let oid = repo.commit(c).oid;
+        match side {
+            Side::Ahead => {}
+            Side::Replaced => replaced.push(oid),
+            Side::Behind | Side::Lost => lost.push(oid),
         }
     }
-    lost.sort_by_key(|o| o.to_hex());
-    replaced.sort_by_key(|o| o.to_hex());
+    lost.sort_unstable();
+    replaced.sort_unstable();
     Ok((lost, replaced))
 }
 
@@ -702,45 +666,24 @@ pub(crate) fn set_upstream(
         )));
     }
     let git = Git::new(&catalog.root);
-    if !run_live(&git, set_upstream_command(set), cancel, report, None)? {
-        return Err(Error::Failed(last_output(report)));
-    }
-    Ok(())
-}
-
-fn remote_tip(git: &Git, full: &str) -> Result<Option<Oid>, Error> {
-    Ok(git
-        .query(&[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{full}^{{commit}}"),
-        ])?
-        .and_then(|s| Oid::from_hex(&s)))
+    run_or_fail(&git, set_upstream_command(set), cancel, report)
 }
 
 /// Whether local branch `branch` has `commit`, or had it at any point its reflog recalls.
 fn ever_had(git: &Git, branch: &str, commit: Oid) -> Result<bool, Error> {
-    let full = format!("refs/heads/{branch}");
-    let reflog = git.run(&["rev-list", "--walk-reflogs", &full])?;
-    let mut input = format!("{}\n", commit.to_hex());
-    for oid in reflog.lines() {
-        input.push_str(&format!("^{oid}\n"));
-    }
+    let reflog = git.run(&[
+        "rev-list",
+        "--walk-reflogs",
+        &format!("refs/heads/{branch}"),
+    ])?;
+    let mut input = format!("{commit}\n");
+    input.extend(reflog.lines().map(|oid| format!("^{oid}\n")));
     Ok(git
         .run_with_input(&["rev-list", "-n", "1", "--stdin"], input)?
         .trim()
         .is_empty())
 }
 
-fn is_ancestor(git: &Git, ancestor: Oid, of: Oid) -> Result<bool, Error> {
-    let (a, b) = (ancestor.to_hex(), of.to_hex());
-    Ok(git
-        .query(&["merge-base", "--is-ancestor", &a, &b])?
-        .is_some())
-}
-
-/// Whether git's config says how `git pull` reconciles diverged branches.
 fn reconcile_configured(git: &Git, branch: &str) -> Result<bool, Error> {
     for key in [
         "pull.rebase".to_owned(),
@@ -760,21 +703,13 @@ fn parse_counts(out: &str) -> Option<(usize, usize)> {
     Some((parts.next()?.ok()?, parts.next()?.ok()?))
 }
 
-fn last_output(report: &Report) -> String {
-    report
-        .steps
-        .last()
-        .map(|s| s.output.clone())
-        .unwrap_or_default()
-}
-
 /// A network command's failure, in git's words, and what parterre can't do about it.
 pub(crate) fn network_failure(report: &Report) -> Error {
-    Error::Failed(format!("{}\n\n{NO_PROMPT}", last_output(report)))
+    failed_without_prompt(&report.last_output())
 }
 
-fn plural(n: usize, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+fn failed_without_prompt(output: &str) -> Error {
+    Error::Failed(format!("{output}\n\n{NO_PROMPT}"))
 }
 
 /// What git printed so far, each command with its output, as a terminal shows it: a carriage
@@ -834,7 +769,6 @@ impl Live {
             .collect()
     }
 
-    /// A command starts.
     pub fn start(&self, args: &[String]) {
         self.lock().push(Shown {
             command: crate::branches::command_text(args),
@@ -849,7 +783,6 @@ impl Live {
         }
     }
 
-    /// The last command's output, as shown.
     fn last_text(&self) -> String {
         self.lock()
             .last()
@@ -875,7 +808,7 @@ fn network_command(git: &Git, args: &[String]) -> std::process::Command {
     command
 }
 
-/// Runs a git command as [`crate::branches::run`] does, streaming its output to `live` as it
+/// Runs a git command as [`crate::operation::run`] does, streaming its output to `live` as it
 /// comes.
 pub(crate) fn run_live(
     git: &Git,
@@ -887,24 +820,9 @@ pub(crate) fn run_live(
     let own = Live::default();
     let live = live.unwrap_or(&own);
     live.start(&args);
-    let mut command = network_command(git, &args);
-    let mut child = cancel.start(&mut command).map_err(|e| match e {
-        parterre_util::Start::Cancelled => Error::Cancelled,
-        parterre_util::Start::Spawn(e) => GitError::Spawn(e).into(),
-    })?;
-    let pipe = |mut from: Box<dyn Read + Send>, live: Live| {
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            loop {
-                match from.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => live.push(&buf[..n]),
-                }
-            }
-        })
-    };
-    let stdout = pipe(Box::new(child.stdout.take().unwrap()), live.clone());
-    let stderr = pipe(Box::new(child.stderr.take().unwrap()), live.clone());
+    let mut child = cancel.start(&mut network_command(git, &args))?;
+    let stdout = stream(child.stdout.take().expect("stdout is piped"), live.clone());
+    let stderr = stream(child.stderr.take().expect("stderr is piped"), live.clone());
     let _ = stdout.join();
     let _ = stderr.join();
     let status = child.wait();
@@ -919,6 +837,16 @@ pub(crate) fn run_live(
         return Err(Error::Cancelled);
     }
     Ok(status.success())
+}
+
+/// Copies what `from` gives to `live` as it comes, on a thread of its own.
+fn stream(mut from: impl Read + Send + 'static, live: Live) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n @ 1..) = from.read(&mut buf) {
+            live.push(&buf[..n]);
+        }
+    })
 }
 
 #[cfg(test)]

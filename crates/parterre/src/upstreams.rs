@@ -1,19 +1,3 @@
-//! Local branches against their upstreams, as the graph, the status bar and the log window
-//! show them (see [`parterre_core::upstream`]).
-//!
-//! Hovering or selecting a node colours the commits between the branch the status bar names
-//! for it and that branch's upstream, each on its own stretch of the edge that holds it: green
-//! ahead, blue behind, red lost to a force push, grey dashed replaced by a rebase. A rebased
-//! branch always has a dashed edge to its upstream, red while hovered if a force push would
-//! lose commits.
-//!
-//! A worktree with a rebase in progress has an orange zigzag edge from its HEAD, the commits
-//! replayed so far, to the branch being rebased, still at its old commit. One with a merge in
-//! progress has an orange dashed arrow from its HEAD to the commit being merged, and one with a
-//! cherry-pick stopped, to the commit being picked. These special
-//! edges run between node centres, cut where they cross the boxes' edges, as TortoiseGit draws
-//! them, and bend around the other boxes where they can.
-
 use std::collections::HashSet;
 
 use eframe::egui::{
@@ -29,24 +13,27 @@ use crate::settings::{Arrows, EdgeStyle, Settings};
 use crate::theme::Palette;
 use crate::view::View;
 
-/// The colour of a commit's stretch of edge, and whether it is dashed.
-fn side_stroke(palette: &Palette, side: Side) -> (Color32, bool) {
+fn side_color(palette: &Palette, side: Side) -> Color32 {
     match side {
-        Side::Ahead => (palette.ahead, false),
-        Side::Behind => (palette.behind, false),
-        Side::Lost => (palette.lost, false),
-        Side::Replaced => (palette.replaced, true),
+        Side::Ahead => palette.ahead,
+        Side::Behind => palette.behind,
+        Side::Lost => palette.lost,
+        Side::Replaced => palette.replaced,
     }
 }
 
-/// The node that shows the ref `r` (an index into [`Repo::refs`]), if it is shown.
-fn node_of_ref(repo: &Repo, graph: &RevGraph, r: usize) -> Option<usize> {
-    let n = graph.node_of(repo.refs[r].target)? as usize;
-    graph.nodes[n].refs.contains(&r).then_some(n)
+/// The node showing the ref `ref_ix`, if it is shown.
+fn node_of_ref(repo: &Repo, graph: &RevGraph, ref_ix: usize) -> Option<usize> {
+    let n = graph.node_of(repo.refs[ref_ix].target)? as usize;
+    graph.nodes[n].refs.contains(&ref_ix).then_some(n)
 }
 
-/// Paints the upstreams over the edges: the dashed edges of rebased branches, and the
-/// commits between the hovered or selected branches and their upstreams.
+fn line_width(view: &View) -> f32 {
+    view.fixed((2.0 * view.zoom).max(1.0))
+}
+
+/// Paints the dashed edges of rebased branches to their upstreams, and the commits between the
+/// hovered or selected branches and their upstreams.
 pub fn paint(
     painter: &Painter,
     canvas: Rect,
@@ -59,11 +46,10 @@ pub fn paint(
     let (repo, graph) = (&*scene.repo, &scene.graph);
     let to_screen = |p: Pos2| view.to_screen(canvas, p);
     let zoom = view.fixed(view.zoom);
-    let width = view.fixed((2.0 * view.zoom).max(1.0));
+    let width = line_width(view);
     let visible = canvas.expand(40.0);
-    // The upstreams the hovered and selected nodes stand for, as the status bar names them.
     let selected = marks.selected.iter().enumerate().filter(|&(_, &s)| s);
-    let active: HashSet<usize> = marks
+    let highlighted: HashSet<usize> = marks
         .hovered
         .into_iter()
         .chain(selected.map(|(n, _)| n))
@@ -72,29 +58,18 @@ pub fn paint(
     for (i, u) in repo.upstreams.iter().enumerate() {
         let branch = node_of_ref(repo, graph, u.branch);
         let upstream = u.target.and_then(|t| node_of_ref(repo, graph, t));
-        let on = active.contains(&i);
+        let is_highlighted = highlighted.contains(&i);
 
         if let (Some(b), Some(t)) = (branch, upstream)
             && b != t
             && u.is_rebased()
         {
-            // Neutral at rest; while hovered, red if a force push would lose commits.
-            let color = match (on, u.loses_commits()) {
+            let color = match (is_highlighted, u.loses_commits()) {
                 (false, _) => palette.edge,
                 (true, true) => palette.lost,
                 (true, false) => palette.behind,
             };
-            let node_box = |n: usize| view.rect_to_screen(canvas, scene.node_rect(n));
-            let scale = to_screen(pos2(1.0, 0.0)).x - to_screen(Pos2::ZERO).x;
-            let others = boxes_in_view(scene, view, canvas, &[b, t]);
-            let path = route_around(
-                node_box(b),
-                node_box(t),
-                &others,
-                4.0,
-                settings.edge_style,
-                scale,
-            );
+            let path = special_route(scene, view, canvas, b, t, 4.0, settings.edge_style);
             let dash = 6.0 * zoom.max(0.5);
             painter.extend(Shape::dashed_line(
                 &path,
@@ -104,7 +79,7 @@ pub fn paint(
             ));
         }
 
-        if !on {
+        if !is_highlighted {
             continue;
         }
         for (e, sides) in u.edge_sides(graph) {
@@ -112,20 +87,14 @@ pub fn paint(
             else {
                 continue;
             };
-            let k = sides.len() as f32;
-            // Runs of one side are drawn as one stretch.
+            let count = sides.len() as f32;
             let mut start = 0;
-            while start < sides.len() {
-                let end = start
-                    + sides[start..]
-                        .iter()
-                        .take_while(|&&s| s == sides[start])
-                        .count();
-                if let Some(side) = sides[start] {
-                    let part = sub_path(&path, start as f32 / k, end as f32 / k);
-                    let (color, dashed) = side_stroke(palette, side);
-                    let stroke = Stroke::new(width * 2.2, color);
-                    if dashed {
+            for run in sides.chunk_by(|a, b| a == b) {
+                let end = start + run.len();
+                if let Some(side) = run[0] {
+                    let part = sub_path(&path, start as f32 / count, end as f32 / count);
+                    let stroke = Stroke::new(width * 2.2, side_color(palette, side));
+                    if side == Side::Replaced {
                         let dash = 5.0 * zoom.max(0.5);
                         painter.extend(Shape::dashed_line(&part, stroke, dash, dash * 0.8));
                     } else {
@@ -138,51 +107,74 @@ pub fn paint(
     }
 }
 
-/// The part of a polyline from `t0` to `t1` (fractions of its length).
-fn sub_path(path: &[Pos2], t0: f32, t1: f32) -> Vec<Pos2> {
-    let total: f32 = path.windows(2).map(|w| w[0].distance(w[1])).sum();
-    let (a, b) = (total * t0, total * t1);
+fn polyline_length(path: &[Pos2]) -> f32 {
+    path.windows(2).map(|w| w[0].distance(w[1])).sum()
+}
+
+/// The part of a polyline between the fractions `from` and `to` of its length.
+fn sub_path(path: &[Pos2], from: f32, to: f32) -> Vec<Pos2> {
+    let total = polyline_length(path);
+    let (start, end) = (total * from, total * to);
     let mut out = Vec::new();
     let mut at = 0.0;
     for w in path.windows(2) {
-        let d = w[0].distance(w[1]);
-        let (s, e) = (at, at + d);
-        if e >= a && s <= b && d > 0.0 {
-            let p0 = w[0].lerp(w[1], ((a - s) / d).clamp(0.0, 1.0));
-            let p1 = w[0].lerp(w[1], ((b - s) / d).clamp(0.0, 1.0));
+        let len = w[0].distance(w[1]);
+        if at + len >= start && at <= end && len > 0.0 {
+            let p0 = w[0].lerp(w[1], ((start - at) / len).clamp(0.0, 1.0));
+            let p1 = w[0].lerp(w[1], ((end - at) / len).clamp(0.0, 1.0));
             if out.is_empty() {
                 out.push(p0);
             }
             out.push(p1);
         }
-        at = e;
+        at += len;
     }
     out
 }
 
-/// The other boxes in view, on screen, for a special edge to bend around.
-fn boxes_in_view(scene: &Scene, view: &View, canvas: Rect, ends: &[usize]) -> Vec<Rect> {
+/// The screen route of an edge parterre adds between the nodes `a` and `b`, around the other
+/// boxes in view (see [`route_around`]).
+fn special_route(
+    scene: &Scene,
+    view: &View,
+    canvas: Rect,
+    a: usize,
+    b: usize,
+    margin: f32,
+    style: EdgeStyle,
+) -> Vec<Pos2> {
+    let node_box = |n: usize| view.rect_to_screen(canvas, scene.node_rect(n));
     let near = canvas.expand(160.0);
-    (0..scene.graph.nodes.len())
-        .filter(|n| !ends.contains(n))
-        .map(|n| view.rect_to_screen(canvas, scene.node_rect(n)))
+    let others: Vec<Rect> = (0..scene.graph.nodes.len())
+        .filter(|&n| n != a && n != b)
+        .map(node_box)
         .filter(|r| near.intersects(*r))
-        .collect()
+        .collect();
+    route_around(
+        node_box(a),
+        node_box(b),
+        &others,
+        margin,
+        style,
+        view.points_per_world_unit(),
+    )
 }
 
-/// A special edge's route, from the centre of box `a` to the centre of box `b`, cut where it
-/// leaves `a` and enters `b`, so it emerges wherever it crosses a box's edge. Of curves bowed
-/// more or less to either side of the straight line, it takes the one crossing the fewest of
-/// the `others` (each kept `margin` clear), then the shortest. Curved, or with straight
-/// segments, as the edges are. `scale` is screen pixels per world unit.
+/// From the centre of box `a` to the centre of box `b`, cut where it leaves `a` and enters `b`,
+/// as TortoiseGit draws such edges. Of curves bowed more or less to either side of the straight
+/// line, it takes the one crossing the fewest of the `others` (each kept `margin` clear), then
+/// the shortest.
 fn route_around(
     a: Rect,
     b: Rect,
     others: &[Rect],
     margin: f32,
     style: EdgeStyle,
-    scale: f32,
+    points_per_world_unit: f32,
 ) -> Vec<Pos2> {
+    const BOWS: [f32; 11] = [0.0, -1.0, 1.0, -2.0, 2.0, -3.0, 3.0, -4.0, 4.0, -6.0, 6.0];
+    const BOW_STEP: f32 = 30.0;
+    const CURVE_SEGMENTS: u16 = 48;
     let (p0, p3) = (a.center(), b.center());
     let chord = p3 - p0;
     let normal = if chord.length() > 0.0 {
@@ -194,9 +186,9 @@ fn route_around(
         if style == EdgeStyle::Straight {
             return vec![p0, c1, c2, p3];
         }
-        (0..=48)
+        (0..=CURVE_SEGMENTS)
             .map(|i| {
-                let t = i as f32 / 48.0;
+                let t = f32::from(i) / f32::from(CURVE_SEGMENTS);
                 let u = 1.0 - t;
                 (p0.to_vec2() * (u * u * u)
                     + c1.to_vec2() * (3.0 * u * u * t)
@@ -216,42 +208,32 @@ fn route_around(
             })
             .count()
     };
-    let length = |path: &[Pos2]| -> f32 { path.windows(2).map(|w| w[0].distance(w[1])).sum() };
-    let mut best: Option<(usize, f32, Vec<Pos2>)> = None;
-    for bow in [
-        0.0f32, -1.0, 1.0, -2.0, 2.0, -3.0, 3.0, -4.0, 4.0, -6.0, 6.0,
-    ] {
-        let lift = normal * (bow * 30.0 * scale);
-        let c1 = p0 + chord / 3.0 + lift;
-        let c2 = p0 + chord * (2.0 / 3.0) + lift;
-        let path = clip(&clip(&curve(c1, c2), a), b);
-        if path.len() < 2 {
-            continue;
-        }
-        let score = (crossings(&path), length(&path));
-        if best
-            .as_ref()
-            .is_none_or(|(n, l, _)| score.0 < *n || score.0 == *n && score.1 < *l)
-        {
-            best = Some((score.0, score.1, path));
-        }
-    }
-    best.map(|(_, _, path)| path).unwrap_or_default()
+    BOWS.into_iter()
+        .filter_map(|bow| {
+            let lift = normal * (bow * BOW_STEP * points_per_world_unit);
+            let c1 = p0 + chord / 3.0 + lift;
+            let c2 = p0 + chord * (2.0 / 3.0) + lift;
+            let path = clip(&clip(&curve(c1, c2), a), b);
+            (path.len() >= 2).then(|| (crossings(&path), polyline_length(&path), path))
+        })
+        .min_by(|x, y| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1)))
+        .map(|(_, _, path)| path)
+        .unwrap_or_default()
 }
 
 /// The part of a polyline outside `r`, which one of its ends is inside: cut where it crosses
 /// `r`'s edge. A polyline with neither end inside is returned as it is.
 fn clip(path: &[Pos2], r: Rect) -> Vec<Pos2> {
-    let from_end = !path.first().is_some_and(|p| r.contains(*p));
+    let reversed = !path.first().is_some_and(|p| r.contains(*p));
     let mut path = path.to_vec();
-    if from_end {
+    if reversed {
         path.reverse();
     }
     if path.first().is_some_and(|p| r.contains(*p)) {
         let Some(k) = path.iter().position(|p| !r.contains(*p)) else {
             return Vec::new();
         };
-        // The edge is between the inside point k - 1 and the outside point k.
+        // Bisects the segment from the inside point k - 1 to the outside point k.
         let (mut inside, mut outside) = (path[k - 1], path[k]);
         for _ in 0..20 {
             let mid = inside.lerp(outside, 0.5);
@@ -263,7 +245,7 @@ fn clip(path: &[Pos2], r: Rect) -> Vec<Pos2> {
         }
         path.splice(..k, [outside]);
     }
-    if from_end {
+    if reversed {
         path.reverse();
     }
     path
@@ -288,71 +270,32 @@ fn along(path: &[Pos2], step: f32) -> Vec<(Pos2, egui::Vec2)> {
     out
 }
 
-/// Paints, for each worktree with a rebase in progress (see [`Marks::rebasing`]), an orange
-/// zigzag between its HEAD's node and the branch being rebased; and for each with a merge in
-/// progress (see [`Marks::merging`]), an orange dashed arrow from its HEAD's node to the commit
-/// being merged: the edge the merge would add, with its arrowhead where the graph's arrows go.
-/// A stopped cherry-pick has the same arrow, to the commit being picked.
+/// A worktree's rebase in progress is a zigzag from its HEAD's node to the branch being
+/// rebased. A merge in progress, or a stopped cherry-pick, is the dashed edge it would add, to
+/// the commit being taken, with its arrowhead where the graph's arrows go.
 pub fn paint_in_progress(
     painter: &Painter,
     canvas: Rect,
     view: &View,
     scene: &Scene,
-    settings: &Settings,
     palette: &Palette,
+    settings: &Settings,
     marks: &Marks,
 ) {
     let (repo, graph) = (&*scene.repo, &scene.graph);
     let node = |c: CommitIx| graph.node_of(c).map(|n| n as usize);
-    let rebasing = marks
-        .rebasing
-        .iter()
-        .map(|&(head, r)| (node(head), node_of_ref(repo, graph, r), false));
-    let merging = marks
-        .merging
-        .iter()
-        .map(|&(head, theirs)| (node(head), node(theirs), true));
     let zoom = view.fixed(view.zoom).max(0.5);
-    let width = view.fixed((2.0 * view.zoom).max(1.0));
-    let scale = view.to_screen(canvas, pos2(1.0, 0.0)).x - view.to_screen(canvas, Pos2::ZERO).x;
-    let stroke = Stroke::new(width, palette.stuck);
-    for (h, b, merge) in rebasing.chain(merging) {
-        let (Some(h), Some(b)) = (h, b) else {
+    let amplitude = 3.0 * zoom;
+    let stroke = Stroke::new(line_width(view), palette.stuck);
+    let (margin, style) = (amplitude + 3.0, settings.edge_style);
+    let route = |head: Option<usize>, other: Option<usize>| {
+        let (head, other) = (head?, other?);
+        (head != other).then(|| special_route(scene, view, canvas, head, other, margin, style))
+    };
+    for &(head, branch) in &marks.rebasing {
+        let Some(path) = route(node(head), node_of_ref(repo, graph, branch)) else {
             continue;
         };
-        if h == b {
-            continue;
-        }
-        let node_box = |n: usize| view.rect_to_screen(canvas, scene.node_rect(n));
-        let amplitude = 3.0 * zoom;
-        let others = boxes_in_view(scene, view, canvas, &[h, b]);
-        let path = route_around(
-            node_box(h),
-            node_box(b),
-            &others,
-            amplitude + 3.0,
-            settings.edge_style,
-            scale,
-        );
-        if merge {
-            let dash = 6.0 * zoom;
-            painter.extend(Shape::dashed_line(&path, stroke, dash, dash * 0.7));
-            // Always an arrow, even with the graph's turned off: it says which way the merge
-            // goes.
-            let arrows = match settings.arrows {
-                Arrows::None => Arrows::ToParent,
-                arrows => arrows,
-            };
-            let len = view.fixed(ARROW_LEN * view.zoom.max(0.4));
-            for tri in arrowhead_points(&path, arrows, len).into_iter().flatten() {
-                painter.add(Shape::convex_polygon(
-                    tri.to_vec(),
-                    palette.stuck,
-                    Stroke::NONE,
-                ));
-            }
-            continue;
-        }
         let zigzag: Vec<Pos2> = along(&path, 4.0 * zoom)
             .into_iter()
             .enumerate()
@@ -362,6 +305,29 @@ pub fn paint_in_progress(
             })
             .collect();
         painter.add(Shape::line(zigzag, stroke));
+    }
+    // An arrow even with the graph's turned off: it says which way the merge goes.
+    let arrows = match settings.arrows {
+        Arrows::None => Arrows::ToParent,
+        arrows => arrows,
+    };
+    let arrow_len = view.fixed(ARROW_LEN * view.zoom.max(0.4));
+    for &(head, theirs) in &marks.merging {
+        let Some(path) = route(node(head), node(theirs)) else {
+            continue;
+        };
+        let dash = 6.0 * zoom;
+        painter.extend(Shape::dashed_line(&path, stroke, dash, dash * 0.7));
+        let triangles = arrowhead_points(&path, arrows, arrow_len)
+            .into_iter()
+            .flatten();
+        for triangle in triangles {
+            painter.add(Shape::convex_polygon(
+                triangle.to_vec(),
+                palette.stuck,
+                Stroke::NONE,
+            ));
+        }
     }
 }
 
@@ -377,8 +343,7 @@ fn upstream_on(scene: &Scene, node: usize) -> Option<usize> {
         .or_else(|| find(&|u| u.rebased_from == Some(n.commit)))
 }
 
-/// The ahead|behind marker: `feature/x 3|2` for the hovered node's branch, else the selected
-/// node's, else HEAD's. Ahead in green, behind in red, git's counts.
+/// `feature/x 3|2` for the hovered node's branch, else the selected node's, else HEAD's.
 pub fn status_ui(
     ui: &mut egui::Ui,
     scene: &Scene,
@@ -410,8 +375,7 @@ pub fn status_ui(
     ui.separator();
 }
 
-/// git's ahead|behind counts, `3|2`: ahead in green, behind in red, a zero weak. Leaves the
-/// item spacing at zero.
+/// git's ahead|behind counts, `3|2`. Leaves the item spacing at zero.
 pub fn counts_ui(ui: &mut egui::Ui, ahead: usize, behind: usize) {
     let palette = Palette::new(ui.visuals().dark_mode, &[]);
     let weak = ui.visuals().weak_text_color();
@@ -432,8 +396,7 @@ pub fn counts_ui(ui: &mut egui::Ui, ahead: usize, behind: usize) {
 /// are none.
 pub type ComparePair = Result<(parterre_core::Oid, parterre_core::Oid), &'static str>;
 
-/// For *Compare → Upstream*: each branch on `node` with an upstream, as (the branch's
-/// upstream, the commits to compare from the upstream to the branch, or why not).
+/// For *Compare → Upstream*: the upstream of each branch on `node` that has one.
 pub fn compare_items(scene: &Scene, node: usize) -> Vec<(&Upstream, ComparePair)> {
     let repo = &scene.repo;
     let oid = |r: usize| repo.commit(repo.refs[r].target).oid;
@@ -452,34 +415,39 @@ pub fn compare_items(scene: &Scene, node: usize) -> Vec<(&Upstream, ComparePair)
         .collect()
 }
 
-const ARROW: f32 = 10.0;
-const GAP: f32 = 1.0;
+const COUNT_FONT_SIZE: f32 = 11.5;
+const COUNT_SPACING: f32 = 5.0;
+const COUNT_ARROW_SIZE: f32 = 10.0;
+const COUNT_ARROW_GAP: f32 = 1.0;
 
-/// Width of the counts [`paint_counts`] draws.
+/// The width [`paint_counts`] takes.
 pub fn counts_width(painter: &Painter, (ahead, behind): (usize, usize)) -> f32 {
-    let font = FontId::proportional(11.5);
+    let font = FontId::proportional(COUNT_FONT_SIZE);
     [ahead, behind]
         .into_iter()
         .filter(|&n| n > 0)
         .map(|n| {
             let g = painter.layout_no_wrap(n.to_string(), font.clone(), Color32::WHITE);
-            5.0 + ARROW + GAP + g.size().x
+            COUNT_SPACING + COUNT_ARROW_SIZE + COUNT_ARROW_GAP + g.size().x
         })
         .sum()
 }
 
-/// Draws `↑2 ↓1` left-aligned at `at`, with the app's glyph style.
+/// `↑2 ↓1`, left-aligned at `at`.
 pub fn paint_counts(painter: &Painter, at: Pos2, (ahead, behind): (usize, usize), color: Color32) {
-    let font = FontId::proportional(11.5);
+    let font = FontId::proportional(COUNT_FONT_SIZE);
     let mut x = at.x;
     for (n, glyph) in [(ahead, glyphs::AHEAD), (behind, glyphs::BEHIND)] {
         if n == 0 {
             continue;
         }
-        x += 5.0;
-        let icon = Rect::from_min_size(pos2(x, at.y - ARROW / 2.0), vec2(ARROW, ARROW));
+        x += COUNT_SPACING;
+        let icon = Rect::from_min_size(
+            pos2(x, at.y - COUNT_ARROW_SIZE / 2.0),
+            vec2(COUNT_ARROW_SIZE, COUNT_ARROW_SIZE),
+        );
         crate::widgets::paint_glyph(painter, icon, glyph, color);
-        x += ARROW + GAP;
+        x += COUNT_ARROW_SIZE + COUNT_ARROW_GAP;
         let g = painter.layout_no_wrap(n.to_string(), font.clone(), color);
         let w = g.size().x;
         painter.galley(pos2(x, at.y - g.size().y / 2.0), g, color);

@@ -1,30 +1,10 @@
-//! Property tests: random graphs, random drags in every model, undo and redo. Positions and
-//! routes stay finite, the net settles and then stays put, a reset returns every node to its
-//! layout position and every edge to its layout route, and when the graph adapts to a drag,
-//! children stay above their parents. (Adapted from a review's fuzzing.)
+mod common;
 
-#![allow(clippy::needless_range_loop)] // index loops read better in these tests
-
+use common::Rng;
 use parterre_core::layout::{
     self, Direction, LayoutEdge, LayoutInput, LayoutOptions, Point, Ranking,
 };
 use parterre_core::physics::{DragModel, FLOW_GAP, Net, NetParams, RestPlace};
-
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn below(&mut self, n: u64) -> u64 {
-        if n == 0 { 0 } else { self.next() % n }
-    }
-    fn f(&mut self) -> f32 {
-        (self.next() % 10_000) as f32 / 10_000.0
-    }
-}
 
 fn input(rng: &mut Rng, n: usize) -> LayoutInput {
     let mut edges = Vec::new();
@@ -55,8 +35,35 @@ fn input(rng: &mut Rng, n: usize) -> LayoutInput {
     }
 }
 
-/// `PHYSICS_SEED` and `PHYSICS_ITERS` override the seed and the number of graphs, to hunt
-/// for failures: `PHYSICS_SEED=31337 PHYSICS_ITERS=1000 cargo test --test properties_physics`.
+fn options(iter: usize) -> LayoutOptions {
+    LayoutOptions {
+        concentrate_edges: iter.is_multiple_of(2),
+        ranking: Ranking::ALL[iter % 3],
+        direction: Direction::ALL[iter % 4],
+        ..LayoutOptions::default()
+    }
+}
+
+fn random_params(rng: &mut Rng, avoid_overlap: bool) -> NetParams {
+    NetParams {
+        model: DragModel::Adapt,
+        pull: rng.unit(),
+        push: rng.unit(),
+        wobble: rng.unit(),
+        avoid_overlap,
+    }
+}
+
+fn settles(net: &mut Net, params: &NetParams) -> bool {
+    (0..5000).any(|_| !net.step(1.0 / 60.0, params))
+}
+
+fn is_finite(p: Point) -> bool {
+    p.x.is_finite() && p.y.is_finite()
+}
+
+/// `PHYSICS_SEED` and `PHYSICS_ITERS` override the seed and the number of graphs, to hunt for
+/// failures: `PHYSICS_SEED=31337 PHYSICS_ITERS=1000 cargo test --test properties_physics`.
 fn env_or(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -65,26 +72,14 @@ fn env_or(name: &str, default: u64) -> u64 {
 }
 
 #[test]
-fn physics_random_drags() {
+fn random_drags_settle_stay_finite_and_reset_to_the_layout() {
     let mut rng = Rng(env_or("PHYSICS_SEED", 4242));
     for iter in 0..env_or("PHYSICS_ITERS", 120) as usize {
         let n = 1 + rng.below(60) as usize;
         let inp = input(&mut rng, n);
-        let opts = LayoutOptions {
-            concentrate_edges: iter % 2 == 0,
-            ranking: Ranking::ALL[iter % 3],
-            direction: Direction::ALL[iter % 4],
-            ..LayoutOptions::default()
-        };
-        let l = layout::layout(&inp, &opts);
+        let l = layout::layout(&inp, &options(iter));
         let mut net = Net::new(&l, &inp.sizes);
-        let mut params = NetParams {
-            model: DragModel::Adapt,
-            pull: rng.f(),
-            push: rng.f(),
-            wobble: rng.f(),
-            avoid_overlap: iter % 5 != 0,
-        };
+        let mut params = random_params(&mut rng, iter % 5 != 0);
         for _ in 0..5 {
             params.model = DragModel::ALL[rng.below(3) as usize];
             let node = rng.below(n as u64) as usize;
@@ -95,11 +90,11 @@ fn physics_random_drags() {
             let carried: Vec<usize> = (0..rng.below(3))
                 .map(|_| rng.below(n as u64) as usize)
                 .collect();
-            net.grab(node, &nodes, &carried, params.model.adapts());
+            net.grab(node, &nodes, &carried, params.model);
             for s in 0..20 {
                 let t = Point::new(
-                    l.nodes[node].x + (s as f32) * 20.0 * (rng.f() - 0.5),
-                    l.nodes[node].y + (s as f32) * 20.0 * (rng.f() - 0.5),
+                    l.nodes[node].x + (s as f32) * 20.0 * (rng.unit() - 0.5),
+                    l.nodes[node].y + (s as f32) * 20.0 * (rng.unit() - 0.5),
                 );
                 net.drag_to(t);
                 let dt = [1.0 / 60.0, 0.0, 1.0, 1e-6, 1.0 / 240.0][rng.below(5) as usize];
@@ -121,15 +116,10 @@ fn physics_random_drags() {
                 net.step(1.0 / 60.0, &params);
             }
         }
-        // Once settled, nothing drifts.
-        let mut settled = false;
-        for _ in 0..5000 {
-            if !net.step(1.0 / 60.0, &params) {
-                settled = true;
-                break;
-            }
-        }
-        assert!(settled, "iter {iter}: never settles after dragging");
+        assert!(
+            settles(&mut net, &params),
+            "iter {iter}: never settles after dragging"
+        );
         let resting: Vec<Point> = (0..n).map(|i| net.node_pos(i)).collect();
         for _ in 0..10 {
             net.step(1.0 / 60.0, &params);
@@ -139,30 +129,18 @@ fn physics_random_drags() {
             "iter {iter}: drifts after settling"
         );
         for i in 0..n {
-            let p = net.node_pos(i);
-            assert!(
-                p.x.is_finite() && p.y.is_finite(),
-                "iter {iter}: NaN node {i}"
-            );
+            assert!(is_finite(net.node_pos(i)), "iter {iter}: NaN node {i}");
         }
         for e in 0..inp.edges.len() {
             let pts: Vec<Point> = net.edge_points(e).collect();
             assert!(pts.len() >= 2);
-            assert!(
-                pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()),
-                "iter {iter}: NaN edge"
-            );
+            assert!(pts.iter().all(|&p| is_finite(p)), "iter {iter}: NaN edge");
         }
         net.reset();
-        settled = false;
-        for _ in 0..5000 {
-            if !net.step(1.0 / 60.0, &params) {
-                settled = true;
-                break;
-            }
-        }
-        assert!(settled, "iter {iter}: never settles after reset");
-        // Everything returns to the layout after a reset.
+        assert!(
+            settles(&mut net, &params),
+            "iter {iter}: never settles after reset"
+        );
         let residual = (0..n)
             .map(|i| {
                 let p = net.node_pos(i);
@@ -181,31 +159,19 @@ fn physics_random_drags() {
 }
 
 #[test]
-fn physics_keeps_children_above_parents() {
+fn adaptive_drags_keep_children_above_parents() {
     let mut rng = Rng(777);
     for iter in 0..120 {
         let n = 2 + rng.below(50) as usize;
         let inp = input(&mut rng, n);
-        let opts = LayoutOptions {
-            concentrate_edges: iter % 2 == 0,
-            ranking: Ranking::ALL[iter % 3],
-            direction: Direction::ALL[iter % 4],
-            ..LayoutOptions::default()
-        };
+        let opts = options(iter);
         let l = layout::layout(&inp, &opts);
         let mut net = Net::new(&l, &inp.sizes);
-        let params = NetParams {
-            model: DragModel::Adapt,
-            pull: rng.f(),
-            push: rng.f(),
-            wobble: rng.f(),
-            avoid_overlap: iter % 3 != 0,
-        };
-        // Drag one node far along or against the flow (and a bit sideways), and drop it.
+        let params = random_params(&mut rng, iter % 3 != 0);
         let node = rng.below(n as u64) as usize;
         let f = opts.direction.flow();
-        let (along, side) = (1200.0 * (rng.f() - 0.5), 200.0 * (rng.f() - 0.5));
-        net.grab(node, &[node], &[], true);
+        let (along, side) = (1200.0 * (rng.unit() - 0.5), 200.0 * (rng.unit() - 0.5));
+        net.grab(node, &[node], &[], DragModel::Adapt);
         for s in 1..=20 {
             let t = s as f32 / 20.0;
             net.drag_to(Point::new(
@@ -215,15 +181,8 @@ fn physics_keeps_children_above_parents() {
             net.step(1.0 / 60.0, &params);
         }
         net.release(&params);
-        let mut settled = false;
-        for _ in 0..5000 {
-            if !net.step(1.0 / 60.0, &params) {
-                settled = true;
-                break;
-            }
-        }
-        assert!(settled, "iter {iter}: never settles");
-        let depth = |i: usize| {
+        assert!(settles(&mut net, &params), "iter {iter}: never settles");
+        let half_depth = |i: usize| {
             let s = inp.sizes[i];
             (f.x.abs() * s.x + f.y.abs() * s.y) / 2.0
         };
@@ -233,7 +192,7 @@ fn physics_keeps_children_above_parents() {
             if c == p {
                 continue;
             }
-            let needed = (depth(c) + depth(p) + FLOW_GAP)
+            let needed = (half_depth(c) + half_depth(p) + FLOW_GAP)
                 .min(along_flow(l.nodes[p]) - along_flow(l.nodes[c]));
             let have = along_flow(net.node_pos(p)) - along_flow(net.node_pos(c));
             assert!(
@@ -245,23 +204,17 @@ fn physics_keeps_children_above_parents() {
     }
 }
 
-/// Putting moved nodes back into a layout they no longer fit (as after a reload that changed
-/// the graph) leaves no boxes overlapping: nodes moved by hand land on others (and on each
-/// other), some beside their first parent, and a few others rest a little away from the
-/// layout. Putting the result back again changes nothing.
+/// As after a reload that changed the graph, the nodes put back no longer fit the layout:
+/// nodes moved by hand land on others and on each other, some beside their first parent, and a
+/// few others rest a little away from the layout. Putting the result back again changes
+/// nothing.
 #[test]
-fn physics_restores_without_overlaps() {
+fn restoring_leaves_no_overlaps() {
     let mut rng = Rng(env_or("PHYSICS_SEED", 1990));
     for iter in 0..env_or("PHYSICS_ITERS", 120) as usize {
         let n = 2 + rng.below(60) as usize;
         let inp = input(&mut rng, n);
-        let opts = LayoutOptions {
-            concentrate_edges: iter % 2 == 0,
-            ranking: Ranking::ALL[iter % 3],
-            direction: Direction::ALL[iter % 4],
-            ..LayoutOptions::default()
-        };
-        let l = layout::layout(&inp, &opts);
+        let l = layout::layout(&inp, &options(iter));
         let first_parent = |i: usize| {
             inp.edges
                 .iter()
@@ -277,25 +230,24 @@ fn physics_restores_without_overlaps() {
             }
             let by_hand = k < moved;
             let offset = if by_hand {
-                // Onto another node, give or take a little.
                 let onto = l.nodes[rng.below(n as u64) as usize];
                 Point::new(
-                    onto.x - l.nodes[node].x + rng.f() * 30.0 - 15.0,
-                    onto.y - l.nodes[node].y + rng.f() * 10.0 - 5.0,
+                    onto.x - l.nodes[node].x + rng.unit() * 30.0 - 15.0,
+                    onto.y - l.nodes[node].y + rng.unit() * 10.0 - 5.0,
                 )
             } else {
-                Point::new(rng.f() * 80.0 - 40.0, rng.f() * 20.0 - 10.0)
+                Point::new(rng.unit() * 80.0 - 40.0, rng.unit() * 20.0 - 10.0)
             };
             let beside = first_parent(node).filter(|_| rng.below(2) == 0).map(|p| {
                 (
                     p,
-                    Point::new(rng.f() * 300.0 - 150.0, -40.0 - rng.f() * 80.0),
+                    Point::new(rng.unit() * 300.0 - 150.0, -40.0 - rng.unit() * 80.0),
                 )
             });
             saved.push(RestPlace {
                 node,
                 offset,
-                moved: by_hand,
+                by_hand,
                 beside,
             });
         }
@@ -303,8 +255,7 @@ fn physics_restores_without_overlaps() {
         net.restore(saved.clone(), &NetParams::default());
         assert!(!net.is_awake(), "iter {iter}: settles at once");
         for i in 0..n {
-            let p = net.node_pos(i);
-            assert!(p.x.is_finite() && p.y.is_finite(), "iter {iter}: node {i}");
+            assert!(is_finite(net.node_pos(i)), "iter {iter}: node {i}");
         }
         assert_eq!(net.tidiness().overlaps, 0, "iter {iter}: n={n}");
         if let [only] = saved.as_slice() {

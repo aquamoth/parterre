@@ -1,20 +1,13 @@
-//! Usage statistics (#261): whether anything may be sent to PostHog, and which lifecycle events
-//! a launch sends. No network here, so all of it is tested without one; the sending is in
-//! `posthog.rs`.
-
 use crate::Version;
 
 /// What the first-run prompt and Settings › Privacy choose to send to PostHog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Choices {
-    /// Installs, launches and features, with the install ID. Ticked unless the user unticks it.
     pub usage_statistics: bool,
-    /// Panics, without the install ID. Unticked unless the user ticks it; read at start (#263).
     pub crash_reports: bool,
 }
 
 impl Default for Choices {
-    /// As the first-run prompt starts: usage statistics ticked, crash reports not (#223).
     fn default() -> Self {
         Choices {
             usage_statistics: true,
@@ -23,80 +16,67 @@ impl Default for Choices {
     }
 }
 
-/// What a build of parterre can send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Build {
     /// Built with the `send` feature.
     pub send: bool,
-    /// A debug build, which never sends.
     pub debug: bool,
 }
 
 impl Build {
-    /// This build.
     pub const THIS: Build = Build {
         send: cfg!(feature = "send"),
         debug: cfg!(debug_assertions),
     };
 }
 
-/// Whether this build has usage statistics and crash reports: built with `send`. Without it,
-/// there is no first-run prompt and Settings › Privacy shows them off and greyed out.
 pub fn has_usage_statistics() -> bool {
     Build::THIS.send
 }
 
-/// Whether `DO_NOT_TRACK` is set (consoledonottrack.com): to anything but nothing or `0`. Then
-/// nothing goes to PostHog, whatever the user chose.
+/// `DO_NOT_TRACK`, as consoledonottrack.com defines it. Then nothing goes to PostHog, whatever
+/// the user chose.
 pub fn do_not_track() -> bool {
     is_set(std::env::var("DO_NOT_TRACK").ok().as_deref())
 }
 
-/// The convention for `DO_NOT_TRACK`'s value: set, and neither empty nor `0`.
-pub(crate) fn is_set(value: Option<&str>) -> bool {
+fn is_set(value: Option<&str>) -> bool {
     value
         .map(str::trim)
         .is_some_and(|v| !v.is_empty() && v != "0")
 }
 
-/// Whether to ask the first-run prompt: in a build with `send`, while it hasn't been answered
-/// (`answered`), unless `DO_NOT_TRACK` is set, which has answered for the user.
-pub fn asks(build: Build, answered: bool, do_not_track: bool) -> bool {
+/// `DO_NOT_TRACK` has answered it for the user.
+pub fn asks_first_run_prompt(build: Build, answered: bool, do_not_track: bool) -> bool {
     build.send && !answered && !do_not_track
 }
 
-/// Whether usage statistics are sent: a release build with `send`, the first-run prompt
-/// answered (`choices`) with usage statistics ticked, and `DO_NOT_TRACK` not set.
-pub fn sends(build: Build, choices: Option<Choices>, do_not_track: bool) -> bool {
+/// `choices` is `None` while the first-run prompt is unanswered.
+pub fn sends_usage_statistics(build: Build, choices: Option<Choices>, do_not_track: bool) -> bool {
     build.send && !build.debug && !do_not_track && choices.is_some_and(|c| c.usage_statistics)
 }
 
-/// Whether the update check may ask GitHub: not before the first-run prompt is answered, as
-/// nothing is sent before then (#223). The update check's own switch is the caller's.
+/// Nothing is sent before the first-run prompt is answered (#223), not even the update check.
 pub fn may_check_for_updates(prompting: bool) -> bool {
     !prompting
 }
 
-/// A random install ID, made once at the first run and never changed. It is the `distinct_id`
-/// of the usage statistics.
 pub fn new_install_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// A version as the usage statistics name it, `$app_version`: `0.6.0` for `0.6.0 (a1b2c3d)`,
-/// `0.6.1-dev.3` for `0.6.1-dev.3+a1b2c3d.dirty`. Kept as it is if it isn't a version.
+/// `$app_version`: `0.6.0` for `0.6.0 (a1b2c3d)`; kept as it is if it isn't a version.
 pub fn app_version(version: &str) -> String {
     Version::parse(version).map_or_else(|| version.trim().to_owned(), |v| v.to_string())
 }
 
-/// An event of the app's life, named as PostHog's mobile SDKs name them.
+/// Named as PostHog's mobile SDKs name them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Lifecycle {
-    /// The first run, once the first-run prompt is answered.
     Installed,
-    /// The first run of a version other than the one that ran last.
-    Updated { previous_version: String },
-    /// Every launch.
+    Updated {
+        previous_version: String,
+    },
     Opened,
     /// The window closing.
     Backgrounded,
@@ -113,9 +93,8 @@ impl Lifecycle {
     }
 }
 
-/// The events a launch of `version` sends: on the first run `Application Installed`, on the
-/// first run of a version other than `last_version` (as [`app_version`] names them)
-/// `Application Updated`, and then `Application Opened`.
+/// `Installed` on the first run, else `Updated` from another `last_version` (as
+/// [`app_version`] names them), then `Opened`.
 pub fn launch(first_run: bool, last_version: Option<&str>, version: &str) -> Vec<Lifecycle> {
     let version = app_version(version);
     let mut events = Vec::new();
@@ -164,37 +143,37 @@ mod tests {
 
     #[test]
     fn the_prompt_is_asked_once_in_builds_that_can_send() {
-        assert!(asks(RELEASE, false, false));
-        assert!(!asks(RELEASE, true, false));
+        assert!(asks_first_run_prompt(RELEASE, false, false));
+        assert!(!asks_first_run_prompt(RELEASE, true, false));
         // Debug builds ask too, so the prompt can be seen; they send nothing.
         let debug = Build {
             send: true,
             debug: true,
         };
-        assert!(asks(debug, false, false));
+        assert!(asks_first_run_prompt(debug, false, false));
         let without_send = Build {
             send: false,
             debug: false,
         };
-        assert!(!asks(without_send, false, false));
+        assert!(!asks_first_run_prompt(without_send, false, false));
         // DO_NOT_TRACK has answered.
-        assert!(!asks(RELEASE, false, true));
+        assert!(!asks_first_run_prompt(RELEASE, false, true));
     }
 
     #[test]
     fn nothing_is_sent_before_the_prompt_is_answered() {
-        assert!(!sends(RELEASE, None, false));
-        assert!(sends(RELEASE, ON, false));
+        assert!(!sends_usage_statistics(RELEASE, None, false));
+        assert!(sends_usage_statistics(RELEASE, ON, false));
     }
 
     #[test]
     fn unticking_usage_statistics_sends_nothing() {
-        assert!(!sends(RELEASE, OFF, false));
+        assert!(!sends_usage_statistics(RELEASE, OFF, false));
     }
 
     #[test]
     fn do_not_track_sends_nothing_whatever_was_chosen() {
-        assert!(!sends(RELEASE, ON, true));
+        assert!(!sends_usage_statistics(RELEASE, ON, true));
     }
 
     #[test]
@@ -209,11 +188,11 @@ mod tests {
                 debug: false,
             },
         ] {
-            assert!(!sends(build, ON, false), "{build:?}");
+            assert!(!sends_usage_statistics(build, ON, false), "{build:?}");
         }
         // The tests are a debug build, or a build without `send`.
         if cfg!(debug_assertions) || !cfg!(feature = "send") {
-            assert!(!sends(Build::THIS, ON, false));
+            assert!(!sends_usage_statistics(Build::THIS, ON, false));
         }
     }
 

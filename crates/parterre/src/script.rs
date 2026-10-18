@@ -1,80 +1,50 @@
-//! Workflow scripts (`--script`): what a person would do in the window, one step per line, for
-//! screenshots and recordings of any window, dialog or menu. See `docs/automation.md`.
-//!
-//! ```text
-//! # Create a branch from the context menu of v0.2.0.
-//! right-click node:v0.2.0
-//! click "Create branch…"
-//! type "feature/demo"
-//! screenshot branch.png window
-//! key Enter
-//! ```
-
 use std::path::PathBuf;
 
-use eframe::egui::{Key, Modifiers, Vec2, vec2};
+use eframe::egui::{Key, Modifiers, PointerButton, Vec2, vec2};
 
-/// What a pointer step aims at.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
-    /// Text on screen: the topmost exact match, else the topmost containing it.
     Text(String),
-    /// The node of a ref name or hash prefix.
+    /// A ref name or hash prefix.
     Node(String),
-    /// The empty spot of the canvas farthest from any node.
     Canvas,
-    /// A toolbar button: `filter`, `zoom` or `drag`.
     Toolbar(String),
-    /// A point of the window, in points from its top left.
     Point(Vec2),
 }
 
-/// What part of the window a screenshot keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Crop {
     Full,
-    /// The topmost window (a dialog, embedded in the main window in scripted runs).
     Window,
-    /// The open menus and popovers.
     Popup,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Button {
-    Primary,
-    Secondary,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
-    /// Do nothing for this many seconds.
-    Wait(f32),
-    /// Wait for the target to show.
+    Wait {
+        seconds: f32,
+    },
     WaitFor(Target),
     Click {
         target: Target,
-        button: Button,
+        button: PointerButton,
         count: u32,
-        /// Held while clicking (`ctrl-click`, `shift-click`).
         modifiers: Modifiers,
     },
     Hover(Target),
-    /// Press on the target, move by this much and let go.
-    Drag(Target, Vec2),
-    /// Turn the mouse wheel by this many points where the pointer is.
+    Drag {
+        target: Target,
+        by: Vec2,
+    },
     Scroll(Vec2),
     Key(Modifiers, Key),
     Type(String),
-    /// Open a window or dialog directly, e.g. `about` or `log:main`; see `docs/automation.md`.
     Open(String),
-    /// Drag a file or folder from elsewhere over the window, until [`Step::DropFile`].
     DragFile(PathBuf),
-    /// Drop what [`Step::DragFile`] dragged.
     DropFile,
     Screenshot(PathBuf, Crop),
 }
 
-/// A step and the line it came from, for error messages.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Line {
     pub number: usize,
@@ -82,27 +52,20 @@ pub struct Line {
 }
 
 pub fn parse(text: &str) -> Result<Vec<Line>, String> {
-    text.lines()
-        .enumerate()
-        .filter_map(|(i, line)| {
-            let words = match split(line) {
-                Ok(words) => words,
-                Err(e) => return Some(Err(format!("line {}: {e}", i + 1))),
-            };
-            (!words.is_empty()).then(|| {
-                step(&words)
-                    .map(|step| Line {
-                        number: i + 1,
-                        step,
-                    })
-                    .map_err(|e| format!("line {}: {e}", i + 1))
-            })
-        })
-        .collect()
+    let mut lines = Vec::new();
+    for (line, number) in text.lines().zip(1..) {
+        let words = split(line).map_err(|e| format!("line {number}: {e}"))?;
+        let Some((command, args)) = words.split_first() else {
+            continue;
+        };
+        let step = step(command, args).map_err(|e| format!("line {number}: {e}"))?;
+        lines.push(Line { number, step });
+    }
+    Ok(lines)
 }
 
-/// The words of a line: separated by spaces, `"quoted"` ones may hold spaces (`\"` and `\\`
-/// inside), and `#` outside quotes starts a comment.
+/// Words are separated by spaces, `"quoted"` ones may hold spaces (`\"` and `\\` inside), and
+/// `#` outside quotes starts a comment.
 fn split(line: &str) -> Result<Vec<String>, String> {
     let mut words = Vec::new();
     let mut chars = line.chars().peekable();
@@ -138,10 +101,8 @@ fn split(line: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-fn step(words: &[String]) -> Result<Step, String> {
-    let command = words[0].as_str();
-    let args = &words[1..];
-    let count = |n: usize| {
+fn step(command: &str, args: &[String]) -> Result<Step, String> {
+    let expect_args = |n: usize| {
         if args.len() == n {
             Ok(())
         } else {
@@ -152,96 +113,88 @@ fn step(words: &[String]) -> Result<Step, String> {
         }
     };
     let click = |button, count, modifiers| -> Result<Step, String> {
+        expect_args(1)?;
         Ok(Step::Click {
-            target: target(args.first().ok_or("missing target")?)?,
+            target: target(&args[0])?,
             button,
             count,
             modifiers,
         })
     };
-    let step = match command {
+    Ok(match command {
         "wait" => {
-            count(1)?;
-            let seconds: f32 = args[0].parse().map_err(|_| "expected seconds")?;
-            Step::Wait(seconds)
+            expect_args(1)?;
+            Step::Wait {
+                seconds: args[0].parse().map_err(|_| "expected seconds")?,
+            }
         }
         "wait-for" => {
-            count(1)?;
+            expect_args(1)?;
             Step::WaitFor(target(&args[0])?)
         }
-        "click" => {
-            count(1)?;
-            click(Button::Primary, 1, Modifiers::NONE)?
-        }
-        "ctrl-click" => {
-            count(1)?;
-            click(Button::Primary, 1, Modifiers::COMMAND)?
-        }
-        "shift-click" => {
-            count(1)?;
-            click(Button::Primary, 1, Modifiers::SHIFT)?
-        }
-        "double-click" => {
-            count(1)?;
-            click(Button::Primary, 2, Modifiers::NONE)?
-        }
-        "right-click" => {
-            count(1)?;
-            click(Button::Secondary, 1, Modifiers::NONE)?
-        }
+        "click" => click(PointerButton::Primary, 1, Modifiers::NONE)?,
+        "ctrl-click" => click(PointerButton::Primary, 1, Modifiers::COMMAND)?,
+        "shift-click" => click(PointerButton::Primary, 1, Modifiers::SHIFT)?,
+        "double-click" => click(PointerButton::Primary, 2, Modifiers::NONE)?,
+        "right-click" => click(PointerButton::Secondary, 1, Modifiers::NONE)?,
         "hover" => {
-            count(1)?;
+            expect_args(1)?;
             Step::Hover(target(&args[0])?)
         }
         "drag" => {
-            count(2)?;
-            Step::Drag(target(&args[0])?, pair(&args[1])?)
+            expect_args(2)?;
+            Step::Drag {
+                target: target(&args[0])?,
+                by: pair(&args[1])?,
+            }
         }
         "scroll" => {
-            count(1)?;
+            expect_args(1)?;
             Step::Scroll(pair(&args[0])?)
         }
         "key" => {
-            count(1)?;
+            expect_args(1)?;
             let (modifiers, key) = key(&args[0])?;
             Step::Key(modifiers, key)
         }
         "type" => {
-            count(1)?;
+            expect_args(1)?;
             Step::Type(quoted(&args[0]).ok_or("type takes quoted text")?.to_owned())
         }
         "open" => {
-            count(1)?;
+            expect_args(1)?;
             Step::Open(args[0].clone())
         }
         "drag-file" => {
-            count(1)?;
-            Step::DragFile(PathBuf::from(quoted(&args[0]).unwrap_or(&args[0])))
+            expect_args(1)?;
+            Step::DragFile(PathBuf::from(unquoted(&args[0])))
         }
         "drop-file" => {
-            count(0)?;
+            expect_args(0)?;
             Step::DropFile
         }
         "screenshot" => {
             if args.is_empty() || args.len() > 2 {
                 return Err("screenshot takes a file and optionally window or popup".into());
             }
-            let file = quoted(&args[0]).unwrap_or(&args[0]);
             let crop = match args.get(1).map(String::as_str) {
                 None | Some("full") => Crop::Full,
                 Some("window") => Crop::Window,
                 Some("popup") => Crop::Popup,
                 Some(other) => return Err(format!("unknown crop {other}: full, window or popup")),
             };
-            Step::Screenshot(PathBuf::from(file), crop)
+            Step::Screenshot(PathBuf::from(unquoted(&args[0])), crop)
         }
         _ => return Err(format!("unknown step {command}")),
-    };
-    Ok(step)
+    })
 }
 
 fn quoted(word: &str) -> Option<&str> {
     word.strip_prefix('"')
+}
+
+fn unquoted(word: &str) -> &str {
+    quoted(word).unwrap_or(word)
 }
 
 fn target(word: &str) -> Result<Target, String> {
@@ -275,7 +228,7 @@ fn pair(word: &str) -> Result<Vec2, String> {
     }
 }
 
-/// `Enter`, `Ctrl+O`, `Ctrl+Shift+Z`: modifiers, then one of egui's key names.
+/// `Ctrl+Shift+Z`: modifiers, then one of egui's key names in any case.
 fn key(word: &str) -> Result<(Modifiers, Key), String> {
     let mut parts: Vec<&str> = word.split('+').collect();
     // `Ctrl++` and `+` name the plus key.
@@ -324,7 +277,7 @@ mod tests {
             lines[0].step,
             Step::Click {
                 target: Target::Node("v0.2.0".into()),
-                button: Button::Secondary,
+                button: PointerButton::Secondary,
                 count: 1,
                 modifiers: Modifiers::NONE,
             }
@@ -333,7 +286,7 @@ mod tests {
             lines[1].step,
             Step::Click {
                 target: Target::Text("Create branch…".into()),
-                button: Button::Primary,
+                button: PointerButton::Primary,
                 count: 1,
                 modifiers: Modifiers::NONE,
             }
@@ -342,7 +295,7 @@ mod tests {
             one("shift-click \"fix\""),
             Step::Click {
                 target: Target::Text("fix".into()),
-                button: Button::Primary,
+                button: PointerButton::Primary,
                 count: 1,
                 modifiers: Modifiers::SHIFT,
             }
@@ -362,7 +315,10 @@ mod tests {
         );
         assert_eq!(
             one("drag 10,20 -30,4.5"),
-            Step::Drag(Target::Point(vec2(10.0, 20.0)), vec2(-30.0, 4.5))
+            Step::Drag {
+                target: Target::Point(vec2(10.0, 20.0)),
+                by: vec2(-30.0, 4.5)
+            }
         );
         assert_eq!(
             one(r#"type "say \"hi\" # not a comment""#),

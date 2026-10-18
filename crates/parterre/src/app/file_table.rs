@@ -1,14 +1,12 @@
-//! The changed-files table of the log and compare windows: a filter, sortable and resizable
-//! columns, a selection, and double-click or Enter to open diff windows. Also the worker that asks git
-//! for such lists off the UI thread.
-
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
-    self, Color32, FontId, Galley, Id, Key, Margin, Modifiers, Rect, Response, RichText,
+    self, Color32, FontId, Galley, Id, Key, Margin, Modifiers, Pos2, Rect, Response, RichText,
     ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use parterre_core::changed_files::{
@@ -19,251 +17,246 @@ use parterre_core::compare::WorkingTree;
 use parterre_core::conflicts::{Answer, Conflict};
 use parterre_core::file_diff::GITLINK_MODE;
 use parterre_core::git::Git;
-use parterre_core::text::{elide_start, thousands};
+use parterre_core::text::{capitalized, elide_start, thousands};
 
 use super::column_borders::{self, Columns};
-use super::log_window::{CELL_PAD, Colors, HEADING, cell, heading_background};
+use super::table_style::{CELL_PAD, Colors, HEADING_HEIGHT, cell, colors, heading_background};
 use crate::{focus, widgets};
 
-/// Opening more diff windows than this at once asks first, as TortoiseGit does.
-const MANY_DIFFS: usize = 10;
-/// Height of a changed-file row.
-const FILE_ROW: f32 = 23.0;
+const MAX_DIFFS_WITHOUT_ASKING: usize = 10;
+const ROW_HEIGHT: f32 = 23.0;
+const BAR_HEIGHT: f32 = 40.0;
+const FILTER_WIDTH: f32 = 280.0;
+const HEADING_FONT_SIZE: f32 = 12.0;
+const SORT_ARROW_ROOM: f32 = 12.0;
+const STATUS_BOX_SIZE: f32 = 16.0;
+const PATH_MIN_WIDTH: f32 = 120.0;
+const ROOMY_PATH_WIDTH: f32 = 260.0;
+/// The columns after the path.
+const FIXED_COLUMN_WIDTHS: [f32; 4] = [90.0, 100.0, 100.0, 110.0];
+const COMPACT_FIXED_COLUMN_WIDTHS: [f32; 4] = [56.0, 78.0, 66.0, 82.0];
 
-/// Changed files, or why they could not be listed.
-pub type Listing = Result<Vec<ChangedFile>, String>;
-
-/// The table's state: sort, filter, selection and the column widths the user picked.
-#[derive(Debug, Default)]
-pub struct FileTable {
-    pub order: FileOrder,
-    pub filter: String,
-    selection: FileSelection,
-    /// Until the window closes.
-    pub widths: ColumnWidths,
-    /// *Conflicts only* unchecked: every file is listed while the working tree has
-    /// conflicts. Checked again once none is left, so that the next conflicts start filtered.
-    all_files: bool,
-    /// How far the rows were scrolled, in the frame before.
-    scroll: f32,
+mod column {
+    pub const PATH: usize = 0;
+    pub const EXTENSION: usize = 1;
+    pub const STATUS: usize = 2;
+    pub const ADDED: usize = 3;
+    pub const REMOVED: usize = 4;
 }
 
-/// A git-style status letter in the Status column: filled when staged, outlined when only on
-/// disk.
+pub type Listing = Result<Vec<ChangedFile>, String>;
+
+#[derive(Debug, Default)]
+pub struct FileTable {
+    order: FileOrder,
+    filter: String,
+    selection: FileSelection,
+    pub widths: ColumnWidths,
+    /// *Conflicts only* unticked.
+    all_files: bool,
+    scroll_offset: f32,
+}
+
 #[derive(Clone, Copy, Debug)]
-pub struct Badge {
+pub struct StatusBadge {
     pub letter: char,
     pub filled: bool,
     pub color: Color32,
 }
 
-/// A row's Status column as badges, instead of its status's name, with their words on hover.
 #[derive(Clone, Debug, Default)]
-pub struct Badges {
-    pub badges: Vec<Badge>,
+pub struct StatusBadges {
+    pub badges: Vec<StatusBadge>,
+    /// Shown on hover.
     pub words: String,
 }
 
-/// Changed files chosen in the list, by path, for the list they belong to. Showing another
-/// list clears it.
+#[derive(Clone, Copy)]
+enum StatusColumn<'a> {
+    Names,
+    Badges(&'a [StatusBadges]),
+    WorkingTree(&'a WorkingTree),
+}
+
+impl<'a> StatusColumn<'a> {
+    fn badges(self) -> Option<&'a [StatusBadges]> {
+        match self {
+            StatusColumn::Badges(badges) => Some(badges),
+            _ => None,
+        }
+    }
+
+    fn working_tree(self) -> Option<&'a WorkingTree> {
+        match self {
+            StatusColumn::WorkingTree(tree) => Some(tree),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct FileSelection {
-    owner: Option<Id>,
+    list_id: Option<Id>,
     paths: HashSet<String>,
-    /// Where a Shift+click range starts.
     anchor: Option<String>,
 }
 
-/// What a click in the changed files asked for, by row in the list as shown.
+impl FileSelection {
+    fn select_only(&mut self, path: &str) {
+        self.paths = HashSet::from([path.to_owned()]);
+        self.anchor = Some(path.to_owned());
+    }
+
+    fn click(&mut self, row: usize, modifiers: Modifiers, files: &[ChangedFile], shown: &[usize]) {
+        let path = &files[shown[row]].path;
+        if modifiers.command {
+            if !self.paths.remove(path) {
+                self.paths.insert(path.clone());
+            }
+            self.anchor = Some(path.clone());
+            return;
+        }
+        match self.anchor_row(files, shown) {
+            Some(from) if modifiers.shift => {
+                let (first, last) = (from.min(row), from.max(row));
+                self.paths = shown[first..=last]
+                    .iter()
+                    .map(|&i| files[i].path.clone())
+                    .collect();
+            }
+            _ => self.select_only(path),
+        }
+    }
+
+    /// Where the row clicked last is in the list as shown, if it's there.
+    fn anchor_row(&self, files: &[ChangedFile], shown: &[usize]) -> Option<usize> {
+        let anchor = self.anchor.as_ref()?;
+        shown.iter().position(|&i| &files[i].path == anchor)
+    }
+
+    fn selected<'f>(
+        &self,
+        files: &'f [ChangedFile],
+        shown: &[usize],
+    ) -> impl Iterator<Item = &'f ChangedFile> {
+        shown
+            .iter()
+            .map(move |&i| &files[i])
+            .filter(|f| self.paths.contains(&f.path))
+    }
+}
+
+/// By row of the list as shown.
 enum FileClick {
     Select(usize, Modifiers),
     Open(usize),
-    /// A right-click: the row becomes the selection unless it is already in it.
-    Menu(usize),
+    ContextMenu(usize),
 }
 
-/// What a row's menu asked for, by row in the list as shown.
+/// By row of the list as shown.
 enum MenuPick {
-    /// Show changes: the selected files, or this one.
     Open(usize),
     Blame(usize),
-    /// One of the working tree's items.
-    Row(usize, RowPick),
+    WorkingTree(usize, WorkingTreePick),
 }
 
-/// What a working-tree row's menu asked for, for its one file.
+struct RowInput {
+    click: Option<FileClick>,
+    pick: Option<MenuPick>,
+    /// While the list has the keyboard.
+    enter: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RowPick {
-    /// *Open in merge tool*.
+pub enum WorkingTreePick {
     MergeTool,
-    /// *Keep*, *Delete* or *Use …*.
     Answer(Answer),
-    /// *Open terminal* in the file's folder.
     Terminal,
-    /// *Open file system* at the file's folder.
     FileSystem,
 }
 
-/// What the table asks its window for.
 #[derive(Default)]
 pub struct TableAction<'f> {
-    /// Diff windows to open: a double-click, Enter, or *Show changes*.
     pub open: Vec<&'f ChangedFile>,
-    /// A blame window to open (the row menu's *Blame*).
     pub blame: Option<&'f ChangedFile>,
-    /// A working-tree row's item picked, for its file.
-    pub row: Option<(&'f ChangedFile, RowPick)>,
+    pub working_tree: Option<(&'f ChangedFile, WorkingTreePick)>,
 }
 
 impl FileTable {
-    /// Forgets the selection.
     pub fn clear_selection(&mut self) {
         self.selection = FileSelection::default();
     }
 
-    /// The bar (the filter, then what `bar` adds, and the count on the right), the headings
-    /// and the rows of `files`, or a line saying they are loading or failed. `name` tells the
-    /// window's widgets apart from another window's; `owner` tells lists apart: the selection
-    /// and the scroll position belong to it. Returns the files to open (a double-click, or
-    /// Enter on the selection) and the file to blame; a row's menu asks for either.
+    /// `name` tells the window's widgets apart from another window's; the selection and the
+    /// scroll position belong to the list `list_id`.
     pub fn show<'f>(
         &mut self,
         ui: &mut Ui,
-        c: &Colors,
         name: &str,
-        owner: Id,
+        list_id: Id,
         files: Option<&'f Listing>,
-        bar: impl FnOnce(&mut Ui),
+        add_to_bar: impl FnOnce(&mut Ui),
     ) -> TableAction<'f> {
         let files = files.map(|l| l.as_deref().map_err(String::as_str));
-        self.table(ui, c, name, owner, files, None, None, bar)
+        self.table(ui, name, list_id, files, StatusColumn::Names, add_to_bar)
     }
 
-    /// [`FileTable::show`] for a list against the working tree: conflicted files show what
-    /// each side did (`MM`, `MD`, …, see [`Conflict::letters`]) as their status, and each row's menu opens the file's folder, and
-    /// the merge tool or finishes the file, as its conflict allows.
-    #[allow(clippy::too_many_arguments)]
+    /// Conflicted files show what each side did as their status, and each row's menu has
+    /// working-tree items.
     pub fn show_working_tree<'f>(
         &mut self,
         ui: &mut Ui,
-        c: &Colors,
         name: &str,
-        owner: Id,
+        list_id: Id,
         files: Option<&'f Listing>,
         tree: Option<&WorkingTree>,
-        bar: impl FnOnce(&mut Ui),
+        add_to_bar: impl FnOnce(&mut Ui),
     ) -> TableAction<'f> {
         let files = files.map(|l| l.as_deref().map_err(String::as_str));
-        self.table(ui, c, name, owner, files, None, tree, bar)
+        let status = tree.map_or(StatusColumn::Names, StatusColumn::WorkingTree);
+        self.table(ui, name, list_id, files, status, add_to_bar)
     }
 
-    /// [`FileTable::show`], with each file's Status column as `badges`, one per file listed.
-    #[allow(clippy::too_many_arguments)]
     pub fn show_badged<'f>(
         &mut self,
         ui: &mut Ui,
-        c: &Colors,
         name: &str,
-        owner: Id,
+        list_id: Id,
         files: &'f [ChangedFile],
-        badges: &[Badges],
-        bar: impl FnOnce(&mut Ui),
+        badges: &[StatusBadges],
+        add_to_bar: impl FnOnce(&mut Ui),
     ) -> TableAction<'f> {
         debug_assert_eq!(files.len(), badges.len());
-        self.table(ui, c, name, owner, Some(Ok(files)), Some(badges), None, bar)
+        let status = StatusColumn::Badges(badges);
+        self.table(ui, name, list_id, Some(Ok(files)), status, add_to_bar)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn table<'f>(
         &mut self,
         ui: &mut Ui,
-        c: &Colors,
         name: &str,
-        owner: Id,
+        list_id: Id,
         files: Option<Result<&'f [ChangedFile], &str>>,
-        badges: Option<&[Badges]>,
-        tree: Option<&WorkingTree>,
-        bar: impl FnOnce(&mut Ui),
+        status: StatusColumn,
+        add_to_bar: impl FnOnce(&mut Ui),
     ) -> TableAction<'f> {
-        if self.selection.owner != Some(owner) {
+        if self.selection.list_id != Some(list_id) {
             self.selection = FileSelection {
-                owner: Some(owner),
+                list_id: Some(list_id),
                 ..FileSelection::default()
             };
         }
-        let weak = ui.visuals().weak_text_color();
-
-        // The bar: filter, what the window adds, count.
-        let (bar_rect, _) =
-            ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
-        heading_background(ui, bar_rect, c);
-        let mut bar_ui = ui.new_child(
-            UiBuilder::new()
-                .max_rect(bar_rect.shrink2(vec2(8.0, 0.0)))
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        );
-        filter_field(
-            &mut bar_ui,
-            &mut self.filter,
-            Id::new((name, "filter")),
-            280.0,
-        );
-        // While the working tree has conflicts, only they are listed unless asked otherwise.
-        let conflicts = tree.filter(|t| !t.conflicts.is_empty());
-        if conflicts.is_some() {
-            bar_ui.add_space(8.0);
-            let mut only = !self.all_files;
-            widgets::tip_explained(
-                bar_ui.checkbox(&mut only, "Conflicts only"),
-                "Conflicts only",
-                "",
-                "List only the files with conflicts, as git status shows them under \
-                 Unmerged paths. Each drops out of the list once it is resolved.",
-            );
-            self.all_files = !only;
-        } else if matches!(files, Some(Ok(_))) {
-            self.all_files = false;
-        }
-        bar(&mut bar_ui);
-        let shown = match files {
-            Some(Ok(files)) => {
-                let mut shown = filter_and_sort(files, &self.filter, self.order);
-                if let Some(tree) = conflicts.filter(|_| !self.all_files) {
-                    shown.retain(|&i| tree.conflict(&files[i].path).is_some());
-                }
-                Some(shown)
-            }
-            _ => None,
-        };
-        if let (Some(Ok(files)), Some(shown)) = (files, &shown) {
-            let count = if shown.len() == files.len() {
-                let n = files.len();
-                format!("{} file{}", thousands(n), if n == 1 { "" } else { "s" })
-            } else {
-                format!(
-                    "{} of {} files",
-                    thousands(shown.len()),
-                    thousands(files.len())
-                )
-            };
-            bar_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(count).size(12.0).color(weak));
-            });
-        }
-
+        let c = colors(ui);
+        let shown = self.bar(ui, &c, name, files, status.working_tree(), add_to_bar);
         let files = match files {
             None => {
-                ui.add_space(16.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(16.0);
+                note(ui, |ui| {
                     ui.weak("Loading…");
                 });
                 return TableAction::default();
             }
             Some(Err(e)) => {
-                ui.add_space(16.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(16.0);
+                note(ui, |ui| {
                     ui.colored_label(c.removed, format!("Could not list the changed files: {e}"));
                 });
                 return TableAction::default();
@@ -271,76 +264,9 @@ impl FileTable {
             Some(Ok(files)) => files,
         };
         let shown = shown.unwrap_or_default();
-
-        // Headings; a click sorts, another reverses.
-        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADING), Sense::hover());
-        heading_background(ui, head, c);
-        let compact = compact_files(head.width());
-        let layout = file_columns(&self.widths, head.width(), head.left());
-        let sorts: Vec<Response> = FileColumn::ALL
-            .into_iter()
-            .enumerate()
-            .map(|(i, column)| {
-                let rect =
-                    Rect::from_x_y_ranges(layout.x[i]..=layout.x[i] + layout.w[i], head.y_range());
-                let response = ui.interact(rect, Id::new((name, "sort", i)), Sense::click());
-                if file_heading(column, compact) != column.title() {
-                    response.on_hover_text(column.title())
-                } else {
-                    response
-                }
-            })
-            .collect();
-        // The borders over the headings; then the columns as dragged, in this frame.
-        let columns = file_table_columns(&layout);
-        let border_id = Id::new((name, "columns"));
-        let active = column_borders::drag(ui, border_id, head, &columns, &mut self.widths);
-        let layout = file_columns(&self.widths, head.width(), head.left());
-        let (x, w) = (&layout.x, &layout.w);
-        let heading_font = FontId::proportional(12.0);
-        for ((i, column), response) in FileColumn::ALL.into_iter().enumerate().zip(sorts) {
-            let rect = Rect::from_x_y_ranges(x[i]..=x[i] + w[i], head.y_range());
-            let heading = file_heading(column, compact);
-            if response.clicked() {
-                self.order.click(column);
-            }
-            let color = if response.hovered() {
-                ui.visuals().text_color()
-            } else {
-                weak
-            };
-            let g = cell(
-                ui,
-                heading,
-                heading_font.clone(),
-                color,
-                w[i] - 2.0 * CELL_PAD - 12.0,
-            );
-            let numeric = matches!(column, FileColumn::Added | FileColumn::Removed);
-            let arrow_room = if self.order.column == column {
-                12.0
-            } else {
-                0.0
-            };
-            let left = if numeric {
-                rect.right() - CELL_PAD - g.size().x - arrow_room
-            } else {
-                rect.left() + CELL_PAD
-            };
-            let text_width = g.size().x;
-            ui.painter()
-                .galley(pos2(left, rect.center().y - g.size().y / 2.0), g, color);
-            if self.order.column == column {
-                let at = pos2(left + text_width + 7.0, rect.center().y);
-                sort_arrow(ui, at, self.order.descending, color);
-            }
-        }
-        column_borders::paint(ui, head, &file_table_columns(&layout), active, c);
-
+        self.headings(ui, &c, name);
         if shown.is_empty() {
-            ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                ui.add_space(16.0);
+            note(ui, |ui| {
                 ui.weak(if files.is_empty() {
                     "No changes."
                 } else {
@@ -349,55 +275,179 @@ impl FileTable {
             });
             return TableAction::default();
         }
+        let input = self.rows(ui, &c, list_id, files, &shown, status);
+        self.act(ui, files, &shown, input)
+    }
 
+    /// Returns the files listed, filtered and sorted, as indices into them.
+    fn bar(
+        &mut self,
+        ui: &mut Ui,
+        c: &Colors,
+        name: &str,
+        files: Option<Result<&[ChangedFile], &str>>,
+        tree: Option<&WorkingTree>,
+        add_to_bar: impl FnOnce(&mut Ui),
+    ) -> Option<Vec<usize>> {
+        let (rect, _) =
+            ui.allocate_exact_size(vec2(ui.available_width(), BAR_HEIGHT), Sense::hover());
+        heading_background(ui, rect, c);
+        let mut bar = ui.new_child(
+            UiBuilder::new()
+                .max_rect(rect.shrink2(vec2(8.0, 0.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        filter_field(&mut bar, &mut self.filter, Id::new((name, "filter")));
+        let conflicts = tree.filter(|t| !t.conflicts.is_empty());
+        if conflicts.is_some() {
+            bar.add_space(8.0);
+            let mut only = !self.all_files;
+            widgets::tip_explained(
+                bar.checkbox(&mut only, "Conflicts only"),
+                "Conflicts only",
+                "",
+                "List only the files with conflicts, as git status shows them under \
+                 Unmerged paths. Each drops out of the list once it is resolved.",
+            );
+            self.all_files = !only;
+        } else if matches!(files, Some(Ok(_))) {
+            // Ticked again once none is left, so that the next conflicts start filtered.
+            self.all_files = false;
+        }
+        add_to_bar(&mut bar);
+        let files = files?.ok()?;
+        let mut shown = filter_and_sort(files, &self.filter, self.order);
+        if let Some(tree) = conflicts.filter(|_| !self.all_files) {
+            shown.retain(|&i| tree.conflict(&files[i].path).is_some());
+        }
+        let count = if shown.len() == files.len() {
+            let n = files.len();
+            format!("{} file{}", thousands(n), if n == 1 { "" } else { "s" })
+        } else {
+            format!(
+                "{} of {} files",
+                thousands(shown.len()),
+                thousands(files.len())
+            )
+        };
+        let weak = ui.visuals().weak_text_color();
+        bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(count).size(12.0).color(weak));
+        });
+        Some(shown)
+    }
+
+    fn headings(&mut self, ui: &mut Ui, c: &Colors, name: &str) {
+        let weak = ui.visuals().weak_text_color();
+        let (head, _) =
+            ui.allocate_exact_size(vec2(ui.available_width(), HEADING_HEIGHT), Sense::hover());
+        heading_background(ui, head, c);
+        let compact = is_compact(head.width());
+        let layout = file_columns(&self.widths, head.width(), head.left());
+        let span = |layout: &Layout, i: usize| {
+            Rect::from_x_y_ranges(layout.x[i]..=layout.x[i] + layout.w[i], head.y_range())
+        };
+        let sorts: Vec<Response> = FileColumn::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(i, column)| {
+                let response =
+                    ui.interact(span(&layout, i), Id::new((name, "sort", i)), Sense::click());
+                if heading(column, compact) != column.title() {
+                    response.on_hover_text(column.title())
+                } else {
+                    response
+                }
+            })
+            .collect();
+        // Laid out again after the drag, so that the columns follow the pointer in this frame.
+        let border_id = Id::new((name, "columns"));
+        let active = column_borders::drag(ui, border_id, head, &columns(&layout), &mut self.widths);
+        let layout = file_columns(&self.widths, head.width(), head.left());
+        let font = FontId::proportional(HEADING_FONT_SIZE);
+        for ((i, column), response) in FileColumn::ALL.into_iter().enumerate().zip(sorts) {
+            let rect = span(&layout, i);
+            if response.clicked() {
+                self.order.click(column);
+            }
+            let color = if response.hovered() {
+                ui.visuals().text_color()
+            } else {
+                weak
+            };
+            let max_width = layout.w[i] - 2.0 * CELL_PAD - SORT_ARROW_ROOM;
+            let g = cell(ui, heading(column, compact), font.clone(), color, max_width);
+            let sorted = self.order.column == column;
+            let arrow_room = if sorted { SORT_ARROW_ROOM } else { 0.0 };
+            let left = if matches!(column, FileColumn::Added | FileColumn::Removed) {
+                rect.right() - CELL_PAD - g.size().x - arrow_room
+            } else {
+                rect.left() + CELL_PAD
+            };
+            let text_width = g.size().x;
+            ui.painter()
+                .galley(pos2(left, rect.center().y - g.size().y / 2.0), g, color);
+            if sorted {
+                let at = pos2(left + text_width + 7.0, rect.center().y);
+                sort_arrow(ui, at, self.order.descending, color);
+            }
+        }
+        column_borders::paint(ui, head, &columns(&layout), active, c);
+    }
+
+    fn rows(
+        &mut self,
+        ui: &mut Ui,
+        c: &Colors,
+        list_id: Id,
+        files: &[ChangedFile],
+        shown: &[usize],
+        status: StatusColumn,
+    ) -> RowInput {
         ui.spacing_mut().item_spacing.y = 0.0;
         let body = egui::TextStyle::Body.resolve(ui.style());
         let text = ui.visuals().text_color();
+        let weak = ui.visuals().weak_text_color();
+        let tree = status.working_tree();
         let mut click = None;
         let mut pick = None;
         // The rows are one stop for Tab, which the keys move the selection in, from the row
         // clicked last.
-        let stop = Id::new(("files", owner, "stop"));
-        let at = self
-            .selection
-            .anchor
-            .as_ref()
-            .and_then(|a| shown.iter().position(|&i| &files[i].path == a));
+        let stop_id = Id::new(("files", list_id, "stop"));
+        let anchor_row = self.selection.anchor_row(files, shown);
         let height = ui.available_height();
-        let page = ((height / FILE_ROW).floor() as usize).saturating_sub(1);
-        let keys = widgets::list_keys(ui, stop, at, shown.len(), page);
+        let rows_per_page = ((height / ROW_HEIGHT).floor() as usize).saturating_sub(1);
+        let keys = widgets::list_keys(ui, stop_id, anchor_row, shown.len(), rows_per_page);
         let mut area = ScrollArea::vertical()
-            .id_salt(("files", owner))
+            .id_salt(("files", list_id))
             .auto_shrink(false);
         if let Some(row) = keys.select {
             click = Some(FileClick::Select(row, Modifiers::NONE));
             // Scrolled only as far as brings it in view.
-            let top = row as f32 * FILE_ROW;
-            let offset = self.scroll.max(top + FILE_ROW - height).min(top);
+            let top = row as f32 * ROW_HEIGHT;
+            let offset = self.scroll_offset.max(top + ROW_HEIGHT - height).min(top);
             area = area.vertical_scroll_offset(offset.max(0.0));
         }
-        let cue = focus::shows_own_by_id(ui.ctx(), stop).then(|| keys.select.or(at).unwrap_or(0));
-        // The context-menu key opens the menu of the row clicked last.
-        let menu_row = keys.select.or(at).filter(|_| keys.menu);
+        let keyed_row = keys.select.or(anchor_row);
+        let cue = focus::shows_own_by_id(ui.ctx(), stop_id).then(|| keyed_row.unwrap_or(0));
+        let menu_row = keyed_row.filter(|_| keys.menu);
         let mut cued = false;
-        let selection = &self.selection;
-        let widths = &self.widths;
-        let stop = widgets::list_stop(ui, stop, ui.available_rect_before_wrap());
-        let output = area.show_rows(ui, FILE_ROW, shown.len(), |ui, range| {
+        let stop = widgets::list_stop(ui, stop_id, ui.available_rect_before_wrap());
+        let output = area.show_rows(ui, ROW_HEIGHT, shown.len(), |ui, range| {
             for row in range {
                 let file = &files[shown[row]];
                 // Not a stop of its own: the table is one.
                 let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), FILE_ROW), Sense::CLICK);
-                focus::click_row(&response, stop.id);
+                    ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::CLICK);
+                focus::take_on_row_click(&response, stop_id);
                 if response.double_clicked() {
                     click = Some(FileClick::Open(row));
                 } else if response.clicked() {
                     click = Some(FileClick::Select(row, ui.input(|i| i.modifiers)));
                 } else if response.secondary_clicked() {
-                    click = Some(FileClick::Menu(row));
+                    click = Some(FileClick::ContextMenu(row));
                 }
-                if selection.paths.contains(&file.path) {
+                if self.selection.paths.contains(&file.path) {
                     ui.painter().rect_filled(rect, 0.0, c.selected_bg);
                 }
                 if response.hovered() {
@@ -409,54 +459,45 @@ impl FileTable {
                     widgets::paint_list_cue(ui, rect);
                     cued = true;
                 }
-                let Layout { x, w } = file_columns(widths, rect.width(), rect.left());
+                let Layout { x, w } = file_columns(&self.widths, rect.width(), rect.left());
+                let span = |i: usize| Rect::from_x_y_ranges(x[i]..=x[i] + w[i], rect.y_range());
                 let y = rect.center().y;
-                let put = |g: Arc<Galley>, x: f32| {
-                    ui.painter().galley(pos2(x, y - g.size().y / 2.0), g, text);
+                let put = |g: Arc<Galley>, left: f32| {
+                    ui.painter()
+                        .galley(pos2(left, y - g.size().y / 2.0), g, text);
                 };
                 let put_right = |g: Arc<Galley>, right: f32| {
                     ui.painter()
                         .galley(pos2(right - g.size().x, y - g.size().y / 2.0), g, text);
                 };
                 let pieces = path_pieces(file);
-                let (path, elided) =
-                    path_galley(ui, &pieces, &body, w[0] - 2.0 * CELL_PAD, text, weak);
-                put(path, x[0] + CELL_PAD);
+                let path_width = w[column::PATH] - 2.0 * CELL_PAD;
+                let (path, elided) = path_galley(ui, &pieces, &body, path_width, text, weak);
+                put(path, x[column::PATH] + CELL_PAD);
+                let extension_width = w[column::EXTENSION] - 2.0 * CELL_PAD;
                 put(
-                    cell(
-                        ui,
-                        file.extension(),
-                        body.clone(),
-                        weak,
-                        w[1] - 2.0 * CELL_PAD,
-                    ),
-                    x[1] + CELL_PAD,
+                    cell(ui, file.extension(), body.clone(), weak, extension_width),
+                    x[column::EXTENSION] + CELL_PAD,
                 );
-                let status_color = match file.status {
-                    FileStatus::Added => c.added,
-                    FileStatus::Deleted => c.removed,
-                    FileStatus::Renamed | FileStatus::Copied => c.renamed,
-                    _ => text,
-                };
-                let badged = badges.map(|b| &b[shown[row]]);
+                let status_left = pos2(x[column::STATUS] + CELL_PAD, y);
+                let badged = status.badges().map(|b| &b[shown[row]]);
                 let conflict = tree.and_then(|t| t.conflict(&file.path));
                 match (badged, conflict) {
-                    (_, Some(conflict)) => {
-                        paint_conflict(ui, conflict, c, pos2(x[2] + CELL_PAD, y));
+                    (_, Some(conflict)) => paint_conflict(ui, conflict, c, status_left),
+                    (Some(b), None) => paint_status_badges(ui, &b.badges, status_left),
+                    (None, None) => {
+                        let color = match file.status {
+                            FileStatus::Added => c.added,
+                            FileStatus::Deleted => c.removed,
+                            FileStatus::Renamed | FileStatus::Copied => c.renamed,
+                            _ => text,
+                        };
+                        let width = w[column::STATUS] - 2.0 * CELL_PAD;
+                        let g = cell(ui, file.status.name(), body.clone(), color, width);
+                        put(g, status_left.x);
                     }
-                    (Some(b), None) => paint_badges(ui, &b.badges, pos2(x[2] + CELL_PAD, y)),
-                    (None, None) => put(
-                        cell(
-                            ui,
-                            file.status.name(),
-                            body.clone(),
-                            status_color,
-                            w[2] - 2.0 * CELL_PAD,
-                        ),
-                        x[2] + CELL_PAD,
-                    ),
                 }
-                // Binary files have no line counts.
+                // `None` for a binary file.
                 let count = |n: Option<u32>, color| {
                     let (s, color) = match n {
                         Some(n) => (thousands(n as usize), color),
@@ -464,13 +505,12 @@ impl FileTable {
                     };
                     ui.painter().layout_no_wrap(s, body.clone(), color)
                 };
-                put_right(count(file.added, c.added), x[3] + w[3] - CELL_PAD);
-                put_right(count(file.removed, c.removed), x[4] + w[4] - CELL_PAD);
-                let path_rect = Rect::from_x_y_ranges(x[0]..=x[0] + w[0], rect.y_range());
-                let status_rect = Rect::from_x_y_ranges(x[2]..=x[2] + w[2], rect.y_range());
-                let on_status = response
-                    .hover_pos()
-                    .is_some_and(|p| status_rect.contains(p));
+                let right = |i: usize| x[i] + w[i] - CELL_PAD;
+                put_right(count(file.added, c.added), right(column::ADDED));
+                put_right(count(file.removed, c.removed), right(column::REMOVED));
+                let hover = response.hover_pos();
+                let on_status = hover.is_some_and(|p| span(column::STATUS).contains(p));
+                let on_path = hover.is_some_and(|p| span(column::PATH).contains(p));
                 let response = match (badged, conflict) {
                     (_, Some(conflict)) if on_status => {
                         response.on_hover_text_at_pointer(capitalized(conflict.words()))
@@ -478,30 +518,29 @@ impl FileTable {
                     (Some(b), None) if on_status => response.on_hover_text_at_pointer(&b.words),
                     _ => response,
                 };
-                let response =
-                    if elided && response.hover_pos().is_some_and(|p| path_rect.contains(p)) {
-                        response.on_hover_ui(|ui| {
-                            ui.label(path_job(&pieces, 0, &body, text, weak));
-                        })
-                    } else {
-                        response
-                    };
+                let response = if elided && on_path {
+                    response.on_hover_ui(|ui| {
+                        ui.label(path_job(&pieces, 0, &body, text, weak));
+                    })
+                } else {
+                    response
+                };
                 let at = pos2(rect.left() + CELL_PAD, rect.bottom());
-                crate::menu::context_menu(&response, menu_row == Some(row), at)
+                crate::menu::context_menu(&response, (menu_row == Some(row)).then_some(at))
                     .style(crate::menu::style)
                     .show(|ui| {
                         crate::menu::fit_window(ui, |ui| {
                             crate::usage::menu(ui.ctx(), crate::usage::Menu::File);
                             ui.set_min_width(crate::menu::MIN_WIDTH);
-                            let chosen = selection.paths.len();
-                            let many = chosen > 1 && selection.paths.contains(&file.path);
+                            let chosen = self.selection.paths.len();
+                            let many = chosen > 1 && self.selection.paths.contains(&file.path);
                             if let Some(p) = row_menu(ui, row, file, many.then_some(chosen), tree) {
                                 pick = Some(p);
                             }
                             if let Some(tree) = tree
                                 && let Some(p) = working_tree_menu(ui, tree, file)
                             {
-                                pick = Some(MenuPick::Row(row, p));
+                                pick = Some(MenuPick::WorkingTree(row, p));
                             }
                             crate::menu::separator(ui);
                             if ui.button("Copy path").clicked() {
@@ -512,107 +551,90 @@ impl FileTable {
                     });
             }
         });
-
-        self.scroll = output.state.offset.y;
+        self.scroll_offset = output.state.offset.y;
         widgets::list_stop_ring(ui, &stop, cued);
-        // Enter opens every selected file; a double-click opens one.
-        let enter = keys.enter
+        RowInput {
+            click,
+            pick,
+            enter: keys.enter,
+        }
+    }
+
+    fn act<'f>(
+        &mut self,
+        ui: &mut Ui,
+        files: &'f [ChangedFile],
+        shown: &[usize],
+        input: RowInput,
+    ) -> TableAction<'f> {
+        let RowInput { click, pick, enter } = input;
+        let enter = enter
             || !ui.ctx().egui_wants_keyboard_input()
                 && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
-        let sel = &mut self.selection;
-        let mut open = Vec::new();
-        let mut blame = None;
-        let mut picked_row = None;
+        let selection = &mut self.selection;
+        let mut action = TableAction::default();
         match pick {
             // The selection, if the row is in it; the row became the selection otherwise.
             Some(MenuPick::Open(row)) => {
                 let file = &files[shown[row]];
-                if sel.paths.contains(&file.path) {
-                    open.extend(
-                        shown
-                            .iter()
-                            .map(|&i| &files[i])
-                            .filter(|f| sel.paths.contains(&f.path)),
-                    );
+                if selection.paths.contains(&file.path) {
+                    action.open.extend(selection.selected(files, shown));
                 } else {
-                    open.push(file);
+                    action.open.push(file);
                 }
             }
-            Some(MenuPick::Blame(row)) => blame = Some(&files[shown[row]]),
-            Some(MenuPick::Row(row, p)) => picked_row = Some((&files[shown[row]], p)),
+            Some(MenuPick::Blame(row)) => action.blame = Some(&files[shown[row]]),
+            Some(MenuPick::WorkingTree(row, p)) => {
+                action.working_tree = Some((&files[shown[row]], p));
+            }
             None => {}
         }
         match click {
             Some(FileClick::Open(row)) => {
                 let file = &files[shown[row]];
-                sel.paths = HashSet::from([file.path.clone()]);
-                sel.anchor = Some(file.path.clone());
-                open.push(file);
+                selection.select_only(&file.path);
+                action.open.push(file);
             }
-            Some(FileClick::Select(row, mods)) => {
-                let path = files[shown[row]].path.clone();
-                let anchor = sel
-                    .anchor
-                    .as_ref()
-                    .and_then(|a| shown.iter().position(|&i| &files[i].path == a));
-                if mods.command {
-                    if !sel.paths.remove(&path) {
-                        sel.paths.insert(path.clone());
-                    }
-                    sel.anchor = Some(path);
-                } else if mods.shift
-                    && let Some(from) = anchor
-                {
-                    let (a, b) = (from.min(row), from.max(row));
-                    sel.paths = shown[a..=b]
-                        .iter()
-                        .map(|&i| files[i].path.clone())
-                        .collect();
-                } else {
-                    sel.paths = HashSet::from([path.clone()]);
-                    sel.anchor = Some(path);
-                }
+            Some(FileClick::Select(row, modifiers)) => {
+                selection.click(row, modifiers, files, shown);
             }
-            Some(FileClick::Menu(row)) => {
-                let path = files[shown[row]].path.clone();
-                if !sel.paths.contains(&path) {
-                    sel.paths = HashSet::from([path.clone()]);
-                    sel.anchor = Some(path);
+            Some(FileClick::ContextMenu(row)) => {
+                let path = &files[shown[row]].path;
+                if !selection.paths.contains(path) {
+                    selection.select_only(path);
                 }
             }
             None => {}
         }
         if enter {
-            open.extend(
-                shown
-                    .iter()
-                    .map(|&i| &files[i])
-                    .filter(|f| sel.paths.contains(&f.path)),
-            );
+            action.open.extend(selection.selected(files, shown));
         }
-        TableAction {
-            open,
-            blame,
-            row: picked_row,
-        }
+        action
     }
 }
 
-/// Badges left to right from `at`, centred on its height.
-fn paint_badges(ui: &Ui, badges: &[Badge], at: egui::Pos2) {
-    let mut x = at.x;
+fn note(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    ui.add_space(16.0);
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        add(ui);
+    });
+}
+
+fn paint_status_badges(ui: &Ui, badges: &[StatusBadge], left_center: Pos2) {
+    let mut x = left_center.x;
     for badge in badges {
         let (letter, fill) = if badge.filled {
             ((badge.letter, Color32::WHITE), Some(badge.color))
         } else {
             ((badge.letter, badge.color), None)
         };
-        x += boxed(ui, &[letter], badge.color, fill, pos2(x, at.y)) + 4.0;
+        x += boxed(ui, &[letter], badge.color, fill, pos2(x, left_center.y)) + 4.0;
     }
 }
 
-/// A conflict's letters, ours then theirs in their status's colour, boxed in red.
-fn paint_conflict(ui: &Ui, conflict: &Conflict, c: &Colors, at: egui::Pos2) {
+/// Ours then theirs, each in its status's colour, boxed in red.
+fn paint_conflict(ui: &Ui, conflict: &Conflict, c: &Colors, left_center: Pos2) {
     let weak = ui.visuals().weak_text_color();
     let letters = conflict.letters().map(|l| {
         let color = match l {
@@ -623,20 +645,17 @@ fn paint_conflict(ui: &Ui, conflict: &Conflict, c: &Colors, at: egui::Pos2) {
         };
         (l, color)
     });
-    boxed(ui, &letters, c.removed, None, at);
+    boxed(ui, &letters, c.removed, None, left_center);
 }
 
-/// `letters` in their colours in a box from `at`, centred on its height, its border `border`
-/// and its inside `fill`. As wide as it is high for one letter, wider for more. Returns its
-/// width.
+/// Square for one letter, wider for more. Returns its width.
 fn boxed(
     ui: &Ui,
     letters: &[(char, Color32)],
     border: Color32,
     fill: Option<Color32>,
-    at: egui::Pos2,
+    left_center: Pos2,
 ) -> f32 {
-    const SIZE: f32 = 16.0;
     let mut job = LayoutJob::default();
     for &(letter, color) in letters {
         job.append(
@@ -646,8 +665,11 @@ fn boxed(
         );
     }
     let g = ui.painter().layout_job(job);
-    let width = (g.size().x + 6.0).max(SIZE);
-    let r = Rect::from_min_size(pos2(at.x, at.y - SIZE / 2.0), vec2(width, SIZE));
+    let width = (g.size().x + 6.0).max(STATUS_BOX_SIZE);
+    let r = Rect::from_min_size(
+        pos2(left_center.x, left_center.y - STATUS_BOX_SIZE / 2.0),
+        vec2(width, STATUS_BOX_SIZE),
+    );
     match fill {
         Some(fill) => {
             ui.painter().rect_filled(r, 3.0, fill);
@@ -666,8 +688,7 @@ fn boxed(
     width
 }
 
-/// The menu of a changed file's row: its diff (or the diffs of the `many` files chosen, when
-/// it is one of them), blame, and copying its path.
+/// `many` is how many files are selected, when the row is one of them.
 fn row_menu(
     ui: &mut Ui,
     row: usize,
@@ -709,11 +730,13 @@ fn row_menu(
     pick
 }
 
-/// A working-tree row's items: the merge tool (greyed, with why, where it can't help), what
-/// finishes its conflict in parterre, and the file's folder in a terminal or the file system.
-fn working_tree_menu(ui: &mut Ui, tree: &WorkingTree, file: &ChangedFile) -> Option<RowPick> {
+fn working_tree_menu(
+    ui: &mut Ui,
+    tree: &WorkingTree,
+    file: &ChangedFile,
+) -> Option<WorkingTreePick> {
     let mut pick = None;
-    let mut item = |ui: &mut Ui, response: Response, p: RowPick| {
+    let mut item = |ui: &mut Ui, response: Response, p: WorkingTreePick| {
         if response.clicked() {
             pick = Some(p);
             ui.close();
@@ -728,7 +751,7 @@ fn working_tree_menu(ui: &mut Ui, tree: &WorkingTree, file: &ChangedFile) -> Opt
     let tool = ui
         .add_enabled(why.is_none(), egui::Button::new("Open in merge tool"))
         .on_disabled_hover_text(why.unwrap_or_default());
-    item(ui, tool, RowPick::MergeTool);
+    item(ui, tool, WorkingTreePick::MergeTool);
     if let Some(c) = conflict {
         for answer in tree.sides.mine_first(c.answers()) {
             let commands: Vec<String> = c
@@ -739,28 +762,19 @@ fn working_tree_menu(ui: &mut Ui, tree: &WorkingTree, file: &ChangedFile) -> Opt
             let response = ui
                 .button(c.item(&tree.sides, answer))
                 .on_hover_text(commands.join("\n"));
-            item(ui, response, RowPick::Answer(answer));
+            item(ui, response, WorkingTreePick::Answer(answer));
         }
     }
     crate::menu::separator(ui);
     let terminal = ui.button("Open terminal");
-    item(ui, terminal, RowPick::Terminal);
+    item(ui, terminal, WorkingTreePick::Terminal);
     let files = ui.button("Open file system");
-    item(ui, files, RowPick::FileSystem);
+    item(ui, files, WorkingTreePick::FileSystem);
     pick
 }
 
-/// `both modified` as `Both modified`.
-fn capitalized(words: &str) -> String {
-    let mut chars = words.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
-}
-
-/// The folder holding `path` in the worktree at `root`, or the nearest one that still exists.
-pub fn file_folder(root: &std::path::Path, path: &str) -> std::path::PathBuf {
+/// The nearest that still exists.
+pub fn file_folder(root: &Path, path: &str) -> PathBuf {
     let mut dir = root.join(path);
     dir.pop();
     while !dir.is_dir() && dir.starts_with(root) && dir != root {
@@ -769,47 +783,44 @@ pub fn file_folder(root: &std::path::Path, path: &str) -> std::path::PathBuf {
     if dir.is_dir() { dir } else { root.to_owned() }
 }
 
-/// Diff windows asked for, held back while "Open all?" is asked when there are many.
 #[derive(Debug)]
 pub struct DiffQueue<T> {
     ready: Vec<T>,
-    confirm: Option<Vec<T>>,
+    unconfirmed: Option<Vec<T>>,
 }
 
 impl<T> Default for DiffQueue<T> {
     fn default() -> Self {
         DiffQueue {
             ready: Vec::new(),
-            confirm: None,
+            unconfirmed: None,
         }
     }
 }
 
 impl<T> DiffQueue<T> {
-    /// Queues `open`, or asks first when it is more than [`MANY_DIFFS`].
     pub fn push(&mut self, open: Vec<T>) {
-        if open.len() > MANY_DIFFS {
-            self.confirm = Some(open);
+        if open.len() > MAX_DIFFS_WITHOUT_ASKING {
+            self.unconfirmed = Some(open);
         } else {
             self.ready.extend(open);
         }
     }
 
-    /// The diff windows to open now.
     pub fn take(&mut self) -> Vec<T> {
         std::mem::take(&mut self.ready)
     }
 
-    /// Drops what is waiting for an answer.
     pub fn cancel(&mut self) {
-        self.confirm = None;
+        self.unconfirmed = None;
     }
 
-    /// Asks before opening more than [`MANY_DIFFS`] diff windows at once, in a modal dialog over
-    /// the window `ui` is in.
+    /// A modal dialog over the window `ui` is in.
     pub fn confirm_many(&mut self, ui: &mut Ui, id: Id) {
-        let Some(pending) = &self.confirm else { return };
-        let n = pending.len();
+        let Some(unconfirmed) = &self.unconfirmed else {
+            return;
+        };
+        let n = unconfirmed.len();
         let shown = crate::dialogs::Dialog::new(id, &format!("Open {n} diff windows?"))
             .screen(crate::usage::Screen::OpenDiffs)
             .width(340.0)
@@ -820,30 +831,28 @@ impl<T> DiffQueue<T> {
                 ui.label("A window opens for every selected file.");
                 ui.add_space(12.0);
                 ui.separator();
-                crate::dialogs::actions(ui, "Open all", true, false, false)
+                crate::dialogs::actions(ui, crate::dialogs::Primary::new("Open all"))
             });
         match shown.inner {
-            crate::dialogs::Answer::Primary => {
-                self.ready.extend(self.confirm.take().unwrap_or_default())
-            }
-            crate::dialogs::Answer::Cancel => self.confirm = None,
-            crate::dialogs::Answer::Open if shown.should_close() => self.confirm = None,
+            crate::dialogs::Answer::Primary => self
+                .ready
+                .extend(self.unconfirmed.take().unwrap_or_default()),
+            crate::dialogs::Answer::Cancel => self.unconfirmed = None,
+            crate::dialogs::Answer::Open if shown.should_close() => self.unconfirmed = None,
             crate::dialogs::Answer::Open => {}
         }
     }
 }
 
-/// Lists asked of git on a worker thread when first needed, and kept by key: the changed
-/// files of a commit, or the files two commits differ in.
+/// Values asked of git on a worker thread when first needed, kept by key.
 #[derive(Debug)]
 pub struct Lister<K, V> {
     /// `None` while git works on it.
-    cache: HashMap<K, Option<V>>,
-    /// Results; `None` for a request dropped because a newer one came in.
+    pub(super) cache: HashMap<K, Option<V>>,
+    /// `None` for a request dropped because a newer one came in.
     rx: Option<mpsc::Receiver<(K, Option<V>)>>,
     tx: Option<mpsc::Sender<K>>,
-    /// The folder the worker asks git in.
-    path: Option<std::path::PathBuf>,
+    repo_path: Option<PathBuf>,
 }
 
 impl<K, V> Default for Lister<K, V> {
@@ -852,7 +861,7 @@ impl<K, V> Default for Lister<K, V> {
             cache: HashMap::new(),
             rx: None,
             tx: None,
-            path: None,
+            repo_path: None,
         }
     }
 }
@@ -862,19 +871,18 @@ where
     K: Clone + Eq + Hash + Send + 'static,
     V: Send + 'static,
 {
-    /// The list for `key` if it is known; otherwise asks for it. The first call starts the
-    /// worker, which runs `work` with git in `repo_path` for every key asked for. Asked from
-    /// another folder (another worktree went to, perhaps since deleted), it starts afresh.
+    /// Asked from another folder (another worktree gone to, perhaps since deleted), it starts
+    /// afresh.
     pub fn get(
         &mut self,
-        repo_path: &std::path::Path,
+        repo_path: &Path,
         key: K,
         ctx: &egui::Context,
         work: fn(&Git, &K) -> V,
     ) -> Option<&V> {
-        if self.path.as_deref() != Some(repo_path) {
+        if self.repo_path.as_deref() != Some(repo_path) {
             *self = Lister {
-                path: Some(repo_path.to_owned()),
+                repo_path: Some(repo_path.to_owned()),
                 ..Lister::default()
             };
         }
@@ -884,7 +892,7 @@ where
                 None => self.cache.remove(&key),
             };
         }
-        if let std::collections::hash_map::Entry::Vacant(slot) = self.cache.entry(key.clone()) {
+        if let Entry::Vacant(slot) = self.cache.entry(key.clone()) {
             slot.insert(None);
             let tx = self.tx.get_or_insert_with(|| {
                 let (req_tx, req_rx) = mpsc::channel::<K>();
@@ -893,9 +901,9 @@ where
                 let ctx = ctx.clone();
                 std::thread::spawn(move || {
                     while let Ok(mut key) = req_rx.recv() {
-                        // Holding an arrow key asks for one commit after another; only the
-                        // newest request still matters. The others are forgotten, so they are
-                        // asked for again if they show up once more.
+                        // Holding an arrow key asks for one commit after another, and only the
+                        // newest matters. The others are forgotten, so that they are asked for
+                        // again if they show up once more.
                         while let Ok(newer) = req_rx.try_recv() {
                             if res_tx.send((key, None)).is_err() {
                                 return;
@@ -918,16 +926,14 @@ where
     }
 }
 
-/// A piece of a path cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PathPiece {
     Folder,
     Name,
-    /// The ` → ` between the old and new path of a rename.
     Arrow,
 }
 
-/// A file's path in pieces: `old → new` for renames and copies.
+/// `old → new` for renames and copies.
 fn path_pieces(file: &ChangedFile) -> Vec<(String, PathPiece)> {
     let mut pieces = Vec::new();
     let push_path = |pieces: &mut Vec<(String, PathPiece)>, path: &str| match path.rfind('/') {
@@ -945,9 +951,8 @@ fn path_pieces(file: &ChangedFile) -> Vec<(String, PathPiece)> {
     pieces
 }
 
-/// The pieces from byte `from` of their text on, after an ellipsis if `from` isn't 0: folders
-/// weak, file names in the text colour. The arrow is monospaced: the proportional font has
-/// none.
+/// The pieces from byte `from` of their text on, after an ellipsis if that isn't 0. The arrow
+/// is monospaced: the proportional font has none.
 fn path_job(
     pieces: &[(String, PathPiece)],
     from: usize,
@@ -977,8 +982,7 @@ fn path_job(
     job
 }
 
-/// The path cell, cut at the start when it is too long so that the file name stays in view.
-/// Also says whether it was cut.
+/// Cut at the start, so that the file name stays in view; true if it was cut.
 fn path_galley(
     ui: &Ui,
     pieces: &[(String, PathPiece)],
@@ -1002,20 +1006,13 @@ fn path_galley(
     (painter.layout_job(job(&shown)), shown != full)
 }
 
-/// Whether a changed-files table `width` wide is compact: in a narrow pane (beside another
-/// one in layouts B and D) the columns after the path shrink, with shorter headings, so that
-/// the path keeps room.
-fn compact_files(width: f32) -> bool {
-    const ROOMY_PATH: f32 = 260.0;
-    width - FILE_COLUMNS.iter().sum::<f32>() < ROOMY_PATH
+/// In a narrow pane, the columns after the path shrink, with shorter headings, so that the path
+/// keeps room.
+fn is_compact(width: f32) -> bool {
+    width - FIXED_COLUMN_WIDTHS.iter().sum::<f32>() < ROOMY_PATH_WIDTH
 }
 
-/// Widths of the columns after the path: extension, status, lines added, lines removed.
-const FILE_COLUMNS: [f32; 4] = [90.0, 100.0, 100.0, 110.0];
-const COMPACT_FILE_COLUMNS: [f32; 4] = [56.0, 78.0, 66.0, 82.0];
-
-/// A changed-files column's heading; shorter in a compact table.
-fn file_heading(column: FileColumn, compact: bool) -> &'static str {
+fn heading(column: FileColumn, compact: bool) -> &'static str {
     match column {
         FileColumn::Extension if compact => "Ext.",
         FileColumn::Added if compact => "Added",
@@ -1024,32 +1021,25 @@ fn file_heading(column: FileColumn, compact: bool) -> &'static str {
     }
 }
 
-/// The path column, which takes what the others leave, and the least it gets.
-const PATH: usize = 0;
-const PATH_MIN: f32 = 120.0;
-
-/// x and widths of the changed-files columns: the path takes what the others leave; they are
-/// as the user dragged them, or as the table's width has them.
 fn file_columns(widths: &ColumnWidths, width: f32, left: f32) -> Layout {
-    let fixed = if compact_files(width) {
-        COMPACT_FILE_COLUMNS
+    let fixed = if is_compact(width) {
+        COMPACT_FIXED_COLUMN_WIDTHS
     } else {
-        FILE_COLUMNS
+        FIXED_COLUMN_WIDTHS
     };
     let defaults = [0.0, fixed[0], fixed[1], fixed[2], fixed[3]];
-    widths.layout(&defaults, PATH, PATH_MIN, left, width)
+    widths.layout(&defaults, column::PATH, PATH_MIN_WIDTH, left, width)
 }
 
-fn file_table_columns(layout: &Layout) -> Columns<'_> {
+fn columns(layout: &Layout) -> Columns<'_> {
     Columns {
         layout,
-        flex: PATH,
-        flex_min: PATH_MIN,
+        flex: column::PATH,
+        flex_min: PATH_MIN_WIDTH,
     }
 }
 
-/// A small triangle: up for ascending, down for descending.
-fn sort_arrow(ui: &Ui, at: egui::Pos2, descending: bool, color: Color32) {
+fn sort_arrow(ui: &Ui, at: Pos2, descending: bool, color: Color32) {
     let (w, h) = (3.5, 3.0);
     let points = if descending {
         vec![
@@ -1068,8 +1058,7 @@ fn sort_arrow(ui: &Ui, at: egui::Pos2, descending: bool, color: Color32) {
         .add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
-/// The filter field of the changed files, with a magnifier.
-fn filter_field(ui: &mut Ui, text: &mut String, id: Id, width: f32) -> Response {
+fn filter_field(ui: &mut Ui, text: &mut String, id: Id) {
     let focused = ui.memory(|m| m.has_focus(id));
     let t = widgets::tones(ui);
     let stroke = if focused {
@@ -1088,7 +1077,7 @@ fn filter_field(ui: &mut Ui, text: &mut String, id: Id, width: f32) -> Response 
             bottom: 0,
         })
         .show(ui, |ui| {
-            ui.set_width(width - 14.0);
+            ui.set_width(FILTER_WIDTH - 14.0);
             ui.set_height(28.0);
             ui.spacing_mut().item_spacing.x = 6.0;
             let weak = ui.visuals().weak_text_color();
@@ -1100,23 +1089,23 @@ fn filter_field(ui: &mut Ui, text: &mut String, id: Id, width: f32) -> Response 
                     .frame(egui::Frame::NONE)
                     .hint_text("Filter paths")
                     .desired_width(ui.available_width()),
-            )
-        })
-        .inner
+            );
+        });
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::tool_harness::{
+        assert_no_id_clashes, click_events, git, raw_input, run_frame, stuck_merge, text_at, write,
+    };
     use super::*;
 
-    /// Asked from another folder (another worktree went to, maybe deleted since), the lister
-    /// forgets what the first folder's worker found and asks again in the new one.
     #[test]
     fn a_lister_asked_from_another_folder_starts_afresh() {
         let ctx = egui::Context::default();
         let mut lister: Lister<u32, String> = Lister::default();
         let wait = |lister: &mut Lister<u32, String>, path: &str| loop {
-            if let Some(v) = lister.get(std::path::Path::new(path), 1, &ctx, |git, _| {
+            if let Some(v) = lister.get(Path::new(path), 1, &ctx, |git, _| {
                 git.dir().display().to_string()
             }) {
                 return v.clone();
@@ -1178,8 +1167,7 @@ mod tests {
         assert_eq!(colors, [weak, text]);
     }
 
-    /// The compare window's table against a stopped merge, frame by frame: what it shows and
-    /// what a row's menu picked.
+    /// The compare window's table against a stopped merge, frame by frame.
     struct Table {
         ctx: egui::Context,
         table: FileTable,
@@ -1189,7 +1177,7 @@ mod tests {
     }
 
     impl Table {
-        fn new(dir: &std::path::Path) -> Table {
+        fn new(dir: &Path) -> Table {
             let (listing, tree) = Table::list(dir);
             let mut t = Table {
                 ctx: egui::Context::default(),
@@ -1203,57 +1191,35 @@ mod tests {
         }
 
         /// HEAD against the working tree in `dir`.
-        fn list(dir: &std::path::Path) -> (Listing, WorkingTree) {
-            let git = parterre_core::git::Git::new(dir);
-            let head = parterre_core::Oid::from_hex(&super::super::tool_harness::git(
-                dir,
-                &["rev-parse", "HEAD"],
-            ))
-            .unwrap();
+        fn list(dir: &Path) -> (Listing, WorkingTree) {
+            let head = parterre_core::Oid::from_hex(&git(dir, &["rev-parse", "HEAD"])).unwrap();
             let compared = parterre_core::compare::Comparison::with_working_tree(head, false)
-                .run(&git)
+                .run(&Git::new(dir))
                 .unwrap();
             (Ok(compared.files), compared.working_tree.unwrap())
         }
 
-        /// Lists the working tree again, as the compare window does when the index changes.
-        fn relist(&mut self, dir: &std::path::Path) {
+        fn relist(&mut self, dir: &Path) {
             (self.listing, self.tree) = Table::list(dir);
             self.frame(Vec::new());
         }
 
-        fn frame(&mut self, events: Vec<egui::Event>) -> Option<(String, RowPick)> {
+        fn frame(&mut self, events: Vec<egui::Event>) -> Option<(String, WorkingTreePick)> {
             let mut picked = None;
-            let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 600.0))),
-                events,
-                ..Default::default()
-            };
             let (table, listing, tree) = (&mut self.table, &self.listing, &self.tree);
-            let mut output = self.ctx.run_ui(input, |ui| {
-                let c = super::super::log_window::colors(ui);
+            let input = raw_input(vec2(900.0, 600.0), events);
+            self.texts = run_frame(&self.ctx, input, |ui| {
                 let action = table.show_working_tree(
                     ui,
-                    &c,
                     "test",
                     Id::new("test"),
                     Some(listing),
                     Some(tree),
                     |_| {},
                 );
-                picked = action.row.map(|(f, p)| (f.path.clone(), p));
+                picked = action.working_tree.map(|(f, p)| (f.path.clone(), p));
             });
-            output.textures_delta.clear();
-            self.texts.clear();
-            for clipped in &output.shapes {
-                super::super::tool_harness::collect(&clipped.shape, &mut self.texts);
-            }
-            let clashes: Vec<_> = self
-                .texts
-                .iter()
-                .filter(|(t, _)| t.contains("use of"))
-                .collect();
-            assert!(clashes.is_empty(), "egui reports id clashes: {clashes:?}");
+            assert_no_id_clashes(&self.texts);
             picked
         }
 
@@ -1261,25 +1227,14 @@ mod tests {
             self.texts.iter().any(|(t, _)| t == text)
         }
 
-        fn click(&mut self, text: &str, button: egui::PointerButton) -> Option<(String, RowPick)> {
-            let at = self
-                .texts
-                .iter()
-                .find(|(t, _)| t == text)
-                .unwrap_or_else(|| panic!("no {text:?}: {:?}", self.texts))
-                .1
-                .center();
+        fn click(
+            &mut self,
+            text: &str,
+            button: egui::PointerButton,
+        ) -> Option<(String, WorkingTreePick)> {
+            let at = text_at(&self.texts, text);
             let mut picked = None;
-            for pressed in [true, false] {
-                let events = vec![
-                    egui::Event::PointerMoved(at),
-                    egui::Event::PointerButton {
-                        pos: at,
-                        button,
-                        pressed,
-                        modifiers: Modifiers::NONE,
-                    },
-                ];
+            for events in click_events(at, button, Modifiers::NONE) {
                 picked = picked.or(self.frame(events));
             }
             picked.or(self.frame(Vec::new()))
@@ -1288,7 +1243,7 @@ mod tests {
 
     #[test]
     fn conflicted_rows_show_what_each_side_did() {
-        let dir = super::super::tool_harness::stuck_merge();
+        let dir = stuck_merge();
         let t = Table::new(dir.path());
         assert!(t.shows("MM"), "{:?}", t.texts);
         assert!(t.shows("MD"));
@@ -1298,8 +1253,7 @@ mod tests {
 
     #[test]
     fn while_conflicted_only_conflicts_are_listed_unless_asked() {
-        use super::super::tool_harness::{git, write};
-        let dir = super::super::tool_harness::stuck_merge();
+        let dir = stuck_merge();
         let p = dir.path();
         write(p, "new.txt", "new\n");
         git(p, &["add", "new.txt"]);
@@ -1330,7 +1284,7 @@ mod tests {
 
     #[test]
     fn a_file_deleted_by_them_takes_a_side_but_not_the_merge_tool() {
-        let dir = super::super::tool_harness::stuck_merge();
+        let dir = stuck_merge();
         let mut t = Table::new(dir.path());
         t.click("gone.txt", egui::PointerButton::Secondary);
         for item in [
@@ -1353,13 +1307,16 @@ mod tests {
                 "Use theirs (feature, deleted)",
                 egui::PointerButton::Primary
             ),
-            Some(("gone.txt".to_owned(), RowPick::Answer(Answer::Theirs)))
+            Some((
+                "gone.txt".to_owned(),
+                WorkingTreePick::Answer(Answer::Theirs)
+            ))
         );
     }
 
     #[test]
     fn a_content_conflict_opens_in_the_merge_tool() {
-        let dir = super::super::tool_harness::stuck_merge();
+        let dir = stuck_merge();
         let mut t = Table::new(dir.path());
         t.click("text.txt", egui::PointerButton::Secondary);
         // Or either side, whole.
@@ -1367,12 +1324,12 @@ mod tests {
         assert!(t.shows("Use theirs (feature)"));
         assert_eq!(
             t.click("Open in merge tool", egui::PointerButton::Primary),
-            Some(("text.txt".to_owned(), RowPick::MergeTool))
+            Some(("text.txt".to_owned(), WorkingTreePick::MergeTool))
         );
         t.click("text.txt", egui::PointerButton::Secondary);
         assert_eq!(
             t.click("Open file system", egui::PointerButton::Primary),
-            Some(("text.txt".to_owned(), RowPick::FileSystem))
+            Some(("text.txt".to_owned(), WorkingTreePick::FileSystem))
         );
     }
 

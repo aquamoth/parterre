@@ -1,15 +1,16 @@
-//! GitHub's releases API over HTTPS, with ureq. Asked without signing in, and with nothing of
-//! parterre's own: no version, no ID, only the user agent GitHub requires.
+//! GitHub's releases API, asked without signing in and with nothing of parterre's own: no
+//! version, no ID, only the user agent GitHub requires.
 
 use std::time::Duration;
 
 use crate::Release;
 
 const RELEASES: &str = "https://api.github.com/repos/aquamoth/parterre/releases";
+const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
-/// The latest release, or with `prereleases` the most recent releases of any kind (GitHub
-/// leaves pre-releases out of the latest).
-pub(crate) fn releases(prereleases: bool) -> Result<Vec<Release>, String> {
+/// The latest release, or with `include_prereleases` the most recent of any kind: GitHub leaves
+/// pre-releases out of the latest.
+pub(crate) fn releases(include_prereleases: bool) -> Option<Vec<Release>> {
     use ureq::tls::{RootCerts, TlsConfig};
     // The system's certificate authorities, including any a company adds.
     let tls = TlsConfig::builder()
@@ -21,7 +22,7 @@ pub(crate) fn releases(prereleases: bool) -> Result<Vec<Release>, String> {
         .user_agent("parterre")
         .build()
         .into();
-    let url = if prereleases {
+    let url = if include_prereleases {
         format!("{RELEASES}?per_page=30")
     } else {
         format!("{RELEASES}/latest")
@@ -31,17 +32,17 @@ pub(crate) fn releases(prereleases: bool) -> Result<Vec<Release>, String> {
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .call()
-        .map_err(|e| e.to_string())?
+        .ok()?
         .body_mut()
         .with_config()
-        .limit(4 * 1024 * 1024)
+        .limit(MAX_RESPONSE_BYTES)
         .read_to_string()
-        .map_err(|e| e.to_string())?;
-    parse(&body, prereleases)
+        .ok()?;
+    parse(&body, include_prereleases)
 }
 
 #[derive(serde::Deserialize)]
-struct Json {
+struct GithubRelease {
     tag_name: String,
     #[serde(default)]
     prerelease: bool,
@@ -49,22 +50,23 @@ struct Json {
     draft: bool,
 }
 
-/// A release (`releases/latest`) or a list of them (`releases`); drafts are left out.
-fn parse(body: &str, list: bool) -> Result<Vec<Release>, String> {
-    let json: Vec<Json> = if list {
-        serde_json::from_str(body)
+/// `releases/latest`'s one release, or `releases`' list; drafts are left out.
+fn parse(body: &str, is_list: bool) -> Option<Vec<Release>> {
+    let releases: Vec<GithubRelease> = if is_list {
+        serde_json::from_str(body).ok()?
     } else {
-        serde_json::from_str(body).map(|one| vec![one])
-    }
-    .map_err(|e| e.to_string())?;
-    Ok(json
-        .into_iter()
-        .filter(|r| !r.draft)
-        .map(|r| Release {
-            tag: r.tag_name,
-            prerelease: r.prerelease,
-        })
-        .collect())
+        vec![serde_json::from_str(body).ok()?]
+    };
+    Some(
+        releases
+            .into_iter()
+            .filter(|r| !r.draft)
+            .map(|r| Release {
+                tag: r.tag_name,
+                prerelease: r.prerelease,
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -91,7 +93,7 @@ mod tests {
             .map(|r| r.tag)
             .collect();
         assert_eq!(tags, ["v0.7.0-rc1", "v0.6.0"]);
-        assert!(parse(r#"{"message": "Not Found"}"#, false).is_err());
-        assert!(parse("<html>", true).is_err());
+        assert!(parse(r#"{"message": "Not Found"}"#, false).is_none());
+        assert!(parse("<html>", true).is_none());
     }
 }

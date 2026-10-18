@@ -1,26 +1,23 @@
-//! The window icon: the app icon from `parterre_core::icon`, rasterised at startup.
-
 use std::path::Path;
 
 use eframe::egui::IconData;
 
-const SIZE: u32 = 64;
+const SIZE_PX: u32 = 64;
 
-/// On macOS eframe makes the window icon the Dock's too. Inside `parterre.app` none is set, an
-/// empty one to eframe, so the Dock keeps the bundle's `.icns`: sharp at every size, with the
+/// On macOS eframe makes the window icon the Dock's too. Inside `parterre.app` none is set (an
+/// empty one, to eframe), so the Dock keeps the bundle's `.icns`: sharp at every size, with the
 /// margin macOS gives app icons.
 pub fn icon() -> IconData {
     if cfg!(target_os = "macos") && std::env::current_exe().is_ok_and(|exe| in_app_bundle(&exe)) {
         return IconData::default();
     }
     IconData {
-        rgba: parterre_core::icon::render(SIZE),
-        width: SIZE,
-        height: SIZE,
+        rgba: parterre_core::icon::render(SIZE_PX),
+        width: SIZE_PX,
+        height: SIZE_PX,
     }
 }
 
-/// Whether `exe` is the program of an app bundle, `….app/Contents/MacOS/parterre`.
 fn in_app_bundle(exe: &Path) -> bool {
     exe.parent()
         .is_some_and(|dir| dir.ends_with("Contents/MacOS"))

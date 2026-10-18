@@ -2,14 +2,12 @@
 //! set to `explicit`, which Git 3.0 makes the default (#228).
 mod common;
 
-use std::path::Path;
 use std::process::Command;
 
-use common::TestRepo;
-use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Catalog, Create, Outcome};
+use common::{TestRepo, done, execute, oid};
+use parterre_core::branches::{Action, Catalog, Create};
 use parterre_core::git::{Git, GitError, load_repo};
-use parterre_util::CancelTree;
+use parterre_core::worktree_folder::same_path_on_disk;
 
 /// Set for git through the environment, in command-line scope: git ignores the setting in a
 /// repository's own config. The test sets it by running itself again, since changing its own
@@ -50,7 +48,7 @@ fn a_bare_repository_opens_and_changes_when_git_only_takes_explicit_ones() {
         return;
     }
     let mut r = TestRepo::new();
-    let tip = Oid::from_hex(&r.commit("only commit")).unwrap();
+    let tip = oid(&r.commit("only commit"));
     let dir = tempfile::tempdir().unwrap();
     let bare = dir.path().join("bare.git");
     r.git(&["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
@@ -66,7 +64,8 @@ fn a_bare_repository_opens_and_changes_when_git_only_takes_explicit_ones() {
     assert!(!catalog.has_working_tree);
     assert_eq!(catalog.current.as_deref(), Some("main"));
 
-    let created = Branches::new(&bare).execute(
+    done(execute(
+        &bare,
         Action::Create(Create {
             start: tip,
             name: "topic".into(),
@@ -74,9 +73,7 @@ fn a_bare_repository_opens_and_changes_when_git_only_takes_explicit_ones() {
             switch: false,
         }),
         None,
-        &CancelTree::default(),
-    );
-    assert!(matches!(created, Outcome::Done(_)), "{created:?}");
+    ));
     assert_eq!(Catalog::load(&bare).unwrap().locals.len(), 2);
 
     // A linked worktree of it, which git finds through the worktree's `.git` file.
@@ -105,20 +102,15 @@ fn a_bare_repository_git_refuses_names_the_folder_to_open() {
     let dir = tempfile::tempdir().unwrap();
     let bare = dir.path().join("bare.git");
     r.git(&["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
-    let same =
-        |a: &Path, b: &Path| std::fs::canonicalize(a).unwrap() == std::fs::canonicalize(b).unwrap();
 
     // From a folder inside it, git finds it and stops. Before 2.38 git has no such setting.
-    let version = r.git(&["--version"]);
-    let mut numbers = version
-        .trim_start_matches("git version ")
-        .split('.')
-        .map(|n| n.parse::<u32>().unwrap_or(0));
+    let version = parterre_core::git::version().expect("git's version");
+    let mut numbers = version.split('.').map(|n| n.parse::<u32>().unwrap_or(0));
     let has_setting = (numbers.next().unwrap(), numbers.next().unwrap()) >= (2, 38);
     match load_repo(&bare.join("refs")).err() {
         Some(GitError::BareRepositoryRefused { found, open }) if has_setting => {
-            assert!(same(&found, &bare));
-            assert!(same(&open, &bare));
+            assert!(same_path_on_disk(&found, &bare));
+            assert!(same_path_on_disk(&open, &bare));
         }
         None if !has_setting => {}
         other => panic!("{version}: {other:?}"),
@@ -126,7 +118,9 @@ fn a_bare_repository_git_refuses_names_the_folder_to_open() {
     // A work tree's `.git`: git 2.45 and later take it, older ones point at the work tree.
     match load_repo(&r.path().join(".git")) {
         Ok(_) => {}
-        Err(GitError::BareRepositoryRefused { open, .. }) => assert!(same(&open, r.path())),
+        Err(GitError::BareRepositoryRefused { open, .. }) => {
+            assert!(same_path_on_disk(&open, r.path()))
+        }
         Err(e) => panic!("{e}"),
     }
 }

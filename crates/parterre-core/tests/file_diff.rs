@@ -1,6 +1,3 @@
-//! File diffs loaded through git from throwaway repositories: renames, added, deleted and
-//! binary files, mode changes, invalid UTF-8, textconv filters and submodules.
-
 mod common;
 
 use common::TestRepo;
@@ -9,7 +6,6 @@ use parterre_core::changed_files::{ChangedFile, FileStatus};
 use parterre_core::file_diff::{Content, DiffOptions, FileDiff, FileDiffSpec, LoadedDiff, Note};
 use parterre_core::git::Git;
 
-/// Loads the diff of `path` in `commit` (against its first parent).
 fn load(r: &TestRepo, commit: &str, path: &str) -> (ChangedFile, LoadedDiff) {
     let git = Git::new(r.path());
     let oid = Oid::from_hex(commit).unwrap();
@@ -52,7 +48,8 @@ fn a_modified_file_reads_both_versions() {
     let c = r.commit_all("edit");
     let (_, loaded) = load(&r, &c, "a.txt");
     assert_eq!(texts(&loaded), ("one\ntwo\nthree\n", "one\n2\nthree\n"));
-    let d = FileDiff::new(texts(&loaded).0, texts(&loaded).1, DiffOptions::default());
+    let (old, new) = texts(&loaded);
+    let d = FileDiff::new(old, new, DiffOptions::default());
     assert_eq!((d.added, d.removed), (1, 1));
     assert!(d.notes(&loaded, Default::default()).is_empty());
 }

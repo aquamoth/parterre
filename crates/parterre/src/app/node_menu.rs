@@ -1,23 +1,17 @@
-//! The graph's right-click menus (#323). A node's is the Git menu (`git_menu`) with what
-//! doesn't apply left out: its sections, headings and order, then *Actions ›* and *Layout*.
-//! Two departures: Fetch isn't the node's, so it stays in the menu bar, and Pull is offered on
-//! the current branch's node and its upstream's only (#356). Items held up by a running git
-//! operation stay, greyed out. With several nodes selected, only what acts on all of them is
-//! offered.
+//! A node's menu is the Git menu without what doesn't apply, then *Actions ›* and *Layout*.
+//! Fetch isn't the node's, and Pull is offered on the current branch's node and its upstream's
+//! only. Items held up by a running git operation stay, greyed out.
 
 use parterre_core::RefKind;
 use parterre_core::Worktree;
-use parterre_core::branches::Action;
 
-use super::Opener;
-use super::ParterreApp;
-use super::branches::{Request, loading_reason};
 use super::compare_window::CompareRequest;
-use super::menu_bar::{Command, Entry, Item, Submenu, case, case_with};
+use super::git_menu::is_pull;
+use super::menu_bar::{Command, Entry, Item, Submenu, Why, case, case_with};
+use super::{Opener, ParterreApp};
 use crate::keys::{self, Platform};
 
 impl ParterreApp {
-    /// The menu of the canvas, away from the nodes.
     pub(super) fn canvas_menu(&self) -> Vec<Entry> {
         let p = Platform::CURRENT;
         let mut entries = vec![
@@ -37,19 +31,13 @@ impl ParterreApp {
         entries
     }
 
-    /// The menu of `node`, which the selection holds.
     pub(super) fn node_menu(&self, node: usize) -> Vec<Entry> {
         let p = Platform::CURRENT;
         let Some(scene) = &self.scene else {
             return Vec::new();
         };
-        let group: Vec<usize> = if self.selection.contains(node) {
-            self.selection.nodes.clone()
-        } else {
-            vec![node]
-        };
-        // Pull is the current branch's, on its node and its upstream's.
-        let oid = scene.repo.commit(scene.graph.nodes[node].commit).oid;
+        let group = self.selection.group_of(node);
+        let oid = scene.node_oid(node);
         let pull_here = scene.graph.nodes[node].refs.iter().any(|&r| {
             let r = &scene.repo.refs[r];
             r.kind == RefKind::LocalBranch && r.is_head
@@ -63,7 +51,7 @@ impl ParterreApp {
             match entry {
                 Entry::Heading(heading) => sections.push((heading, Vec::new())),
                 Entry::Separator => {}
-                Entry::Item(i) if matches!(i.command, Command::Fetch) => {}
+                Entry::Item(i) if matches!(i.command, Some(Command::Fetch)) => {}
                 Entry::Item(i) if is_pull(&i) && (!pull_here || group.len() > 1) => {}
                 entry => {
                     if let Some((_, items)) = sections.last_mut() {
@@ -96,13 +84,12 @@ impl ParterreApp {
         entries
     }
 
-    /// *Mark for comparison* (or *Clear the mark*) and *Compare with marked*.
     fn marks(&self, node: usize) -> Vec<Entry> {
         let p = Platform::CURRENT;
         let Some(scene) = &self.scene else {
             return Vec::new();
         };
-        let oid = scene.repo.commit(scene.graph.nodes[node].commit).oid;
+        let oid = scene.node_oid(node);
         let marked = self.marked.as_ref();
         let mark = match marked {
             Some((m, _)) if *m == oid => Item::new(
@@ -127,16 +114,14 @@ impl ParterreApp {
         entries
     }
 
-    /// *Actions ›*: copying, then opening, what the node right-clicked has.
-    fn actions(&self, node: usize, selected: usize) -> Submenu {
+    fn actions(&self, node: usize, selected_count: usize) -> Submenu {
         let p = Platform::CURRENT;
         let mut entries = Vec::new();
         let Some(scene) = &self.scene else {
             return Submenu::new(case(p, "Actions"), entries);
         };
         let n = &scene.graph.nodes[node];
-        // The worktrees shown on the node, the open one at HEAD among them. Hidden, the open
-        // one is still at HEAD.
+        // With worktrees hidden, the open one is still at HEAD.
         let worktrees: Vec<&Worktree> = if self.settings.graph.show_worktrees {
             scene
                 .worktrees_on(node)
@@ -152,7 +137,6 @@ impl ParterreApp {
                 .collect()
         };
         let worktrees: Vec<&Worktree> = worktrees.into_iter().filter(|w| !w.missing).collect();
-        // One worktree: the item. Several: a submenu naming them.
         let each = |label: &str, command: &dyn Fn(&Worktree) -> Command| -> Option<Entry> {
             match worktrees.as_slice() {
                 [] => None,
@@ -179,9 +163,9 @@ impl ParterreApp {
         };
         let oid = scene.repo.commit(n.commit).oid;
         let hash = Item::new(case(p, "Copy commit hash"), Command::CopyText(oid.to_hex()));
-        // Right-clicking selects the node alone, and then Ctrl+C copies the same hash.
+        // Alone selected, the node's hash is what Ctrl+C copies.
         entries.push(
-            if selected > 1 {
+            if selected_count > 1 {
                 hash
             } else {
                 hash.key(keys::COPY)
@@ -206,11 +190,7 @@ impl ParterreApp {
             Command::CopyText(w.path.display().to_string())
         }));
         let mut open = Vec::new();
-        let pull_requests_shown = self.settings.graph.show_pull_requests
-            && self.pull_requests.origin().is_some()
-            && !self.pull_requests.needs_sign_in()
-            && self.pull_requests.list().is_some();
-        if pull_requests_shown {
+        if self.pull_requests_active() && self.pull_requests.list().is_some() {
             let item = |label: String, i: usize| -> Entry {
                 let pr = &scene.pull_requests[i];
                 Item::new(label, Command::OpenPullRequest(pr.url.clone()))
@@ -249,7 +229,6 @@ impl ParterreApp {
         Submenu::new(case(p, "Actions"), entries)
     }
 
-    /// Selecting the subtree, returning the selection to the layout, centring on the node.
     fn layout(&self, node: usize, group: Vec<usize>) -> Vec<Entry> {
         let p = Platform::CURRENT;
         let Some(scene) = &self.scene else {
@@ -278,25 +257,15 @@ impl ParterreApp {
     }
 }
 
-/// The Git menu's *Pull ‹current branch›*.
-fn is_pull(item: &Item) -> bool {
-    matches!(&item.command, Command::Git(Request::Run(Action::Pull(_))))
-        || item.label.starts_with(&case(Platform::CURRENT, "Pull "))
-}
-
-/// `entry` without what doesn't apply: a greyed-out item goes, unless only a running git
-/// operation holds it up; a submenu keeps what applies, and goes when nothing does.
+/// A greyed-out item goes, unless only a running git operation holds it up; a submenu keeps
+/// what applies, and goes when nothing does.
 fn applying(entry: Entry) -> Option<Entry> {
-    let waiting = |why: &Option<String>| {
-        why.as_deref()
-            .is_some_and(|w| w == loading_reason(true) || w == loading_reason(false))
-    };
+    let waiting = |why: &Option<Why>| why.as_ref().is_some_and(Why::is_waiting);
     match entry {
-        Entry::Item(i) if !i.enabled && !waiting(&i.why) => None,
-        Entry::Submenu(s) if !s.enabled && !waiting(&s.why) => None,
+        Entry::Item(i) if !i.enabled && !waiting(&i.why_disabled) => None,
+        Entry::Submenu(s) if !s.enabled && !waiting(&s.why_disabled) => None,
         Entry::Submenu(mut s) => {
             s.entries = s.entries.into_iter().filter_map(applying).collect();
-            // A separator left first or last by what went.
             while matches!(s.entries.last(), Some(Entry::Separator)) {
                 s.entries.pop();
             }
@@ -337,6 +306,7 @@ mod tests {
         let empty = Submenu::new("Open", vec![item("c", Some("No"))]);
         assert!(applying(empty.into()).is_none());
         assert!(applying(item("d", Some("Up to date"))).is_none());
-        assert!(applying(item("e", Some(loading_reason(true)))).is_some());
+        let waiting = Item::new("e", Command::ShowLog).blocked(Some(Why::GitBusy));
+        assert!(applying(waiting.into()).is_some());
     }
 }

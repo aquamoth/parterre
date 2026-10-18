@@ -1,10 +1,5 @@
-//! Open pull requests of the forge repository a repository's `origin` points at: GitHub or
-//! Azure DevOps ([`Origin`]). Not in TortoiseGit. Research and decisions:
-//! `docs/research/github-forks-and-pull-requests.md`.
-//! Also the signed-in user's GitHub repositories, to clone one ([`github::repositories`]).
-//!
-//! Nothing here fetches commits. A pull request is shown only where its head is a commit the
-//! repository has already, as a label on that commit ([`PullRequests::heads`]).
+//! Design: `docs/research/github-forks-and-pull-requests.md`. Nothing here fetches commits: a
+//! pull request is shown only on a head commit the repository already has.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -15,9 +10,13 @@ use parterre_core::git::{Git, GitError};
 use parterre_core::oid::Oid;
 use parterre_core::repo::{RefKind, Repo};
 use parterre_core::revgraph::PullRequestHead;
+use parterre_core::text::capitalized;
+use serde::de::DeserializeOwned;
 
 pub mod azure;
 pub mod github;
+#[cfg(any(feature = "github", feature = "azure-devops"))]
+mod http;
 mod repositories;
 
 pub use repositories::{Listed, Repositories};
@@ -25,31 +24,24 @@ pub use repositories::{Listed, Repositories};
 use azure::AzureRepo;
 use github::GithubRepo;
 
-/// An open pull request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequest {
     pub number: u64,
     pub title: String,
-    /// The login of whoever opened it.
     pub author: String,
     pub draft: bool,
-    /// The commit its head branch is at.
     pub head: Oid,
-    /// The branch it proposes, and `owner/name` of the repository that branch is in (`None` if
-    /// that repository was deleted).
     pub head_branch: String,
+    /// As [`Origin::full_name`] names it; `None` once that repository is deleted.
     pub head_repo: Option<String>,
-    /// The branch it would be merged into, and `owner/name` of the repository it is in: the
-    /// repository the pull request belongs to.
     pub base_branch: String,
+    /// The repository the pull request belongs to, as [`Origin::full_name`] names it.
     pub base_repo: String,
-    /// Its page on the forge, e.g. `https://github.com/owner/name/pull/12`.
     pub url: String,
 }
 
 impl PullRequest {
-    /// The branch it proposes as GitHub names it: `topic` in the same repository,
-    /// `owner:topic` in another (a fork), and `topic (deleted fork)` if that is gone.
+    /// The head branch as GitHub labels it.
     pub fn head_label(&self) -> String {
         match &self.head_repo {
             Some(repo) if !repo.eq_ignore_ascii_case(&self.base_repo) => {
@@ -70,7 +62,6 @@ pub enum Origin {
 }
 
 impl Origin {
-    /// The forge repository a remote URL points at, if it is on a forge parterre knows.
     pub fn from_url(url: &str) -> Option<Origin> {
         GithubRepo::from_url(url)
             .map(Origin::Github)
@@ -92,8 +83,7 @@ impl Origin {
         }
     }
 
-    /// Loads the open pull requests of the repository `git` works on, from its forge
-    /// ([`github::load`], [`azure::load`]). Run it on a worker thread.
+    /// Blocks: run it on a worker thread.
     pub fn load(&self, git: &Git) -> Result<PullRequests, ForgeError> {
         match self {
             Origin::Github(_) => github::load(git),
@@ -101,7 +91,7 @@ impl Origin {
         }
     }
 
-    /// The pull requests in `json` instead of the forge's (`--pull-requests-from`).
+    /// From `json` instead of the forge (`--pull-requests-from`).
     pub fn load_canned(&self, git: &Git, json: &str) -> Result<PullRequests, ForgeError> {
         match self {
             Origin::Github(_) => github::load_canned(git, json),
@@ -110,20 +100,18 @@ impl Origin {
     }
 }
 
-/// Whether a branch about to be deleted on a remote is proposed by an open pull request (#318).
+/// Whether an open pull request proposes a branch about to be deleted on a remote (#318).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Proposed {
-    /// Its remote is on no forge parterre knows: there's nothing to ask.
     NotOnForge,
     No,
     Open(PullRequest),
-    /// The forge couldn't be asked, and why.
+    /// The forge couldn't be asked: why.
     Unknown(String),
 }
 
 impl Proposed {
-    /// Whether one of `found`, a forge's open pull requests, proposes `branch` of the
-    /// repository `repo`.
+    /// Whether one of a forge's open pull requests proposes `branch` of `repo`.
     fn among(found: &Result<Vec<PullRequest>, ForgeError>, repo: &str, branch: &str) -> Proposed {
         let list = match found {
             Ok(list) => list,
@@ -140,81 +128,89 @@ impl Proposed {
     }
 }
 
-/// For each remote branch, as `(remote, branch)`: whether an open pull request proposes it, on
-/// the forge its remote is on, for the question before deleting them, with pull requests shown
-/// or not. Each forge is asked about its own remotes' branches only, once: GitHub
-/// ([`github::proposals`]), and each Azure DevOps repository ([`azure::proposals`]); nothing
-/// for other remotes. `canned` is `--pull-requests-from`'s list, used instead. Run it on a
-/// worker thread.
+/// For each remote branch `(remote, branch)`: whether an open pull request proposes it, on the
+/// forge its remote points at, whether pull requests are shown or not. GitHub is asked once,
+/// and each Azure DevOps repository once, about their own remotes' branches only; `canned`,
+/// `--pull-requests-from`'s list, is used instead if given. Blocks: run it on a worker thread.
 pub fn proposals(git: &Git, branches: &[(String, String)], canned: Option<&str>) -> Vec<Proposed> {
     let urls = remote_urls(git).unwrap_or_default();
-    let on: Vec<Option<(&str, Origin)>> = branches
+    let forge_repos: Vec<Option<(&str, Origin)>> = branches
         .iter()
         .map(|(remote, _)| {
             let (_, url) = urls.iter().find(|(name, _)| name == remote)?;
             Some((url.as_str(), Origin::from_url(url)?))
         })
         .collect();
-    let mut found = vec![Proposed::NotOnForge; branches.len()];
-    let mut github = Vec::new();
-    let mut azure = Vec::new();
-    for (i, (on, (_, branch))) in on.iter().zip(branches).enumerate() {
-        match on {
-            Some((_, Origin::Github(repo))) => github.push((i, (repo, branch.as_str()))),
-            Some((url, Origin::AzureDevops(repo))) => {
-                azure.push((i, (*url, repo, branch.as_str())))
-            }
+    let mut on_github = Vec::new();
+    let mut on_azure = Vec::new();
+    for (i, (forge_repo, (_, branch))) in forge_repos.iter().zip(branches).enumerate() {
+        match forge_repo {
+            Some((_, Origin::Github(repo))) => on_github.push((i, (repo, branch.as_str()))),
+            Some((url, Origin::AzureDevops(repo))) => on_azure.push((
+                i,
+                azure::RemoteBranch {
+                    remote_url: url,
+                    repo,
+                    name: branch,
+                },
+            )),
             None => {}
         }
     }
-    if !github.is_empty() {
-        let asked: Vec<_> = github.iter().map(|(_, b)| *b).collect();
-        for ((i, _), proposed) in github.iter().zip(github::proposals(git, &asked, canned)) {
-            found[*i] = proposed;
-        }
-    }
-    if !azure.is_empty() {
-        let asked: Vec<_> = azure.iter().map(|(_, b)| *b).collect();
-        for ((i, _), proposed) in azure.iter().zip(azure::proposals(git, &asked, canned)) {
-            found[*i] = proposed;
-        }
-    }
+    let mut found = vec![Proposed::NotOnForge; branches.len()];
+    ask_once(&mut found, &on_github, |asked| {
+        github::proposals(git, asked, canned)
+    });
+    ask_once(&mut found, &on_azure, |asked| {
+        azure::proposals(git, asked, canned)
+    });
     found
 }
 
-/// The forge repository `origin` points at, if any. Asks git only, not the forge.
+/// Asks `ask` about all `branches` at once, if there are any, and puts each answer at its
+/// branch's index in `found`.
+fn ask_once<B: Copy>(
+    found: &mut [Proposed],
+    branches: &[(usize, B)],
+    ask: impl FnOnce(&[B]) -> Vec<Proposed>,
+) {
+    if branches.is_empty() {
+        return;
+    }
+    let asked: Vec<B> = branches.iter().map(|&(_, branch)| branch).collect();
+    for (&(i, _), proposed) in branches.iter().zip(ask(&asked)) {
+        found[i] = proposed;
+    }
+}
+
+/// Asks git only, not the forge.
 pub fn origin(git: &Git) -> Option<Origin> {
     let url = git.query(&["remote", "get-url", "origin"]).ok()??;
     Origin::from_url(&url)
 }
 
-/// A remote of the local repository, and the forge repository it points at: `owner/name` on
-/// GitHub, `org/project/name` on Azure DevOps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remote {
     pub name: String,
+    /// The forge repository it points at: `owner/name` on GitHub, `org/project/name` on Azure
+    /// DevOps.
     pub repo: String,
 }
 
-/// The open pull requests of a repository, with what is needed to find their base branches
-/// among its refs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PullRequests {
-    /// Newest first.
     pub list: Vec<PullRequest>,
-    /// The remotes that point at repositories on the forge.
+    /// Only those pointing at the forge.
     pub remotes: Vec<Remote>,
-    /// The upstream of each local branch that has one, by full ref name:
-    /// `refs/heads/main` → `refs/remotes/origin/main`.
+    /// `refs/heads/main` → `refs/remotes/origin/main`, for each local branch with an upstream.
     pub upstreams: HashMap<String, String>,
 }
 
 impl PullRequests {
-    /// The pull requests whose heads are commits of `repo`, each with where it is shown: its
-    /// head commit, the refs of its base branch, and the remote-tracking branch of its head
-    /// branch. The base branch's refs are its remote-tracking branches, in every remote that
-    /// points at the pull request's repository, and the local branches that have one of them as
-    /// upstream. The head branch's is the first in a remote that points at its repository.
+    /// The pull requests whose heads are commits of `repo`, each with where it is shown. Its
+    /// base branch's refs are the remote-tracking branches of every remote pointing at the pull
+    /// request's repository, and the local branches tracking one of them; its head branch's is
+    /// the first remote-tracking branch of a remote pointing at the head repository.
     pub fn heads(&self, repo: &Repo) -> Vec<(PullRequestHead, &PullRequest)> {
         let mut bases: HashMap<(String, &str), Vec<usize>> = HashMap::new();
         let mut tracking: HashMap<(String, &str), usize> = HashMap::new();
@@ -254,9 +250,8 @@ impl PullRequests {
     }
 }
 
-/// The forge repository (`owner/name`, lowercase) and branch of a remote-tracking branch such as
-/// `refs/remotes/origin/main`. Remote names may contain slashes: the longest that fits is the
-/// remote.
+/// The forge repository, in lower case, and branch of `refs/remotes/<remote>/<branch>`.
+/// Remote names may contain slashes: the longest remote that fits wins.
 fn remote_branch<'a>(remotes: &[Remote], full_name: &'a str) -> Option<(String, &'a str)> {
     let rest = full_name.strip_prefix("refs/remotes/")?;
     remotes
@@ -269,7 +264,6 @@ fn remote_branch<'a>(remotes: &[Remote], full_name: &'a str) -> Option<(String, 
         .map(|(remote, branch)| (remote.repo.to_ascii_lowercase(), branch))
 }
 
-/// A forge parterre asks for pull requests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Forge {
     Github,
@@ -277,7 +271,14 @@ pub enum Forge {
 }
 
 impl Forge {
-    /// Whether this build of parterre can ask it: was built with its feature.
+    pub fn name(self) -> &'static str {
+        match self {
+            Forge::Github => "GitHub",
+            Forge::AzureDevops => "Azure DevOps",
+        }
+    }
+
+    /// Whether this build of parterre has its feature.
     pub fn supported(self) -> bool {
         match self {
             Forge::Github => cfg!(feature = "github"),
@@ -296,10 +297,7 @@ impl Forge {
 
 impl fmt::Display for Forge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Forge::Github => "GitHub",
-            Forge::AzureDevops => "Azure DevOps",
-        })
+        f.write_str(self.name())
     }
 }
 
@@ -309,14 +307,12 @@ pub enum ForgeError {
     NoForge,
     #[error("this build of parterre has no {0} support")]
     Unsupported(Forge),
-    /// GitHub is only asked signed in, as the GitHub CLI is.
     #[error("the GitHub CLI (gh) isn't installed")]
     NoGh,
     #[error("the GitHub CLI (gh) isn't signed in to github.com")]
     NotSignedIn,
     #[error("GitHub turned down the GitHub CLI's (gh's) sign-in")]
     TokenRejected,
-    /// Azure DevOps is asked with the sign-in git has for `url`, from its credential helper.
     #[error("git has no sign-in for {url} that it can give without asking")]
     NoGitSignIn { url: String },
     #[error("Azure DevOps turned down git's sign-in for {url}")]
@@ -339,14 +335,12 @@ pub enum ForgeError {
     },
     #[error("unexpected answer from {0}: {1}")]
     Parse(Forge, String),
-    /// From the file of `--pull-requests-from`.
+    /// From `--pull-requests-from`'s file.
     #[error("pull requests file: {0}")]
     Canned(String),
 }
 
 impl ForgeError {
-    /// True if pull requests can't be asked for until the user signs in: with `gh` for GitHub,
-    /// with git for Azure DevOps.
     pub fn needs_sign_in(&self) -> bool {
         matches!(
             self,
@@ -368,9 +362,8 @@ impl ForgeError {
         }
     }
 
-    /// How to tell the user, in a dialog.
     pub fn explain(&self) -> Explanation {
-        let sign_in = || Some("gh auth login".to_owned());
+        let gh_sign_in = || Some("gh auth login".to_owned());
         // Asked for its refs, git signs in to the repository, with Git Credential Manager
         // keeping the sign-in, and changes nothing. Over HTTPS also for an SSH origin.
         let git_sign_in = |url: &str| Some(format!("git ls-remote {url}"));
@@ -381,7 +374,7 @@ impl ForgeError {
                  isn't installed. Install it, sign in with this command in a terminal, and \
                  turn pull requests on again."
                     .to_owned(),
-                sign_in(),
+                gh_sign_in(),
             ),
             ForgeError::NotSignedIn => (
                 "Not signed in to GitHub".to_owned(),
@@ -389,14 +382,14 @@ impl ForgeError {
                  isn't signed in. Sign in with this command in a terminal, and turn pull \
                  requests on again."
                     .to_owned(),
-                sign_in(),
+                gh_sign_in(),
             ),
             ForgeError::TokenRejected => (
                 "GitHub didn't accept the sign-in".to_owned(),
                 "The GitHub CLI's sign-in may have expired. Sign in again with this command in \
                  a terminal, and turn pull requests on again."
                     .to_owned(),
-                sign_in(),
+                gh_sign_in(),
             ),
             ForgeError::NoGitSignIn { url } => (
                 "Not signed in to Azure DevOps".to_owned(),
@@ -458,13 +451,13 @@ impl ForgeError {
                 format!("Couldn't reach {forge}"),
                 format!(
                     "{}. Check the network connection, and turn pull requests on again.",
-                    capitalised(why)
+                    capitalized(why)
                 ),
                 None,
             ),
             other => (
                 "Couldn't show pull requests".to_owned(),
-                format!("{}.", capitalised(&other.to_string())),
+                format!("{}.", capitalized(&other.to_string())),
                 None,
             ),
         };
@@ -476,28 +469,19 @@ impl ForgeError {
     }
 }
 
-/// What a dialog says about a [`ForgeError`]: a short title, a sentence or two, and a command
-/// to run in a terminal, if one helps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Explanation {
     pub title: String,
     pub body: String,
+    /// To run in a terminal.
     pub command: Option<String>,
 }
 
-/// A token for an API. Never printed: its `Debug` shows stars.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Token(String);
-
-impl fmt::Debug for Token {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Token(***)")
-    }
-}
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// What `cmd` prints with `input` on its stdin, if it succeeds within `timeout`: `Ok(None)` if
 /// it fails, or takes longer and is stopped. Errs if it can't be started. Its errors are
-/// dropped, and no console window flashes up on Windows.
+/// dropped.
 pub(crate) fn output_within(
     cmd: &mut Command,
     input: &str,
@@ -510,6 +494,7 @@ pub(crate) fn output_within(
         .stderr(Stdio::null());
     #[cfg(windows)]
     {
+        // A GUI-subsystem app on Windows; without this a console window would flash up.
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -535,7 +520,7 @@ pub(crate) fn output_within(
                 let left = deadline.saturating_duration_since(Instant::now());
                 return Ok(rx.recv_timeout(left).ok());
             }
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -545,55 +530,24 @@ pub(crate) fn output_within(
     }
 }
 
-/// The HTTPS client the APIs are asked with.
-#[cfg(any(feature = "github", feature = "azure-devops"))]
-fn agent() -> ureq::Agent {
-    use ureq::tls::{RootCerts, TlsConfig};
-    // The system's certificate authorities, including any a company adds.
-    let tls = TlsConfig::builder()
-        .root_certs(RootCerts::PlatformVerifier)
-        .build();
-    ureq::Agent::config_builder()
-        .tls_config(tls)
-        .timeout_global(Some(Duration::from_secs(30)))
-        // Error answers carry the reason, and the rate limit in their headers.
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .user_agent(concat!("parterre/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into()
-}
-
-/// `text` with its first letter in upper case.
-fn capitalised(text: &str) -> String {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
-}
-
-/// How long a loaded list is used before GitHub is asked again, as in t3code: a minute if it
-/// has pull requests (they change), five if not.
+/// How long a loaded list is used before the forge is asked again, as in t3code.
 pub fn fresh_for(found_any: bool) -> Duration {
     Duration::from_secs(if found_any { 60 } else { 5 * 60 })
 }
 
-/// How long after a push or a fetch moved `origin`'s branches ([`origin_moved`]) GitHub is
-/// asked once more, however fresh the list. A pull request is usually opened a few seconds
-/// after its branch is pushed: after the load the push itself started (#294).
+/// How long after [`origin_moved`] the forge is asked once more, however fresh the list: a pull
+/// request is usually opened seconds after its branch is pushed, after the load the push
+/// started (#294).
 pub const RECHECK_AFTER_PUSH: Duration = Duration::from_secs(60);
 
-/// How long to wait after `failures` failed loads in a row, as in t3code: 20 s, doubling, at
-/// most 15 min.
+/// How long to wait after `failures` failed loads in a row, as in t3code.
 pub fn retry_after(failures: u32) -> Duration {
     let doublings = failures.saturating_sub(1).min(6);
     Duration::from_secs((20u64 << doublings).min(15 * 60))
 }
 
-/// Whether a push or a fetch moved, added or removed a branch of `origin` between two snapshots
-/// of a repository. Those branches are what GitHub is asked about, and a pull request is
-/// usually opened just after its branch is pushed.
+/// Whether `origin`'s branches differ between two snapshots: the pull requests shown are those
+/// proposing them.
 pub fn origin_moved(old: &Repo, new: &Repo) -> bool {
     fn branches(repo: &Repo) -> Vec<(&str, Oid)> {
         let mut branches: Vec<_> = repo
@@ -610,14 +564,12 @@ pub fn origin_moved(old: &Repo, new: &Repo) -> bool {
     branches(old) != branches(new)
 }
 
-/// The remotes of the repository `git` works on, with their URLs (`insteadOf` rewrites
-/// applied, as git would fetch from them).
+/// Each remote's name and fetch URL, with `insteadOf` applied.
 pub fn remote_urls(git: &Git) -> Result<Vec<(String, String)>, GitError> {
     Ok(parse_remote_urls(&git.run(&["remote", "-v"])?))
 }
 
-/// Parses `git remote -v`: `name<TAB>url (fetch)` lines, and the same with `(push)`. In a
-/// partial clone the fetch line ends in the filter, e.g. `(fetch) [tree:0]`.
+/// In a partial clone the fetch line ends in the filter: `(fetch) [tree:0]`.
 fn parse_remote_urls(out: &str) -> Vec<(String, String)> {
     out.lines()
         .filter_map(|line| {
@@ -626,6 +578,63 @@ fn parse_remote_urls(out: &str) -> Vec<(String, String)> {
             Some((name.to_owned(), url.to_owned()))
         })
         .collect()
+}
+
+/// `scheme://[user@]host[:port]/path`, or git's scp-like `[user@]host:path`, which has no
+/// scheme.
+struct RemoteUrl<'a> {
+    /// In lower case.
+    scheme: Option<String>,
+    /// In lower case.
+    host: String,
+    path: &'a str,
+}
+
+impl RemoteUrl<'_> {
+    fn parse(url: &str) -> Option<RemoteUrl<'_>> {
+        /// Git ends the host at `?` or `#` too, and takes the user up to the first `@`: an
+        /// authority such as `github.com?@dev.azure.com` would have git hand over github.com's
+        /// sign-in for a request to Azure DevOps. Such remotes are on no forge.
+        fn without_user(authority: &str) -> Option<&str> {
+            if authority.contains(['?', '#', '\\']) || authority.matches('@').count() > 1 {
+                return None;
+            }
+            Some(
+                authority
+                    .split_once('@')
+                    .map_or(authority, |(_, host)| host),
+            )
+        }
+        let url = url.trim();
+        match url.split_once("://") {
+            Some((scheme, rest)) => {
+                let (authority, path) = rest.split_once('/')?;
+                let host = without_user(authority)?;
+                let host = host.split_once(':').map_or(host, |(host, _)| host);
+                Some(RemoteUrl {
+                    scheme: Some(scheme.to_ascii_lowercase()),
+                    host: host.to_ascii_lowercase(),
+                    path,
+                })
+            }
+            None => {
+                let (authority, path) = url.split_once(':')?;
+                // As git reads it: scp-like only with no slash before the colon.
+                if authority.contains('/') {
+                    return None;
+                }
+                Some(RemoteUrl {
+                    scheme: None,
+                    host: without_user(authority)?.to_ascii_lowercase(),
+                    path,
+                })
+            }
+        }
+    }
+}
+
+fn parse_answer<T: DeserializeOwned>(forge: Forge, body: &str) -> Result<T, ForgeError> {
+    serde_json::from_str(body).map_err(|e| ForgeError::Parse(forge, e.to_string()))
 }
 
 /// Pull requests from `json` (`--pull-requests-from`), for screenshots and demos without the
@@ -676,7 +685,6 @@ fn canned(
         .collect()
 }
 
-/// The upstream of every local branch that has one (see [`PullRequests::upstreams`]).
 pub fn upstreams(git: &Git) -> Result<HashMap<String, String>, GitError> {
     let out = git.run(&[
         "for-each-ref",
@@ -690,6 +698,39 @@ pub fn upstreams(git: &Git) -> Result<HashMap<String, String>, GitError> {
             (!upstream.is_empty()).then(|| (branch.to_owned(), upstream.to_owned()))
         })
         .collect())
+}
+
+#[cfg(test)]
+mod fake {
+    use std::cell::RefCell;
+
+    use super::{Forge, ForgeError};
+
+    /// Answers each request with the next of its answers, and keeps the requests.
+    #[derive(Debug)]
+    pub(crate) struct Fake<A> {
+        answers: RefCell<Vec<Result<A, ForgeError>>>,
+        pub asked: RefCell<Vec<String>>,
+    }
+
+    impl<A> Fake<A> {
+        pub fn new(answers: impl IntoIterator<Item = Result<A, ForgeError>>) -> Fake<A> {
+            let mut answers: Vec<_> = answers.into_iter().collect();
+            answers.reverse();
+            Fake {
+                answers: RefCell::new(answers),
+                asked: RefCell::default(),
+            }
+        }
+
+        pub fn answer(&self, forge: Forge, request: &str) -> Result<A, ForgeError> {
+            self.asked.borrow_mut().push(request.to_owned());
+            self.answers
+                .borrow_mut()
+                .pop()
+                .unwrap_or_else(|| Err(ForgeError::Network(forge, "no more answers".into())))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -881,6 +922,21 @@ mod tests {
         let waits: Vec<u64> = (1..=8).map(|n| retry_after(n).as_secs()).collect();
         assert_eq!(waits, [20, 40, 80, 160, 320, 640, 900, 900]);
         assert_eq!(retry_after(0).as_secs(), 20);
+    }
+
+    #[test]
+    fn remotes_whose_host_git_reads_otherwise_are_on_no_forge() {
+        for url in [
+            "https://github.com?@dev.azure.com/attacker/p/_git/r",
+            "https://github.com#@dev.azure.com/attacker/p/_git/r",
+            "https://github.com\\@attacker.visualstudio.com/p/_git/r",
+            "https://me@github.com@dev.azure.com/attacker/p/_git/r",
+            "me@github.com@ssh.dev.azure.com:v3/attacker/p/r",
+        ] {
+            assert_eq!(Origin::from_url(url), None, "{url}");
+        }
+        assert!(Origin::from_url("https://org@dev.azure.com/org/p/_git/r").is_some());
+        assert!(Origin::from_url("git@github.com:o/r.git").is_some());
     }
 
     #[test]

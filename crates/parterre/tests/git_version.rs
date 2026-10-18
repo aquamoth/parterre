@@ -1,6 +1,3 @@
-//! A git older than parterre needs is refused with one clear message (#233), not run and
-//! misread.
-
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;

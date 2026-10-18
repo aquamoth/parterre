@@ -1,11 +1,8 @@
-//! The log window's layouts: four fixed arrangements of its three panes (commits, details,
-//! changed files), and where the two dividers of each sit. Decided in #29; the prototype is on
-//! the branch `prototype/log-window`. No docking, no hiding panes, no custom layouts: a new
-//! layout is a deliberate addition to [`LogLayout::ALL`].
+//! The log window's layouts are fixed by design (#29): no docking, no hiding panes, no custom
+//! layouts. A new layout is a deliberate addition to [`LogLayout::ALL`].
 
 use serde::{Deserialize, Serialize};
 
-/// One of the fixed arrangements of the log window's panes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LogLayout {
     /// A: commits, details and changed files from top to bottom, as in TortoiseGit.
@@ -38,9 +35,8 @@ impl LogLayout {
     }
 }
 
-/// Where the dividers between the panes are, per layout. Each layout has two, stored as
-/// fractions of the room the panes share (the window body less the dividers themselves), so
-/// they keep their proportions when the window is resized.
+/// Two per layout, as fractions of the room the panes share (the window body less the
+/// dividers), so that they keep their proportions when the window is resized.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Dividers {
@@ -57,7 +53,6 @@ pub struct Dividers {
 }
 
 impl Default for Dividers {
-    /// As in the prototype.
     fn default() -> Self {
         Dividers {
             stacked: [0.45, 0.22],
@@ -69,23 +64,16 @@ impl Default for Dividers {
 }
 
 impl Dividers {
-    /// The smallest share of the height a pane gets.
-    pub const MIN_HEIGHT: f32 = 0.08;
-    /// The smallest share of the width a pane gets: the panes hold tables, which need more
-    /// room across than down.
-    pub const MIN_WIDTH: f32 = 0.15;
+    const MIN_HEIGHT_SHARE: f32 = 0.08;
+    /// The panes hold tables, which need more room across than down.
+    const MIN_WIDTH_SHARE: f32 = 0.15;
 
-    /// The two fractions of `layout`.
     pub fn of(&self, layout: LogLayout) -> [f32; 2] {
-        *self.slot(layout)
-    }
-
-    fn slot(&self, layout: LogLayout) -> &[f32; 2] {
         match layout {
-            LogLayout::Stacked => &self.stacked,
-            LogLayout::SideBySide => &self.side_by_side,
-            LogLayout::DetailsBelow => &self.details_below,
-            LogLayout::FilesRight => &self.files_right,
+            LogLayout::Stacked => self.stacked,
+            LogLayout::SideBySide => self.side_by_side,
+            LogLayout::DetailsBelow => self.details_below,
+            LogLayout::FilesRight => self.files_right,
         }
     }
 
@@ -98,23 +86,28 @@ impl Dividers {
         }
     }
 
-    /// Whether `layout`'s dividers are where they start.
     pub fn is_default(&self, layout: LogLayout) -> bool {
         self.of(layout) == Dividers::default().of(layout)
     }
 
-    /// Puts `layout`'s dividers back where they start; the other layouts keep theirs.
     pub fn reset(&mut self, layout: LogLayout) {
         *self.slot_mut(layout) = Dividers::default().of(layout);
     }
 
-    /// Whether divider `which` (0 or 1) of `layout` splits a width, i.e. is a vertical bar
-    /// dragged sideways. The others split a height.
+    /// Whether divider `which` (0 or 1) of `layout` is a vertical bar, dragged sideways.
     pub fn splits_width(layout: LogLayout, which: usize) -> bool {
         matches!(
             (layout, which),
             (LogLayout::SideBySide, 0) | (LogLayout::DetailsBelow, 1) | (LogLayout::FilesRight, 0)
         )
+    }
+
+    fn min_share(layout: LogLayout, which: usize) -> f32 {
+        if Dividers::splits_width(layout, which) {
+            Dividers::MIN_WIDTH_SHARE
+        } else {
+            Dividers::MIN_HEIGHT_SHARE
+        }
     }
 
     /// Moves divider `which` (0 or 1) of `layout` to `at`: where its middle is, as a fraction
@@ -128,7 +121,7 @@ impl Dividers {
         }
         let d = self.slot_mut(layout);
         if layout == LogLayout::Stacked {
-            let min = Dividers::MIN_HEIGHT;
+            let min = Dividers::MIN_HEIGHT_SHARE;
             if which == 0 {
                 // The boundary between details and files stays.
                 let both = d[0] + d[1];
@@ -139,29 +132,23 @@ impl Dividers {
             }
             return;
         }
-        let min = if Dividers::splits_width(layout, which) {
-            Dividers::MIN_WIDTH
-        } else {
-            Dividers::MIN_HEIGHT
-        };
+        let min = Dividers::min_share(layout, which);
         d[which.min(1)] = at.clamp(min, 1.0 - min);
     }
 
     /// The same dividers, each moved where [`Dividers::set`] would allow; values that aren't
     /// numbers go back to their defaults. For settings saved by hand or by another version.
     pub fn clamped(self) -> Dividers {
-        let defaults = Dividers::default();
         let mut out = self;
         for layout in LogLayout::ALL {
             let saved = self.of(layout);
+            out.reset(layout);
             if saved.iter().any(|v| !v.is_finite()) {
-                out.reset(layout);
                 continue;
             }
-            *out.slot_mut(layout) = defaults.of(layout);
             if layout == LogLayout::Stacked {
                 // The first from the top, then the second below it.
-                let min = Dividers::MIN_HEIGHT;
+                let min = Dividers::MIN_HEIGHT_SHARE;
                 let first = saved[0].clamp(min, 1.0 - 2.0 * min);
                 out.stacked = [first, saved[1].clamp(min, (1.0 - first - min).max(min))];
             } else {
@@ -179,10 +166,9 @@ mod tests {
 
     fn every_pane_has_room(d: &Dividers) -> bool {
         let eps = 1e-5;
+        let min_height = Dividers::MIN_HEIGHT_SHARE - eps;
         let [a, b] = d.stacked;
-        let stacked = a >= Dividers::MIN_HEIGHT - eps
-            && b >= Dividers::MIN_HEIGHT - eps
-            && 1.0 - a - b >= Dividers::MIN_HEIGHT - eps;
+        let stacked = a >= min_height && b >= min_height && 1.0 - a - b >= min_height;
         let others = [
             LogLayout::SideBySide,
             LogLayout::DetailsBelow,
@@ -191,11 +177,7 @@ mod tests {
         .into_iter()
         .all(|layout| {
             (0..2).all(|which| {
-                let min = if Dividers::splits_width(layout, which) {
-                    Dividers::MIN_WIDTH
-                } else {
-                    Dividers::MIN_HEIGHT
-                };
+                let min = Dividers::min_share(layout, which);
                 let v = d.of(layout)[which];
                 v >= min - eps && 1.0 - v >= min - eps
             })
@@ -238,7 +220,7 @@ mod tests {
         assert!((d.stacked[1] - 0.50).abs() < 1e-6);
         // The first divider can't pass the second.
         d.set(LogLayout::Stacked, 0, 0.95);
-        assert!((d.stacked[1] - Dividers::MIN_HEIGHT).abs() < 1e-6);
+        assert!((d.stacked[1] - Dividers::MIN_HEIGHT_SHARE).abs() < 1e-6);
         assert!((d.stacked[0] + d.stacked[1] - 0.80).abs() < 1e-6);
     }
 
@@ -267,7 +249,7 @@ mod tests {
         assert_eq!(d.files_right, [0.5, 0.5]);
         assert_eq!(
             d.details_below,
-            [Dividers::MIN_HEIGHT, 1.0 - Dividers::MIN_WIDTH]
+            [Dividers::MIN_HEIGHT_SHARE, 1.0 - Dividers::MIN_WIDTH_SHARE]
         );
     }
 

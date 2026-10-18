@@ -1,12 +1,11 @@
-//! Settings as versioned JSON documents: stored between runs, and exported to share them with
-//! other computers or a team. Each is read one setting at a time (see
-//! [`parterre_core::lenient`]), so files written by an older or a newer parterre load all
-//! they can.
+//! Settings as versioned JSON documents, stored between runs and exported to share. Each is
+//! read one setting at a time (see [`parterre_core::lenient`]), so files written by an older or
+//! a newer parterre load all they can.
 //!
 //! A document is an object with
-//! - `version`: [`VERSION`], the format's. It goes up when a setting changes its meaning, and
-//!   reading converts what an older version wrote. Settings added or removed leave it alone:
-//!   missing ones get their defaults, unknown ones are left out.
+//! - `version`: [`FORMAT_VERSION`]. It goes up when a setting changes its meaning, and reading
+//!   converts what an older version wrote. Settings added or removed leave it alone: missing
+//!   ones get their defaults, unknown ones are left out.
 //!
 //!   An older parterre saving the stored document keeps a newer version's number, and writes
 //!   back the settings it couldn't read; those it could, it writes as it understood them (#369).
@@ -14,10 +13,9 @@
 //!   read, rather than being converted from what it was: under the newer number, it isn't
 //!   converted again.
 //! - `parterre`: the version of parterre that wrote it, for people reading it.
-//! - `settings`: parterre's own settings (exported without what belongs to the computer:
-//!   window sizes and dividers).
-//! - `repository`: the settings of the repository shown (in an exported file), or
-//!   `repositories`: those of every repository, by its main worktree (stored).
+//! - `settings`: parterre's own settings, exported without the computer's own.
+//! - `repository`: the settings of the repository shown (exported), or `repositories`: those of
+//!   every repository, by [`RepoSettings::key`] (stored).
 
 use std::collections::BTreeMap;
 
@@ -28,14 +26,11 @@ use parterre_core::Repo;
 
 use crate::settings::{RepoSettings, Settings};
 
-/// The format's version.
-pub const VERSION: u64 = 1;
+pub const FORMAT_VERSION: u64 = 1;
 
-/// The storage key of the stored document.
 pub const STORAGE_KEY: &str = "parterre-settings";
 
-/// Settings that belong to the computer, not exported: window sizes and dividers.
-const MACHINE: [&[&str]; 7] = [
+const MACHINE_SETTINGS: [&[&str]; 7] = [
     &["log_window", "size"],
     &["log_window", "dividers"],
     &["diff_window", "size"],
@@ -51,19 +46,19 @@ const MACHINE: [&[&str]; 7] = [
 pub struct Stored {
     /// By [`RepoSettings::key`]. A repository without settings of its own has the defaults.
     pub repositories: BTreeMap<String, RepoSettings>,
-    file: Value,
+    document: Value,
     skipped: Vec<Skipped>,
 }
 
 impl Stored {
-    /// Reads a stored document; `None` if `text` isn't one.
+    /// `None` if `text` isn't a stored document.
     pub fn read(text: &str) -> Option<(Settings, Stored)> {
-        let file: Value = serde_json::from_str(text).ok()?;
-        file.get("version")?;
+        let document: Value = serde_json::from_str(text).ok()?;
+        document.get("version")?;
         let mut skipped = Vec::new();
-        let settings = part(&file, "settings", &Settings::default(), &mut skipped);
+        let settings = read_part(&document, "settings", &Settings::default(), &mut skipped);
         let mut repositories = BTreeMap::new();
-        if let Some(stored) = file.get("repositories").and_then(Value::as_object) {
+        if let Some(stored) = document.get("repositories").and_then(Value::as_object) {
             for (key, value) in stored {
                 let read = lenient::read(&RepoSettings::default(), value);
                 let under = |s: Skipped| s.under(key).under("repositories");
@@ -73,13 +68,13 @@ impl Stored {
         }
         let stored = Stored {
             repositories,
-            file,
+            document,
             skipped,
         };
         Some((settings, stored))
     }
 
-    /// The document to store, with what a newer version wrote kept.
+    /// The document to store, keeping what a newer version wrote.
     pub fn write(&self, settings: &Settings) -> String {
         let repositories: Map<String, Value> = self
             .repositories
@@ -87,14 +82,13 @@ impl Stored {
             .map(|(key, repo)| (key.clone(), to_value(repo)))
             .collect();
         let mut now = header();
-        // What a newer version wrote is written back in its form, so the number stays its.
-        let version = self.file.get("version").and_then(Value::as_u64);
-        if let Some(newer) = version.filter(|&v| v > VERSION) {
+        let version = self.document.get("version").and_then(Value::as_u64);
+        if let Some(newer) = version.filter(|&v| v > FORMAT_VERSION) {
             now["version"] = newer.into();
         }
         now["settings"] = to_value(settings);
         now["repositories"] = Value::Object(repositories);
-        lenient::write_back(now, &self.file, &self.skipped).to_string()
+        lenient::write_back(now, &self.document, &self.skipped).to_string()
     }
 
     /// Forgets every repository's settings, and what the stored document had besides.
@@ -102,13 +96,12 @@ impl Stored {
         *self = Stored::default();
     }
 
-    /// The settings of `repo`: the defaults if it has none of its own.
     pub fn settings_of(&self, repo: &Repo) -> RepoSettings {
         let key = RepoSettings::key(repo);
         self.repositories.get(&key).cloned().unwrap_or_default()
     }
 
-    /// Keeps `repo` as the settings of the repository `key`. The defaults aren't kept.
+    /// The defaults aren't kept.
     pub fn keep(&mut self, key: String, repo: RepoSettings) {
         if repo == RepoSettings::default() {
             self.repositories.remove(&key);
@@ -118,28 +111,42 @@ impl Stored {
     }
 }
 
-/// Loads the stored settings, parterre's and every repository's: the defaults without any, or
-/// if they are corrupt, which the last value says.
-pub fn load(storage: Option<&dyn eframe::Storage>) -> (Settings, Stored, bool) {
+#[derive(Debug, Default)]
+pub struct Loaded {
+    pub settings: Settings,
+    pub stored: Stored,
+    /// The stored settings didn't read: these are the defaults.
+    pub corrupt: bool,
+}
+
+/// The defaults without stored settings.
+pub fn load(storage: Option<&dyn eframe::Storage>) -> Loaded {
     let Some(text) = storage.and_then(|storage| storage.get_string(STORAGE_KEY)) else {
-        return Default::default();
+        return Loaded::default();
     };
     match Stored::read(&text) {
-        Some((settings, stored)) => (settings, stored, false),
-        None => (Settings::default(), Stored::default(), true),
+        Some((settings, stored)) => Loaded {
+            settings,
+            stored,
+            corrupt: false,
+        },
+        None => Loaded {
+            corrupt: true,
+            ..Loaded::default()
+        },
     }
 }
 
-/// The exported file: parterre's settings and, if `repository`, the settings of the repository
-/// shown, which `settings` holds as in the app.
-pub fn export(settings: &Settings, repository: bool) -> String {
+/// The exported file: parterre's settings and, with `with_repository`, the settings of the
+/// repository shown, which `settings` holds as in the app.
+pub fn export(settings: &Settings, with_repository: bool) -> String {
     let mut file = header();
     let mut value = to_value(settings);
     for path in local_paths() {
-        remove(&mut value, &path);
+        remove_path(&mut value, &path);
     }
     file["settings"] = value;
-    if repository {
+    if with_repository {
         file["repository"] = to_value(&RepoSettings::of(&settings.graph));
     }
     serde_json::to_string_pretty(&file).unwrap_or_default() + "\n"
@@ -150,12 +157,11 @@ pub fn export(settings: &Settings, repository: bool) -> String {
 pub struct Imported {
     /// parterre's settings, with those of the computer and of the repository shown kept.
     pub settings: Option<Settings>,
-    /// The settings of a repository.
     pub repository: Option<RepoSettings>,
     /// Settings left out: unknown here, or with values that don't read. Named from the top of
     /// the file, `settings.theme` or `repository.ref_filter`.
     pub skipped: Vec<String>,
-    /// Written by a newer format than this parterre reads.
+    /// Written in a newer format than this parterre reads.
     pub newer: bool,
 }
 
@@ -163,41 +169,43 @@ pub struct Imported {
 /// file get their defaults.
 pub fn import(text: &str, current: &Settings) -> Result<Imported, String> {
     let mut file: Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
-    let version = file.get("version").and_then(Value::as_u64);
-    let parts = ["settings", "repository"].map(|key| file.get(key).is_some_and(Value::is_object));
-    if version.is_none() || parts == [false, false] {
+    let Some(version) = file.get("version").and_then(Value::as_u64) else {
+        return Err("not a parterre settings file".into());
+    };
+    let has_part = |key: &str| file.get(key).is_some_and(Value::is_object);
+    let (has_settings, has_repository) = (has_part("settings"), has_part("repository"));
+    if !has_settings && !has_repository {
         return Err("not a parterre settings file".into());
     }
     let mut skipped = Vec::new();
-    let settings = parts[0].then(|| {
-        // What the computer and the repository shown have stays as it is.
+    let settings = has_settings.then(|| {
         let mut base = to_value(&Settings::default());
         let now = to_value(current);
         for path in local_paths() {
             if let (Some(value), Some(slot)) = (get(&now, &path), get_mut(&mut base, &path)) {
                 *slot = value.clone();
             }
-            remove(&mut file["settings"], &path);
+            remove_path(&mut file["settings"], &path);
         }
         let base = serde_json::from_value(base).unwrap_or_else(|_| current.clone());
-        part(&file, "settings", &base, &mut skipped)
+        read_part(&file, "settings", &base, &mut skipped)
     });
-    let repository =
-        parts[1].then(|| part(&file, "repository", &RepoSettings::default(), &mut skipped));
+    let repository = has_repository
+        .then(|| read_part(&file, "repository", &RepoSettings::default(), &mut skipped));
     Ok(Imported {
         settings,
         repository,
         skipped: skipped.iter().map(Skipped::name).collect(),
-        newer: version.is_some_and(|v| v > VERSION),
+        newer: version > FORMAT_VERSION,
     })
 }
 
-/// The paths of the settings that aren't exported as parterre's: the computer's, and the
-/// repository settings among the graph options.
+/// The settings not exported as parterre's: the computer's, and the repository settings among
+/// the graph options.
 fn local_paths() -> Vec<Vec<String>> {
     let repository = to_value(&RepoSettings::default());
     let repository = repository.as_object().into_iter().flat_map(Map::keys);
-    MACHINE
+    MACHINE_SETTINGS
         .iter()
         .map(|path| path.iter().map(|&key| key.to_owned()).collect())
         .chain(repository.map(|key| vec!["graph".to_owned(), key.clone()]))
@@ -205,7 +213,7 @@ fn local_paths() -> Vec<Vec<String>> {
 }
 
 /// The part `key` of `file` read onto `base`, adding what was left out to `skipped`.
-fn part<T>(file: &Value, key: &str, base: &T, skipped: &mut Vec<Skipped>) -> T
+fn read_part<T>(file: &Value, key: &str, base: &T, skipped: &mut Vec<Skipped>) -> T
 where
     T: serde::Serialize + serde::de::DeserializeOwned + Clone,
 {
@@ -215,14 +223,14 @@ where
 }
 
 fn header() -> Value {
-    json!({"version": VERSION, "parterre": crate::VERSION})
+    json!({"version": FORMAT_VERSION, "parterre": crate::VERSION})
 }
 
 fn to_value(value: &impl serde::Serialize) -> Value {
     serde_json::to_value(value).unwrap_or_default()
 }
 
-fn remove(value: &mut Value, path: &[String]) {
+fn remove_path(value: &mut Value, path: &[String]) {
     let Some((last, parent)) = path.split_last() else {
         return;
     };
@@ -259,11 +267,10 @@ mod tests {
 
         let (back, stored) = Stored::read(&text).unwrap();
         assert_eq!(back, settings);
-        // The defaults aren't kept.
-        assert_eq!(stored.repositories.len(), 1);
+        assert_eq!(stored.repositories.len(), 1, "the defaults aren't kept");
         assert_eq!(stored.repositories["/src/app"], filtered());
         let file: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(file["version"], VERSION);
+        assert_eq!(file["version"], FORMAT_VERSION);
         assert_eq!(file["parterre"], crate::VERSION);
     }
 
@@ -342,14 +349,22 @@ mod tests {
         stored.keep(RepoSettings::key(&repo), filtered());
         let mut storage = Memory::default();
         eframe::Storage::set_string(&mut storage, STORAGE_KEY, stored.write(&settings));
-        let (back, stored, corrupt) = load(Some(&storage));
+        let Loaded {
+            settings: back,
+            stored,
+            corrupt,
+        } = load(Some(&storage));
         assert_eq!(back, settings);
         assert_eq!(stored.settings_of(&repo), filtered());
         assert!(!corrupt);
 
         // Nothing stored, or an automated run: the defaults.
         for storage in [Some(&Memory::default() as &dyn eframe::Storage), None] {
-            let (back, stored, corrupt) = load(storage);
+            let Loaded {
+                settings: back,
+                stored,
+                corrupt,
+            } = load(storage);
             assert_eq!(back, Settings::default());
             assert!(stored.repositories.is_empty());
             assert!(!corrupt);
@@ -366,7 +381,11 @@ mod tests {
         ] {
             let mut storage = Memory::default();
             eframe::Storage::set_string(&mut storage, STORAGE_KEY, text.into());
-            let (settings, stored, corrupt) = load(Some(&storage));
+            let Loaded {
+                settings,
+                stored,
+                corrupt,
+            } = load(Some(&storage));
             assert_eq!(settings, Settings::default(), "{text}");
             assert!(stored.repositories.is_empty());
             assert!(corrupt, "{text}");
@@ -381,7 +400,7 @@ mod tests {
         };
         filtered().apply(&mut settings.graph);
         let file: Value = serde_json::from_str(&export(&settings, true)).unwrap();
-        assert_eq!(file["version"], VERSION);
+        assert_eq!(file["version"], FORMAT_VERSION);
         let exported = &file["settings"];
         assert_eq!(exported["theme"], "Dark");
         assert!(exported["log_window"].get("size").is_none());

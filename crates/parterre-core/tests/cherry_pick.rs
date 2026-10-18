@@ -1,22 +1,8 @@
-//! Cherry-picking onto the open worktree's branch, against real, disposable repositories: when
-//! it's offered, what the confirmation leaves out (checked against what `git cherry-pick` then
-//! does), the order the commits go on in, and every way it can stop, refuse or keep changes
-//! aside.
 mod common;
 
-use common::TestRepo;
-use parterre_core::Oid;
-use parterre_core::branches::{Action, Branches, Catalog, Outcome, Report, Stuck};
+use common::{TestRepo, done, failed, oid, rev};
+use parterre_core::branches::{Action, Catalog, GitOperation, Outcome, Stuck};
 use parterre_core::cherry_pick::{self, CherryPick, Picks, Preview, Skipped};
-use parterre_util::CancelTree;
-
-fn oid(s: &str) -> Oid {
-    Oid::from_hex(s).unwrap()
-}
-
-fn rev(r: &TestRepo, rev: &str) -> Oid {
-    oid(&r.git(&["rev-parse", rev]))
-}
 
 fn lacking(r: &TestRepo, of: &str) -> Preview {
     Preview::load(r.path(), &Picks::Lacking(rev(r, of)), Some(of.into())).unwrap()
@@ -28,28 +14,9 @@ fn chosen(r: &TestRepo, commits: &[&str]) -> Preview {
 }
 
 fn execute(r: &TestRepo, pick: CherryPick) -> Outcome {
-    Branches::new(r.path()).execute(
-        Action::CherryPick(Box::new(pick)),
-        None,
-        &CancelTree::default(),
-    )
+    common::execute(r, Action::CherryPick(Box::new(pick)), None)
 }
 
-fn done(out: Outcome) -> Report {
-    match out {
-        Outcome::Done(report) => report,
-        other => panic!("expected it done: {other:?}"),
-    }
-}
-
-fn failed(out: Outcome) -> String {
-    match out {
-        Outcome::Failed { error, .. } => error.to_string(),
-        other => panic!("expected a failure: {other:?}"),
-    }
-}
-
-/// The subjects of `range`, newest first.
 fn subjects(r: &TestRepo, range: &str) -> Vec<String> {
     r.git(&["log", "--format=%s", range])
         .lines()
@@ -57,8 +24,6 @@ fn subjects(r: &TestRepo, range: &str) -> Vec<String> {
         .collect()
 }
 
-/// `main` with a commit of its own, and `up` with three from a shared base: `one` and `three`
-/// touch files of their own, `two` too.
 fn diverged() -> (TestRepo, [String; 3]) {
     let mut r = TestRepo::new();
     r.write("file", b"base\n");
@@ -82,7 +47,6 @@ fn it_is_offered_where_a_commit_isnt_on_the_branch_yet() {
     let catalog = Catalog::load(r.path()).unwrap();
     let offered = |c: &str| cherry_pick::offered(&repo, &catalog, rev(&r, c));
     assert_eq!(offered("up"), Some("main"));
-    // On main already, or main itself.
     assert_eq!(offered("main~1"), None);
     assert_eq!(offered("main"), None);
     // The log's selection: one commit not on main is enough.
@@ -106,7 +70,6 @@ fn it_is_offered_where_a_commit_isnt_on_the_branch_yet() {
         cherry_pick::offered(&repo, &catalog, rev(&r, "ahead")),
         Some("main")
     );
-    // A detached HEAD has no branch.
     r.git(&["checkout", "-q", "--detach", "main"]);
     let catalog = Catalog::load(r.path()).unwrap();
     assert_eq!(cherry_pick::offered(&repo, &catalog, rev(&r, "up")), None);
@@ -144,7 +107,6 @@ fn the_graphs_picks_are_what_main_lacks_and_git_agrees() {
     assert_eq!(p.skipped(oid(&feature)), None);
     assert_eq!(p.picked(oid(&same)), None);
     assert_eq!(p.picked(oid(&feature)), Some(true));
-    // Oldest first, explicitly.
     assert_eq!(p.commits(), [oid(&feature), oid(&side)]);
 
     let pick = p.cherry_pick(false, false);
@@ -172,14 +134,12 @@ fn chosen_commits_skip_those_between_and_go_on_oldest_first() {
     assert_eq!(subjects(&r, "main~3..main"), ["three", "one", "mine"]);
     assert!(!r.path().join("two").exists());
 
-    // Dropping one leaves the other; dropping both leaves nothing to do.
     let mut p = chosen(&r, &[&two]);
     assert_eq!(p.cherry_pick(false, false).name, &two[..7]);
     p.set_picked(oid(&two), false);
     assert_eq!(p.blocked(), Some("Pick at least one commit."));
     p.set_picked(oid(&two), true);
     assert_eq!(p.blocked(), None);
-    // Commits already on main are left out, not picked again.
     let mut p = chosen(&r, &[&two, &r.git(&["rev-parse", "main~1"])]);
     assert_eq!(p.skipped(rev(&r, "main~1")), Some(Skipped::OnBranch));
     p.set_picked(rev(&r, "main~1"), true);
@@ -221,7 +181,6 @@ fn x_records_where_each_commit_came_from() {
     );
 }
 
-/// `main` and `up` both change `file`; `up` has a clean commit before and after its change.
 fn conflicting() -> (TestRepo, [String; 3]) {
     let mut r = TestRepo::new();
     r.write("file", b"base\n");
@@ -265,17 +224,18 @@ fn a_conflict_midway_stops_it_and_says_where() {
         "Finish or abort it with git, or go to another worktree."
     );
     let catalog = Catalog::load(r.path()).unwrap();
-    assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a cherry-pick")));
+    assert_eq!(
+        catalog.stuck(),
+        Some(Stuck::InProgress(GitOperation::CherryPick))
+    );
     assert_eq!(catalog.conflicted, ["file"]);
     let p = picking(&r);
     assert_eq!(p.commit, oid(&theirs));
     assert_eq!((p.done, p.total), (2, 3));
-    // The first went on.
     assert_eq!(rev(&r, "main~1"), mine);
     assert_eq!(subjects(&r, "main~1..main"), ["before"]);
     assert_ne!(rev(&r, "main"), oid(&before));
 
-    // Nothing more starts there.
     let refused = Preview::load(r.path(), &Picks::Lacking(rev(&r, "up")), None)
         .unwrap_err()
         .to_string();
@@ -316,7 +276,10 @@ fn a_pick_that_turns_out_empty_stops_as_git_does() {
         "Cherry-pick stopped"
     );
     let catalog = Catalog::load(r.path()).unwrap();
-    assert_eq!(catalog.stuck(), Some(Stuck::InProgress("a cherry-pick")));
+    assert_eq!(
+        catalog.stuck(),
+        Some(Stuck::InProgress(GitOperation::CherryPick))
+    );
 }
 
 #[test]
@@ -338,7 +301,6 @@ fn uncommitted_changes_git_refuses_to_pick_over_are_left_alone() {
 fn stash_changes_sets_them_aside_and_puts_them_back() {
     let (r, [one, ..]) = diverged();
     r.write("mine", b"edited\n");
-    // Untracked files stay where they are.
     r.write("untracked", b"new\n");
     let p = chosen(&r, &[&one]);
     let pick = p.cherry_pick(false, true);
