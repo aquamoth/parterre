@@ -684,6 +684,9 @@ impl ParterreApp {
 
     fn reset_settings(&mut self) {
         self.settings = Settings::default();
+        // The running build's ring, which a nightly build keeps at nightly (#398).
+        self.telemetry.privacy.ring = None;
+        self.telemetry.privacy.keep_ring(privacy::running_ring());
         self.stored.reset();
         self.settings_note = None;
     }

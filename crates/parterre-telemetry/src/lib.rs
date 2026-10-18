@@ -13,6 +13,7 @@ mod feature;
 mod github;
 #[cfg(feature = "send")]
 mod posthog;
+mod ring;
 // No session is started without `send`.
 #[cfg_attr(not(feature = "send"), allow(dead_code))]
 mod session;
@@ -25,6 +26,7 @@ pub use feature::{
     Action, DiffForm, DragModel, Feature, GraphDirection, GraphMode, LogLayout, MAX_REPOSITORIES,
     Menu, Properties, Range, Screen, Theme, Value, record, recording, register,
 };
+pub use ring::Ring;
 pub use update::{CARGO_INSTALL, Download, Release, Update, Version, newer};
 pub use usage::{
     Build, Choices, Lifecycle, app_version, asks_first_run_prompt, do_not_track,
@@ -210,18 +212,24 @@ pub struct UpdateCheck {
 }
 
 impl UpdateCheck {
-    /// `current` is this build's version: `0.6.0 (a1b2c3d)`. `found` is called on the checking
-    /// thread when a newer release turns up. `None`, asking nothing, without
+    /// `current` is this build's version: `1.2.3-rc+a1b2c3d`; `ring` the installation's, which
+    /// is narrowed to what this copy's channel can take ([`Ring::on`]). `found` is called on the
+    /// checking thread when a newer build turns up. `None`, asking nothing, without
     /// [`has_update_check`].
-    pub fn start(current: &str, found: impl Fn() + Send + 'static) -> Option<UpdateCheck> {
+    pub fn start(
+        current: &str,
+        ring: Ring,
+        found: impl Fn() + Send + 'static,
+    ) -> Option<UpdateCheck> {
         if !has_update_check() {
             return None;
         }
         let current = Version::parse(current)?;
+        let ring = ring.on(Channel::current());
         let (stop, stopped) = mpsc::channel();
         let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
-            check_for_updates(&current, &stopped, &send, &found);
+            check_for_updates(&current, ring, &stopped, &send, &found);
         });
         Some(UpdateCheck {
             found: receive,
@@ -241,14 +249,15 @@ impl UpdateCheck {
 #[cfg(feature = "send")]
 fn check_for_updates(
     current: &Version,
+    ring: Ring,
     stopped: &Receiver<()>,
     send: &Sender<Update>,
     found: &dyn Fn(),
 ) {
     use std::sync::mpsc::RecvTimeoutError;
     loop {
-        let releases = github::releases(current.is_prerelease()).unwrap_or_default();
-        if let Some(update) = newer(current, &releases).and_then(|r| Update::to(&r.tag)) {
+        let releases = github::releases().unwrap_or_default();
+        if let Some(update) = newer(current, ring, &releases).and_then(|r| Update::to(&r.tag)) {
             if send.send(update).is_err() {
                 return;
             }
@@ -265,7 +274,7 @@ fn check_for_updates(
 
 /// Never started: [`has_update_check`] is false without `send`.
 #[cfg(not(feature = "send"))]
-fn check_for_updates(_: &Version, _: &Receiver<()>, _: &Sender<Update>, _: &dyn Fn()) {}
+fn check_for_updates(_: &Version, _: Ring, _: &Receiver<()>, _: &Sender<Update>, _: &dyn Fn()) {}
 
 #[cfg(test)]
 mod tests {

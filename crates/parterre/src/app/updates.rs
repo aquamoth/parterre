@@ -1,5 +1,5 @@
 use eframe::egui;
-use parterre_telemetry::{Download, Update, UpdateCheck};
+use parterre_telemetry::{Download, Ring, Update, UpdateCheck};
 
 use super::{Note, ParterreApp};
 use crate::dialogs::{self, Dialog};
@@ -23,11 +23,16 @@ impl ParterreApp {
             || !parterre_telemetry::may_check_for_updates(prompting)
         {
             self.update_check = None;
-        } else if self.update_check.is_none() && parterre_telemetry::has_update_check() {
-            let ctx = ctx.clone();
-            self.update_check = UpdateCheck::start(crate::version(), move || ctx.request_repaint());
+        } else if parterre_telemetry::has_update_check() {
+            let ring = self.telemetry.privacy.ring().unwrap_or(Ring::Stable);
+            if self.update_check.as_ref().is_none_or(|(r, _)| *r != ring) {
+                let ctx = ctx.clone();
+                self.update_check =
+                    UpdateCheck::start(crate::version(), ring, move || ctx.request_repaint())
+                        .map(|check| (ring, check));
+            }
         }
-        if let Some(update) = self.update_check.as_mut().and_then(|c| c.newer())
+        if let Some(update) = self.update_check.as_mut().and_then(|(_, c)| c.newer())
             && tell_once(&mut self.release_told, &update.version)
         {
             self.release_dialog = Some(update.clone());
@@ -103,7 +108,7 @@ impl ParterreApp {
         }
         match &self.automation.canned_newer_release {
             Some(update) => Some(update.clone()),
-            None => self.update_check.as_mut()?.newer().cloned(),
+            None => self.update_check.as_mut()?.1.newer().cloned(),
         }
     }
 

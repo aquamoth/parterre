@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Align, Layout, RichText, Ui, vec2};
 use parterre_core::Repo;
-use parterre_telemetry::{Build, Choices, Context, Lifecycle, Properties, Usage};
+use parterre_telemetry::{Build, Choices, Context, Lifecycle, Properties, Ring, Usage};
 
 use super::ParterreApp;
 use crate::settings::{Privacy, PrivacyAnswer};
@@ -42,8 +42,16 @@ pub(super) struct Telemetry {
     registered_properties: Option<Properties>,
 }
 
+/// The ring of the build running, if it was published: a dev build has none (#411).
+pub(super) fn running_ring() -> Option<Ring> {
+    let (version, published) = crate::this_build();
+    let version = parterre_telemetry::Version::parse(version)?;
+    published.then(|| Ring::of(&version)).flatten()
+}
+
 impl Telemetry {
     pub fn new(mut privacy: Privacy, scripted: bool) -> Telemetry {
+        privacy.keep_ring(running_ring());
         let do_not_track = parterre_telemetry::do_not_track();
         // Scripted runs read no stored settings: answered with the defaults.
         if scripted && privacy.answer.is_none() && parterre_telemetry::has_usage_statistics() {
