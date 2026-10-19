@@ -92,7 +92,8 @@ local copy, and nothing is asked at the next start. Crash reports have their own
 are sent even with *Usage statistics* unticked.
 
 Ticking *Crash reports* in the first-run prompt takes effect at once; a change in *Settings →
-Privacy* takes effect from the next start. Only panics are reported: aborts,
+Privacy* takes effect from the next start. Choosing *canary builds* there ticks *Crash reports*
+too, which you can untick again. Only panics are reported: aborts,
 stack overflows and crashes in native code, such as a graphics driver, aren't caught.
 
 ## Never sent
