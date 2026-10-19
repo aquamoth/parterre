@@ -67,7 +67,8 @@ jobs:
             fi
           fi
           run=$(.github/scripts/canary-run.sh "$GITHUB_SHA")
-          echo "$version ($tag), ${run:+the binaries of canary run $run}${run:-binaries built here}"
+          from=${run:+the binaries of canary run $run}
+          echo "$version ($tag), ${from:-binaries built here}"
           {
             echo "version=$version"
             echo "ring=$ring"
