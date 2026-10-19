@@ -55,7 +55,7 @@ jobs:
             --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[].tagName')
           options=(--title "$title" --generate-notes)
           if [ -n "$previous" ]; then
-            start=$(printf '%s\n' "$releases" | grep -E "$previous" | head -n1 || true)
+            start=$(printf '%s\n' "$releases" | grep -E -- "$previous" | head -n1 || true)
             [ -n "$start" ] && options+=(--notes-start-tag "$start")
           fi
           [ "$RING" = stable ] || options+=(--prerelease)
@@ -73,7 +73,7 @@ jobs:
           esac
           gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
             --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[].tagName' |
-            grep -E "$pattern" | tail -n +$((keep + 1)) |
+            grep -E -- "$pattern" | tail -n +$((keep + 1)) |
             while read -r tag; do
               echo "Deleting $tag"
               gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
