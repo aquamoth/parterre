@@ -100,7 +100,8 @@ It does what fits the channel parterre came through:
   own builds only, rc of release candidates and releases; never of a build of the commit
   running. The first run and *Reset* take the running build's ring; running a published build
   of a later ring widens it, a canary build to nightly, and only the user narrows it, in
-  Settings › Privacy (*Tell me about*). Canary is listed there once chosen, or with Shift held.
+  Settings › Privacy (*Tell me about*). Canary is listed there once chosen, or with Shift held; choosing it
+  ticks *Crash reports* (#419).
 - **Stable only:** an MSI installed for all users, from Program Files (Chocolatey, winget's
   machine-wide install), and `cargo install` hear of releases only, whatever the ring: Windows
   Installer never upgrades a machine-wide install with a per-user MSI, and crates.io has

@@ -363,7 +363,7 @@ impl ParterreApp {
                     channel: Channel::current(),
                 };
                 if updates.show(ui, &mut s.check_for_updates, &mut ring) {
-                    privacy.set_ring(ring);
+                    privacy.choose_ring(ring);
                 }
                 ui.add_space(14.0);
                 if let Some(error) = privacy_page(ui, &mut self.telemetry) {

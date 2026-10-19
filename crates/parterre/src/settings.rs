@@ -106,6 +106,19 @@ impl Privacy {
         self.ring = Some(ring.name().to_owned());
     }
 
+    /// The user's choice in Settings › Privacy. Choosing canary turns crash reports on, which
+    /// the user may turn off again (#419).
+    pub fn choose_ring(&mut self, ring: parterre_telemetry::Ring) {
+        self.set_ring(ring);
+        if let Some(answer) = self
+            .answer
+            .as_mut()
+            .filter(|_| ring == parterre_telemetry::Ring::Canary)
+        {
+            answer.crash_reports = true;
+        }
+    }
+
     /// Keeps the ring as a start of a build of `running` leaves it ([`parterre_telemetry::Ring::kept`]).
     pub fn keep_ring(&mut self, running: Option<parterre_telemetry::Ring>) {
         self.set_ring(parterre_telemetry::Ring::kept(self.ring(), running));
@@ -562,6 +575,32 @@ mod tests {
         // Whatever can't be read is unanswered: asked again.
         let back: Privacy = serde_json::from_str(r#"{"answer": 3}"#).unwrap_or_default();
         assert_eq!(back.answer, None);
+    }
+
+    #[test]
+    fn choosing_canary_turns_crash_reports_on() {
+        use parterre_telemetry::Ring;
+        let mut privacy = Privacy::default();
+        privacy.choose_ring(Ring::Canary);
+        assert_eq!(privacy.ring(), Some(Ring::Canary));
+        assert_eq!(
+            privacy.answer, None,
+            "no switch to flip before the first run"
+        );
+
+        privacy.answer(parterre_telemetry::Choices {
+            usage_statistics: false,
+            crash_reports: false,
+        });
+        privacy.choose_ring(Ring::Nightly);
+        assert!(!privacy.choices().unwrap().crash_reports);
+        privacy.choose_ring(Ring::Canary);
+        let choices = privacy.choices().unwrap();
+        assert!(choices.crash_reports && !choices.usage_statistics);
+        // Turned off again, it stays off until canary is chosen again.
+        privacy.answer.as_mut().unwrap().crash_reports = false;
+        privacy.keep_ring(Some(Ring::Canary));
+        assert!(!privacy.choices().unwrap().crash_reports);
     }
 
     #[test]
