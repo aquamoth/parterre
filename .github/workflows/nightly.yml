@@ -54,7 +54,8 @@ jobs:
           fi
           version=$(cargo run -q --locked -p parterre-stamp -- version --ring nightly --date "$(date -u +%Y%m%d)")
           run=$(.github/scripts/canary-run.sh "$sha")
-          echo "$version of $sha, ${run:+the binaries of canary run $run}${run:-binaries built here}"
+          from=${run:+the binaries of canary run $run}
+          echo "$version of $sha, ${from:-binaries built here}"
           {
             echo "moved=true"
             echo "version=$version"
