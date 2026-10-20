@@ -243,6 +243,9 @@ pub struct ParterreApp {
     folder_picker_requested: bool,
     file_dialog: Option<Pending<PickFor>>,
     title_shown: String,
+    /// The repository parterre last asked to be started again on after an update (`restart`),
+    /// `None` before it first asked.
+    restart_on: Option<Option<PathBuf>>,
     settings: Settings,
     /// Every repository's settings. The shown one's live in `settings` until kept here.
     stored: Stored,
@@ -385,6 +388,7 @@ impl ParterreApp {
             title_shown: opening
                 .as_ref()
                 .map_or_else(|| window_title(repo.as_ref()), Opening::title),
+            restart_on: None,
             repo: repo.map(Arc::new),
             recent,
             folder_picker_requested: false,
@@ -2773,6 +2777,11 @@ impl eframe::App for ParterreApp {
         if self.title_shown != title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title_shown = title;
+        }
+        let shown = self.repo.as_ref().map(|r| r.path.as_path());
+        if self.persist && self.restart_on.as_ref().map(Option::as_deref) != Some(shown) {
+            crate::restart::register(shown);
+            self.restart_on = Some(shown.map(Path::to_path_buf));
         }
         self.finish_opening(&ctx);
         // Dropped on the Dock icon, opened with parterre, or its service (#336, #337).
