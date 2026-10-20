@@ -275,8 +275,8 @@ pub fn build_with_pull_requests(
     build_with_landed(repo, options, pull_requests, &[])
 }
 
-/// Also with the commits squash- and rebase-merged branches landed as (`crate::merged`) kept
-/// as nodes, wherever they are shown anyway, so that a line can go from each branch to its.
+/// Also keeps `landed` as nodes, wherever they are shown anyway: the commits that squash- and
+/// rebase-merged branches landed as (`crate::merged`), which a line from each branch ends at.
 pub fn build_with_landed(
     repo: &Repo,
     options: &GraphOptions,

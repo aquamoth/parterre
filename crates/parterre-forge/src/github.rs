@@ -16,7 +16,8 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use super::{
-    Forge, ForgeError, GoneBranch, Proposed, PullRequest, PullRequests, Remote, RemoteUrl,
+    Forge, ForgeError, GoneBranch, MERGED_PER_BRANCH, Proposed, PullRequest, PullRequests, Remote,
+    RemoteUrl,
 };
 #[cfg(feature = "github")]
 use crate::http::{self, Token};
@@ -32,9 +33,6 @@ const BRANCHES_PER_REQUEST: usize = 100;
 /// As t3code: GitHub prices a connection of 100 like one of 1, and a name such as `main` can
 /// have many other forks' pull requests.
 const PULL_REQUESTS_PER_BRANCH: usize = 100;
-/// Merged pull requests of a branch name, newest first: a name is seldom used again for more
-/// pull requests than this.
-const MERGED_PER_BRANCH: usize = 10;
 const GH_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]

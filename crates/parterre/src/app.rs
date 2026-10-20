@@ -190,6 +190,9 @@ struct LayoutJob {
     rx: mpsc::Receiver<Scene>,
     options: (GraphOptions, LayoutOptions),
     view_anchor: Option<(Oid, Pos2)>,
+    /// Started before any scene of the repository was placed on screen: its own is placed
+    /// afresh, as the earlier one may have been meanwhile.
+    unplaced: bool,
     selected_commits: Vec<Oid>,
     /// Child and parent.
     selected_edge: Option<(Oid, Oid)>,
@@ -517,8 +520,8 @@ impl ParterreApp {
             self.job = Some(LayoutJob {
                 rx,
                 options,
-                // A scene not yet placed on screen has no place to keep.
                 view_anchor: self.view_anchor().filter(|_| !self.needs_initial_view),
+                unplaced: self.needs_initial_view,
                 selected_commits: if pending.is_empty() {
                     self.selected_commits()
                 } else {
@@ -555,6 +558,7 @@ impl ParterreApp {
         self.selected_edge = job.selected_edge.and_then(|(c, p)| self.edge_for(&c, &p));
         self.update_search();
         self.restore_moves(carried);
+        self.needs_initial_view |= job.unplaced;
         if let (Some((oid, screen)), Some(scene)) = (job.view_anchor, &self.scene)
             && let Some(node) = self.node_for(&oid)
             && self.canvas.is_positive()

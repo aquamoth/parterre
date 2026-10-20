@@ -41,12 +41,12 @@ pub struct Merged {
 
 impl Merged {
     /// What the git check and the forge found, together: a branch is merged if either says so.
-    /// The forge's commit is the one the pull request was completed as; the check's is found
-    /// by patch.
+    /// The forge's word goes where it has one: it knows how the pull request was completed
+    /// (a rebase of one commit looks like a squash to the check), and as which commit.
     pub fn either(local: Option<Merged>, forge: Option<Merged>) -> Option<Merged> {
         match (local, forge) {
             (Some(local), Some(forge)) => Some(Merged {
-                how: local.how.or(forge.how),
+                how: forge.how.or(local.how),
                 landed: forge.landed.or(local.landed),
                 pull_request: forge.pull_request,
             }),
@@ -97,8 +97,8 @@ impl MergedBranches {
         self.by_branch.is_empty()
     }
 
-    /// The ref `branch` of `repo`'s answer (an index into [`Repo::refs`]), if it is about
-    /// where the branch is now.
+    /// The answer about the ref `branch` of `repo` (an index into [`Repo::refs`]), if it is
+    /// about where the branch is now.
     pub fn of(&self, repo: &Repo, branch: usize) -> Option<&Merged> {
         let r = repo.refs.get(branch)?;
         self.of_branch(&r.full_name, repo.commit(r.target).oid)
@@ -166,7 +166,7 @@ pub fn find(git: &Git, repo: &Repo, branches: &[usize]) -> Result<Vec<Option<Mer
         return Ok(vec![None; branches.len()]);
     };
     let generation = repo.generations();
-    let checked: Vec<Option<Branch>> = branches
+    let examined: Vec<Option<Branch>> = branches
         .iter()
         .map(|&b| {
             let tip = repo.refs[b].target;
@@ -189,7 +189,7 @@ pub fn find(git: &Git, repo: &Repo, branches: &[usize]) -> Result<Vec<Option<Mer
             })
         })
         .collect();
-    let Some(oldest_base) = checked
+    let Some(oldest_base) = examined
         .iter()
         .flatten()
         .map(|b| b.merge_base)
@@ -205,16 +205,17 @@ pub fn find(git: &Git, repo: &Repo, branches: &[usize]) -> Result<Vec<Option<Mer
         .filter(|&c| repo.commit(c).parents.len() <= 1)
         .collect();
 
-    let mut singles: Vec<CommitIx> = upstream.clone();
-    let mut seen: HashSet<CommitIx> = singles.iter().copied().collect();
-    for b in checked.iter().flatten() {
-        singles.extend(b.own.iter().copied().filter(|&c| seen.insert(c)));
+    // Each commit against its parent: the default branch's, and the branches' own.
+    let mut one_by_one: Vec<CommitIx> = upstream.clone();
+    let mut seen: HashSet<CommitIx> = one_by_one.iter().copied().collect();
+    for b in examined.iter().flatten() {
+        one_by_one.extend(b.own.iter().copied().filter(|&c| seen.insert(c)));
     }
     let oid = |c: CommitIx| repo.commit(c).oid.to_hex();
-    let lines: String = singles.iter().map(|&c| oid(c) + "\n").collect();
+    let lines: String = one_by_one.iter().map(|&c| oid(c) + "\n").collect();
     let commit_ids = patch_ids(git, lines)?;
     // `<tip> <merge base>` diffs the merge base against the tip, headed by the tip.
-    let mut pairs: Vec<(CommitIx, CommitIx)> = checked
+    let mut pairs: Vec<(CommitIx, CommitIx)> = examined
         .iter()
         .flatten()
         .map(|b| (b.tip, b.merge_base))
@@ -233,21 +234,21 @@ pub fn find(git: &Git, repo: &Repo, branches: &[usize]) -> Result<Vec<Option<Mer
             copies.entry(id).or_default().push(c);
         }
     }
-    let answers = checked
+    let answers = examined
         .iter()
         .map(|b| {
             let b = b.as_ref()?;
-            let after: HashSet<CommitIx> =
-                crate::upstream::difference(repo, generation, default, b.merge_base)
-                    .0
-                    .into_iter()
-                    .collect();
-            let landing = |id: Option<&String>| -> Option<CommitIx> {
-                copies
+            // A copy on the default branch that the branch's merge base doesn't reach landed
+            // after the branch forked. One copy stands for one commit only.
+            let mut used: HashSet<CommitIx> = HashSet::new();
+            let landing = |id: Option<&String>, used: &mut HashSet<CommitIx>| {
+                let c = copies
                     .get(id?.as_str())?
                     .iter()
                     .copied()
-                    .find(|c| after.contains(c))
+                    .find(|&c| !used.contains(&c) && !repo.reaches(b.merge_base, c))?;
+                used.insert(c);
+                Some(c)
             };
             let landed = |how: How, c: CommitIx| Merged {
                 how: Some(how),
@@ -262,12 +263,13 @@ pub fn find(git: &Git, repo: &Repo, branches: &[usize]) -> Result<Vec<Option<Mer
                 .collect();
             if ids.len() >= 2 {
                 let rebased: Option<Vec<CommitIx>> =
-                    ids.iter().map(|id| landing(Some(id))).collect();
+                    ids.iter().map(|id| landing(Some(id), &mut used)).collect();
                 if let Some(copies) = rebased {
+                    // Of its newest commit with a change: its tip, unless that is empty.
                     return Some(landed(How::Rebase, copies[0]));
                 }
             }
-            let squashed = landing(branch_ids.get(&repo.commit(b.tip).oid))?;
+            let squashed = landing(branch_ids.get(&repo.commit(b.tip).oid), &mut HashSet::new())?;
             Some(landed(How::Squash, squashed))
         })
         .collect();
@@ -363,6 +365,12 @@ mod tests {
         assert_eq!(
             Merged::either(Some(local.clone()), Some(forge.clone())),
             Some(merged(Some(How::Squash), true, Some(9)))
+        );
+        // A rebase of one commit is a squash to the check; the forge knows better.
+        let rebased = merged(Some(How::Rebase), true, Some(9));
+        assert_eq!(
+            Merged::either(Some(local.clone()), Some(rebased.clone())),
+            Some(rebased)
         );
         assert_eq!(Merged::either(Some(local.clone()), None), Some(local));
         assert_eq!(Merged::either(None, Some(forge.clone())), Some(forge));

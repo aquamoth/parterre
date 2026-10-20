@@ -205,7 +205,7 @@ fn commit_row<'r>(
     let commit = repo.commit(ix);
     Row {
         hash: commit.oid.short(repo.abbrev_len),
-        refs: table_style::badges(repo, &refs[ix.ix()], Some(ix), labels.graph, labels.merged),
+        refs: table_style::badges(repo, &refs[ix.ix()], Some(ix), labels),
         subject: &commit.subject,
         author: &commit.author_name,
         author_email: &commit.author_email,

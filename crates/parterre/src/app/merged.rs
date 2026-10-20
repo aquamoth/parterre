@@ -273,59 +273,31 @@ mod tests {
 
     use parterre_core::merged::How;
 
-    fn git(dir: &std::path::Path, args: &[&str]) -> String {
-        let out = std::process::Command::new(parterre_core::git::program())
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_AUTHOR_NAME", "A")
-            .env("GIT_AUTHOR_EMAIL", "a@example.com")
-            .env("GIT_COMMITTER_NAME", "A")
-            .env("GIT_COMMITTER_EMAIL", "a@example.com")
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "git {args:?}: {out:?}");
-        String::from_utf8(out.stdout).unwrap().trim().to_owned()
-    }
+    use crate::app::tool_harness::{git, init};
 
     /// A repository with `topic` squash-merged into `main` on a bare `origin` (not on a
-    /// forge), and `topic` deleted there and pruned here. Returns the squash commit.
+    /// forge), and `topic` deleted there, which the push takes out here too. Returns the squash
+    /// commit.
     fn squash_merged(dir: &std::path::Path) -> String {
         let origin = dir.join("origin.git");
+        let origin = origin.to_str().unwrap();
         let work = dir.join("work");
-        git(
-            dir,
-            &[
-                "init",
-                "-q",
-                "--bare",
-                "-b",
-                "main",
-                origin.to_str().unwrap(),
-            ],
-        );
-        git(dir, &["init", "-q", "-b", "main", work.to_str().unwrap()]);
+        git(dir, &["init", "-q", "--bare", "-b", "main", origin]);
+        std::fs::create_dir(&work).unwrap();
+        init(&work);
         let run = |args: &[&str]| git(&work, args);
-        run(&["remote", "add", "origin", origin.to_str().unwrap()]);
-        std::fs::write(work.join("a.txt"), "1\n").unwrap();
-        run(&["add", "-A"]);
-        run(&["commit", "-q", "-m", "Start"]);
-        run(&["push", "-q", "-u", "origin", "main"]);
-        run(&["remote", "set-head", "origin", "main"]);
+        run(&["remote", "add", "origin", origin]);
+        run(&["commit", "-q", "--allow-empty", "-m", "Start"]);
         run(&["switch", "-q", "-c", "topic"]);
         std::fs::write(work.join("b.txt"), "1\n").unwrap();
-        run(&["add", "-A"]);
+        run(&["add", "b.txt"]);
         run(&["commit", "-q", "-m", "Topic"]);
-        run(&["push", "-q", "-u", "origin", "topic"]);
+        run(&["push", "-q", "-u", "origin", "main", "topic"]);
+        run(&["remote", "set-head", "origin", "main"]);
         run(&["switch", "-q", "main"]);
-        std::fs::write(work.join("c.txt"), "1\n").unwrap();
-        run(&["add", "-A"]);
-        run(&["commit", "-q", "-m", "Elsewhere"]);
         run(&["merge", "-q", "--squash", "topic"]);
         run(&["commit", "-q", "-m", "Topic (#1)"]);
         run(&["push", "-q", "origin", "main", ":topic"]);
-        run(&["fetch", "-q", "--prune", "origin"]);
         run(&["rev-parse", "HEAD"])
     }
 

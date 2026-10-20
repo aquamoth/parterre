@@ -263,6 +263,7 @@ fn loads_parterres_pull_requests_from_github() {
 
 /// #384: parterre's own #422, merged from `t3/prune-grep` at 79e5e5a.
 /// `cargo test -p parterre-forge --features github --test forge -- --ignored merged`
+#[cfg(feature = "github")]
 #[test]
 #[ignore = "needs the network and a signed-in gh"]
 fn finds_a_merged_pull_request_of_parterre_on_github() {
@@ -462,14 +463,13 @@ fn azure_devops_origins_have_pull_requests_on_their_heads() {
     assert!(heads[0].0.head.is_some(), "origin/topic is its head branch");
 }
 
-/// `PARTERRE_AZURE_REPO=https://dev.azure.com/o/p/_git/r cargo test -p parterre-forge
-/// --features azure-devops --test forge -- --ignored azure`
+/// #384: as [`loads_pull_requests_from_azure_devops`], with `PARTERRE_AZURE_MERGED="BRANCH
+/// HEAD NUMBER MERGE_COMMIT"` naming a completed pull request of that repository, from BRANCH
+/// at HEAD.
 #[cfg(feature = "azure-devops")]
 #[test]
 #[ignore = "needs the network and a sign-in to Azure DevOps"]
 fn finds_a_completed_pull_request_on_azure_devops() {
-    // `PARTERRE_AZURE_MERGED="BRANCH HEAD NUMBER MERGE_COMMIT"`: a completed pull request of
-    // PARTERRE_AZURE_REPO, from BRANCH at HEAD.
     let url = std::env::var("PARTERRE_AZURE_REPO").expect("PARTERRE_AZURE_REPO is set");
     let merged = std::env::var("PARTERRE_AZURE_MERGED").expect("PARTERRE_AZURE_MERGED is set");
     let [branch, head, number, landed] = merged.split(' ').collect::<Vec<_>>()[..] else {
@@ -492,7 +492,7 @@ fn finds_a_completed_pull_request_on_azure_devops() {
     eprintln!("{found:?}");
 }
 
-/// `PARTERRE_AZURE_REPO=https://dev.azure.com/{org}/{project}/_git/{repo} cargo test -p parterre-forge \
+/// `PARTERRE_AZURE_REPO=https://dev.azure.com/o/p/_git/r cargo test -p parterre-forge
 /// --features azure-devops --test forge -- --ignored azure`
 #[cfg(feature = "azure-devops")]
 #[test]

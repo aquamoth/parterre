@@ -14,7 +14,6 @@ use parterre_core::branches::{
     Outcome, Report, Stuck, Warning, Worktree, command_text,
 };
 use parterre_core::file_diff::FileDiffSpec;
-
 use parterre_core::merged::MergedBranches;
 use parterre_core::remote::{Live, RemoteBranchTip};
 use parterre_core::reset::{self, Mode};
