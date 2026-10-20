@@ -21,6 +21,7 @@ mod notice;
 mod raster;
 mod record;
 mod render;
+mod restart;
 mod reveal;
 mod scene;
 mod script;
