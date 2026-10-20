@@ -13,8 +13,11 @@
 use std::cmp::Reverse;
 use std::fmt::Write as _;
 
-use super::{Forge, ForgeError, Proposed, PullRequest, PullRequests, Remote, RemoteUrl};
+use super::{
+    Forge, ForgeError, GoneBranch, Proposed, PullRequest, PullRequests, Remote, RemoteUrl,
+};
 use parterre_core::git::Git;
+use parterre_core::merged::Merged;
 
 mod repositories;
 #[cfg(feature = "azure-devops")]
@@ -26,6 +29,9 @@ use sign_in::{signed_in_to_organisation, signed_in_to_repository};
 
 const API_VERSION: &str = "api-version=7.1";
 const PULL_REQUESTS_PER_PAGE: usize = 500;
+/// Completed pull requests of a branch name, newest first: a name is seldom used again for
+/// more pull requests than this.
+const COMPLETED_PER_BRANCH: usize = 10;
 /// 5,000 active pull requests are more than any repository has.
 const MAX_PAGES: usize = 10;
 /// What Azure DevOps doesn't take in project and repository names.
@@ -36,6 +42,51 @@ pub fn load(git: &Git) -> Result<PullRequests, ForgeError> {
     pull_requests(git, |url, origin| {
         load_active_pull_requests(git, url, origin)
     })
+}
+
+/// For each of `branches`: the completed pull request from it into `origin`'s repository,
+/// whose head was its tip when completed. One request per branch, signed in as git is for
+/// `origin`'s URL; 11 took 3.2 s, one after another, on a large organisation (#384).
+pub(crate) fn merged(
+    git: &Git,
+    origin: &AzureRepo,
+    branches: &[GoneBranch],
+) -> Result<Vec<Option<Merged>>, ForgeError> {
+    let url = git
+        .query(&["remote", "get-url", "origin"])?
+        .ok_or(ForgeError::NoForge)?;
+    signed_in_to_repository(git, &url, origin, |api| {
+        completed_pull_requests(api, origin, branches)
+    })
+}
+
+fn completed_pull_requests(
+    api: &dyn Api,
+    repo: &AzureRepo,
+    branches: &[GoneBranch],
+) -> Result<Vec<Option<Merged>>, ForgeError> {
+    let path = format!(
+        "/{}/_apis/git/repositories/{}/pullrequests",
+        percent_encoded(&repo.project),
+        percent_encoded(&repo.name),
+    );
+    branches
+        .iter()
+        .map(|b| {
+            let source = percent_encoded(&format!("refs/heads/{}", b.name));
+            let body = api.get(&format!(
+                "{path}?searchCriteria.sourceRefName={source}&searchCriteria.status=completed\
+                 &$top={COMPLETED_PER_BRANCH}&{API_VERSION}"
+            ))?;
+            let answer: json::List<json::CompletedPullRequest> =
+                super::parse_answer(Forge::AzureDevops, &body)?;
+            Ok(answer
+                .value
+                .into_iter()
+                .filter(|pr| pr.fork_source.is_none())
+                .find_map(|pr| pr.into_merged(b.tip)))
+        })
+        .collect()
 }
 
 /// A branch of an Azure DevOps remote, whose URL is `remote_url`.
@@ -232,6 +283,7 @@ mod json {
     use serde::Deserialize;
     use serde::de::IgnoredAny;
 
+    use parterre_core::merged::{How, Merged};
     use parterre_core::oid::Oid;
 
     #[derive(Debug, Deserialize)]
@@ -284,6 +336,58 @@ mod json {
                 base_branch: super::branch_name(&self.target_ref_name).to_owned(),
                 base_repo: repo_name.to_owned(),
                 url: super::pull_request_url(web_url, self.pull_request_id),
+            })
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct CompletedPullRequest {
+        pull_request_id: u64,
+        last_merge_source_commit: Option<Commit>,
+        last_merge_commit: Option<Commit>,
+        completion_options: Option<CompletionOptions>,
+        pub fork_source: Option<IgnoredAny>,
+    }
+
+    /// `mergeStrategy` is `GitPullRequestMergeStrategy`, by name or by number (1
+    /// `noFastForward`, 2 `squash`, 3 `rebase`, 4 `rebaseMerge`); older pull requests have
+    /// only `squashMerge`.
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CompletionOptions {
+        merge_strategy: Option<serde_json::Value>,
+        #[serde(default)]
+        squash_merge: bool,
+    }
+
+    impl CompletionOptions {
+        fn how(&self) -> Option<How> {
+            use serde_json::Value;
+            match &self.merge_strategy {
+                Some(Value::String(s)) if s == "squash" => Some(How::Squash),
+                Some(Value::String(s)) if s == "rebase" || s == "rebaseMerge" => Some(How::Rebase),
+                Some(Value::Number(n)) if n.as_u64() == Some(2) => Some(How::Squash),
+                Some(Value::Number(n)) if matches!(n.as_u64(), Some(3 | 4)) => Some(How::Rebase),
+                _ => self.squash_merge.then_some(How::Squash),
+            }
+        }
+    }
+
+    impl CompletedPullRequest {
+        /// `None` unless its head was `tip` when it was completed.
+        pub fn into_merged(self, tip: Oid) -> Option<Merged> {
+            let head = Oid::from_hex(&self.last_merge_source_commit?.commit_id)?;
+            let how = self
+                .completion_options
+                .as_ref()
+                .and_then(CompletionOptions::how);
+            (head == tip).then(|| Merged {
+                how,
+                landed: self
+                    .last_merge_commit
+                    .and_then(|c| Oid::from_hex(&c.commit_id)),
+                pull_request: Some(self.pull_request_id),
             })
         }
     }
@@ -436,6 +540,7 @@ fn decoded_name(segment: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::fake::Fake;
+    use parterre_core::merged::How;
     use parterre_core::oid::Oid;
 
     fn repo(org: &str, project: &str, name: &str, host: Host) -> Option<AzureRepo> {
@@ -649,5 +754,106 @@ mod tests {
             active_pull_requests(&api, &cjp()),
             Err(ForgeError::GitSignInRejected { .. })
         ));
+    }
+
+    fn completed(id: u64, head: char, merged: char, extra: &str) -> String {
+        format!(
+            r#"{{"pullRequestId":{id},"status":"completed",
+                "lastMergeSourceCommit":{{"commitId":"{sha}"}},
+                "lastMergeCommit":{{"commitId":"{merge}"}}{extra}}}"#,
+            sha = head.to_string().repeat(40),
+            merge = merged.to_string().repeat(40),
+        )
+    }
+
+    fn sha(c: char) -> Oid {
+        Oid::from_hex(&c.to_string().repeat(40)).unwrap()
+    }
+
+    /// #384: one request per branch; only a pull request whose head was the branch's tip.
+    #[test]
+    fn completed_pull_requests_are_found_by_branch_and_tip() {
+        let api = Fake::new(vec![
+            page(&[
+                // The name used again: a newer pull request from another tip first.
+                completed(12, 'e', '2', ""),
+                completed(
+                    7,
+                    'a',
+                    '1',
+                    r#","completionOptions":{"mergeStrategy":"squash"}"#,
+                ),
+            ]),
+            page(&[completed(
+                9,
+                'b',
+                '3',
+                r#","completionOptions":{"mergeStrategy":"rebaseMerge"}"#,
+            )]),
+            page(&[completed(5, 'x', '5', "")]),
+            // The strategy by number, and an older pull request's flag.
+            page(&[completed(
+                6,
+                'd',
+                '6',
+                r#","completionOptions":{"mergeStrategy":2}"#,
+            )]),
+            page(&[completed(
+                8,
+                'f',
+                '8',
+                r#","completionOptions":{"squashMerge":true}"#,
+            )]),
+        ]);
+        let branches = [
+            GoneBranch {
+                name: "fix/x".into(),
+                tip: sha('a'),
+            },
+            GoneBranch {
+                name: "topic".into(),
+                tip: sha('b'),
+            },
+            GoneBranch {
+                name: "abandoned".into(),
+                tip: sha('c'),
+            },
+            GoneBranch {
+                name: "numbered".into(),
+                tip: sha('d'),
+            },
+            GoneBranch {
+                name: "old".into(),
+                tip: sha('f'),
+            },
+        ];
+        let squashed = |id: u64, landed: char| {
+            Some(Merged {
+                how: Some(How::Squash),
+                landed: Some(sha(landed)),
+                pull_request: Some(id),
+            })
+        };
+        let found = completed_pull_requests(&api, &cjp(), &branches).unwrap();
+        assert_eq!(
+            found,
+            [
+                squashed(7, '1'),
+                Some(Merged {
+                    how: Some(How::Rebase),
+                    landed: Some(sha('3')),
+                    pull_request: Some(9),
+                }),
+                None,
+                squashed(6, '6'),
+                squashed(8, '8'),
+            ]
+        );
+        assert_eq!(
+            api.asked.borrow()[0],
+            "/CJP%20Work/_apis/git/repositories/some.repo/pullrequests\
+             ?searchCriteria.sourceRefName=refs%2Fheads%2Ffix%2Fx\
+             &searchCriteria.status=completed&$top=10&api-version=7.1"
+        );
     }
 }

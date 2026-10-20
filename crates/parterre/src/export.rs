@@ -157,6 +157,18 @@ fn to_svg(scene: &Scene, settings: &Settings, palette: &Palette) -> String {
                 hex(fill),
                 hex(border)
             );
+            if row.merged {
+                let shade = hex(crate::merged_branches::shade(fill));
+                let stripes = crate::merged_branches::polygons(
+                    row_rect,
+                    corners,
+                    crate::merged_branches::PERIOD,
+                );
+                for stripe in stripes {
+                    let points = svg_points(&stripe);
+                    let _ = writeln!(svg, r#"<polygon points="{points}" fill="{shade}"/>"#);
+                }
+            }
             let (x, anchor) = match row.kind {
                 RowKind::PullRequest { .. } => {
                     let (end, icon) = pull_request_label(row_rect, row.width, 1.0);

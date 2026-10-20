@@ -198,7 +198,7 @@ fn copied_onto_branch(git: &Git, branch: &str, upstream: &str) -> HashSet<Oid> {
 
 /// The commits reachable from `a` but not from `b`, and from `b` but not from `a`, newest
 /// first. Walks down from both by generation, as far as either side has commits of its own.
-fn difference(
+pub(crate) fn difference(
     repo: &Repo,
     generation: &[u32],
     a: CommitIx,

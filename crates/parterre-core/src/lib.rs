@@ -24,6 +24,7 @@ pub mod log_graph;
 pub mod log_layout;
 pub mod merge;
 pub mod merge_tool;
+pub mod merged;
 pub mod oid;
 mod operation;
 pub mod pattern;

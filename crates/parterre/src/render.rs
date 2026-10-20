@@ -111,6 +111,7 @@ pub fn paint_scene(
         crate::upstreams::paint(painter, canvas, view, scene, palette, settings, marks);
     }
     crate::upstreams::paint_in_progress(painter, canvas, view, scene, palette, settings, marks);
+    crate::merged_branches::paint_lines(painter, canvas, view, scene, palette, settings);
 
     let font = FontId::monospace(fixed(FONT_SIZE * zoom));
     let draw_text = FONT_SIZE * zoom >= MIN_DRAWN_TEXT_PX;
@@ -132,6 +133,11 @@ pub fn paint_scene(
                 Stroke::new(fixed(1.0), border),
                 StrokeKind::Inside,
             );
+            // Below the zoom where text is drawn, the only sign left on the label.
+            if row.merged {
+                let period = fixed(crate::merged_branches::PERIOD * zoom);
+                crate::merged_branches::paint_stripes(painter, row_rect, corners, period, fill);
+            }
             if !draw_text {
                 continue;
             }
@@ -720,6 +726,7 @@ mod tests {
             label: label.into(),
             kind,
             width: 0.0,
+            merged: false,
         };
         let checkout = |missing| Some(Checkout { index: 1, missing });
         let branch = |worktree, head| RowKind::Ref {

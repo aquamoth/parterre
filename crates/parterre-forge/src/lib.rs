@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use parterre_core::git::{Git, GitError};
+use parterre_core::merged::Merged;
 use parterre_core::oid::Oid;
 use parterre_core::repo::{RefKind, Repo};
 use parterre_core::revgraph::PullRequestHead;
@@ -97,6 +98,46 @@ impl Origin {
             Origin::Github(_) => github::load_canned(git, json),
             Origin::AzureDevops(_) => azure::load_canned(git, json),
         }
+    }
+
+    /// For each of `branches`: its merged pull request, if its head was the branch's tip when
+    /// it was merged (#384). Branch names get used again, so the name alone doesn't do. On
+    /// GitHub one request per 100 branches, on Azure DevOps one per branch. Blocks: run it on
+    /// a worker thread.
+    pub fn merged(
+        &self,
+        git: &Git,
+        branches: &[GoneBranch],
+    ) -> Result<Vec<Option<Merged>>, ForgeError> {
+        if branches.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self {
+            Origin::Github(repo) => github::merged(repo, branches),
+            Origin::AzureDevops(repo) => azure::merged(git, repo, branches),
+        }
+    }
+}
+
+/// A local branch whose upstream on `origin` is gone, as the forge is asked about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GoneBranch {
+    /// The upstream's name on `origin`, which was the pull request's head branch: `topic` of
+    /// `origin/topic`.
+    pub name: String,
+    pub tip: Oid,
+}
+
+impl GoneBranch {
+    /// The local branch `branch` of `repo` (an index into [`Repo::refs`]), if its upstream is
+    /// on `origin`.
+    pub fn of(repo: &Repo, branch: usize) -> Option<GoneBranch> {
+        let upstream = repo.upstream_of(branch)?;
+        let name = upstream.name.strip_prefix("refs/remotes/origin/")?;
+        Some(GoneBranch {
+            name: name.to_owned(),
+            tip: repo.commit(repo.refs[branch].target).oid,
+        })
     }
 }
 

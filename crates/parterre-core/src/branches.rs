@@ -1049,6 +1049,11 @@ impl Deletion {
         }
     }
 
+    /// The worktree's HEAD or the branch's tip.
+    pub fn tip(&self) -> Option<Oid> {
+        self.head
+    }
+
     /// The same loss, whatever git said before.
     fn same_loss(&self, other: &Self) -> bool {
         self.head == other.head

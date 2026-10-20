@@ -417,7 +417,7 @@ impl Git {
             .map(into_string_lossy)
     }
 
-    fn run_with_input_bytes(
+    pub(crate) fn run_with_input_bytes(
         &self,
         args: &[&str],
         input: impl Into<Vec<u8>>,

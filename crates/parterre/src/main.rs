@@ -17,6 +17,7 @@ mod keys;
 #[cfg(target_os = "macos")]
 mod macos;
 mod menu;
+mod merged_branches;
 mod notice;
 mod raster;
 mod record;
