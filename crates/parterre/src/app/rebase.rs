@@ -9,13 +9,12 @@ use parterre_core::glyphs::{self, Glyph};
 use parterre_core::log::{LogOptions, LogQuery};
 use parterre_core::log_graph::LogGraph;
 use parterre_core::rebase::{self, Preview, Todo};
-use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{capitalized, plural};
 use parterre_core::{CommitIx, Oid, Repo};
 
 use super::branches::Asked;
 use super::commit_table::{CommitList, CommitTable, ROW_HEIGHT, Row, Select};
-use super::table_style::{self, HEADING_HEIGHT};
+use super::table_style::{self, HEADING_HEIGHT, Labels};
 use crate::theme::Palette;
 use crate::{dialogs, keys, menu, widgets};
 
@@ -117,7 +116,7 @@ impl ListedCommits {
         &mut self,
         ui: &mut Ui,
         palette: &Palette,
-        options: &GraphOptions,
+        labels: Labels<'_>,
     ) -> Option<Oid> {
         let c = table_style::colors(ui);
         let Self {
@@ -138,7 +137,7 @@ impl ListedCommits {
             icons: false,
         };
         let clicks = in_growing_slot(ui, commits.len(), |ui| {
-            let row = |i: usize| commit_row(repo, refs, options, commits[i]);
+            let row = |i: usize| commit_row(repo, refs, labels, commits[i]);
             table.show(ui, &c, list, row, |_, _, _| {}, None)
         });
         clicks.double_clicked.map(|row| self.oid(row))
@@ -151,7 +150,7 @@ impl ListedCommits {
         &mut self,
         ui: &mut Ui,
         palette: &Palette,
-        options: &GraphOptions,
+        labels: Labels<'_>,
         mark: impl Fn(Oid, Row<'_>) -> Row<'_>,
         mut menu: impl FnMut(&mut Ui, Oid),
         skipped: impl Fn(Oid) -> Option<&'static str>,
@@ -185,7 +184,7 @@ impl ListedCommits {
                 ui,
                 &c,
                 list,
-                |i| mark(oid(i), commit_row(repo, refs, options, commits[i])),
+                |i| mark(oid(i), commit_row(repo, refs, labels, commits[i])),
                 |ui, i, _| menu(ui, oid(i)),
                 Some(&mut tip),
             )
@@ -200,13 +199,13 @@ impl ListedCommits {
 fn commit_row<'r>(
     repo: &'r Repo,
     refs: &[Vec<usize>],
-    options: &GraphOptions,
+    labels: Labels<'_>,
     ix: CommitIx,
 ) -> Row<'r> {
     let commit = repo.commit(ix);
     Row {
         hash: commit.oid.short(repo.abbrev_len),
-        refs: table_style::badges(repo, &refs[ix.ix()], Some(ix), options),
+        refs: table_style::badges(repo, &refs[ix.ix()], Some(ix), labels.graph, labels.merged),
         subject: &commit.subject,
         author: &commit.author_name,
         author_email: &commit.author_email,
@@ -362,7 +361,7 @@ impl RebaseDialog {
         ctx: &egui::Context,
         busy: bool,
         palette: &Palette,
-        options: &GraphOptions,
+        labels: Labels<'_>,
     ) -> Asked {
         let title = format!(
             "Rebase {} onto {}",
@@ -381,7 +380,7 @@ impl RebaseDialog {
                 if dialogs::commit_line(ui, self.listed.repo(), self.preview.onto) {
                     show_in_log = Some(self.preview.onto);
                 }
-                if let Some(oid) = self.commits_table(ui, palette, options) {
+                if let Some(oid) = self.commits_table(ui, palette, labels) {
                     show_in_log = Some(oid);
                 }
                 self.choose(ui);
@@ -479,12 +478,7 @@ impl RebaseDialog {
 
     /// The commits being rebased, with what the rebase does with each; those git leaves out are
     /// greyed, as are those dropped. Returns the commit double-clicked.
-    fn commits_table(
-        &mut self,
-        ui: &mut Ui,
-        palette: &Palette,
-        options: &GraphOptions,
-    ) -> Option<Oid> {
+    fn commits_table(&mut self, ui: &mut Ui, palette: &Palette, labels: Labels<'_>) -> Option<Oid> {
         let choices = self.choices(ui);
         let shared_todo = shared(
             self.selected()
@@ -496,7 +490,7 @@ impl RebaseDialog {
         let clicked = self.listed.show_choosing(
             ui,
             palette,
-            options,
+            labels,
             |oid, row| Row {
                 icon: preview.todo(oid).and_then(|t| icon_of(&choices, t)),
                 greyed: preview.skipped(oid).is_some() || preview.todo(oid) == Some(Todo::Drop),

@@ -4,10 +4,10 @@ use eframe::egui::{self, Id, Ui, ViewportId};
 use parterre_core::Repo;
 use parterre_core::branches::command_text;
 use parterre_core::merge::{self, Method, Preview};
-use parterre_core::revgraph::GraphOptions;
 
 use super::branches::Asked;
 use super::rebase::{ListedCommits, listing_dialog_width, stash_checkbox};
+use super::table_style::Labels;
 use crate::dialogs;
 use crate::theme::Palette;
 
@@ -61,7 +61,7 @@ impl MergeDialog {
         ctx: &egui::Context,
         busy: bool,
         palette: &Palette,
-        options: &GraphOptions,
+        labels: Labels<'_>,
     ) -> Asked {
         let name = self.name();
         let title = format!("Merge {name} into {}", self.preview.branch);
@@ -77,7 +77,7 @@ impl MergeDialog {
                 if dialogs::commit_line(ui, self.listed.repo(), self.preview.theirs) {
                     show_in_log = Some(self.preview.theirs);
                 }
-                if let Some(oid) = self.listed.show(ui, palette, options) {
+                if let Some(oid) = self.listed.show(ui, palette, labels) {
                     show_in_log = Some(oid);
                 }
                 self.methods(ui, &name);

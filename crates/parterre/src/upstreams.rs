@@ -134,7 +134,7 @@ fn sub_path(path: &[Pos2], from: f32, to: f32) -> Vec<Pos2> {
 
 /// The screen route of an edge parterre adds between the nodes `a` and `b`, around the other
 /// boxes in view (see [`route_around`]).
-fn special_route(
+pub(crate) fn special_route(
     scene: &Scene,
     view: &View,
     canvas: Rect,

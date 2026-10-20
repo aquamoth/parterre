@@ -62,6 +62,20 @@ impl fmt::Display for Oid {
     }
 }
 
+/// As its hex digits.
+impl serde::Serialize for Oid {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Oid {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Oid, D::Error> {
+        let hex = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+        Oid::from_hex(&hex).ok_or_else(|| serde::de::Error::custom("not a commit id"))
+    }
+}
+
 impl fmt::Debug for Oid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Oid({})", self.short(12))
@@ -84,6 +98,15 @@ mod tests {
     fn rejects_bad_input() {
         assert!(Oid::from_hex("abc").is_none());
         assert!(Oid::from_hex(&"g".repeat(40)).is_none());
+    }
+
+    #[test]
+    fn stored_as_hex() {
+        let oid = Oid::from_hex(&"ab".repeat(20)).unwrap();
+        let json = serde_json::to_string(&oid).unwrap();
+        assert_eq!(json, format!("\"{}\"", "ab".repeat(20)));
+        assert_eq!(serde_json::from_str::<Oid>(&json).unwrap(), oid);
+        assert!(serde_json::from_str::<Oid>("\"abc\"").is_err());
     }
 
     #[test]

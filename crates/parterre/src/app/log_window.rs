@@ -15,6 +15,7 @@ use parterre_core::glyphs::{self, Glyph};
 use parterre_core::log::{self, LogList, LogOptions, LogOrder, LogQuery};
 use parterre_core::log_graph::LogGraph;
 use parterre_core::log_layout::LogLayout;
+use parterre_core::merged::MergedBranches;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{find_urls, plural, thousands};
 use parterre_core::{Commit, CommitIx, Oid, Repo};
@@ -255,6 +256,7 @@ struct Env<'a> {
     open_worktree: Option<&'a Path>,
     palette: Palette,
     graph: &'a GraphOptions,
+    merged: &'a MergedBranches,
     settings: &'a mut LogWindowSettings,
     /// The commit marked for comparison, and its name.
     marked: Option<&'a (Oid, String)>,
@@ -754,6 +756,7 @@ impl LogWindow {
                         &refs_by_commit[commits[i].ix()],
                         Some(commits[i]),
                         env.graph,
+                        env.merged,
                     ),
                     subject: &commit.subject,
                     author: &commit.author_name,
@@ -831,6 +834,7 @@ impl LogWindow {
             &view.refs_by_commit[ix.ix()],
             Some(ix),
             env.graph,
+            env.merged,
         );
         ScrollArea::vertical()
             .id_salt(("log-details", commit.oid))
@@ -1329,6 +1333,7 @@ impl ParterreApp {
                 open_worktree: self.repo.as_deref().map(|r| r.path.as_path()),
                 palette,
                 graph: &self.settings.graph,
+                merged: self.merged.shown(),
                 settings: &mut self.settings.log_window,
                 marked: self.marked.as_ref(),
                 branches: self.branches.catalog.as_deref(),
@@ -1569,6 +1574,7 @@ mod tests {
                 open_worktree: None,
                 palette: Palette::new(false, &[]),
                 graph: &graph,
+                merged: &MergedBranches::default(),
                 settings: &mut settings,
                 marked: None,
                 branches: None,

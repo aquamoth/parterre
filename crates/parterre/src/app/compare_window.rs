@@ -9,6 +9,7 @@ use parterre_core::conflicts::Resolve;
 use parterre_core::file_diff::{FileDiffSpec, Rev};
 use parterre_core::glyphs;
 use parterre_core::log::commit_name;
+use parterre_core::merged::MergedBranches;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::{Oid, Repo};
 
@@ -89,6 +90,7 @@ impl CompareView {
 struct Env<'a> {
     palette: Palette,
     graph: &'a GraphOptions,
+    merged: &'a MergedBranches,
     settings: &'a mut CompareWindowSettings,
 }
 
@@ -344,6 +346,7 @@ fn side(
         &view.refs_by_commit[ix.ix()],
         Some(ix),
         env.graph,
+        env.merged,
     ) {
         if x >= right {
             break;
@@ -458,6 +461,7 @@ impl ParterreApp {
             let mut env = Env {
                 palette,
                 graph: &self.settings.graph,
+                merged: self.merged.shown(),
                 settings: &mut self.settings.compare_window,
             };
             let compare = &mut self.compare;

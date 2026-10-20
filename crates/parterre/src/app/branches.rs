@@ -14,6 +14,8 @@ use parterre_core::branches::{
     Outcome, Report, Stuck, Warning, Worktree, command_text,
 };
 use parterre_core::file_diff::FileDiffSpec;
+
+use parterre_core::merged::MergedBranches;
 use parterre_core::remote::{Live, RemoteBranchTip};
 use parterre_core::reset::{self, Mode};
 use parterre_core::revgraph::GraphOptions;
@@ -30,6 +32,7 @@ use super::rebase::{RebaseDialog, stuck_color};
 use super::remote::{PullDialog, PullRequestCheck, SetUpstreamDialog};
 use super::reset::ResetDialog;
 use super::revert::{RestoreDialog, RevertDialog};
+use super::table_style::Labels;
 use crate::file_dialog::{self, Pending};
 use crate::theme::Palette;
 use crate::usage::{self, Screen};
@@ -2079,18 +2082,30 @@ impl Tool {
         self.notice(ctx, path, title.to_owned(), Report::default(), None);
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, palette: &Palette, options: &GraphOptions) {
+    /// `merged`: the branches found squash- or rebase-merged, striped in the dialogs' commit
+    /// lists, and named where they landed when deleting one would lose their commits.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        palette: &Palette,
+        options: &GraphOptions,
+        merged: &MergedBranches,
+    ) {
         self.form_dialog(ctx);
         self.reset_dialog(ctx);
-        self.rebase_dialog(ctx, palette, options);
-        self.merge_dialog(ctx, palette, options);
-        self.cherry_pick_dialog(ctx, palette, options);
+        let labels = Labels {
+            graph: options,
+            merged,
+        };
+        self.rebase_dialog(ctx, palette, labels);
+        self.merge_dialog(ctx, palette, labels);
+        self.cherry_pick_dialog(ctx, palette, labels);
         self.revert_dialog(ctx);
         self.restore_stash_dialog(ctx);
         self.pull_diverged_dialog(ctx);
         self.set_upstream_dialog(ctx);
         self.clone_dialog(ctx);
-        self.loss_dialog(ctx);
+        self.loss_dialog(ctx, merged);
         self.network_window(ctx);
         self.notifications(ctx);
     }
@@ -2264,38 +2279,33 @@ impl Tool {
         }
     }
 
-    fn rebase_dialog(&mut self, ctx: &egui::Context, palette: &Palette, options: &GraphOptions) {
+    fn rebase_dialog(&mut self, ctx: &egui::Context, palette: &Palette, labels: Labels<'_>) {
         let Some(mut dialog) = self.dialogs.rebase.take() else {
             return;
         };
-        let asked = dialog.show(ctx, self.busy(), palette, options);
+        let asked = dialog.show(ctx, self.busy(), palette, labels);
         let rebase = || Some(Action::Rebase(Box::new(dialog.rebase())));
         if self.answered(ctx, asked, dialog.opener, rebase) {
             self.dialogs.rebase = Some(dialog);
         }
     }
 
-    fn merge_dialog(&mut self, ctx: &egui::Context, palette: &Palette, options: &GraphOptions) {
+    fn merge_dialog(&mut self, ctx: &egui::Context, palette: &Palette, labels: Labels<'_>) {
         let Some(mut dialog) = self.dialogs.merge.take() else {
             return;
         };
-        let asked = dialog.show(ctx, self.busy(), palette, options);
+        let asked = dialog.show(ctx, self.busy(), palette, labels);
         let merge = || Some(Action::Merge(Box::new(dialog.merge())));
         if self.answered(ctx, asked, dialog.opener, merge) {
             self.dialogs.merge = Some(dialog);
         }
     }
 
-    fn cherry_pick_dialog(
-        &mut self,
-        ctx: &egui::Context,
-        palette: &Palette,
-        options: &GraphOptions,
-    ) {
+    fn cherry_pick_dialog(&mut self, ctx: &egui::Context, palette: &Palette, labels: Labels<'_>) {
         let Some(mut dialog) = self.dialogs.cherry_pick.take() else {
             return;
         };
-        let asked = dialog.show(ctx, self.busy(), palette, options);
+        let asked = dialog.show(ctx, self.busy(), palette, labels);
         let cherry_pick = || Some(Action::CherryPick(Box::new(dialog.cherry_pick())));
         if self.answered(ctx, asked, dialog.opener, cherry_pick) {
             self.dialogs.cherry_pick = Some(dialog);
@@ -2328,9 +2338,18 @@ impl Tool {
     }
 
     /// The confirmation or warning an operation came back with.
-    fn loss_dialog(&mut self, ctx: &egui::Context) {
+    fn loss_dialog(&mut self, ctx: &egui::Context, merged: &MergedBranches) {
         let Some(mut loss) = self.dialogs.loss.take() else {
             return;
+        };
+        let repo = self.repo.clone();
+        // A local branch squash- or rebase-merged: where its commits' changes landed (#384).
+        let landed = |name: &str, tip: Oid| -> Option<String> {
+            let m = merged.of_branch(&format!("refs/heads/{name}"), tip)?;
+            Some(format!(
+                "Their changes are upstream: {name} was {}.",
+                m.describe(repo.as_deref()?)
+            ))
         };
         let warning = &loss.warning;
         let confirmation = warning.is_confirmation();
@@ -2361,7 +2380,7 @@ impl Tool {
                 {
                     super::remote::deletion_notes(ui, branches, catalog.as_deref(), check);
                 }
-                show_log = loss_fields(ui, warning, listing_files, &mut deletes_branches);
+                show_log = loss_fields(ui, warning, listing_files, &mut deletes_branches, &landed);
             });
             let commands: Vec<String> = warning.commands.iter().map(|a| command_text(a)).collect();
             dialogs::command_box(ui, &commands);
@@ -2631,12 +2650,14 @@ fn loss_title(warning: &Warning) -> (String, &'static str) {
 }
 
 /// What the loss dialog says is lost: by each deletion, its changed files and its commits, and
-/// the commits lost or replaced. Returns the commits whose *Show in log* was clicked.
+/// the commits lost or replaced. `landed` says where a merged local branch's changes are, given
+/// its name and tip. Returns the commits whose *Show in log* was clicked.
 fn loss_fields(
     ui: &mut Ui,
     warning: &Warning,
     listing_files: &mut HashSet<usize>,
     deletes_branches: &mut bool,
+    landed: &dyn Fn(&str, Oid) -> Option<String>,
 ) -> Option<Vec<Oid>> {
     let mut show_log = None;
     let worktrees = matches!(warning.action, Action::DeleteWorktrees { .. });
@@ -2722,6 +2743,13 @@ fn loss_fields(
                     show_log = Some(d.commits.clone());
                 }
             });
+            let note = match (&warning.action, d.tip()) {
+                (Action::DeleteBranches(_), Some(tip)) => landed(&d.name, tip),
+                _ => None,
+            };
+            if let Some(note) = note {
+                ui.weak(note);
+            }
         }
         if let Some(b) = branch {
             row(ui, &mut |ui| {
@@ -2734,6 +2762,9 @@ fn loss_fields(
                     show_log = Some(b.commits.clone());
                 }
             });
+            if let Some(note) = landed(&b.name, b.tip) {
+                ui.weak(note);
+            }
         }
     };
     if several {

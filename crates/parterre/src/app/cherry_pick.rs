@@ -9,7 +9,6 @@ use parterre_core::branches::command_text;
 use parterre_core::cherry_pick::{self, Preview};
 use parterre_core::glyphs;
 use parterre_core::log_graph::LogGraph;
-use parterre_core::revgraph::GraphOptions;
 use parterre_core::{CommitIx, Oid, Repo};
 
 use super::branches::Asked;
@@ -18,6 +17,7 @@ use super::rebase::{
     Choice, ListedCommits, choice_buttons, choice_menu, icon_of, listing_dialog_width, shared,
     stash_checkbox,
 };
+use super::table_style::Labels;
 use crate::dialogs;
 use crate::theme::Palette;
 
@@ -85,7 +85,7 @@ impl CherryPickDialog {
         ctx: &egui::Context,
         busy: bool,
         palette: &Palette,
-        options: &GraphOptions,
+        labels: Labels<'_>,
     ) -> Asked {
         let pick = self.cherry_pick();
         let title = format!("Cherry-pick {} onto {}", pick.name, pick.branch);
@@ -101,7 +101,7 @@ impl CherryPickDialog {
                 if dialogs::commit_line(ui, self.listed.repo(), self.preview.head) {
                     show_in_log = Some(self.preview.head);
                 }
-                if let Some(oid) = self.commits_table(ui, palette, options) {
+                if let Some(oid) = self.commits_table(ui, palette, labels) {
                     show_in_log = Some(oid);
                 }
                 self.choose(ui);
@@ -191,12 +191,7 @@ impl CherryPickDialog {
 
     /// The listed commits, with whether each is picked; those left out are greyed, as are those
     /// dropped. Returns the commit double-clicked.
-    fn commits_table(
-        &mut self,
-        ui: &mut Ui,
-        palette: &Palette,
-        options: &GraphOptions,
-    ) -> Option<Oid> {
+    fn commits_table(&mut self, ui: &mut Ui, palette: &Palette, labels: Labels<'_>) -> Option<Oid> {
         let choices = Self::choices(ui);
         let shared_pick = shared(
             self.selected()
@@ -208,7 +203,7 @@ impl CherryPickDialog {
         let clicked = self.listed.show_choosing(
             ui,
             palette,
-            options,
+            labels,
             |oid, row| {
                 let picked = preview.picked(oid);
                 Row {

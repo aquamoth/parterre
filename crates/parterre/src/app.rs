@@ -31,6 +31,7 @@ mod log_window;
 mod menu_bar;
 mod merge;
 mod merge_tool;
+mod merged;
 mod node_menu;
 mod privacy;
 mod pull_requests;
@@ -296,6 +297,8 @@ pub struct ParterreApp {
     reloading: Option<(PathBuf, mpsc::Receiver<Result<Repo, String>>)>,
     pull_requests: pull_requests::PullRequestLoader,
     pull_requests_were_on: bool,
+    /// The local branches squash- or rebase-merged (#384).
+    merged: merged::MergedLoader,
     pull_requests_error: Option<parterre_forge::ForgeError>,
     /// With the ring it was started for: a ring chosen in Settings starts it again.
     update_check: Option<(parterre_telemetry::Ring, parterre_telemetry::UpdateCheck)>,
@@ -457,6 +460,10 @@ impl ParterreApp {
                 None => pull_requests::PullRequestLoader::default(),
             },
             pull_requests_were_on,
+            merged: merged::MergedLoader::new(
+                storage.map(merged::load).unwrap_or_default(),
+                automation.canned_pull_requests.is_some(),
+            ),
             pull_requests_error: None,
             update_check: None,
             release_told: storage.and_then(updates::release_told),
@@ -495,14 +502,23 @@ impl ParterreApp {
                         .x
                 };
                 let pull_requests = self.pull_requests.list().map(|p| &**p);
-                Scene::prepare(repo, &self.settings, pull_requests, &mut width, text_height)
+                let merged = self.merged.shown();
+                Scene::prepare(
+                    repo,
+                    &self.settings,
+                    pull_requests,
+                    merged,
+                    &mut width,
+                    text_height,
+                )
             });
             let rx = worker::spawn(ctx, move || input.lay_out());
             let pending = std::mem::take(&mut self.select_after_layout);
             self.job = Some(LayoutJob {
                 rx,
                 options,
-                view_anchor: self.view_anchor(),
+                // A scene not yet placed on screen has no place to keep.
+                view_anchor: self.view_anchor().filter(|_| !self.needs_initial_view),
                 selected_commits: if pending.is_empty() {
                     self.selected_commits()
                 } else {
@@ -2174,6 +2190,19 @@ fn node_tooltip(ui: &mut Ui, scene: &Scene, node: usize, details: &mut Details) 
         ui.add_space(4.0);
         ui.label(RichText::new(refs.join("\n")).weak());
     }
+    let merged: Vec<String> = n
+        .refs
+        .iter()
+        .filter_map(|&r| {
+            let m = scene.merged.of(&scene.repo, r)?;
+            let name = &scene.repo.refs[r].name;
+            Some(format!("{name} was {}", m.describe(&scene.repo)))
+        })
+        .collect();
+    if !merged.is_empty() {
+        ui.add_space(4.0);
+        ui.label(merged.join("\n"));
+    }
     let worktrees: Vec<String> = scene
         .worktrees_on(node)
         .into_iter()
@@ -2255,6 +2284,25 @@ fn legend(ui: &mut Ui, palette: &Palette, rules: &[crate::theme::BranchColor]) -
         "Current branch (HEAD), or a detached HEAD",
     );
     swatch(ui, palette.local_branch, "feature/x", "Local branch");
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(LEGEND_SWATCH_SIZE, Sense::hover());
+        let fill = palette.local_branch;
+        let corners = egui::CornerRadius::same(4);
+        ui.painter().rect_filled(rect, corners, fill);
+        let period = crate::merged_branches::period_for(rect.height());
+        crate::merged_branches::paint_stripes(ui.painter(), rect, corners, period, fill);
+        ui.painter().text(
+            rect.left_center() + vec2(8.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            "feature/z",
+            FontId::monospace(12.0),
+            crate::theme::text_on(fill),
+        );
+        ui.label(
+            "Local branch squash- or rebase-merged; a green dashed line goes to where it \
+             landed",
+        );
+    });
     swatch(
         ui,
         palette.remote_branch,
@@ -2818,6 +2866,9 @@ impl eframe::App for ParterreApp {
             }
         }
         self.update_pull_requests(&ctx);
+        if self.merged.update(self.repo.as_ref(), &ctx) {
+            self.requested_options = None;
+        }
         self.usage_statistics(&ctx);
         self.update_check(&ctx);
         self.ensure_scene(&ctx);
@@ -2877,7 +2928,9 @@ impl eframe::App for ParterreApp {
         // Over everything else.
         self.first_run_prompt(&ctx, frame);
         let palette = self.palette(&ctx);
-        self.branches.show(&ctx, &palette, &self.settings.graph);
+        let merged = self.merged.shown();
+        self.branches
+            .show(&ctx, &palette, &self.settings.graph, merged);
         self.merge_tools.show(&ctx);
         if let Some(e) = self.merge_tools.error.take() {
             self.status = Some(Note::Error(e));
@@ -2902,9 +2955,12 @@ impl eframe::App for ParterreApp {
                 || self.pull_requests_active()
                     && self.pull_requests.list().is_some()
                     && self.job.is_some();
+            let merging =
+                self.merged.is_loading() || !self.merged.shown().is_empty() && self.job.is_some();
             self.automation.waiting = self.diffs.is_loading()
                 || self.blames.is_loading()
                 || pulling
+                || merging
                 || self.reloading.is_some();
             self.automation
                 .drive(&ctx, self.scene.as_ref(), &mut self.view, self.canvas);
@@ -2935,6 +2991,7 @@ impl eframe::App for ParterreApp {
                 self.stored.write(&self.settings),
             );
             eframe::set_value(storage, MOVES_KEY, &self.moves);
+            eframe::set_value(storage, merged::MERGED_KEY, self.merged.remembered());
             eframe::set_value(storage, RECENT_KEY, &self.recent);
             eframe::set_value(storage, CLONE_PARENT_KEY, &self.branches.clone_parent);
             eframe::set_value(storage, PRIVACY_KEY, &self.telemetry.privacy);

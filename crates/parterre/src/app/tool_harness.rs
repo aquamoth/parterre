@@ -170,7 +170,8 @@ impl Harness {
         self.texts = run_frame(&self.ctx, input, |ui| {
             tool.update(ui.ctx(), Some(repo));
             let palette = crate::theme::Palette::new(false, &[]);
-            tool.show(ui.ctx(), &palette, &GraphOptions::default());
+            let merged = parterre_core::merged::MergedBranches::default();
+            tool.show(ui.ctx(), &palette, &GraphOptions::default(), &merged);
         });
         assert_no_id_clashes(&self.texts);
     }
