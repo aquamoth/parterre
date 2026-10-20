@@ -14,7 +14,8 @@ use std::cmp::Reverse;
 use std::fmt::Write as _;
 
 use super::{
-    Forge, ForgeError, GoneBranch, Proposed, PullRequest, PullRequests, Remote, RemoteUrl,
+    Forge, ForgeError, GoneBranch, MERGED_PER_BRANCH, Proposed, PullRequest, PullRequests, Remote,
+    RemoteUrl,
 };
 use parterre_core::git::Git;
 use parterre_core::merged::Merged;
@@ -29,9 +30,6 @@ use sign_in::{signed_in_to_organisation, signed_in_to_repository};
 
 const API_VERSION: &str = "api-version=7.1";
 const PULL_REQUESTS_PER_PAGE: usize = 500;
-/// Completed pull requests of a branch name, newest first: a name is seldom used again for
-/// more pull requests than this.
-const COMPLETED_PER_BRANCH: usize = 10;
 /// 5,000 active pull requests are more than any repository has.
 const MAX_PAGES: usize = 10;
 /// What Azure DevOps doesn't take in project and repository names.
@@ -76,7 +74,7 @@ fn completed_pull_requests(
             let source = percent_encoded(&format!("refs/heads/{}", b.name));
             let body = api.get(&format!(
                 "{path}?searchCriteria.sourceRefName={source}&searchCriteria.status=completed\
-                 &$top={COMPLETED_PER_BRANCH}&{API_VERSION}"
+                 &$top={MERGED_PER_BRANCH}&{API_VERSION}"
             ))?;
             let answer: json::List<json::CompletedPullRequest> =
                 super::parse_answer(Forge::AzureDevops, &body)?;

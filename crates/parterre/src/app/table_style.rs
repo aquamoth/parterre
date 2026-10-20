@@ -208,8 +208,7 @@ pub(super) fn badges<'a>(
     repo: &'a Repo,
     refs: &[usize],
     commit: Option<CommitIx>,
-    graph: &GraphOptions,
-    merged: &MergedBranches,
+    Labels { graph, merged }: Labels<'_>,
 ) -> Vec<Badge<'a>> {
     let worktrees_shown = graph.show_worktrees;
     let refs: Vec<usize> = refs

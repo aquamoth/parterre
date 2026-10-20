@@ -133,7 +133,7 @@ pub fn paint_scene(
                 Stroke::new(fixed(1.0), border),
                 StrokeKind::Inside,
             );
-            // Below the zoom where text is drawn, the only sign left on the label.
+            // At any zoom: below the one where text is drawn, the only sign left on the label.
             if row.merged {
                 let period = fixed(crate::merged_branches::PERIOD * zoom);
                 crate::merged_branches::paint_stripes(painter, row_rect, corners, period, fill);

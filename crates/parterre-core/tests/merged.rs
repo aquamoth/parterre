@@ -199,6 +199,26 @@ fn changes_from_before_the_branch_are_not_where_it_landed() {
     assert_eq!(found(&s), [("topic".to_owned(), None)]);
 }
 
+/// One copy upstream stands for one of the branch's commits, however many make that change.
+#[test]
+fn one_copy_is_not_two_commits_rebased() {
+    let mut s = Setup::new();
+    // The branch adds a line, takes it out, and adds it again.
+    s.repo.git(&["switch", "-q", "-c", "topic", "main"]);
+    let add = s.change("topic.txt", "One");
+    s.repo.git(&["revert", "--no-edit", "HEAD"]);
+    s.change("topic.txt", "One");
+    s.repo.git(&["push", "-q", "-u", "origin", "topic"]);
+    // Only the first two have a copy on the default branch.
+    s.main_moves_on("Elsewhere");
+    s.repo.git(&["cherry-pick", &add, "topic~1"]);
+    let added = s.repo.git(&["rev-parse", "HEAD~1"]);
+    s.repo.git(&["push", "-q", "origin", "main"]);
+    s.delete_on_origin("topic");
+    // Not rebase-merged; the change of the whole branch is the added line, though.
+    assert_eq!(found(&s), [("topic".to_owned(), squash(&added))]);
+}
+
 /// Merge commits and fast-forwards need nothing: the graph shows where they landed.
 #[test]
 fn only_gone_branches_the_default_branch_lacks_are_candidates() {

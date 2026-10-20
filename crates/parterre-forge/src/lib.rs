@@ -119,6 +119,10 @@ impl Origin {
     }
 }
 
+/// Merged pull requests asked for per branch name, newest first: a name is seldom used again
+/// for more pull requests than this.
+const MERGED_PER_BRANCH: usize = 10;
+
 /// A local branch whose upstream on `origin` is gone, as the forge is asked about it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GoneBranch {
