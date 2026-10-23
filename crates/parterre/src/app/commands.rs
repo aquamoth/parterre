@@ -89,6 +89,7 @@ impl ParterreApp {
                 (s.net.can_undo(), s.net.can_redo(), s.net.any_displaced())
             });
         let newer = self.newer_release();
+        let update_label = (newer.as_ref()).map(|u| self.next_step(u).menu_label(&u.version));
         let g = &self.settings.graph;
         let why_no_pull_requests = self
             .pull_requests
@@ -131,9 +132,7 @@ impl ParterreApp {
             drag: self.settings.net.model,
             direction: self.settings.layout.direction,
             newer_version: newer.as_ref().map(|u| u.version.clone()),
-            update_installs: newer
-                .as_ref()
-                .is_some_and(|u| super::updates::installs(u).is_some()),
+            update_label,
             git_menu,
         }
     }

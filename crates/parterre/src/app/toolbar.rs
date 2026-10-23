@@ -102,13 +102,21 @@ impl ParterreApp {
             let room = ui.available_width()
                 - widgets::trailing_width(ui, TOOLS_ON_THE_RIGHT)
                 - ui.spacing().item_spacing.x;
+            // The update's button goes just right of the field, which stays in the middle: room
+            // for it is kept on both sides (#433).
+            let update = if self.newer_release().is_some() {
+                widgets::BUTTON_SIZE + ui.spacing().item_spacing.x
+            } else {
+                0.0
+            };
             ui.allocate_ui_with_layout(
                 vec2(room.max(0.0), widgets::BUTTON_SIZE),
                 Layout::left_to_right(Align::Center),
                 |ui| {
-                    let width = super::text_view::find_field_width(room);
+                    let width = super::text_view::find_field_width(room - 2.0 * update);
                     ui.add_space(((room - width) / 2.0).max(0.0));
                     self.find_field(ui, width);
+                    self.update_button(ui);
                 },
             );
 

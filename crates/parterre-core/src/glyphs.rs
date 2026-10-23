@@ -300,8 +300,22 @@ pub const FETCH: Glyph = &[
     Part::Path("M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"),
 ];
 
+/// A newer release to download (#433): Lucide's download, and its arrow-down alone inside the
+/// ring that fills as it downloads.
+pub const DOWNLOAD: Glyph = &[
+    Part::Path("M12 15V3"),
+    Part::Path("m7 10 5 5 5-5"),
+    Part::Path("M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"),
+];
+pub const ARROW_DOWN: Glyph = &[Part::Path("M12 5v14"), Part::Path("m19 12-7 7-7-7")];
+/// Downloaded: restart to update. Lucide's rotate-cw.
+pub const RESTART: Glyph = &[
+    Part::Path("M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"),
+    Part::Path("M21 3v5h-5"),
+];
+
 #[cfg(test)]
-const ALL: [Glyph; 53] = [
+const ALL: [Glyph; 56] = [
     MENU,
     SEARCH,
     PLUS,
@@ -355,6 +369,9 @@ const ALL: [Glyph; 53] = [
     FETCH,
     FOLDER,
     FOLDER_GONE,
+    DOWNLOAD,
+    ARROW_DOWN,
+    RESTART,
 ];
 
 #[derive(Clone, Debug, PartialEq)]

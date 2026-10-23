@@ -1,4 +1,5 @@
 use eframe::egui;
+use parterre_core::glyphs;
 use parterre_telemetry::{Channel, Download, Install, Ring, Update, UpdateCheck};
 
 use super::settings_window::SettingsPage;
@@ -83,12 +84,13 @@ impl ParterreApp {
         };
         let heard = builds(self.heard_ring());
         let this_version = running_version(crate::version());
+        let next = self.next_step(&update);
         let stage = self.updating.as_mut().map(|u| u.run.stage().clone());
-        let method = self.updating.as_ref().map(|u| u.method);
-        let primary = match &stage {
-            None if installs(&update).is_some() => Some(("Update now", ReleaseAnswer::Update)),
-            None => Some(("Download", ReleaseAnswer::Download)),
-            Some(Stage::Failed(failure)) => Some(match &failure.fallback {
+        let method = self.updating.as_ref().map(|u| u.run.method());
+        let primary = match (&next, &stage) {
+            (Next::Download | Next::Fetch, _) => Some(("Download", ReleaseAnswer::Next)),
+            (Next::Install, _) => Some(("Restart to update", ReleaseAnswer::Next)),
+            (_, Some(Stage::Failed(failure))) => Some(match &failure.fallback {
                 Some(Fallback::Open(file)) if is_disk_image(file) => {
                     ("Open the disk image", ReleaseAnswer::Fallback)
                 }
@@ -96,11 +98,7 @@ impl ParterreApp {
                 Some(Fallback::Show(_)) => ("Show the download", ReleaseAnswer::Fallback),
                 None => ("Release page", ReleaseAnswer::Notes),
             }),
-            Some(_) => None,
-        };
-        let close = match stage {
-            Some(Stage::Downloading { .. }) => "Cancel",
-            _ => CLOSE,
+            _ => None,
         };
         let shown = Dialog::new("new-release", dialog_title(update.ring))
             .screen(crate::usage::Screen::NewRelease)
@@ -129,7 +127,7 @@ impl ParterreApp {
                     }
                 });
                 ui.separator();
-                let mut widths = vec![widgets::text_button_width(ui, close)];
+                let mut widths = vec![widgets::text_button_width(ui, CLOSE)];
                 if let Some((label, _)) = primary {
                     widths.push(widgets::filled_button_width(
                         ui,
@@ -138,7 +136,7 @@ impl ParterreApp {
                     ));
                 }
                 dialogs::button_row(ui, &widths, |ui| {
-                    if widgets::text_button(ui, close).clicked() {
+                    if widgets::text_button(ui, CLOSE).clicked() {
                         answer = ReleaseAnswer::Close;
                     }
                     if let Some((label, primary)) = primary
@@ -156,13 +154,10 @@ impl ParterreApp {
         match answer {
             ReleaseAnswer::Open => {}
             ReleaseAnswer::Close => {
-                // A download stops. An installer already started runs on, and its outcome opens
-                // the dialog again.
-                if let Some(updating) = &self.updating {
-                    updating.run.cancel();
-                    if !matches!(stage, Some(Stage::Installing)) {
-                        self.updating = None;
-                    }
+                // A download or an install runs on, followed by the toolbar's button. What has
+                // ended is let go, so that the button offers the download again.
+                if matches!(stage, Some(Stage::Failed(_) | Stage::Installed { .. })) {
+                    self.updating = None;
                 }
                 self.release_dialog = None;
             }
@@ -172,11 +167,11 @@ impl ParterreApp {
                 }
             }
             ReleaseAnswer::Change => self.open_settings(SettingsPage::Privacy),
-            ReleaseAnswer::Update => self.start_update(ctx, &update),
-            ReleaseAnswer::Download => {
-                let download = update.download.clone();
-                self.download(ctx, &download);
-                self.release_dialog = None;
+            ReleaseAnswer::Next => {
+                self.get_update(ctx, &update);
+                if next == Next::Download {
+                    self.release_dialog = None;
+                }
             }
             ReleaseAnswer::Fallback => {
                 let opened = match &stage {
@@ -199,8 +194,40 @@ impl ParterreApp {
         }
     }
 
-    /// Starts *Update now* on the channels parterre installs itself on (#431), with the dialog
-    /// open to follow it.
+    /// What the next click on the toolbar's button, the dialog's button or the menu's entry does
+    /// for `update` (#433).
+    pub(super) fn next_step(&mut self, update: &Update) -> Next {
+        if installs(update).is_none() {
+            return Next::Download;
+        }
+        match self.updating.as_mut().map(|u| u.run.stage().clone()) {
+            None | Some(Stage::Cancelled) => Next::Fetch,
+            Some(Stage::Downloading { done, size }) => Next::Wait { done, size },
+            Some(Stage::Downloaded) => Next::Install,
+            Some(Stage::Installing | Stage::Restart(_)) => Next::Busy,
+            Some(Stage::Failed(_)) => Next::Show { failed: true },
+            Some(Stage::Installed { .. }) => Next::Show { failed: false },
+        }
+    }
+
+    /// Takes the update's next step, as the user clicked for it: the download, then the install
+    /// (#433). Where parterre doesn't install it itself, *Download* as before.
+    pub(super) fn get_update(&mut self, ctx: &egui::Context, update: &Update) {
+        match self.next_step(update) {
+            Next::Download => self.download(ctx, &update.download),
+            Next::Fetch => self.start_update(ctx, update),
+            Next::Install => {
+                if let Some(updating) = self.updating.as_mut() {
+                    updating.run.install(ctx);
+                }
+            }
+            Next::Show { .. } => self.release_dialog = Some(update.clone()),
+            Next::Wait { .. } | Next::Busy => {}
+        }
+    }
+
+    /// Downloads the update on the channels parterre installs itself on (#431); the toolbar's
+    /// button shows how far it is.
     fn start_update(&mut self, ctx: &egui::Context, update: &Update) {
         let Some((install, method)) = installs(update) else {
             return;
@@ -210,10 +237,8 @@ impl ParterreApp {
             self_update::Updating::start(&update.version, install.clone(), method, ctx.clone());
         self.updating = Some(Updating {
             update: update.clone(),
-            method,
             run,
         });
-        self.release_dialog = Some(update.clone());
     }
 
     /// Starts the new copy once it is in place and closes this one, and opens the dialog again
@@ -247,6 +272,48 @@ impl ParterreApp {
         }
     }
 
+    /// The toolbar's button for a newer release, just right of the find field, and nothing
+    /// without one (#433).
+    pub(super) fn update_button(&mut self, ui: &mut egui::Ui) {
+        let Some(update) = self.newer_release() else {
+            return;
+        };
+        let next = self.next_step(&update);
+        let accent = widgets::tones(ui).accent;
+        let response = match next {
+            Next::Busy => {
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::Vec2::splat(widgets::BUTTON_SIZE),
+                    egui::Sense::hover(),
+                );
+                ui.put(
+                    egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(16.0)),
+                    egui::Spinner::new().size(16.0),
+                );
+                response
+            }
+            Next::Wait { done, size } => {
+                let progress = size.map_or(0.0, |size| done as f32 / size.max(1) as f32);
+                widgets::progress_button(ui, glyphs::DOWNLOAD, accent, Some(progress))
+            }
+            Next::Install => widgets::progress_button(ui, glyphs::RESTART, accent, None),
+            Next::Show { failed: true } => {
+                let error = ui.visuals().error_fg_color;
+                widgets::progress_button(ui, glyphs::WARNING, error, None)
+            }
+            Next::Show { failed: false } => {
+                widgets::progress_button(ui, glyphs::CHECK, accent, None)
+            }
+            Next::Download | Next::Fetch => {
+                widgets::progress_button(ui, glyphs::DOWNLOAD, accent, None)
+            }
+        };
+        let (title, body) = button_tip(next, &update.version);
+        if widgets::tip_explained(response, &title, "", &body).clicked() {
+            self.get_update(ui.ctx(), &update);
+        }
+    }
+
     pub(super) fn newer_release(&mut self) -> Option<Update> {
         if !self.settings.check_for_updates {
             return None;
@@ -254,18 +321,6 @@ impl ParterreApp {
         match &self.automation.canned_newer_release {
             Some(update) => Some(update.clone()),
             None => self.update_check.as_mut()?.1.newer().cloned(),
-        }
-    }
-
-    /// The menu's entry: *Update now* in the dialog where parterre installs it itself.
-    pub(super) fn get_update(&mut self, ctx: &egui::Context, update: &Update) {
-        if installs(update).is_some() {
-            if self.updating.is_none() {
-                self.start_update(ctx, update);
-            }
-            self.release_dialog = Some(update.clone());
-        } else {
-            self.download(ctx, &update.download);
         }
     }
 
@@ -294,8 +349,75 @@ impl ParterreApp {
 #[derive(Debug)]
 pub(super) struct Updating {
     update: Update,
-    method: Method,
     run: self_update::Updating,
+}
+
+/// What an update's next click does (#433).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Next {
+    /// *Download* as before, where parterre doesn't install it itself.
+    Download,
+    /// Start the download.
+    Fetch,
+    /// Nothing while it downloads.
+    Wait {
+        done: u64,
+        size: Option<u64>,
+    },
+    Install,
+    /// Nothing while it installs.
+    Busy,
+    /// Open the dialog with how it ended.
+    Show {
+        failed: bool,
+    },
+}
+
+impl Next {
+    /// The menu's entry for `version`.
+    pub(super) fn menu_label(self, version: &str) -> String {
+        match self {
+            Next::Download | Next::Fetch => format!("Download {version}"),
+            Next::Wait { .. } => format!("Downloading {version}…"),
+            Next::Install => format!("Restart to update to {version}"),
+            Next::Busy => format!("Installing {version}…"),
+            Next::Show { .. } => format!("Update to {version}…"),
+        }
+    }
+}
+
+/// The toolbar button's tooltip: what it is at, and what a click does.
+fn button_tip(next: Next, version: &str) -> (String, String) {
+    let out = format!("parterre {version} is out");
+    match next {
+        Next::Download => (out, "Click to download it.".to_owned()),
+        Next::Fetch => (
+            out,
+            "Click to download it. Once it's downloaded, a click installs it and restarts \
+             parterre."
+                .to_owned(),
+        ),
+        Next::Wait { done, size } => (
+            format!("Downloading parterre {version}"),
+            self_update::progress_text(done, size),
+        ),
+        Next::Install => (
+            format!("Restart to update to {version}"),
+            "Downloaded. Click to install it and restart parterre.".to_owned(),
+        ),
+        Next::Busy => (
+            format!("Installing parterre {version}"),
+            "parterre restarts when it's done.".to_owned(),
+        ),
+        Next::Show { failed: true } => (
+            format!("The update to {version} failed"),
+            "Click to see why.".to_owned(),
+        ),
+        Next::Show { failed: false } => (
+            format!("parterre {version} is installed"),
+            "Click for more.".to_owned(),
+        ),
+    }
 }
 
 /// The file `update` installs and how, where parterre installs it itself.
@@ -332,6 +454,9 @@ fn stage_note(ui: &mut egui::Ui, stage: &Stage, method: Option<Method>) {
                 });
             });
         }
+        Stage::Downloaded => {
+            ui.label("Downloaded. Restart to update when it suits you.");
+        }
         Stage::Installed { reboot: false } => {
             ui.label("Installed. Start parterre again to use it.");
         }
@@ -359,8 +484,7 @@ enum ReleaseAnswer {
     Close,
     Notes,
     Change,
-    Update,
-    Download,
+    Next,
     Fallback,
 }
 
