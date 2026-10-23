@@ -110,15 +110,12 @@ impl MergedBranches {
         (*asked == tip).then_some(merged)
     }
 
-    /// The commits the branches of `repo` landed as, where it has them: the graph keeps them
-    /// as nodes.
-    pub fn landed(&self, repo: &Repo) -> Vec<CommitIx> {
-        let mut landed: Vec<CommitIx> = (0..repo.refs.len())
-            .filter_map(|b| repo.lookup(&self.of(repo, b)?.landed?))
-            .collect();
-        landed.sort_unstable();
-        landed.dedup();
-        landed
+    /// The commits the branches of `repo` landed as, where it has them, each with its branch
+    /// (an index into [`Repo::refs`]): the graph keeps them as nodes while the branch shows.
+    pub fn landed(&self, repo: &Repo) -> Vec<(usize, CommitIx)> {
+        (0..repo.refs.len())
+            .filter_map(|b| Some((b, repo.lookup(&self.of(repo, b)?.landed?)?)))
+            .collect()
     }
 }
 
