@@ -128,6 +128,8 @@ pub struct Harness {
     pub events: Vec<Event>,
     pub modifiers: Modifiers,
     pub texts: Vec<(String, Rect)>,
+    /// The local branches found squash- or rebase-merged, as the app passes them (#384).
+    pub merged: parterre_core::merged::MergedBranches,
 }
 
 impl Harness {
@@ -146,6 +148,7 @@ impl Harness {
             events: Vec::new(),
             modifiers: Modifiers::NONE,
             texts: Vec::new(),
+            merged: Default::default(),
         };
         h.frame();
         h
@@ -166,12 +169,11 @@ impl Harness {
             time: Some(self.time),
             ..raw_input(vec2(1600.0, 1000.0), std::mem::take(&mut self.events))
         };
-        let (tool, repo) = (&mut self.tool, &self.repo);
+        let (tool, repo, merged) = (&mut self.tool, &self.repo, &self.merged);
         self.texts = run_frame(&self.ctx, input, |ui| {
             tool.update(ui.ctx(), Some(repo));
             let palette = crate::theme::Palette::new(false, &[]);
-            let merged = parterre_core::merged::MergedBranches::default();
-            tool.show(ui.ctx(), &palette, &GraphOptions::default(), &merged);
+            tool.show(ui.ctx(), &palette, &GraphOptions::default(), merged);
         });
         assert_no_id_clashes(&self.texts);
     }

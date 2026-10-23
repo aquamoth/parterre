@@ -78,8 +78,8 @@ the branch being rebased.
 A local branch whose pull request was **squash- or rebase-merged** is striped once its
 upstream is gone, with a green dashed arrow to the commit it landed as. parterre finds it with
 git alone, and asks GitHub or Azure DevOps too, which also catch conflicts resolved as the pull
-request was completed. Hover the branch to see how and in which pull request, and deleting it
-says where its commits' changes went.
+request was completed. Hover the branch to see how and in which pull request. Deleting it
+asks plainly, without a warning: its changes are already upstream.
 
 <img alt="fix/cart-rounding, rebased onto main but not pushed, is selected: a dashed arrow runs to origin/fix/cart-rounding, its new commits are green and the replaced ones grey dashed. On the right, an orange zigzag joins the worktree storefront-checkout, stopped part-way through a rebase, to feature/checkout-redesign" src="docs/images/1.0/rebase-light.png#gh-light-mode-only">
 <img alt="fix/cart-rounding, rebased onto main but not pushed, is selected: a dashed arrow runs to origin/fix/cart-rounding, its new commits are green and the replaced ones grey dashed. On the right, an orange zigzag joins the worktree storefront-checkout, stopped part-way through a rebase, to feature/checkout-redesign" src="docs/images/1.0/rebase-dark.png#gh-dark-mode-only">

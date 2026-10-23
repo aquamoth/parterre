@@ -224,7 +224,9 @@ tip). Merge commits and fast-forwards need none of this: the graph shows where t
 parterre finds such branches by their patches, with git alone, and asks GitHub or Azure DevOps
 too (signed in as for pull requests), for a merged pull request from the branch at its tip: it
 catches conflicts resolved as the pull request was completed. Hovering the branch says which
-it was, and in which pull request; deleting it says where its commits' changes went. Each
+it was, and in which pull request. Deleting it asks as calmly as deleting a merged branch,
+saying where its changes went, instead of warning that its commits are lost; deleting it
+together with a branch that isn't merged still warns of that one's commits. Each
 branch is asked about once, on opening and after fetching, and the answer is kept. Always on.
 
 ## The log
