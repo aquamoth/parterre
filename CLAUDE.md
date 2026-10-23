@@ -18,6 +18,9 @@ Standalone TortoiseGit-style revision graph viewer. Rust workspace, egui/eframe 
 - Work is tracked in GitHub issues (`gh issue`), not in files: open questions and decisions
   for the human to review are labelled `question`, planned work `enhancement`, and defects
   `bug`. Refer to them by number (#68).
+- No code without an issue (#426). Once a report turns into a change, find its issue or open
+  one, with the cause and the decided fix, before the first edit; the commit and the PR name
+  it. Reading code to find the cause needs none.
 
 Commands (Rust from `~/.cargo/bin`):
 
