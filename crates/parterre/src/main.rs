@@ -26,6 +26,7 @@ mod restart;
 mod reveal;
 mod scene;
 mod script;
+mod self_update;
 mod settings;
 mod settings_file;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -161,7 +162,7 @@ struct Cli {
     github_repositories_from: Option<PathBuf>,
 
     /// Offer VERSION as a newer release instead of asking GitHub: the menu's update marker and
-    /// its Download entry, for screenshots and tests (see docs/automation.md).
+    /// its Download or Update to entry, for screenshots and tests (see docs/automation.md).
     #[arg(long, value_name = "VERSION", hide = true)]
     newer_release: Option<String>,
 
@@ -396,6 +397,9 @@ fn run(mut cli: Cli) -> Result<(), String> {
     // Scripted and recorded runs report to the terminal; an interactive window must outlive it.
     if interactive && !startup::enabled() {
         console::detach();
+    }
+    if interactive {
+        self_update::clean_up();
     }
 
     let (width, height) = cli.window_size.unwrap_or((1400.0, 900.0));

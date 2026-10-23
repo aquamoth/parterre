@@ -23,6 +23,11 @@ version: *parterre 0.8.0 is out*, a link to its release notes, and *Download*. U
 update, *Download 0.8.0* opens the *Help* menu on Windows and Linux, whose title turns blue,
 and sits under *About parterre* on macOS, where parterre's Dock icon gets a badge.
 
+Installed with the Windows installer, the zip, the disk image or a tarball, the button is
+*Update now* and the entry *Update to 0.8.0* (#431). parterre then downloads the release's
+file and its `SHA256SUMS` from GitHub itself, only when you click, and with nothing of its own
+in the requests, as above. It installs the file only if the checksum matches.
+
 On by default. *Check for updates* in *Settings → Privacy* turns it off; then nothing is asked.
 Snap and Flatpak never check, because their stores update parterre, and neither does a build
 without the [`send` feature](building.md#features). There *Check for updates* is off and greyed

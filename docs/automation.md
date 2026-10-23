@@ -212,11 +212,12 @@ runs start from the defaults otherwise.
 | `--log-layout a\|b\|c\|d` | The log window's layout: `stacked`, `side-by-side`, `details-below`, `files-right` |
 | `--diff-form side\|unified`, `--diff-words`, `--diff-whitespace`, `--diff-unfolded` | The diff window's settings |
 | `--no-syntax-colour` | Plain text in the diff and blame windows, as their toolbar button gives |
-| `--newer-release VERSION` | A newer release out, e.g. `0.7.0`: the blue *Help* menu and *Download 0.7.0* in it (on macOS in the parterre menu, and a badge on the Dock icon). The dialog telling of it shows only when opened (`open new-release`) |
+| `--newer-release VERSION` | A newer release out, e.g. `0.7.0`: the blue *Help* menu and *Download 0.7.0* in it, or *Update to 0.7.0* where parterre installs it itself (on macOS in the parterre menu, and a badge on the Dock icon). The dialog telling of it shows only when opened (`open new-release`) |
 
 Scripted runs never ask GitHub for newer releases: `--newer-release` is the only answer they
 get. *Download* does what it does for the build being run, which for one without a channel
-(any local build) is copying `cargo install --locked parterre`.
+(any local build) is copying `cargo install --locked parterre`. *Update now*, on a published
+build, really downloads and installs VERSION from GitHub.
 
 `parterre --help` lists the common ones. The window settings at the bottom are hidden there,
 being of use mainly for automation.

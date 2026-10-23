@@ -11,18 +11,7 @@ const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 /// The 30 most recent releases of any kind. At most 8 are canary and nightly builds (#392), so
 /// the newest release and release candidate are among them.
 pub(crate) fn releases() -> Option<Vec<Release>> {
-    use ureq::tls::{RootCerts, TlsConfig};
-    // The system's certificate authorities, including any a company adds.
-    let tls = TlsConfig::builder()
-        .root_certs(RootCerts::PlatformVerifier)
-        .build();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .tls_config(tls)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .user_agent("parterre")
-        .build()
-        .into();
-    let body = agent
+    let body = agent(Some(Duration::from_secs(30)))
         .get(&format!("{RELEASES}?per_page=30"))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
@@ -34,6 +23,24 @@ pub(crate) fn releases() -> Option<Vec<Release>> {
         .read_to_string()
         .ok()?;
     parse(&body)
+}
+
+/// An agent with the system's certificate authorities, including any a company adds, and at
+/// most `whole` for a request with its response. Each step gets 30 s however long the whole.
+pub(crate) fn agent(whole: Option<Duration>) -> ureq::Agent {
+    use ureq::tls::{RootCerts, TlsConfig};
+    let tls = TlsConfig::builder()
+        .root_certs(RootCerts::PlatformVerifier)
+        .build();
+    let step = Some(Duration::from_secs(30));
+    ureq::Agent::config_builder()
+        .tls_config(tls)
+        .timeout_global(whole)
+        .timeout_connect(step)
+        .timeout_recv_response(step)
+        .user_agent("parterre")
+        .build()
+        .into()
 }
 
 #[derive(serde::Deserialize)]
