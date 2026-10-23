@@ -467,17 +467,10 @@ mod tests {
         };
         merged.insert("refs/heads/topic", oid(3), answer);
         let merged = Arc::new(merged);
-        let settings = Settings::default();
-        let prepare = |merged: &Arc<MergedBranches>| {
-            Scene::prepare(
-                &repo,
-                &settings,
-                None,
-                merged,
-                &mut |s| s.len() as f32,
-                10.0,
-            )
+        let prepare_with = |settings: &Settings, merged: &Arc<MergedBranches>| {
+            Scene::prepare(&repo, settings, None, merged, &mut |s| s.len() as f32, 10.0)
         };
+        let prepare = |merged: &Arc<MergedBranches>| prepare_with(&Settings::default(), merged);
         let input = prepare(&merged);
         let tip = input.graph.node_of(CommitIx(3)).unwrap() as usize;
         let striped: Vec<(&str, bool)> = input.visuals[tip]
@@ -489,6 +482,14 @@ mod tests {
         assert!(input.graph.node_of(CommitIx(1)).is_some());
         let without = prepare(&Arc::default());
         assert_eq!(without.graph.node_of(CommitIx(1)), None);
+        // With local branches hidden, nothing of it is drawn: no row, nor a node to point at.
+        let mut hidden = Settings::default();
+        hidden.graph.show_local_branches = false;
+        let input = prepare_with(&hidden, &merged);
+        let rows = input.visuals.iter().flat_map(|v| &v.rows);
+        assert!(rows.clone().all(|r| !r.merged));
+        assert!(rows.clone().all(|r| r.label != "topic"));
+        assert_eq!(input.graph.node_of(CommitIx(1)), None);
     }
 
     #[test]

@@ -300,12 +300,20 @@ fn the_commit_it_landed_as_is_a_node() {
     s.delete_on_origin("topic");
     let repo = s.load();
     let landed: CommitIx = repo.lookup(&oid(&landed)).expect("in the snapshot");
+    let topic = (branch(&repo, "topic"), landed);
     let options = GraphOptions::default();
     let without = revgraph::build(&repo, &options);
     assert_eq!(without.node_of(landed), None);
-    let with = revgraph::build_with_landed(&repo, &options, &[], &[landed]);
+    let with = revgraph::build_with_landed(&repo, &options, &[], &[topic]);
     assert!(with.node_of(landed).is_some());
     assert_eq!(with.nodes.len(), without.nodes.len() + 1);
+    // Not while the branch itself is hidden: nothing points there.
+    let no_local = GraphOptions {
+        show_local_branches: false,
+        ..GraphOptions::default()
+    };
+    let graph = revgraph::build_with_landed(&repo, &no_local, &[], &[topic]);
+    assert_eq!(graph.node_of(landed), None);
     // Only where it is shown anyway.
     let hidden = GraphOptions {
         show_remote_branches: false,
@@ -314,7 +322,8 @@ fn the_commit_it_landed_as_is_a_node() {
     };
     s.repo.git(&["switch", "-q", "topic"]);
     let repo = s.load();
-    let graph = revgraph::build_with_landed(&repo, &hidden, &[], &[landed]);
+    let topic = (branch(&repo, "topic"), landed);
+    let graph = revgraph::build_with_landed(&repo, &hidden, &[], &[topic]);
     assert_eq!(graph.node_of(landed), None);
 }
 
@@ -332,7 +341,8 @@ fn answers_are_kept_by_branch_and_tip() {
     let answer = squash(&landed).unwrap();
     answers.insert("refs/heads/topic", tip, answer.clone());
     assert_eq!(answers.of(&repo, topic), Some(&answer));
-    assert_eq!(answers.landed(&repo), [repo.lookup(&oid(&landed)).unwrap()]);
+    let landed = repo.lookup(&oid(&landed)).unwrap();
+    assert_eq!(answers.landed(&repo), [(topic, landed)]);
     // The branch moved on: the answer was about another commit.
     answers.insert("refs/heads/topic", oid(&"0".repeat(40)), answer);
     assert_eq!(answers.of(&repo, topic), None);
