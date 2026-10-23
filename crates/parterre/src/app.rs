@@ -310,6 +310,8 @@ pub struct ParterreApp {
     update_check: Option<(parterre_telemetry::Ring, parterre_telemetry::UpdateCheck)>,
     release_told: Option<String>,
     release_dialog: Option<parterre_telemetry::Update>,
+    /// *Update now*, from its download until parterre starts again (#431).
+    updating: Option<updates::Updating>,
     telemetry: privacy::Telemetry,
     system_theme: SystemTheme,
     /// The theme last sent to the window, for its title bar.
@@ -475,6 +477,7 @@ impl ParterreApp {
             update_check: None,
             release_told: storage.and_then(updates::release_told),
             release_dialog: None,
+            updating: None,
             telemetry,
             system_theme: SystemTheme::watch(&cc.egui_ctx),
             window_theme: None,

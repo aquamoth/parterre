@@ -88,6 +88,7 @@ impl ParterreApp {
             self.scene.as_ref().map_or((false, false, false), |s| {
                 (s.net.can_undo(), s.net.can_redo(), s.net.any_displaced())
             });
+        let newer = self.newer_release();
         let g = &self.settings.graph;
         let why_no_pull_requests = self
             .pull_requests
@@ -129,7 +130,10 @@ impl ParterreApp {
             any_displaced,
             drag: self.settings.net.model,
             direction: self.settings.layout.direction,
-            newer_version: self.newer_release().map(|u| u.version),
+            newer_version: newer.as_ref().map(|u| u.version.clone()),
+            update_installs: newer
+                .as_ref()
+                .is_some_and(|u| super::updates::installs(u).is_some()),
             git_menu,
         }
     }
@@ -144,7 +148,7 @@ impl ParterreApp {
             Command::About => self.about.open(ctx),
             Command::Download => {
                 if let Some(update) = self.newer_release() {
-                    self.download(ctx, &update.download);
+                    self.get_update(ctx, &update);
                 }
             }
             Command::Settings => self.open_settings(self.settings_page),

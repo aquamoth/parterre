@@ -298,8 +298,8 @@ The app is signed ad hoc (`codesign --sign -`), not with a Developer ID, and not
 (why: [distribution.md](distribution.md#macos)). Apple silicon runs nothing unsigned, and the
 signature seals `Info.plist` and the resources with the binary. A copy downloaded with a
 browser is quarantined, so the first start says Apple could not verify it; *System Settings ›
-Privacy & Security › Open Anyway* opens it, once. A copy from `curl` or built locally isn't
-quarantined and opens at once.
+Privacy & Security › Open Anyway* opens it, once. A copy from `curl`, one built locally or
+one *Update now* installed (#431) isn't quarantined and opens at once.
 
 From a terminal, run `/Applications/parterre.app/Contents/MacOS/parterre`, or link it onto the
 `PATH`. Started from the Dock or Finder, git and `gh` still get the login shell's `PATH`, as

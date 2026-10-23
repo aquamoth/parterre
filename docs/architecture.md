@@ -93,6 +93,8 @@ crates/parterre-telemetry
                        how an installation keeps its ring
   update.rs            versions and their order, which build a ring hears of, and where
                        *Download* goes on each channel; no network
+  download.rs          *Update now*'s download (#431), checked against the release's
+                       `SHA256SUMS`, behind the `send` feature
   usage.rs             whether anything may go to PostHog (the first-run prompt's answer,
                        `DO_NOT_TRACK`, debug builds), the install ID, and which lifecycle
                        events a launch sends; no network
@@ -103,7 +105,8 @@ crates/parterre-telemetry
                        a test sink (`recording`); no network
   crash.rs             whether panics go to PostHog, and the home folder in them made `~`;
                        no network
-  github.rs            GitHub's releases API through ureq, behind the `send` feature
+  github.rs            GitHub's releases API through ureq, and the agent the download uses
+                       too, behind the `send` feature
   posthog.rs           all of the PostHog code: posthog-rs's client on a thread of its own,
                        the events, their standard properties and the registered ones, and
                        the SDK's global client that sends panics, behind the `send` feature
@@ -120,6 +123,8 @@ crates/parterre        the binary (eframe/egui)
   version.rs           the version counted from the tags, dev and per ring (runs in build.rs
                        and parterre-stamp; see docs/releasing.md)
   slot.rs              the version slot the pipeline writes the published version into
+  self_update.rs       *Update now* (#431): the download on a thread, then msiexec, the
+                       archive's binary swapped in, or the disk image's app, and the restart
   app.rs               canvas interaction, search, status bar, windows, opening folders
     toolbar.rs         the toolbar and its popovers
     menu_bar.rs        the menu bar (#339): the menus as a tree of entries built from the
@@ -131,7 +136,7 @@ crates/parterre        the binary (eframe/egui)
                        offers
     file_drop.rs       a folder dropped on the window opens
     updates.rs         the update check as the settings say, *Download*, and the dialog telling
-                       of each new release once
+                       of each new release once, following *Update now* to its end
     privacy.rs         the first-run prompt, and the usage statistics and crash reports as
                        the user's choices say, told of input and repositories opened;
                        Settings › Privacy shows them

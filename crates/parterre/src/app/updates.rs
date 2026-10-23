@@ -1,9 +1,10 @@
 use eframe::egui;
-use parterre_telemetry::{Channel, Download, Ring, Update, UpdateCheck};
+use parterre_telemetry::{Channel, Download, Install, Ring, Update, UpdateCheck};
 
 use super::settings_window::SettingsPage;
 use super::{Note, ParterreApp};
 use crate::dialogs::{self, Dialog};
+use crate::self_update::{self, Failure, Fallback, Method, Stage};
 use crate::widgets;
 
 pub const RELEASE_TOLD_KEY: &str = "parterre-release-told";
@@ -76,12 +77,31 @@ impl ParterreApp {
 
     pub(super) fn release_dialog(&mut self, ctx: &egui::Context) {
         const CLOSE: &str = "Close";
-        const DOWNLOAD: &str = "Download";
-        let heard = builds(self.heard_ring());
-        let Some(update) = &self.release_dialog else {
+        self.follow_update(ctx);
+        let Some(update) = self.release_dialog.clone() else {
             return;
         };
+        let heard = builds(self.heard_ring());
         let this_version = running_version(crate::version());
+        let stage = self.updating.as_mut().map(|u| u.run.stage().clone());
+        let method = self.updating.as_ref().map(|u| u.method);
+        let primary = match &stage {
+            None if installs(&update).is_some() => Some(("Update now", ReleaseAnswer::Update)),
+            None => Some(("Download", ReleaseAnswer::Download)),
+            Some(Stage::Failed(failure)) => Some(match &failure.fallback {
+                Some(Fallback::Open(file)) if is_disk_image(file) => {
+                    ("Open the disk image", ReleaseAnswer::Fallback)
+                }
+                Some(Fallback::Open(_)) => ("Open the installer", ReleaseAnswer::Fallback),
+                Some(Fallback::Show(_)) => ("Show the download", ReleaseAnswer::Fallback),
+                None => ("Release page", ReleaseAnswer::Notes),
+            }),
+            Some(_) => None,
+        };
+        let close = match stage {
+            Some(Stage::Downloading { .. }) => "Cancel",
+            _ => CLOSE,
+        };
         let shown = Dialog::new("new-release", dialog_title(update.ring))
             .screen(crate::usage::Screen::NewRelease)
             .width(360.0)
@@ -103,20 +123,28 @@ impl ParterreApp {
                             answer = ReleaseAnswer::Change;
                         }
                     });
+                    if let Some(stage) = &stage {
+                        ui.add_space(6.0);
+                        stage_note(ui, stage, method);
+                    }
                 });
                 ui.separator();
-                let widths = [
-                    widgets::text_button_width(ui, CLOSE),
-                    widgets::filled_button_width(ui, DOWNLOAD, dialogs::PRIMARY_MIN_WIDTH),
-                ];
+                let mut widths = vec![widgets::text_button_width(ui, close)];
+                if let Some((label, _)) = primary {
+                    widths.push(widgets::filled_button_width(
+                        ui,
+                        label,
+                        dialogs::PRIMARY_MIN_WIDTH,
+                    ));
+                }
                 dialogs::button_row(ui, &widths, |ui| {
-                    if widgets::text_button(ui, CLOSE).clicked() {
+                    if widgets::text_button(ui, close).clicked() {
                         answer = ReleaseAnswer::Close;
                     }
-                    let download =
-                        widgets::primary_button(ui, DOWNLOAD, dialogs::PRIMARY_MIN_WIDTH);
-                    if download.clicked() {
-                        answer = ReleaseAnswer::Download;
+                    if let Some((label, primary)) = primary
+                        && widgets::primary_button(ui, label, dialogs::PRIMARY_MIN_WIDTH).clicked()
+                    {
+                        answer = primary;
                     }
                 });
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -127,18 +155,95 @@ impl ParterreApp {
         let answer = shown.or_closed(ReleaseAnswer::Close);
         match answer {
             ReleaseAnswer::Open => {}
-            ReleaseAnswer::Close => self.release_dialog = None,
+            ReleaseAnswer::Close => {
+                // A download stops. An installer already started runs on, and its outcome opens
+                // the dialog again.
+                if let Some(updating) = &self.updating {
+                    updating.run.cancel();
+                    if !matches!(stage, Some(Stage::Installing)) {
+                        self.updating = None;
+                    }
+                }
+                self.release_dialog = None;
+            }
             ReleaseAnswer::Notes => {
                 if let Err(e) = crate::browser::open(&update.notes()) {
                     self.status = Some(Note::Error(e));
                 }
             }
             ReleaseAnswer::Change => self.open_settings(SettingsPage::Privacy),
+            ReleaseAnswer::Update => self.start_update(ctx, &update),
             ReleaseAnswer::Download => {
                 let download = update.download.clone();
                 self.download(ctx, &download);
                 self.release_dialog = None;
             }
+            ReleaseAnswer::Fallback => {
+                let opened = match &stage {
+                    Some(Stage::Failed(Failure {
+                        fallback: Some(Fallback::Open(file)),
+                        ..
+                    })) => crate::browser::open_file(file),
+                    Some(Stage::Failed(Failure {
+                        fallback: Some(Fallback::Show(dir)),
+                        ..
+                    })) => crate::file_manager::open(dir),
+                    _ => Ok(()),
+                };
+                if let Err(e) = opened {
+                    self.status = Some(Note::Error(e));
+                }
+                self.updating = None;
+                self.release_dialog = None;
+            }
+        }
+    }
+
+    /// Starts *Update now* on the channels parterre installs itself on (#431), with the dialog
+    /// open to follow it.
+    fn start_update(&mut self, ctx: &egui::Context, update: &Update) {
+        let Some((install, method)) = installs(update) else {
+            return;
+        };
+        crate::usage::action(crate::usage::Action::DownloadUpdate);
+        let run =
+            self_update::Updating::start(&update.version, install.clone(), method, ctx.clone());
+        self.updating = Some(Updating {
+            update: update.clone(),
+            method,
+            run,
+        });
+        self.release_dialog = Some(update.clone());
+    }
+
+    /// Starts the new copy once it is in place and closes this one, and opens the dialog again
+    /// on an outcome the user should see.
+    fn follow_update(&mut self, ctx: &egui::Context) {
+        let Some(updating) = self.updating.as_mut() else {
+            return;
+        };
+        match updating.run.stage().clone() {
+            Stage::Restart(target) => {
+                let repo = self.repo.as_ref().map(|r| r.path.clone());
+                match self_update::relaunch(&target, repo.as_deref()) {
+                    // Closing the main window saves the settings.
+                    Ok(()) => ctx
+                        .send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close),
+                    Err(e) => {
+                        self.status = Some(Note::Error(format!(
+                            "parterre is updated, but couldn't start again: {e}. Start it again \
+                             to use the new version."
+                        )));
+                    }
+                }
+                self.updating = None;
+                self.release_dialog = None;
+            }
+            Stage::Cancelled => self.updating = None,
+            Stage::Failed(_) | Stage::Installed { .. } if self.release_dialog.is_none() => {
+                self.release_dialog = Some(updating.update.clone());
+            }
+            _ => {}
         }
     }
 
@@ -152,9 +257,26 @@ impl ParterreApp {
         }
     }
 
+    /// The menu's entry: *Update now* in the dialog where parterre installs it itself.
+    pub(super) fn get_update(&mut self, ctx: &egui::Context, update: &Update) {
+        if installs(update).is_some() {
+            if self.updating.is_none() {
+                self.start_update(ctx, update);
+            }
+            self.release_dialog = Some(update.clone());
+        } else {
+            self.download(ctx, &update.download);
+        }
+    }
+
     pub(super) fn download(&mut self, ctx: &egui::Context, download: &Download) {
         crate::usage::action(crate::usage::Action::DownloadUpdate);
         match download {
+            Download::Install(install) => {
+                if let Err(e) = crate::browser::open(&install.url) {
+                    self.status = Some(Note::Error(e));
+                }
+            }
             Download::Open(url) => {
                 if let Err(e) = crate::browser::open(url) {
                     self.status = Some(Note::Error(e));
@@ -165,6 +287,61 @@ impl ParterreApp {
                 self.status = Some(Note::Info(format!("Copied: {command}")));
             }
         }
+    }
+}
+
+/// *Update now* under way, with the release it installs.
+#[derive(Debug)]
+pub(super) struct Updating {
+    update: Update,
+    method: Method,
+    run: self_update::Updating,
+}
+
+/// The file `update` installs and how, where parterre installs it itself.
+pub(super) fn installs(update: &Update) -> Option<(&Install, Method)> {
+    match &update.download {
+        Download::Install(install) => Some((install, Method::of(Channel::current())?)),
+        _ => None,
+    }
+}
+
+fn is_disk_image(file: &std::path::Path) -> bool {
+    file.extension().is_some_and(|e| e == "dmg")
+}
+
+/// Where the update is, under the dialog's fields.
+fn stage_note(ui: &mut egui::Ui, stage: &Stage, method: Option<Method>) {
+    match stage {
+        Stage::Downloading { done, size } => {
+            ui.label(format!(
+                "Downloading… {}",
+                self_update::progress_text(*done, *size)
+            ));
+            let fraction = size.map_or(0.0, |size| *done as f32 / size.max(1) as f32);
+            ui.add(egui::ProgressBar::new(fraction).desired_height(6.0));
+        }
+        Stage::Installing | Stage::Restart(_) => {
+            ui.horizontal_wrapped(|ui| {
+                ui.spinner();
+                ui.label(match method {
+                    Some(Method::Msi { .. }) => {
+                        "Installing… parterre closes, and opens again when it's done."
+                    }
+                    _ => "Installing…",
+                });
+            });
+        }
+        Stage::Installed { reboot: false } => {
+            ui.label("Installed. Start parterre again to use it.");
+        }
+        Stage::Installed { reboot: true } => {
+            ui.label("Installed. Restart Windows to finish.");
+        }
+        Stage::Failed(failure) => {
+            ui.colored_label(ui.visuals().error_fg_color, &failure.message);
+        }
+        Stage::Cancelled => {}
     }
 }
 
@@ -182,7 +359,9 @@ enum ReleaseAnswer {
     Close,
     Notes,
     Change,
+    Update,
     Download,
+    Fallback,
 }
 
 #[cfg(test)]

@@ -171,10 +171,34 @@ pub struct Update {
 /// What the *Download* button does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Download {
+    /// *Update now*: parterre downloads this release file itself, checks it and installs it.
+    Install(Install),
     /// Opens this release file's URL in the browser.
     Open(String),
     /// Copies this command to the clipboard.
     Copy(&'static str),
+}
+
+/// A release file parterre installs itself, on the channels whose download the browser would
+/// mark, so that SmartScreen or Gatekeeper stopped it (#431).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Install {
+    /// `parterre-1.2.3-x86_64-pc-windows-msvc.msi`.
+    pub file: String,
+    pub url: String,
+    /// The release's `SHA256SUMS`, which every ring publishes, to check the file against.
+    pub sums: String,
+}
+
+impl Download {
+    /// The release file's, if it has one.
+    pub fn url(&self) -> Option<&str> {
+        match self {
+            Download::Install(install) => Some(&install.url),
+            Download::Open(url) => Some(url),
+            Download::Copy(_) => None,
+        }
+    }
 }
 
 impl Update {
@@ -217,11 +241,21 @@ impl Update {
             }
             Channel::Snap | Channel::Flatpak => return None,
         };
-        let url = format!("{REPOSITORY_URL}/releases/download/v{version}/{file}");
+        let release = format!("{REPOSITORY_URL}/releases/download/v{version}");
+        let url = format!("{release}/{file}");
+        let download = match channel {
+            // No mark to escape: the browser hands them to the system's installer (#255).
+            Channel::Deb | Channel::Rpm => Download::Open(url),
+            _ => Download::Install(Install {
+                file,
+                url,
+                sums: format!("{release}/SHA256SUMS"),
+            }),
+        };
         Some(Update {
             version,
             ring,
-            download: Download::Open(url),
+            download,
         })
     }
 }
@@ -388,17 +422,11 @@ mod tests {
     }
 
     #[test]
-    fn download_opens_the_channels_own_file() {
-        let url = |channel, target| match Update::of("v0.6.0-rc1", channel, target) {
-            Some(Update {
-                version,
-                download: Download::Open(url),
-                ..
-            }) => {
-                assert_eq!(version, "0.6.0-rc1");
-                url
-            }
-            other => panic!("{other:?}"),
+    fn download_takes_the_channels_own_file() {
+        let url = |channel, target| {
+            let update = Update::of("v0.6.0-rc1", channel, target).unwrap();
+            assert_eq!(update.version, "0.6.0-rc1");
+            update.download.url().unwrap().to_owned()
         };
         let release = "https://github.com/aquamoth/parterre/releases/download/v0.6.0-rc1";
         // As in the release v0.6.0-rc1, and the .dmg as the release workflow names it since.
@@ -442,6 +470,37 @@ mod tests {
             assert_eq!(url(channel, target), format!("{release}/{file}"));
         }
     }
+
+    #[test]
+    fn parterre_installs_what_the_browser_would_mark() {
+        let download = |channel, target| Update::of("v1.2.3", channel, target).unwrap().download;
+        for (channel, target) in [
+            (Channel::Msi, "x86_64-pc-windows-msvc"),
+            (Channel::MsiMachine, "x86_64-pc-windows-msvc"),
+            (Channel::Zip, "x86_64-pc-windows-msvc"),
+            (Channel::Dmg, "aarch64-apple-darwin"),
+            (Channel::Tarball, "aarch64-apple-darwin"),
+            (Channel::Tarball, "x86_64-unknown-linux-gnu"),
+        ] {
+            let Download::Install(install) = download(channel, target) else {
+                panic!("{channel:?} should install");
+            };
+            assert_eq!(install.url, format!("{}/{}", RELEASE_123, install.file));
+            assert_eq!(install.sums, format!("{RELEASE_123}/SHA256SUMS"));
+        }
+        assert_eq!(
+            download(Channel::MsiMachine, "x86_64-pc-windows-msvc"),
+            download(Channel::Msi, "x86_64-pc-windows-msvc")
+        );
+        for channel in [Channel::Deb, Channel::Rpm] {
+            assert!(matches!(
+                download(channel, "x86_64-unknown-linux-gnu"),
+                Download::Open(_)
+            ));
+        }
+    }
+
+    const RELEASE_123: &str = "https://github.com/aquamoth/parterre/releases/download/v1.2.3";
 
     #[test]
     fn download_copies_the_command_on_the_cargo_channel() {

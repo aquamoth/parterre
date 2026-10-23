@@ -150,7 +150,9 @@ next start; ticking them in the first-run prompt, at once.
   `public_repo` token. Fine-grained tokens don't work, so the token belongs to a machine
   account that owns only a fork of winget-pkgs.
 - **Unsigned:**
-  - winget and Chocolatey downloads show no SmartScreen prompt.
+  - winget and Chocolatey downloads show no SmartScreen prompt, nor does an update parterre
+    installs itself (*Update now*, #431): the program that saves a file marks it, and parterre
+    doesn't mark its own download.
   - A download straight from GitHub shows "Windows protected your PC" (→ *More info* → *Run
     anyway*), as the zip does today.
   - Windows 11 with Smart App Control turned on blocks unsigned programs outright.
@@ -252,7 +254,8 @@ Sources:
 - **Signed ad hoc, not notarized:**
   - Apple silicon runs nothing unsigned; an ad hoc signature is enough for that.
   - A download from GitHub is quarantined, so the first start says Apple could not verify it.
-    *System Settings › Privacy & Security › Open Anyway* opens it, once.
+    *System Settings › Privacy & Security › Open Anyway* opens it, once. An update parterre
+    installs itself (*Update now*, #431) isn't quarantined, so it opens at once.
 - **Signing option if that changes:** a Developer ID and notarization, through the Apple
   Developer Program: US$99 a year. Trustfall AB would enrol as an organisation, which needs a
   D-U-N-S number. Then the app opens without the prompt.

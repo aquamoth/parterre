@@ -12,12 +12,13 @@ homepage.workspace = true
 readme = "README.md"
 
 [features]
-# The update check (#258), usage statistics (#261) and crash reports (#263). Without it the
-# crate asks and sends nothing: the switch for packagers.
+# The update check (#258) and the download of Update now (#431), usage statistics (#261) and
+# crash reports (#263). Without it the crate asks and sends nothing: the switch for packagers.
 send = [
     "dep:serde",
     "dep:serde_json",
     "dep:ureq",
+    "dep:sha2",
     "dep:posthog-rs",
     "dep:sys-locale",
     "dep:iana-time-zone",
@@ -29,6 +30,8 @@ uuid = { version = "1", features = ["v4", "v7"] }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
+# To check an update's download against its release's SHA256SUMS (#431).
+sha2 = { version = "0.11", default-features = false, optional = true }
 # PostHog's official SDK, its blocking client: no async runtime of parterre's own. It brings
 # reqwest, beside ureq (#225).
 posthog-rs = { version = "0.27", default-features = false, features = [

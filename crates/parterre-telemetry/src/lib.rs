@@ -8,6 +8,8 @@ use std::time::{Duration, SystemTime};
 
 mod channel;
 mod crash;
+#[cfg(feature = "send")]
+mod download;
 mod feature;
 #[cfg(feature = "send")]
 mod github;
@@ -27,7 +29,7 @@ pub use feature::{
     Menu, Properties, Range, Screen, Theme, Value, record, recording, register,
 };
 pub use ring::Ring;
-pub use update::{CARGO_INSTALL, Download, Release, Update, Version, newer};
+pub use update::{CARGO_INSTALL, Download, Install, Release, Update, Version, newer};
 pub use usage::{
     Build, Choices, Lifecycle, app_version, asks_first_run_prompt, do_not_track,
     has_usage_statistics, launch, may_check_for_updates, new_install_id, sends_usage_statistics,
@@ -199,6 +201,35 @@ impl Channel {
 /// Built with `send`, and not on Snap or Flatpak, whose stores update parterre.
 pub fn has_update_check() -> bool {
     cfg!(feature = "send") && !matches!(Channel::current(), Channel::Snap | Channel::Flatpak)
+}
+
+/// Why [`download`] gave up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DownloadError {
+    Cancelled,
+    /// What went wrong, for the user: "couldn't download …: …".
+    Failed(String),
+}
+
+/// Downloads `install`'s file into `dir` for *Update now* (#431), and checks it against its
+/// release's `SHA256SUMS`: the path of the checked file. A partial or mismatched file is
+/// removed. `progress` is told the bytes so far and the size, if the server gives it, and
+/// `cancelled` is asked between reads. Blocks: call it on a thread of its own.
+pub fn download(
+    install: &Install,
+    dir: &Path,
+    progress: &dyn Fn(u64, Option<u64>),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<std::path::PathBuf, DownloadError> {
+    #[cfg(feature = "send")]
+    return download::download(install, dir, progress, cancelled);
+    #[cfg(not(feature = "send"))]
+    {
+        let _ = (install, dir, progress, cancelled);
+        Err(DownloadError::Failed(
+            "this build makes no requests of its own (built without `send`)".to_owned(),
+        ))
+    }
 }
 
 /// Asks GitHub whether a newer release is out, at once and then every
