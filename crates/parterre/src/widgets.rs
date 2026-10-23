@@ -177,6 +177,47 @@ pub fn icon_button(ui: &mut Ui, glyph: Glyph, on: bool) -> Response {
     response
 }
 
+/// An icon button in `color`. With `progress` (0 to 1), a small arrow inside a ring that fills
+/// clockwise from the top as a download does, as t3code shows its own (#433).
+pub fn progress_button(
+    ui: &mut Ui,
+    glyph: Glyph,
+    color: Color32,
+    progress: Option<f32>,
+) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(BUTTON_SIZE), Sense::click());
+    paint_background(ui, rect, &response, false, false);
+    match progress {
+        Some(progress) => {
+            let radius = ICON_SIZE / 2.0;
+            let width = 2.0;
+            let center = rect.center();
+            let painter = ui.painter();
+            painter.circle_stroke(center, radius, Stroke::new(width, tones(ui).field_line));
+            let steps = 48;
+            let filled = (progress.clamp(0.0, 1.0) * steps as f32).round() as usize;
+            if filled > 0 {
+                let points = (0..=filled)
+                    .map(|i| {
+                        let angle = std::f32::consts::TAU * i as f32 / steps as f32
+                            - std::f32::consts::FRAC_PI_2;
+                        center + vec2(angle.cos(), angle.sin()) * radius
+                    })
+                    .collect();
+                painter.add(Shape::line(points, Stroke::new(width, color)));
+            }
+            let arrow = Rect::from_center_size(center, Vec2::splat(ICON_SIZE * 0.6));
+            paint_glyph(painter, arrow, glyphs::ARROW_DOWN, color);
+        }
+        None => {
+            let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON_SIZE));
+            paint_glyph(ui.painter(), icon, glyph, color);
+        }
+    }
+    focus::ring(ui, &response, BUTTON_CORNER);
+    response
+}
+
 /// The diff and blame windows' toggle of syntax colouring.
 pub fn syntax_button(ui: &mut Ui, on: &mut bool) {
     let (title, body) = if *on {

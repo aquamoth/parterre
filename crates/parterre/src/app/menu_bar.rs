@@ -345,8 +345,9 @@ pub struct State {
     pub drag: DragModel,
     pub direction: Direction,
     pub newer_version: Option<String>,
-    /// parterre installs the newer version itself: *Update to*, not *Download* (#431).
-    pub update_installs: bool,
+    /// The newer version's entry, as its next step says: *Download 1.2.3*, *Restart to update
+    /// to 1.2.3*, … (#433).
+    pub update_label: Option<String>,
     pub git_menu: Vec<Entry>,
 }
 
@@ -555,12 +556,8 @@ fn app_menu(state: &State) -> Vec<Entry> {
 
 fn download(state: &State) -> Option<Entry> {
     let version = state.newer_version.as_ref()?;
-    let verb = if state.update_installs {
-        "Update to"
-    } else {
-        "Download"
-    };
-    let mut item = Item::new(format!("{verb} {version}"), Command::Download);
+    let label = (state.update_label.clone()).unwrap_or_else(|| format!("Download {version}"));
+    let mut item = Item::new(label, Command::Download);
     item.accent = true;
     Some(item.into())
 }
@@ -921,7 +918,7 @@ mod tests {
             drag: DragModel::Adapt,
             direction: Direction::NewestTop,
             newer_version: None,
-            update_installs: false,
+            update_label: None,
             git_menu: vec![
                 Item::new("Show log", Command::ShowLog).into(),
                 Item::new("Fetch", Command::Fetch).into(),
@@ -1101,11 +1098,11 @@ mod tests {
             labels(&find(&menus, Kind::App).entries)[..2],
             ["About parterre", "Download 1.3.6-nightly.20261017"]
         );
-        // Where parterre installs it itself (#431).
-        s.update_installs = true;
+        // Once downloaded (#433).
+        s.update_label = Some("Restart to update to 1.3.6-nightly.20261017".into());
         assert_eq!(
             labels(&find(&build(&s), Kind::App).entries)[1],
-            "Update to 1.3.6-nightly.20261017"
+            "Restart to update to 1.3.6-nightly.20261017"
         );
     }
 

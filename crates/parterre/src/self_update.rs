@@ -1,5 +1,6 @@
 //! *Update now* (#431): parterre downloads its update itself, so that the file carries no Mark
 //! of the Web or quarantine for SmartScreen or Gatekeeper to stop, installs it and starts again.
+//! Each step waits for the user's click: the download, then the install (#433).
 //!
 //! - **MSI:** `msiexec /passive` while parterre keeps running. The Restart Manager closes every
 //!   parterre window and starts each again on its repository (`restart.rs`, #424); closed
@@ -44,13 +45,15 @@ impl Method {
     }
 }
 
-/// Where an update is, as the dialog shows it.
+/// Where an update is, as the toolbar's button and the dialog show it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Stage {
     Downloading {
         done: u64,
         size: Option<u64>,
     },
+    /// Checked and waiting for the click that installs it (#433).
+    Downloaded,
     Installing,
     /// Replaced: start this and close.
     Restart(Relaunch),
@@ -94,41 +97,51 @@ impl Failure {
     }
 }
 
-/// An update on a thread of its own, from its download until it restarts parterre or fails.
+/// An update in two steps, each started by the user (#433): the download, then the install.
+/// Each runs on a thread of its own.
 #[derive(Debug)]
 pub struct Updating {
+    method: Method,
+    dir: PathBuf,
     progress: Arc<Progress>,
-    outcome: Receiver<Stage>,
+    outcome: Receiver<Result<PathBuf, Stage>>,
+    /// The checked download, once it is.
+    file: Option<PathBuf>,
+    installed: Option<Receiver<Stage>>,
     stage: Stage,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Progress {
     done: AtomicU64,
     /// `u64::MAX` while unknown.
     size: AtomicU64,
     cancelled: AtomicBool,
-    installing: AtomicBool,
 }
 
 impl Updating {
     /// Downloads into a folder of its own, named after `version`.
     pub fn start(version: &str, install: Install, method: Method, ctx: egui::Context) -> Updating {
         let progress = Arc::new(Progress {
+            done: AtomicU64::new(0),
             size: AtomicU64::new(u64::MAX),
-            ..Progress::default()
+            cancelled: AtomicBool::new(false),
         });
         let (send, outcome) = mpsc::channel();
         let dir = downloads().join(format!("{version}-{}", std::process::id()));
         let shared = Arc::clone(&progress);
+        let into = dir.clone();
         std::thread::spawn(move || {
-            let stage = update(&install, method, &dir, &shared, &ctx);
-            let _ = send.send(stage);
+            let _ = send.send(download(&install, &into, &shared, &ctx));
             ctx.request_repaint();
         });
         Updating {
+            method,
+            dir,
             progress,
             outcome,
+            file: None,
+            installed: None,
             stage: Stage::Downloading {
                 done: 0,
                 size: None,
@@ -136,37 +149,73 @@ impl Updating {
         }
     }
 
-    /// Stops the download; an installer already started runs on.
-    pub fn cancel(&self) {
-        self.progress.cancelled.store(true, Ordering::Relaxed);
+    pub fn method(&self) -> Method {
+        self.method
+    }
+
+    /// Installs the download, once it is [`Stage::Downloaded`].
+    pub fn install(&mut self, ctx: &egui::Context) {
+        let Some(file) = self
+            .file
+            .clone()
+            .filter(|_| self.stage == Stage::Downloaded)
+        else {
+            return;
+        };
+        let (send, installed) = mpsc::channel();
+        let (method, dir, ctx) = (self.method, self.dir.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let stage = match method {
+                Method::Msi { machine } => run_installer(&file, machine),
+                Method::Archive => replace_from_archive(&file, &dir),
+                Method::DiskImage => replace_from_disk_image(&file, &dir),
+            };
+            let _ = send.send(stage);
+            ctx.request_repaint();
+        });
+        self.installed = Some(installed);
+        self.stage = Stage::Installing;
     }
 
     pub fn stage(&mut self) -> &Stage {
-        if let Ok(stage) = self.outcome.try_recv() {
-            self.stage = stage;
-        } else if matches!(self.stage, Stage::Downloading { .. }) {
-            self.stage = if self.progress.installing.load(Ordering::Relaxed) {
-                Stage::Installing
-            } else {
-                let size = self.progress.size.load(Ordering::Relaxed);
-                Stage::Downloading {
-                    done: self.progress.done.load(Ordering::Relaxed),
-                    size: (size != u64::MAX).then_some(size),
+        if let Some(installed) = &self.installed {
+            if let Ok(stage) = installed.try_recv() {
+                self.stage = stage;
+            }
+        } else if let Ok(outcome) = self.outcome.try_recv() {
+            self.stage = match outcome {
+                Ok(file) => {
+                    self.file = Some(file);
+                    Stage::Downloaded
                 }
+                Err(stage) => stage,
+            };
+        } else if matches!(self.stage, Stage::Downloading { .. }) {
+            let size = self.progress.size.load(Ordering::Relaxed);
+            self.stage = Stage::Downloading {
+                done: self.progress.done.load(Ordering::Relaxed),
+                size: (size != u64::MAX).then_some(size),
             };
         }
         &self.stage
     }
 }
 
-fn update(
+/// An update let go stops downloading.
+impl Drop for Updating {
+    fn drop(&mut self) {
+        self.progress.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The checked file, or the stage it ended in instead.
+fn download(
     install: &Install,
-    method: Method,
     dir: &Path,
     progress: &Progress,
     ctx: &egui::Context,
-) -> Stage {
-    let downloaded = parterre_telemetry::download(
+) -> Result<PathBuf, Stage> {
+    parterre_telemetry::download(
         install,
         dir,
         &|done, size| {
@@ -177,24 +226,14 @@ fn update(
             ctx.request_repaint_after(Duration::from_millis(100));
         },
         &|| progress.cancelled.load(Ordering::Relaxed),
-    );
-    let file = match downloaded {
-        Ok(file) => file,
-        Err(DownloadError::Cancelled) => return Stage::Cancelled,
-        Err(DownloadError::Failed(e)) => {
-            return Stage::Failed(Failure::new(
-                format!("Couldn't download the update: {e}."),
-                None,
-            ));
-        }
-    };
-    progress.installing.store(true, Ordering::Relaxed);
-    ctx.request_repaint();
-    match method {
-        Method::Msi { machine } => run_installer(&file, machine),
-        Method::Archive => replace_from_archive(&file, dir),
-        Method::DiskImage => replace_from_disk_image(&file, dir),
-    }
+    )
+    .map_err(|e| match e {
+        DownloadError::Cancelled => Stage::Cancelled,
+        DownloadError::Failed(e) => Stage::Failed(Failure::new(
+            format!("Couldn't download the update: {e}."),
+            None,
+        )),
+    })
 }
 
 /// Runs the installer while parterre runs on, for the Restart Manager to close and start again.
