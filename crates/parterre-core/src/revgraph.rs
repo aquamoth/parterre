@@ -272,6 +272,18 @@ pub fn build_with_pull_requests(
     options: &GraphOptions,
     pull_requests: &[PullRequestHead],
 ) -> RevGraph {
+    build_with_landed(repo, options, pull_requests, &[])
+}
+
+/// Also keeps the commits in `landed` as nodes, wherever they are shown anyway and their
+/// branch (an index into [`Repo::refs`]) is shown too: the commits that squash- and
+/// rebase-merged branches landed as (`crate::merged`), which a line from each branch ends at.
+pub fn build_with_landed(
+    repo: &Repo,
+    options: &GraphOptions,
+    pull_requests: &[PullRequestHead],
+    landed: &[(usize, CommitIx)],
+) -> RevGraph {
     let n = repo.commits.len();
     let head = repo.head_commit().map(CommitIx::ix);
 
@@ -393,6 +405,15 @@ pub fn build_with_pull_requests(
             if c.ix() < n && visible[c.ix()] {
                 decorated[c.ix()] = true;
             }
+        }
+    }
+    for &(b, c) in landed {
+        let branch_shown = repo
+            .refs
+            .get(b)
+            .is_some_and(|r| refs_on[r.target.ix()].contains(&b) && visible[r.target.ix()]);
+        if branch_shown && c.ix() < n && visible[c.ix()] {
+            decorated[c.ix()] = true;
         }
     }
 

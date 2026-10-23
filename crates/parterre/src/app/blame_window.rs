@@ -14,8 +14,8 @@ use parterre_core::find;
 use parterre_core::git::{CommitDetails, Git};
 use parterre_core::glyphs;
 use parterre_core::log_graph::LogGraph;
+use parterre_core::merged::MergedBranches;
 use parterre_core::repo::cmp_refs_for_display;
-use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{line_number, thousands, word_at};
 use parterre_core::{CommitIx, Oid, Repo};
 use parterre_highlight::{self as highlight, Engine, Spans};
@@ -23,7 +23,7 @@ use parterre_util::Cancel;
 
 use super::commit_table::{CommitList, CommitTable, ROW_HEIGHT, Row, Select};
 use super::divider::{Bar, DIVIDER_THICKNESS, divider};
-use super::table_style::{self, CELL_PAD, HEADING_HEIGHT, cell};
+use super::table_style::{self, CELL_PAD, HEADING_HEIGHT, Labels, cell};
 use super::text_view::{
     Colors, Find, FindInText, HEADER_HEIGHT, LINE_END, Load, OVERVIEW_WIDTH, SCROLLBAR_HEIGHT,
     ScrollView, TOOL_GAP, TextAt, TextMetrics, TextRow, chosen_columns, colors, file_window_title,
@@ -239,7 +239,7 @@ impl History {
 /// What the history pane takes from the app's settings.
 struct Env<'a> {
     palette: Palette,
-    graph: &'a GraphOptions,
+    labels: Labels<'a>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1319,7 +1319,7 @@ impl BlameWindow {
             &c,
             &mut self.history_list,
             |i| match history {
-                Some(h) => history_row(h, i, repo, env.graph, &bc),
+                Some(h) => history_row(h, i, repo, env.labels, &bc),
                 None => Row::default(),
             },
             |ui, i, _| {
@@ -1457,6 +1457,7 @@ impl BlameWindow {
         &mut self,
         ctx: &egui::Context,
         settings: &mut Settings,
+        merged: &MergedBranches,
         window_theme: Option<egui::SystemTheme>,
         icon: &Arc<egui::IconData>,
     ) -> Vec<BlameRequest> {
@@ -1487,7 +1488,10 @@ impl BlameWindow {
             }
             let env = Env {
                 palette: Palette::new(ui.visuals().dark_mode, &settings.branch_colors),
-                graph: &settings.graph,
+                labels: Labels {
+                    graph: &settings.graph,
+                    merged,
+                },
             };
             viewport::central_panel(ui).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -1850,7 +1854,7 @@ fn history_row<'a>(
     h: &'a History,
     i: usize,
     repo: &'a Repo,
-    graph: &GraphOptions,
+    labels: Labels<'_>,
     bc: &BlameColors,
 ) -> Row<'a> {
     let row = &h.history.rows[i];
@@ -1861,7 +1865,7 @@ fn history_row<'a>(
     Row {
         hash,
         hash_fill: h.ages[i].filter(|_| row.owns_lines).map(|age| bc.age(age)),
-        refs: table_style::badges(repo, &h.refs[i], row.snapshot, graph),
+        refs: table_style::badges(repo, &h.refs[i], row.snapshot, labels),
         outlined_label: (row.commit.is_some() && row.snapshot.is_none())
             .then_some("not in the graph"),
         subject,
@@ -2165,6 +2169,7 @@ impl ParterreApp {
             requests.extend(window.show(
                 ctx,
                 &mut self.settings,
+                self.merged.shown(),
                 self.window_theme,
                 &self.window_icon,
             ));
@@ -2240,6 +2245,7 @@ mod tests {
     use super::*;
     use parterre_core::file_history::LogCommit;
     use parterre_core::repo::Head;
+    use parterre_core::revgraph::GraphOptions;
 
     const A: &str = "c4275f7dbe7e820e3bb9a21c7d1cc1317657f2d4";
     const B: &str = "8e09b4551acb469f9df4ce58895b77e2e7e4190e";
@@ -2349,7 +2355,10 @@ mod tests {
         ctx.run_ui(input, |ui| {
             let env = Env {
                 palette: Palette::new(false, &[]),
-                graph: &graph,
+                labels: Labels {
+                    graph: &graph,
+                    merged: &MergedBranches::default(),
+                },
             };
             w.handle_keys(ui);
             requests = w.contents(ui, settings, &mut true, &env);
@@ -2879,10 +2888,15 @@ mod tests {
         assert_eq!(span(&w), None);
         let h = w.history().unwrap();
         let bc = blame_colors(&egui::Ui::new(ctx.clone(), Id::new("t"), UiBuilder::new()));
-        let row = history_row(h, 1, &w.repo, &GraphOptions::default(), &bc);
+        let (graph, merged) = (GraphOptions::default(), MergedBranches::default());
+        let labels = Labels {
+            graph: &graph,
+            merged: &merged,
+        };
+        let row = history_row(h, 1, &w.repo, labels, &bc);
         assert!(row.greyed);
         assert_eq!(row.hash_fill, None);
-        let row = history_row(h, 0, &w.repo, &GraphOptions::default(), &bc);
+        let row = history_row(h, 0, &w.repo, labels, &bc);
         assert!(!row.greyed);
         assert_eq!(row.hash_fill, Some(bc.age(1.0)));
     }
@@ -2988,7 +3002,10 @@ mod tests {
             ctx.run_ui(input, |ui| {
                 let env = Env {
                     palette: Palette::new(false, &[]),
-                    graph: &graph,
+                    labels: Labels {
+                        graph: &graph,
+                        merged: &MergedBranches::default(),
+                    },
                 };
                 w.contents(ui, settings, &mut true, &env);
             })
@@ -3075,7 +3092,10 @@ mod tests {
             ctx.run_ui(input, |ui| {
                 let env = Env {
                     palette: Palette::new(false, &[]),
-                    graph: &graph,
+                    labels: Labels {
+                        graph: &graph,
+                        merged: &MergedBranches::default(),
+                    },
                 };
                 w.contents(ui, &mut settings, syntax, &env);
             })

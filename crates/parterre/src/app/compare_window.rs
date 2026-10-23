@@ -9,11 +9,10 @@ use parterre_core::conflicts::Resolve;
 use parterre_core::file_diff::{FileDiffSpec, Rev};
 use parterre_core::glyphs;
 use parterre_core::log::commit_name;
-use parterre_core::revgraph::GraphOptions;
 use parterre_core::{Oid, Repo};
 
 use super::file_table::{DiffQueue, FileTable, Lister, Listing, WorkingTreePick, file_folder};
-use super::table_style::{Colors, badge, badges, colors};
+use super::table_style::{Colors, Labels, badge, badges, colors};
 use super::viewport::{self, Viewport};
 use super::{Opener, ParterreApp};
 use crate::keys;
@@ -88,7 +87,7 @@ impl CompareView {
 
 struct Env<'a> {
     palette: Palette,
-    graph: &'a GraphOptions,
+    labels: Labels<'a>,
     settings: &'a mut CompareWindowSettings,
 }
 
@@ -343,7 +342,7 @@ fn side(
         &view.repo,
         &view.refs_by_commit[ix.ix()],
         Some(ix),
-        env.graph,
+        env.labels,
     ) {
         if x >= right {
             break;
@@ -457,7 +456,10 @@ impl ParterreApp {
             let palette = Palette::new(ui.visuals().dark_mode, &self.settings.branch_colors);
             let mut env = Env {
                 palette,
-                graph: &self.settings.graph,
+                labels: Labels {
+                    graph: &self.settings.graph,
+                    merged: self.merged.shown(),
+                },
                 settings: &mut self.settings.compare_window,
             };
             let compare = &mut self.compare;

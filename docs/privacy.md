@@ -130,6 +130,13 @@ organisation, project and repository names to Azure DevOps, which hosts them, an
 only to the host git has it for. Nothing is asked without one, and parterre never asks you for
 one. The same toolbar button turns it off.
 
+Whichever the toolbar button says, parterre asks the forge `origin` is on about local branches
+whose upstream is gone: whether a pull request from that branch, at that commit, was merged
+(squash- and rebase-merged branches are striped). GitHub is sent the repository's owner and
+name and those branch names; Azure DevOps the organisation, project and repository names, and
+each branch name in a request of its own. Each branch is asked about once: the answer is kept
+on your computer. It is asked only with the sign-in described above, and never without one.
+
 *Clone repository…* asks each Azure DevOps organisation git has a sign-in for (see the [user
 guide](usage.md)) for its repositories, in the same way, sending the organisation's name.
 

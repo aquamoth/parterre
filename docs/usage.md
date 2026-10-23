@@ -215,6 +215,20 @@ branch has a dashed edge to its upstream. The status bar shows `branch 3|2` (ahe
 log's branch labels ↑3 ↓2, and *Compare with origin/x* compares the two. On by default
 (*Settings → Advanced*).
 
+### Squash- and rebase-merged branches
+
+A local branch whose upstream is gone, and whose changes are on the default branch all the same,
+was squash- or rebase-merged: its label is striped, in the graph, the log and the dialogs, and
+a green dashed arrow goes to the commit it landed as (the squash commit, or the copy of its
+tip). Merge commits and fast-forwards need none of this: the graph shows where they landed.
+parterre finds such branches by their patches, with git alone, and asks GitHub or Azure DevOps
+too (signed in as for pull requests), for a merged pull request from the branch at its tip: it
+catches conflicts resolved as the pull request was completed. Hovering the branch says which
+it was, and in which pull request. Deleting it asks as calmly as deleting a merged branch,
+saying where its changes went, instead of warning that its commits are lost; deleting it
+together with a branch that isn't merged still warns of that one's commits. Each
+branch is asked about once, on opening and after fetching, and the answer is kept. Always on.
+
 ## The log
 
 *Show log* opens a window listing a node's history, or the commits between two selected nodes,

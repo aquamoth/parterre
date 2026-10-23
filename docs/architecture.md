@@ -39,6 +39,9 @@ crates/parterre-core   GUI-free; everything testable lives here
   upstream.rs          local branches against their upstreams: ahead, behind, lost to a force
                        push or replaced by a rebase (a counterpart by patch, or by author,
                        author date and subject), and the edges that hold them
+  merged.rs            local branches whose upstream is gone, squash- or rebase-merged into
+                       the default branch, found by patch id in four git starts (#384), and
+                       the answers by branch and tip
   pattern.rs           branch-name wildcards, for hiding and colouring branches
   recent.rs            the recently opened repositories
   lenient.rs           reading settings one at a time, so files of older and newer
@@ -60,7 +63,8 @@ crates/parterre-core   GUI-free; everything testable lives here
 
 crates/parterre-forge  open pull requests, on core's types
   lib.rs               the model, where each is shown (head commit and base-branch refs),
-                       remotes and upstreams from git; which forge origin is on (`Origin`)
+                       remotes and upstreams from git; which forge origin is on (`Origin`);
+                       the merged pull request of a gone branch, at its tip (#384)
   github.rs            github.com remotes; one GraphQL request per 100 fetched branches of
                        origin (and its parent), signed in with `gh auth token`, within a
                        rate-limit budget; HTTPS through ureq behind the `github` feature
@@ -135,6 +139,8 @@ crates/parterre        the binary (eframe/egui)
     auto_reload.rs     a worker thread that reloads when the refs change
     pull_requests.rs   loads open pull requests on a worker thread while they are shown, cached
                        per repository, with back-off
+    merged.rs          which gone branches were squash- or rebase-merged, asked of git and
+                       the forge on a worker thread, ten at a time, and kept between restarts
     log_window.rs      the log window (Show log): an immediate viewport with three panes
                        (commits, details, changed files) that one of four fixed layouts
                        arranges, picked in its header; changed files come from git on a
@@ -155,6 +161,8 @@ crates/parterre        the binary (eframe/egui)
   scene.rs             node contents and sizes + layout + physics net, hit testing
   render.rs            painting nodes, edges, arrows, overview
   upstreams.rs         upstreams over the edges, the status bar's ahead|behind, ↑n ↓m counts
+  merged_branches.rs   a merged branch's stripes (graph, badges, SVG) and its dashed line to
+                       where it landed
   export.rs            SVG export, and PNG and WebP export: render.rs painted in tiles by
                        an offscreen egui context, sized to stay within 100 megapixels
   raster.rs            software rasteriser for egui's meshes (for PNG and WebP, with no GPU
@@ -205,6 +213,9 @@ crates/parterre        the binary (eframe/egui)
      start history, and show only where one of their base branch's refs is shown. As labels
      they make their heads nodes, like tags. They are loaded from origin's forge on a worker thread
      (`forge`), separately from the snapshot, which stays what git has.
+   - The commit a squash- or rebase-merged branch landed as stays a node where it is shown
+     anyway, as a rebased branch's old commit does, so that the branch's dashed line has an
+     end. Which branches those are is worked out on a worker thread too (`app/merged.rs`).
    - Worktrees, while shown: a branch another worktree has checked out is shown even where
      the local-branch switch or the hide list would leave it out, and starts history. A
      detached worktree's HEAD starts history too and labels its commit, above the hash. The

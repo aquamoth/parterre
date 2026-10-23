@@ -6,6 +6,7 @@ use eframe::egui::{
     pos2, vec2,
 };
 use parterre_core::glyphs;
+use parterre_core::merged::MergedBranches;
 use parterre_core::revgraph::GraphOptions;
 use parterre_core::{CommitIx, GitRef, Label, RefKind, Repo, Worktree};
 
@@ -98,6 +99,14 @@ pub(super) fn cell(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32
     ui.painter().layout_job(job)
 }
 
+/// What decides how a commit's labels are drawn: which refs the graph shows, and which
+/// branches were squash- or rebase-merged.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Labels<'a> {
+    pub graph: &'a GraphOptions,
+    pub merged: &'a MergedBranches,
+}
+
 /// A label before a commit's subject, as the graph draws them.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Badge<'a> {
@@ -105,6 +114,8 @@ pub(super) enum Badge<'a> {
         git_ref: &'a GitRef,
         worktree: Option<&'a Worktree>,
         ahead_behind: Option<(usize, usize)>,
+        /// Squash- or rebase-merged: striped, as in the graph.
+        merged: bool,
     },
     DetachedWorktree(&'a Worktree),
 }
@@ -136,6 +147,10 @@ impl<'a> Badge<'a> {
             Badge::Ref { worktree, .. } => worktree,
             Badge::DetachedWorktree(w) => Some(w),
         }
+    }
+
+    fn is_merged(&self) -> bool {
+        matches!(*self, Badge::Ref { merged: true, .. })
     }
 
     fn ahead_behind(&self) -> Option<(usize, usize)> {
@@ -193,7 +208,7 @@ pub(super) fn badges<'a>(
     repo: &'a Repo,
     refs: &[usize],
     commit: Option<CommitIx>,
-    graph: &GraphOptions,
+    Labels { graph, merged }: Labels<'_>,
 ) -> Vec<Badge<'a>> {
     let worktrees_shown = graph.show_worktrees;
     let refs: Vec<usize> = refs
@@ -220,6 +235,7 @@ pub(super) fn badges<'a>(
                     .filter(|_| graph.show_upstreams)
                     .map(|u| (u.ahead(), u.behind()))
                     .filter(|&(ahead, behind)| ahead + behind > 0),
+                merged: merged.of(repo, index).is_some(),
             },
             Label::Worktree(k) => Badge::DetachedWorktree(&repo.worktrees[k]),
         })
@@ -269,6 +285,11 @@ fn paint_badge(
         Stroke::new(1.0, Color32::from_black_alpha(64)),
         egui::StrokeKind::Inside,
     );
+    if badge.is_merged() {
+        let period = crate::merged_branches::period_for(BADGE_HEIGHT);
+        let inside = rect.shrink(1.0);
+        crate::merged_branches::paint_stripes(painter, inside, CornerRadius::same(2), period, fill);
+    }
     let mut text_left = rect.left() + BADGE_PAD;
     if let Some(w) = badge.worktree() {
         let icon = Rect::from_center_size(

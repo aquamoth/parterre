@@ -15,10 +15,15 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use super::{Forge, ForgeError, Proposed, PullRequest, PullRequests, Remote, RemoteUrl};
+use super::{
+    Forge, ForgeError, GoneBranch, MERGED_PER_BRANCH, Proposed, PullRequest, PullRequests, Remote,
+    RemoteUrl,
+};
 #[cfg(feature = "github")]
 use crate::http::{self, Token};
 use parterre_core::git::{Git, GitError};
+use parterre_core::merged::Merged;
+use parterre_core::oid::Oid;
 
 mod repositories;
 pub use repositories::{Protocol, repositories, repositories_canned};
@@ -126,6 +131,39 @@ pub(crate) fn proposals(
     branches
         .iter()
         .map(|(repo, branch)| Proposed::among(&found, &repo.full_name(), branch))
+        .collect()
+}
+
+/// For each of `branches`: the merged pull request from it into `origin`'s repository or its
+/// parent, whose head was its tip when merged. Asks GitHub once per 100 branch names.
+pub(crate) fn merged(
+    origin: &GithubRepo,
+    branches: &[GoneBranch],
+) -> Result<Vec<Option<Merged>>, ForgeError> {
+    let mut names: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+    names.sort();
+    names.dedup();
+    let found = with_api(|api| merged_pull_requests(api, origin, &names))?;
+    if let Some(until) = found.pause_until {
+        pause(until);
+    }
+    Ok(merged_of(&found.list, branches))
+}
+
+/// Each branch's pull request among `found`: from it, with its tip as the head.
+fn merged_of(found: &[MergedPullRequest], branches: &[GoneBranch]) -> Vec<Option<Merged>> {
+    branches
+        .iter()
+        .map(|b| {
+            let pr = found
+                .iter()
+                .find(|pr| pr.head_branch == b.name && pr.head == b.tip)?;
+            Some(Merged {
+                how: None,
+                landed: pr.merge_commit,
+                pull_request: Some(pr.number),
+            })
+        })
         .collect()
 }
 
@@ -240,12 +278,22 @@ pub(crate) trait Api {
 }
 
 #[derive(Debug)]
-pub(crate) struct Found {
+pub(crate) struct Found<P = PullRequest> {
     /// `origin`'s `owner/name` as GitHub has it now.
     pub name: String,
-    pub list: Vec<PullRequest>,
+    pub list: Vec<P>,
     /// Unix time.
     pub pause_until: Option<u64>,
+}
+
+/// A merged pull request from a branch of `origin`'s own repository.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MergedPullRequest {
+    pub number: u64,
+    /// As it was when merged.
+    pub head: Oid,
+    pub head_branch: String,
+    pub merge_commit: Option<Oid>,
 }
 
 /// Which pull requests from the branches asked about are kept.
@@ -270,11 +318,11 @@ fn open_pull_requests(
         pause_until: None,
     };
     for chunk in branches.chunks(BRANCHES_PER_REQUEST) {
-        let response = api.post(&request(origin, chunk))?;
+        let response = api.post(&request(origin, chunk, Asked::Open))?;
         found.pause_until = found
             .pause_until
             .max(response.quota.and_then(Quota::pause_until));
-        let repo = repository(&response.body, origin)?;
+        let repo: json::Repository<json::PullRequest> = repository(&response.body, origin)?;
         found.name = repo.name_with_owner.clone();
         let is_kept = |pr: &json::PullRequest| match heads_from {
             HeadsFrom::AnyRepository => true,
@@ -283,7 +331,7 @@ fn open_pull_requests(
                     .eq_ignore_ascii_case(&repo.name_with_owner)
             }),
         };
-        let mut add = |base: &str, connections: &HashMap<String, json::Connection>| {
+        let mut add = |base: &str, connections: &HashMap<String, json::Connection<_>>| {
             let Some(base) = GithubRepo::from_full_name(base) else {
                 return;
             };
@@ -311,15 +359,71 @@ fn open_pull_requests(
     Ok(found)
 }
 
+/// The merged pull requests whose head is one of `branches` of `origin`'s own repository,
+/// into it, and into its parent if it is a fork.
+fn merged_pull_requests(
+    api: &dyn Api,
+    origin: &GithubRepo,
+    branches: &[String],
+) -> Result<Found<MergedPullRequest>, ForgeError> {
+    let mut found = Found {
+        name: origin.full_name(),
+        list: Vec::new(),
+        pause_until: None,
+    };
+    for chunk in branches.chunks(BRANCHES_PER_REQUEST) {
+        let response = api.post(&request(origin, chunk, Asked::Merged))?;
+        found.pause_until = found
+            .pause_until
+            .max(response.quota.and_then(Quota::pause_until));
+        let repo: json::Repository<json::MergedPullRequest> = repository(&response.body, origin)?;
+        found.name = repo.name_with_owner.clone();
+        let own = |pr: &&json::MergedPullRequest| {
+            pr.head_repository.as_ref().is_some_and(|r| {
+                r.name_with_owner
+                    .eq_ignore_ascii_case(&repo.name_with_owner)
+            })
+        };
+        let parent = repo.parent.iter().flat_map(|p| p.connections.values());
+        found.list.extend(
+            repo.connections
+                .values()
+                .chain(parent)
+                .flat_map(|c| &c.nodes)
+                .filter(own)
+                .filter_map(json::MergedPullRequest::to_merged),
+        );
+    }
+    Ok(found)
+}
+
+/// Which pull requests [`request`] asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asked {
+    Open,
+    /// Newest first.
+    Merged,
+}
+
 /// A connection `b<i>` per branch, on `origin` and on its parent. Branch names go in as
 /// variables, never into the query text.
-fn request(origin: &GithubRepo, branches: &[String]) -> String {
+fn request(origin: &GithubRepo, branches: &[String], asked: Asked) -> String {
+    let (state, rest, fields) = match asked {
+        Asked::Open => (
+            "OPEN",
+            format!("first:{PULL_REQUESTS_PER_BRANCH}"),
+            "number title isDraft headRefOid headRefName headRepository{nameWithOwner} \
+             baseRefName author{login}",
+        ),
+        Asked::Merged => (
+            "MERGED",
+            format!("first:{MERGED_PER_BRANCH},orderBy:{{field:CREATED_AT,direction:DESC}}"),
+            "number headRefOid headRefName headRepository{nameWithOwner} mergeCommit{oid}",
+        ),
+    };
     let connections: String = (0..branches.len())
         .map(|i| {
-            format!(
-                "b{i}:pullRequests(states:OPEN,headRefName:$b{i},\
-                 first:{PULL_REQUESTS_PER_BRANCH}){{nodes{{...pr}}}}"
-            )
+            format!("b{i}:pullRequests(states:{state},headRefName:$b{i},{rest}){{nodes{{...pr}}}}")
         })
         .collect();
     let params: String = (0..branches.len())
@@ -328,8 +432,7 @@ fn request(origin: &GithubRepo, branches: &[String]) -> String {
     let query = format!(
         "query($owner:String!,$name:String!{params}){{repository(owner:$owner,name:$name){{\
          nameWithOwner parent{{nameWithOwner {connections}}}{connections}}}}}\
-         fragment pr on PullRequest{{number title isDraft headRefOid headRefName \
-         headRepository{{nameWithOwner}} baseRefName author{{login}}}}"
+         fragment pr on PullRequest{{{fields}}}"
     );
     let mut variables = serde_json::Map::new();
     variables.insert("owner".into(), origin.owner.clone().into());
@@ -340,8 +443,11 @@ fn request(origin: &GithubRepo, branches: &[String]) -> String {
     serde_json::json!({ "query": query, "variables": variables }).to_string()
 }
 
-fn repository(body: &str, origin: &GithubRepo) -> Result<json::Repository, ForgeError> {
-    let answer: json::Answer<json::Data> = super::parse_answer(Forge::Github, body)?;
+fn repository<P: serde::de::DeserializeOwned>(
+    body: &str,
+    origin: &GithubRepo,
+) -> Result<json::Repository<P>, ForgeError> {
+    let answer: json::Answer<json::Data<P>> = super::parse_answer(Forge::Github, body)?;
     if let Some(repo) = answer.data.and_then(|d| d.repository) {
         return Ok(repo);
     }
@@ -371,8 +477,8 @@ mod json {
     }
 
     #[derive(Debug, Deserialize)]
-    pub struct Data {
-        pub repository: Option<Repository>,
+    pub struct Data<P> {
+        pub repository: Option<Repository<P>>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -396,28 +502,59 @@ mod json {
         }
     }
 
+    /// With the pull requests `P` of each branch asked about.
     #[derive(Debug, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct Repository {
+    #[serde(rename_all = "camelCase", bound(deserialize = "P: Deserialize<'de>"))]
+    pub struct Repository<P> {
         pub name_with_owner: String,
         #[serde(default)]
-        pub parent: Option<Parent>,
+        pub parent: Option<Parent<P>>,
         /// `b0`, `b1`, …: the pull requests of each branch asked about.
         #[serde(flatten)]
-        pub connections: HashMap<String, Connection>,
+        pub connections: HashMap<String, Connection<P>>,
     }
 
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
-    pub struct Parent {
+    pub struct Parent<P> {
         pub name_with_owner: String,
         #[serde(flatten)]
-        pub connections: HashMap<String, Connection>,
+        pub connections: HashMap<String, Connection<P>>,
     }
 
     #[derive(Debug, Deserialize)]
-    pub struct Connection {
-        pub nodes: Vec<PullRequest>,
+    pub struct Connection<P> {
+        pub nodes: Vec<P>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct MergedPullRequest {
+        number: u64,
+        head_ref_oid: String,
+        head_ref_name: String,
+        pub head_repository: Option<Named>,
+        merge_commit: Option<Commit>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct Commit {
+        oid: String,
+    }
+
+    impl MergedPullRequest {
+        /// `None` if its head isn't a commit id.
+        pub fn to_merged(&self) -> Option<super::MergedPullRequest> {
+            Some(super::MergedPullRequest {
+                number: self.number,
+                head: Oid::from_hex(&self.head_ref_oid)?,
+                head_branch: self.head_ref_name.clone(),
+                merge_commit: self
+                    .merge_commit
+                    .as_ref()
+                    .and_then(|c| Oid::from_hex(&c.oid)),
+            })
+        }
     }
 
     #[derive(Debug, Deserialize)]
@@ -837,5 +974,72 @@ mod tests {
             Err(e) => assert!(e.to_string().contains("SAML enforcement"), "{e}"),
             Ok(_) => panic!("an error was expected"),
         }
+    }
+
+    fn merged_pr(number: u64, branch: &str, head_repo: &str, head: char, merged: char) -> String {
+        format!(
+            r#"{{"number":{number},"headRefOid":"{sha}","headRefName":"{branch}",
+                "headRepository":{{"nameWithOwner":"{head_repo}"}},
+                "mergeCommit":{{"oid":"{merge}"}}}}"#,
+            sha = head.to_string().repeat(40),
+            merge = merged.to_string().repeat(40),
+        )
+    }
+
+    fn gone(name: &str, tip: char) -> GoneBranch {
+        GoneBranch {
+            name: name.into(),
+            tip: Oid::from_hex(&tip.to_string().repeat(40)).unwrap(),
+        }
+    }
+
+    /// #384: only a merged pull request whose head was the branch's tip, from origin's own
+    /// repository, into it or into its parent.
+    #[test]
+    fn merged_pull_requests_are_found_by_branch_and_tip() {
+        let body = format!(
+            r#"{{"data":{{"repository":{{"nameWithOwner":"Me/Fork",
+                "b0":{{"nodes":[{}, {}]}},
+                "b1":{{"nodes":[{}]}},
+                "parent":{{"nameWithOwner":"up/stream",
+                    "b0":{{"nodes":[]}},
+                    "b1":{{"nodes":[{}]}}}}}}}}}}"#,
+            // The name used again: a newer pull request from another tip first.
+            merged_pr(9, "fix", "me/fork", 'e', '9'),
+            merged_pr(4, "fix", "me/fork", 'a', '4'),
+            // Another fork's branch of the same name and tip.
+            merged_pr(8, "topic", "other/fork", 'b', '8'),
+            merged_pr(31, "topic", "me/fork", 'b', '3'),
+        );
+        let api = fake(&[&body], None);
+        let origin = repo("me", "fork").unwrap();
+        let found = merged_pull_requests(&api, &origin, &["fix".into(), "topic".into()]).unwrap();
+        let branches = [gone("fix", 'a'), gone("topic", 'b'), gone("fix", 'c')];
+        let landed = |c: char| Some(Oid::from_hex(&c.to_string().repeat(40)).unwrap());
+        assert_eq!(
+            merged_of(&found.list, &branches),
+            [
+                Some(Merged {
+                    how: None,
+                    landed: landed('4'),
+                    pull_request: Some(4),
+                }),
+                Some(Merged {
+                    how: None,
+                    landed: landed('3'),
+                    pull_request: Some(31),
+                }),
+                None,
+            ]
+        );
+        let query = requests(&api)[0]["query"].as_str().unwrap().to_owned();
+        assert!(
+            query.contains(
+                "b1:pullRequests(states:MERGED,headRefName:$b1,first:10,\
+                 orderBy:{field:CREATED_AT,direction:DESC})"
+            ),
+            "{query}"
+        );
+        assert!(query.contains("mergeCommit{oid}"), "{query}");
     }
 }

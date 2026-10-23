@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use eframe::egui::{Color32, FontId, Pos2, Rect, Vec2, pos2, vec2};
 use parterre_core::layout::{self, Layout, LayoutEdge, LayoutInput, LayoutOptions, Point};
+use parterre_core::merged::MergedBranches;
 use parterre_core::physics::{DragModel, Net};
 use parterre_core::revgraph::{self, RevGraph, RevNode};
 use parterre_core::{Label, Oid, RefKind, Repo};
@@ -48,6 +49,8 @@ pub struct Row {
     pub kind: RowKind,
     /// At 100%, with the glyph before it for a worktree.
     pub width: f32,
+    /// A local branch squash- or rebase-merged ([`Scene::merged`]): striped.
+    pub merged: bool,
 }
 
 impl Row {
@@ -91,6 +94,8 @@ pub struct Scene {
     pub net: Net,
     pub row_height: f32,
     pub pull_requests: Vec<PullRequest>,
+    /// The local branches found squash- or rebase-merged, as the scene was built.
+    pub merged: Arc<MergedBranches>,
 }
 
 /// Prepared on the UI thread, which owns the fonts; [`SceneInput::lay_out`] can then run on any
@@ -104,6 +109,7 @@ pub struct SceneInput {
     options: LayoutOptions,
     row_height: f32,
     pull_requests: Vec<PullRequest>,
+    merged: Arc<MergedBranches>,
 }
 
 impl SceneInput {
@@ -118,6 +124,7 @@ impl SceneInput {
             net,
             row_height: self.row_height,
             pull_requests: self.pull_requests,
+            merged: self.merged,
         }
     }
 }
@@ -128,6 +135,7 @@ impl Scene {
         repo: &Arc<Repo>,
         settings: &Settings,
         pull_requests: Option<&PullRequests>,
+        merged: &Arc<MergedBranches>,
         text_width: &mut dyn FnMut(&str) -> f32,
         text_height: f32,
     ) -> SceneInput {
@@ -137,7 +145,8 @@ impl Scene {
             .into_iter()
             .map(|(head, pr)| (head, pr.clone()))
             .unzip();
-        let graph = revgraph::build_with_pull_requests(repo, &settings.graph, &heads);
+        let landed = merged.landed(repo);
+        let graph = revgraph::build_with_landed(repo, &settings.graph, &heads, &landed);
 
         let row_height = text_height + 2.0 * MARGIN_Y;
         // Commits without refs show their hash as long as git abbreviates it in this
@@ -149,7 +158,7 @@ impl Scene {
             .nodes
             .iter()
             .map(|node| {
-                let mut rows = unmeasured_rows(repo, node, worktrees_shown, &pull_requests);
+                let mut rows = unmeasured_rows(repo, node, worktrees_shown, &pull_requests, merged);
                 for row in &mut rows {
                     row.width = text_width(&row.label);
                     if row.worktree().is_some() {
@@ -193,6 +202,7 @@ impl Scene {
             options: settings.layout.clone(),
             row_height,
             pull_requests,
+            merged: Arc::clone(merged),
         }
     }
 
@@ -210,7 +220,8 @@ impl Scene {
                     .size()
                     .x
             };
-            Scene::prepare(repo, settings, None, &mut width, text_height)
+            let merged = Arc::default();
+            Scene::prepare(repo, settings, None, &merged, &mut width, text_height)
         });
         input.lay_out()
     }
@@ -294,6 +305,7 @@ fn unmeasured_rows(
     node: &RevNode,
     worktrees_shown: bool,
     pull_requests: &[PullRequest],
+    merged: &MergedBranches,
 ) -> Vec<Row> {
     let checkout = |index: usize| Checkout {
         index,
@@ -303,6 +315,7 @@ fn unmeasured_rows(
         label,
         kind,
         width: 0.0,
+        merged: false,
     };
     let mut rows: Vec<Row> = repo
         .labels(&node.refs, &node.worktrees, worktrees_shown)
@@ -316,7 +329,14 @@ fn unmeasured_rows(
                 },
                 Label::Worktree(index) => RowKind::Worktree(checkout(index)),
             };
-            unmeasured(repo.label_name(label), kind)
+            let merged = match label {
+                Label::Ref { index, .. } => merged.of(repo, index).is_some(),
+                Label::Worktree(_) => false,
+            };
+            Row {
+                merged,
+                ..unmeasured(repo.label_name(label), kind)
+            }
         })
         .collect();
     // Only refs stand in for the hash. Worktrees go above it, pull requests below, and the open
@@ -397,7 +417,15 @@ mod tests {
         settings: &Settings,
         pull_requests: Option<&PullRequests>,
     ) -> SceneInput {
-        Scene::prepare(repo, settings, pull_requests, &mut |s| s.len() as f32, 10.0)
+        let merged = Arc::default();
+        Scene::prepare(
+            repo,
+            settings,
+            pull_requests,
+            &merged,
+            &mut |s| s.len() as f32,
+            10.0,
+        )
     }
 
     fn rows(input: &SceneInput, node: usize) -> Vec<(String, RowKind)> {
@@ -406,6 +434,62 @@ mod tests {
             .iter()
             .map(|r| (r.label.clone(), r.kind.clone()))
             .collect()
+    }
+
+    /// #384: the merged branch's own row is striped, and the commit it landed as is a node.
+    #[test]
+    fn a_merged_branch_is_striped_and_where_it_landed_is_a_node() {
+        // main (0) has the squash commit (1) above the root (2); topic and other are at 3.
+        let repo = Arc::new(Repo::new(
+            "/x".into(),
+            vec![
+                commit(4, vec![CommitIx(1)]),
+                commit(3, vec![CommitIx(2)]),
+                commit(1, Vec::new()),
+                commit(2, vec![CommitIx(2)]),
+            ],
+            vec![
+                git_ref("refs/heads/main", 0, true),
+                git_ref("refs/heads/other", 3, false),
+                git_ref("refs/heads/topic", 3, false),
+            ],
+            Head::Branch {
+                name: "refs/heads/main".into(),
+                target: Some(CommitIx(0)),
+            },
+        ));
+        let oid = |c: u32| repo.commit(CommitIx(c)).oid;
+        let mut merged = MergedBranches::default();
+        let answer = parterre_core::merged::Merged {
+            how: Some(parterre_core::merged::How::Squash),
+            landed: Some(oid(1)),
+            pull_request: Some(7),
+        };
+        merged.insert("refs/heads/topic", oid(3), answer);
+        let merged = Arc::new(merged);
+        let prepare_with = |settings: &Settings, merged: &Arc<MergedBranches>| {
+            Scene::prepare(&repo, settings, None, merged, &mut |s| s.len() as f32, 10.0)
+        };
+        let prepare = |merged: &Arc<MergedBranches>| prepare_with(&Settings::default(), merged);
+        let input = prepare(&merged);
+        let tip = input.graph.node_of(CommitIx(3)).unwrap() as usize;
+        let striped: Vec<(&str, bool)> = input.visuals[tip]
+            .rows
+            .iter()
+            .map(|r| (r.label.as_str(), r.merged))
+            .collect();
+        assert_eq!(striped, [("other", false), ("topic", true)]);
+        assert!(input.graph.node_of(CommitIx(1)).is_some());
+        let without = prepare(&Arc::default());
+        assert_eq!(without.graph.node_of(CommitIx(1)), None);
+        // With local branches hidden, nothing of it is drawn: no row, nor a node to point at.
+        let mut hidden = Settings::default();
+        hidden.graph.show_local_branches = false;
+        let input = prepare_with(&hidden, &merged);
+        let rows = input.visuals.iter().flat_map(|v| &v.rows);
+        assert!(rows.clone().all(|r| !r.merged));
+        assert!(rows.clone().all(|r| r.label != "topic"));
+        assert_eq!(input.graph.node_of(CommitIx(1)), None);
     }
 
     #[test]

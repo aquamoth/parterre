@@ -261,6 +261,45 @@ fn loads_parterres_pull_requests_from_github() {
     eprintln!("{} open pull requests from main", prs.list.len());
 }
 
+/// #384: parterre's own #422, merged from `t3/prune-grep` at 79e5e5a.
+/// `cargo test -p parterre-forge --features github --test forge -- --ignored merged`
+#[cfg(feature = "github")]
+#[test]
+#[ignore = "needs the network and a signed-in gh"]
+fn finds_a_merged_pull_request_of_parterre_on_github() {
+    let oid = |hex: &str| parterre_core::Oid::from_hex(hex).unwrap();
+    let origin = forge::Origin::Github(GithubRepo {
+        owner: "aquamoth".into(),
+        name: "parterre".into(),
+    });
+    let r = TestRepo::new();
+    let branches = [
+        forge::GoneBranch {
+            name: "t3/prune-grep".into(),
+            tip: oid("79e5e5af1f789743024e9bdbd0cc5466d153ff4b"),
+        },
+        // The same name at another commit is another branch.
+        forge::GoneBranch {
+            name: "t3/prune-grep".into(),
+            tip: oid(&"0".repeat(40)),
+        },
+    ];
+    let found = origin
+        .merged(&Git::new(r.path()), &branches)
+        .expect("GitHub answers");
+    assert_eq!(
+        found,
+        [
+            Some(parterre_core::merged::Merged {
+                how: None,
+                landed: Some(oid("ffbf0b479fd70868e677597460810010a985145e")),
+                pull_request: Some(422),
+            }),
+            None,
+        ]
+    );
+}
+
 #[test]
 fn github_is_not_asked_without_fetched_branches() {
     let mut r = TestRepo::new();
@@ -422,6 +461,35 @@ fn azure_devops_origins_have_pull_requests_on_their_heads() {
     let heads = prs.heads(&repo);
     assert_eq!(heads.len(), 1);
     assert!(heads[0].0.head.is_some(), "origin/topic is its head branch");
+}
+
+/// #384: as [`loads_pull_requests_from_azure_devops`], with `PARTERRE_AZURE_MERGED="BRANCH
+/// HEAD NUMBER MERGE_COMMIT"` naming a completed pull request of that repository, from BRANCH
+/// at HEAD.
+#[cfg(feature = "azure-devops")]
+#[test]
+#[ignore = "needs the network and a sign-in to Azure DevOps"]
+fn finds_a_completed_pull_request_on_azure_devops() {
+    let url = std::env::var("PARTERRE_AZURE_REPO").expect("PARTERRE_AZURE_REPO is set");
+    let merged = std::env::var("PARTERRE_AZURE_MERGED").expect("PARTERRE_AZURE_MERGED is set");
+    let [branch, head, number, landed] = merged.split(' ').collect::<Vec<_>>()[..] else {
+        panic!("PARTERRE_AZURE_MERGED is BRANCH HEAD NUMBER MERGE_COMMIT");
+    };
+    let oid = |hex: &str| parterre_core::Oid::from_hex(hex).expect("a commit id");
+    let mut r = TestRepo::new();
+    r.commit("A");
+    r.git(&["remote", "add", "origin", &url]);
+    let git = Git::new(r.path());
+    let origin = forge::origin(&git).expect("on Azure DevOps");
+    let asked = [forge::GoneBranch {
+        name: branch.into(),
+        tip: oid(head),
+    }];
+    let found = origin.merged(&git, &asked).expect("Azure DevOps answers");
+    let found = found[0].clone().expect("found merged");
+    assert_eq!(found.pull_request, Some(number.parse().unwrap()));
+    assert_eq!(found.landed, Some(oid(landed)));
+    eprintln!("{found:?}");
 }
 
 /// `PARTERRE_AZURE_REPO=https://dev.azure.com/o/p/_git/r cargo test -p parterre-forge

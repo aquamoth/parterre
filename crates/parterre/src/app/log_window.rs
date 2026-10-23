@@ -15,7 +15,6 @@ use parterre_core::glyphs::{self, Glyph};
 use parterre_core::log::{self, LogList, LogOptions, LogOrder, LogQuery};
 use parterre_core::log_graph::LogGraph;
 use parterre_core::log_layout::LogLayout;
-use parterre_core::revgraph::GraphOptions;
 use parterre_core::text::{find_urls, plural, thousands};
 use parterre_core::{Commit, CommitIx, Oid, Repo};
 
@@ -23,7 +22,7 @@ use super::commit_table::{CommitList, CommitTable, Row, Select};
 use super::compare_window::CompareRequest;
 use super::divider::{Bar, DIVIDER_THICKNESS, divider};
 use super::file_table::{DiffQueue, FileTable, Lister, Listing};
-use super::table_style::{Colors, badge_widget, badges, colors};
+use super::table_style::{Colors, Labels, badge_widget, badges, colors};
 use super::text_view::{find_field_left, find_field_width, match_count};
 use super::viewport::{self, Viewport};
 use super::{Details, ParterreApp};
@@ -254,7 +253,7 @@ struct Env<'a> {
     /// deleted, and any worktree of the repository answers.
     open_worktree: Option<&'a Path>,
     palette: Palette,
-    graph: &'a GraphOptions,
+    labels: Labels<'a>,
     settings: &'a mut LogWindowSettings,
     /// The commit marked for comparison, and its name.
     marked: Option<&'a (Oid, String)>,
@@ -611,7 +610,7 @@ impl LogWindow {
             Stroke::new(1.0, c.line),
         );
         let mut label = view.query.label(&view.repo, &view.refs_by_commit, |r| {
-            env.graph.shows(r.kind)
+            env.labels.graph.shows(r.kind)
         });
         if view.pinned {
             label.from = None;
@@ -737,7 +736,7 @@ impl LogWindow {
         let marked = env.marked;
         let branches = env.branches;
         let branch_busy = env.branch_busy;
-        let worktrees = env.graph.show_worktrees;
+        let worktrees = env.labels.graph.show_worktrees;
         let query = self.find.query.as_str();
         let mut request = None;
         table.show(
@@ -753,7 +752,7 @@ impl LogWindow {
                         repo,
                         &refs_by_commit[commits[i].ix()],
                         Some(commits[i]),
-                        env.graph,
+                        env.labels,
                     ),
                     subject: &commit.subject,
                     author: &commit.author_name,
@@ -830,7 +829,7 @@ impl LogWindow {
             &view.repo,
             &view.refs_by_commit[ix.ix()],
             Some(ix),
-            env.graph,
+            env.labels,
         );
         ScrollArea::vertical()
             .id_salt(("log-details", commit.oid))
@@ -1328,7 +1327,10 @@ impl ParterreApp {
                 details: &mut self.details,
                 open_worktree: self.repo.as_deref().map(|r| r.path.as_path()),
                 palette,
-                graph: &self.settings.graph,
+                labels: Labels {
+                    graph: &self.settings.graph,
+                    merged: self.merged.shown(),
+                },
                 settings: &mut self.settings.log_window,
                 marked: self.marked.as_ref(),
                 branches: self.branches.catalog.as_deref(),
@@ -1358,6 +1360,8 @@ mod tests {
     use crate::app::commit_table::ROW_HEIGHT;
     use crate::app::table_style::HEADING_HEIGHT;
     use parterre_core::log_layout::Dividers;
+    use parterre_core::merged::MergedBranches;
+    use parterre_core::revgraph::GraphOptions;
 
     #[test]
     fn loss_log_keeps_exact_membership_with_saved_filters_and_after_refs_disappear() {
@@ -1568,7 +1572,10 @@ mod tests {
                 details: &mut details,
                 open_worktree: None,
                 palette: Palette::new(false, &[]),
-                graph: &graph,
+                labels: Labels {
+                    graph: &graph,
+                    merged: &MergedBranches::default(),
+                },
                 settings: &mut settings,
                 marked: None,
                 branches: None,
