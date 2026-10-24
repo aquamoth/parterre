@@ -2385,7 +2385,7 @@ impl Tool {
                     super::remote::deletion_notes(ui, branches, catalog.as_deref(), check);
                 }
                 show_log = if upstream {
-                    upstream_fields(ui, warning, &landed)
+                    upstream_fields(ui, warning, &mut deletes_branches, &landed)
                 } else {
                     loss_fields(ui, warning, listing_files, &mut deletes_branches, &landed)
                 };
@@ -2657,16 +2657,33 @@ fn loss_title(warning: &Warning) -> (String, &'static str) {
     }
 }
 
-/// Whether `warning` deletes local branches and every commit it would lose is a deleted
-/// branch's whose changes landed upstream, as `landed` says (#384).
+/// Whether `warning` deletes local branches, or worktrees with their branches, and every commit
+/// it would lose is a deleted branch's whose changes landed upstream, as `landed` says (#384,
+/// #435).
 fn all_upstream(warning: &Warning, landed: &dyn Fn(&str, Oid) -> Option<String>) -> bool {
-    if !matches!(warning.action, Action::DeleteBranches(_)) || warning.commits.is_empty() {
+    let worktrees = warning.deletes_branches();
+    if !(worktrees || matches!(warning.action, Action::DeleteBranches(_)))
+        || warning.commits.is_empty()
+    {
         return false;
     }
     let mut covered: HashSet<Oid> = HashSet::new();
     for d in &warning.deletions {
         if d.refusal.is_some() || !d.files.is_empty() {
             return false;
+        }
+        if worktrees {
+            // A detached HEAD's commits are on no branch that could have landed.
+            if !d.commits.is_empty() {
+                return false;
+            }
+            if let Some(b) = d.branch.as_ref().filter(|b| !b.commits.is_empty()) {
+                if landed(&b.name, b.tip).is_none() {
+                    return false;
+                }
+                covered.extend(&b.commits);
+            }
+            continue;
         }
         if d.commits.is_empty() {
             continue;
@@ -2681,9 +2698,46 @@ fn all_upstream(warning: &Warning, landed: &dyn Fn(&str, Oid) -> Option<String>)
 
 /// The title deleting branches whose changes are all upstream asks with.
 fn upstream_title(warning: &Warning) -> String {
+    let worktrees = matches!(warning.action, Action::DeleteWorktrees { .. });
     match warning.deletions.as_slice() {
+        [one] if worktrees => format!("Delete worktree {}?", one.name),
+        many if worktrees => format!("Delete {} worktrees?", many.len()),
         [one] => format!("Delete branch {}?", one.name),
         many => format!("Delete {} local branches?", many.len()),
+    }
+}
+
+/// What deleting worktrees always says, lost or not: the folders that go, and whether their
+/// branches go with them.
+fn worktree_fields(ui: &mut Ui, warning: &Warning, deletes_branches: &mut bool) {
+    if !matches!(warning.action, Action::DeleteWorktrees { .. }) {
+        return;
+    }
+    match warning.deletions.as_slice() {
+        [one] => {
+            if let Some(path) = &one.path {
+                ui.label(format!(
+                    "The folder {} and everything in it will be deleted.",
+                    path.display()
+                ));
+            }
+        }
+        _ => {
+            ui.label("These folders and everything in them will be deleted.");
+        }
+    }
+    let owned: Vec<&str> = warning
+        .deletions
+        .iter()
+        .filter_map(|d| d.branch.as_ref())
+        .map(|b| b.name.as_str())
+        .collect();
+    if !owned.is_empty() {
+        let label = match owned.as_slice() {
+            [one] => format!("Also delete local branch {one}"),
+            _ => "Also delete their local branches".to_owned(),
+        };
+        ui.checkbox(deletes_branches, label);
     }
 }
 
@@ -2693,13 +2747,20 @@ fn upstream_title(warning: &Warning) -> String {
 fn upstream_fields(
     ui: &mut Ui,
     warning: &Warning,
+    deletes_branches: &mut bool,
     landed: &dyn Fn(&str, Oid) -> Option<String>,
 ) -> Option<Vec<Oid>> {
+    worktree_fields(ui, warning, deletes_branches);
+    // A worktree's are its branch's; a branch's are its own.
     let merged: Vec<String> = warning
         .deletions
         .iter()
-        .filter(|d| !d.commits.is_empty())
-        .filter_map(|d| landed(&d.name, d.tip()?))
+        .filter_map(|d| match &d.branch {
+            Some(b) => Some((b.name.as_str(), b.tip, &b.commits)),
+            None => Some((d.name.as_str(), d.tip()?, &d.commits)),
+        })
+        .filter(|(_, _, commits)| !commits.is_empty())
+        .filter_map(|(name, tip, _)| landed(name, tip))
         .collect();
     for note in &merged {
         ui.label(format!("{note}."));
@@ -2736,34 +2797,7 @@ fn loss_fields(
     landed: &dyn Fn(&str, Oid) -> Option<String>,
 ) -> Option<Vec<Oid>> {
     let mut show_log = None;
-    let worktrees = matches!(warning.action, Action::DeleteWorktrees { .. });
-    match warning.deletions.as_slice() {
-        [one] if worktrees => {
-            if let Some(path) = &one.path {
-                ui.label(format!(
-                    "The folder {} and everything in it will be deleted.",
-                    path.display()
-                ));
-            }
-        }
-        _ if worktrees => {
-            ui.label("These folders and everything in them will be deleted.");
-        }
-        _ => {}
-    }
-    let owned: Vec<&str> = warning
-        .deletions
-        .iter()
-        .filter_map(|d| d.branch.as_ref())
-        .map(|b| b.name.as_str())
-        .collect();
-    if worktrees && !owned.is_empty() {
-        let label = match owned.as_slice() {
-            [one] => format!("Also delete local branch {one}"),
-            _ => "Also delete their local branches".to_owned(),
-        };
-        ui.checkbox(deletes_branches, label);
-    }
+    worktree_fields(ui, warning, deletes_branches);
     let deletes_branches = *deletes_branches;
     let several = warning.deletions.len() > 1;
     let unreachable = match &warning.action {
@@ -3271,6 +3305,32 @@ mod tests {
         h.click("Delete");
         h.until("it is gone", |h| {
             !git(h.path(), &["branch", "--format=%(refname:short)"]).contains("three")
+        });
+    }
+
+    /// #435: a worktree deleted with its squash-merged branch loses no work either.
+    #[test]
+    fn deleting_a_worktree_with_its_squash_merged_branch_is_a_calm_confirmation() {
+        let (dir, others) = repository();
+        let b = others.path().join("b");
+        git(&b, &["commit", "-q", "--allow-empty", "-m", "only on b"]);
+        let path = listed(dir.path(), others.path(), "b");
+        let mut h = Harness::new(dir);
+        squash_merged(&mut h, "b");
+        h.ask(worktree_deletion(path), "Delete worktree b?");
+        h.click("Also delete local branch b");
+        h.until("its commit is upstream", |h| {
+            h.shows_part("b was squash-merged as") && h.shows("1 commit")
+        });
+        assert!(
+            h.shows("Delete worktree b?") && !h.shows("Delete anyway") && !h.shows_part("lose"),
+            "{:?}",
+            h.texts
+        );
+        assert!(h.shows_part("will be deleted"), "{:?}", h.texts);
+        h.click("Delete");
+        h.until("both are gone", |h| {
+            !b.exists() && git(h.path(), &["branch", "--list", "b"]).is_empty()
         });
     }
 
