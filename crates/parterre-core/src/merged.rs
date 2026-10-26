@@ -4,11 +4,13 @@
 //! are checked: a forge deletes the branch once merged, and a fetch prunes it.
 //!
 //! Found here from git alone, by patch: a squash merge is a commit on the default branch with
-//! the change of the whole branch (`git diff <merge-base> <tip> | git patch-id --stable`), and
-//! a rebase merge has a copy of each of the branch's commits there (as `rev-list --cherry-mark`
-//! finds them). Either way it landed after the branch forked. Every branch is checked with the
-//! same four git starts. The forge finds what this misses: conflicts resolved, or edits made,
-//! as the pull request was completed (`parterre-forge`).
+//! the change of the whole branch (`git diff -U0 <merge-base> <tip> | git patch-id --stable`),
+//! and a rebase merge has a copy of each of the branch's commits there (as `rev-list
+//! --cherry-mark` finds them). Either way it landed after the branch forked. Changes are
+//! compared without context, the lines added and removed alone, so that a pull request rebased
+//! on the forge before it was merged is found too (#437). Every branch is checked with the same
+//! four git starts. The forge finds what this misses: conflicts resolved, or edits made, as
+//! the pull request was completed (`parterre-forge`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -274,12 +276,17 @@ pub fn find(git: &Git, repo: &Repo, branches: &[usize]) -> Result<Vec<Option<Mer
 }
 
 /// `git patch-id --stable` of what `git diff-tree --stdin` prints for `lines`: by the commit
-/// heading each diff. A diff that changes nothing has none.
+/// heading each diff. A diff that changes nothing has none. Without context: the lines each
+/// file adds and removes count, not their neighbours, which a rebase on the forge may change
+/// (#437).
 fn patch_ids(git: &Git, lines: String) -> Result<HashMap<Oid, String>, GitError> {
     if lines.is_empty() {
         return Ok(HashMap::new());
     }
-    let diffs = git.run_with_input_bytes(&["diff-tree", "--stdin", "-p", "--no-renames"], lines)?;
+    let diffs = git.run_with_input_bytes(
+        &["diff-tree", "--stdin", "-p", "-U0", "--no-renames"],
+        lines,
+    )?;
     let ids = git.run_with_input(&["patch-id", "--stable"], diffs)?;
     Ok(ids
         .lines()

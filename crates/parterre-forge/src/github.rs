@@ -150,14 +150,14 @@ pub(crate) fn merged(
     Ok(merged_of(&found.list, branches))
 }
 
-/// Each branch's pull request among `found`: from it, with its tip as the head.
+/// Each branch's pull request among `found`: from it, and its ([`GoneBranch::merged_by`]).
 fn merged_of(found: &[MergedPullRequest], branches: &[GoneBranch]) -> Vec<Option<Merged>> {
     branches
         .iter()
         .map(|b| {
-            let pr = found
-                .iter()
-                .find(|pr| pr.head_branch == b.name && pr.head == b.tip)?;
+            let pr = found.iter().find(|pr| {
+                pr.head_branch == b.name && b.merged_by(Some(pr.head), pr.merge_commit)
+            })?;
             Some(Merged {
                 how: None,
                 landed: pr.merge_commit,
@@ -990,6 +990,7 @@ mod tests {
         GoneBranch {
             name: name.into(),
             tip: Oid::from_hex(&tip.to_string().repeat(40)).unwrap(),
+            landed: None,
         }
     }
 
@@ -1041,5 +1042,34 @@ mod tests {
             "{query}"
         );
         assert!(query.contains("mergeCommit{oid}"), "{query}");
+    }
+
+    /// #437: rebased on GitHub before it was merged, its head isn't the branch's tip; it is
+    /// the branch's if it was merged as the commit git found the branch landed as.
+    #[test]
+    fn a_pull_request_rebased_first_is_found_by_where_it_landed() {
+        let found = [MergedPullRequest {
+            number: 5,
+            head: Oid::from_hex(&"9".repeat(40)).unwrap(),
+            head_branch: "topic".into(),
+            merge_commit: Oid::from_hex(&"7".repeat(40)),
+        }];
+        let landed = |c: char| Oid::from_hex(&c.to_string().repeat(40));
+        let landed_at = |c: char| GoneBranch {
+            landed: landed(c),
+            ..gone("topic", '4')
+        };
+        let expected = Merged {
+            how: None,
+            landed: landed('7'),
+            pull_request: Some(5),
+        };
+        assert_eq!(
+            merged_of(
+                &found,
+                &[landed_at('7'), landed_at('0'), gone("topic", '4')]
+            ),
+            [Some(expected), None, None]
+        );
     }
 }

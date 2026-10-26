@@ -173,6 +173,52 @@ fn a_branch_partly_upstream_is_not_merged() {
     assert_eq!(found(&s), [("topic".to_owned(), None)]);
 }
 
+/// A branch that adds `lines` to `main.txt`, pushed and gone; meanwhile `main` adds `Main`
+/// there too, and then lands `landed` after it: as a forge squash-merges a pull request it
+/// rebased first. Returns the squash commit.
+fn rebased_and_squashed(s: &mut Setup, lines: &[&str], landed: &[&str]) -> String {
+    s.repo.git(&["switch", "-q", "-c", "topic", "main"]);
+    for line in lines {
+        s.change("main.txt", line);
+    }
+    s.repo.git(&["push", "-q", "-u", "origin", "topic"]);
+    s.main_moves_on("Elsewhere");
+    s.change("main.txt", "Main");
+    let text: String = landed.iter().map(|l| format!("{l}\n")).collect();
+    let mut file = std::fs::read_to_string(s.repo.path().join("main.txt")).unwrap();
+    file.push_str(&text);
+    s.repo.write("main.txt", file.as_bytes());
+    let commit = s.repo.commit_all("topic (#1)");
+    s.repo.git(&["push", "-q", "origin", "main"]);
+    s.delete_on_origin("topic");
+    commit
+}
+
+/// The rebase put its lines next to others: the same lines added count, not their neighbours
+/// (#437).
+#[test]
+fn a_branch_rebased_before_its_squash_merge_is_found() {
+    let mut s = Setup::new();
+    let landed = rebased_and_squashed(&mut s, &["One", "Two"], &["One", "Two"]);
+    assert_eq!(found(&s), [("topic".to_owned(), squash(&landed))]);
+}
+
+/// Not if one of its lines didn't land.
+#[test]
+fn a_branch_rebased_with_a_line_dropped_is_not_merged() {
+    let mut s = Setup::new();
+    rebased_and_squashed(&mut s, &["One", "Two"], &["One"]);
+    assert_eq!(found(&s), [("topic".to_owned(), None)]);
+}
+
+/// Nor if one of them landed changed.
+#[test]
+fn a_branch_rebased_with_a_line_changed_is_not_merged() {
+    let mut s = Setup::new();
+    rebased_and_squashed(&mut s, &["One", "Two"], &["One", "Too"]);
+    assert_eq!(found(&s), [("topic".to_owned(), None)]);
+}
+
 #[test]
 fn a_branch_deleted_unmerged_is_not_merged() {
     let mut s = Setup::new();
