@@ -9,7 +9,8 @@
 //! never changes for that pair, and is kept as soon as either side says so. "Not found" is kept
 //! only once git and the forge have both answered, and dropped once the branch's upstream is
 //! seen again: a branch made to track one not pushed yet is gone until its first push, and can
-//! be merged with that tip later. Answers of branches that moved or went are dropped.
+//! be merged with that tip later. It is dropped, too, once a newer check may find what the
+//! older one didn't (#441). Answers of branches that moved or went are dropped.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -36,12 +37,20 @@ pub fn load(storage: &dyn eframe::Storage) -> Remembered {
     eframe::get_value(storage, MERGED_KEY).unwrap_or_default()
 }
 
+/// The version of the check: bumped whenever it comes to find branches merged that it didn't,
+/// so that "not found" answers of an older one are asked again (#441). 1: changes compared
+/// without context, and pull requests found by the commit they were merged as (#437).
+const CHECK: u32 = 1;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Answer {
     /// The tip it is about.
     pub tip: Oid,
     /// `None`: neither git nor the forge found it merged.
     pub merged: Option<Merged>,
+    /// The [`CHECK`] that answered; 0 for answers stored before checks had a version.
+    #[serde(default)]
+    pub check: u32,
 }
 
 /// What a job found for its branches, in their order.
@@ -136,7 +145,14 @@ impl MergedLoader {
             let answers = self.remembered.entry(job.key).or_default();
             for ((name, tip), merged) in job.branches.into_iter().zip(found.merged) {
                 if merged.is_some() || found.complete {
-                    answers.insert(name, Answer { tip, merged });
+                    answers.insert(
+                        name,
+                        Answer {
+                            tip,
+                            merged,
+                            check: CHECK,
+                        },
+                    );
                 }
             }
             changed |= self.show();
@@ -260,7 +276,7 @@ fn same_snapshot(a: Option<&Arc<Repo>>, b: Option<&Arc<Repo>>) -> bool {
 }
 
 /// Drops the answers about branches that went or moved, and the "not found" of each branch
-/// whose upstream is there again.
+/// whose upstream is there again or that an older check gave.
 fn forget_stale(answers: &mut HashMap<String, Answer>, repo: &Repo) {
     answers.retain(|name, answer| {
         let Some(b) = repo.refs.iter().position(|r| r.full_name == *name) else {
@@ -268,7 +284,7 @@ fn forget_stale(answers: &mut HashMap<String, Answer>, repo: &Repo) {
         };
         let at_tip = repo.commit(repo.refs[b].target).oid == answer.tip;
         let upstream_back = repo.upstream_of(b).is_some_and(|u| !u.is_gone());
-        at_tip && (answer.merged.is_some() || !upstream_back)
+        at_tip && (answer.merged.is_some() || (!upstream_back && answer.check >= CHECK))
     });
 }
 
@@ -362,7 +378,11 @@ mod tests {
             let r = repo.refs.iter().find(|r| r.name == name).unwrap();
             repo.commit(r.target).oid
         };
-        let not_found = |tip| Answer { tip, merged: None };
+        let not_found = |tip| Answer {
+            tip,
+            merged: None,
+            check: CHECK,
+        };
         let mut answers: HashMap<String, Answer> = [
             ("refs/heads/topic", not_found(tip("topic"))),
             ("refs/heads/main", not_found(tip("main"))),
@@ -379,5 +399,34 @@ mod tests {
         kept.sort_unstable();
         // `main`'s upstream is there: its "not found" may change.
         assert_eq!(kept, ["refs/heads/topic"]);
+    }
+
+    /// #441: an older check's "not found" is asked again, as this one may find it; its
+    /// "merged" stays.
+    #[test]
+    fn an_older_checks_not_found_is_forgotten() {
+        let dir = tempfile::tempdir().unwrap();
+        squash_merged(dir.path());
+        let repo = parterre_core::git::load_repo(&dir.path().join("work")).unwrap();
+        let topic = repo.refs.iter().find(|r| r.name == "topic").unwrap();
+        let tip = repo.commit(topic.target).oid;
+        let merged = Merged {
+            how: Some(How::Squash),
+            landed: None,
+            pull_request: None,
+        };
+        let kept = |merged: Option<Merged>, check: u32| {
+            let answer = Answer { tip, merged, check };
+            let mut answers = HashMap::from([(topic.full_name.clone(), answer)]);
+            forget_stale(&mut answers, &repo);
+            !answers.is_empty()
+        };
+        assert!(!kept(None, CHECK - 1));
+        assert!(kept(None, CHECK));
+        assert!(kept(Some(merged), CHECK - 1));
+        // Answers stored before checks had a version are from the first.
+        let stored = format!("(tip:\"{}\",merged:None)", tip.to_hex());
+        let answer: Answer = ron::from_str(&stored).unwrap();
+        assert_eq!(answer.check, 0);
     }
 }
