@@ -206,11 +206,16 @@ fn check(repo: &Repo, branches: &[usize], no_forge: bool) -> Found {
     let git = Git::new(&repo.path);
     let local = merged::find(&git, repo, branches);
     let origin = (!no_forge).then(|| parterre_forge::origin(&git)).flatten();
-    // The forge knows only branches whose upstream was on `origin`.
+    // The forge knows only branches whose upstream was on `origin`. Where git found one
+    // landed, the forge names its pull request though it was rebased there first (#437).
+    let landed = |i: usize| {
+        let found = local.as_ref().ok()?.get(i)?.as_ref()?;
+        found.landed
+    };
     let gone: Vec<(usize, GoneBranch)> = branches
         .iter()
         .enumerate()
-        .filter_map(|(i, &b)| Some((i, GoneBranch::of(repo, b)?)))
+        .filter_map(|(i, &b)| Some((i, GoneBranch::of(repo, b, landed(i))?)))
         .collect();
     let mut forge: Vec<Option<Merged>> = vec![None; branches.len()];
     let forge_answered = match &origin {

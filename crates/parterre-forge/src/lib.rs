@@ -130,18 +130,29 @@ pub struct GoneBranch {
     /// `origin/topic`.
     pub name: String,
     pub tip: Oid,
+    /// The commit git found its changes landed as (`parterre_core::merged::find`), if it did.
+    pub landed: Option<Oid>,
 }
 
 impl GoneBranch {
     /// The local branch `branch` of `repo` (an index into [`Repo::refs`]), if its upstream is
-    /// on `origin`.
-    pub fn of(repo: &Repo, branch: usize) -> Option<GoneBranch> {
+    /// on `origin`, with the commit git found it `landed` as.
+    pub fn of(repo: &Repo, branch: usize, landed: Option<Oid>) -> Option<GoneBranch> {
         let upstream = repo.upstream_of(branch)?;
         let name = upstream.name.strip_prefix("refs/remotes/origin/")?;
         Some(GoneBranch {
             name: name.to_owned(),
             tip: repo.commit(repo.refs[branch].target).oid,
+            landed,
         })
+    }
+
+    /// Whether a merged pull request from it, with head `head` that was merged as
+    /// `merge_commit`, is its: its head was the branch's tip, or it was merged as the commit
+    /// git found the branch landed as, though rebased on the forge first (#437). Only that
+    /// names the pull request; git found the branch merged already.
+    fn merged_by(&self, head: Option<Oid>, merge_commit: Option<Oid>) -> bool {
+        head == Some(self.tip) || (merge_commit.is_some() && merge_commit == self.landed)
     }
 }
 

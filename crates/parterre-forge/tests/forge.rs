@@ -277,11 +277,13 @@ fn finds_a_merged_pull_request_of_parterre_on_github() {
         forge::GoneBranch {
             name: "t3/prune-grep".into(),
             tip: oid("79e5e5af1f789743024e9bdbd0cc5466d153ff4b"),
+            landed: None,
         },
         // The same name at another commit is another branch.
         forge::GoneBranch {
             name: "t3/prune-grep".into(),
             tip: oid(&"0".repeat(40)),
+            landed: None,
         },
     ];
     let found = origin
@@ -484,6 +486,7 @@ fn finds_a_completed_pull_request_on_azure_devops() {
     let asked = [forge::GoneBranch {
         name: branch.into(),
         tip: oid(head),
+        landed: None,
     }];
     let found = origin.merged(&git, &asked).expect("Azure DevOps answers");
     let found = found[0].clone().expect("found merged");

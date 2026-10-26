@@ -82,7 +82,7 @@ fn completed_pull_requests(
                 .value
                 .into_iter()
                 .filter(|pr| pr.fork_source.is_none())
-                .find_map(|pr| pr.into_merged(b.tip)))
+                .find_map(|pr| pr.into_merged(b)))
         })
         .collect()
 }
@@ -284,6 +284,8 @@ mod json {
     use parterre_core::merged::{How, Merged};
     use parterre_core::oid::Oid;
 
+    use crate::GoneBranch;
+
     #[derive(Debug, Deserialize)]
     pub struct List<T> {
         pub value: Vec<T>,
@@ -373,18 +375,18 @@ mod json {
     }
 
     impl CompletedPullRequest {
-        /// `None` unless its head was `tip` when it was completed.
-        pub fn into_merged(self, tip: Oid) -> Option<Merged> {
-            let head = Oid::from_hex(&self.last_merge_source_commit?.commit_id)?;
+        /// `None` unless it is `branch`'s ([`GoneBranch::merged_by`]).
+        pub fn into_merged(self, branch: &GoneBranch) -> Option<Merged> {
+            let oid = |c: Option<Commit>| c.and_then(|c| Oid::from_hex(&c.commit_id));
+            let head = oid(self.last_merge_source_commit);
+            let landed = oid(self.last_merge_commit);
             let how = self
                 .completion_options
                 .as_ref()
                 .and_then(CompletionOptions::how);
-            (head == tip).then(|| Merged {
+            branch.merged_by(head, landed).then_some(Merged {
                 how,
-                landed: self
-                    .last_merge_commit
-                    .and_then(|c| Oid::from_hex(&c.commit_id)),
+                landed,
                 pull_request: Some(self.pull_request_id),
             })
         }
@@ -807,22 +809,27 @@ mod tests {
             GoneBranch {
                 name: "fix/x".into(),
                 tip: sha('a'),
+                landed: None,
             },
             GoneBranch {
                 name: "topic".into(),
                 tip: sha('b'),
+                landed: None,
             },
             GoneBranch {
                 name: "abandoned".into(),
                 tip: sha('c'),
+                landed: None,
             },
             GoneBranch {
                 name: "numbered".into(),
                 tip: sha('d'),
+                landed: None,
             },
             GoneBranch {
                 name: "old".into(),
                 tip: sha('f'),
+                landed: None,
             },
         ];
         let squashed = |id: u64, landed: char| {
@@ -853,5 +860,35 @@ mod tests {
              ?searchCriteria.sourceRefName=refs%2Fheads%2Ffix%2Fx\
              &searchCriteria.status=completed&$top=10&api-version=7.1"
         );
+    }
+
+    /// #437: rebased on the forge before it was completed, its head isn't the branch's tip;
+    /// it is the branch's if it was completed as the commit git found the branch landed as.
+    #[test]
+    fn a_pull_request_rebased_first_is_found_by_where_it_landed() {
+        let squash = r#","completionOptions":{"mergeStrategy":"squash"}"#;
+        let api = Fake::new(vec![
+            page(&[completed(11, '9', '7', squash)]),
+            page(&[completed(12, '9', '7', squash)]),
+            page(&[completed(13, '9', '7', squash)]),
+        ]);
+        let gone = |landed: Option<char>| GoneBranch {
+            name: "topic".into(),
+            tip: sha('4'),
+            landed: landed.map(sha),
+        };
+        let branches = [
+            gone(Some('7')),
+            // Git found it landed elsewhere, or nowhere.
+            gone(Some('0')),
+            gone(None),
+        ];
+        let found = completed_pull_requests(&api, &cjp(), &branches).unwrap();
+        let rebased = Merged {
+            how: Some(How::Squash),
+            landed: Some(sha('7')),
+            pull_request: Some(11),
+        };
+        assert_eq!(found, [Some(rebased), None, None]);
     }
 }
