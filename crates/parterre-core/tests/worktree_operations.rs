@@ -417,6 +417,33 @@ fn a_worktree_that_loses_nothing_is_confirmed_then_deleted_keeping_its_branch() 
     assert_eq!(r.git(&["branch", "--list", "clean"]), "clean");
 }
 
+/// Windows deletes no file a program holds open, and git, having let go of the worktree, stops
+/// there and says only "Invalid argument" (#445). The file and the program holding it are named.
+#[cfg(windows)]
+#[test]
+fn a_folder_left_behind_names_the_file_in_use_and_the_program_holding_it() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 1;
+
+    let (r, others, _) = repository();
+    let path = worktree(&r, others.path(), "busy", &["-b", "busy"]);
+    let action = deletion(&r, "busy");
+    let confirm = warning(execute(&r, action.clone(), None));
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path.join("file"))
+        .unwrap();
+    let error = failed(execute(&r, action, Some(&confirm)));
+    drop(held);
+    assert!(!registered(&r, "busy"));
+    assert!(error.contains("left behind"), "{error}");
+    assert!(error.contains("file is in use by"), "{error}");
+    let process = format!("process {}", std::process::id());
+    assert!(error.contains(&process), "{error}");
+    assert!(!error.contains("Invalid argument"), "{error}");
+}
+
 #[test]
 fn changed_staged_and_untracked_files_are_listed_and_only_then_forced() {
     let (r, others, _) = repository();
