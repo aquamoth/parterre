@@ -2507,8 +2507,8 @@ mod tests {
         drag(&mut net, &[0], by, &free());
         settle(&mut net, &free());
         assert!(close(net.node_pos(0), l.nodes[0] + by));
-        for i in 1..4 {
-            assert_eq!(net.node_pos(i), l.nodes[i], "node {i} stays");
+        for (i, &p) in l.nodes.iter().enumerate().take(4).skip(1) {
+            assert_eq!(net.node_pos(i), p, "node {i} stays");
         }
         // The edge now runs along a route of its own, but its bend points still follow, for
         // when its nodes come back into line.
@@ -2839,8 +2839,8 @@ mod tests {
         let shape: Vec<Point> = (0..5).map(|i| net.node_pos(i)).collect();
         assert!(net.undo());
         settle(&mut net, &params);
-        for i in 0..5 {
-            assert!(close(net.node_pos(i), l.nodes[i]), "node {i} back");
+        for (i, &p) in l.nodes.iter().enumerate().take(5) {
+            assert!(close(net.node_pos(i), p), "node {i} back");
         }
         assert!(!net.moved_by_hand[2] && !net.any_displaced());
         assert!(net.redo());
@@ -3234,8 +3234,8 @@ mod tests {
             net.reset();
             settle(&mut net, &params);
             assert_eq!(order(&net), before);
-            for i in 0..4 {
-                assert!(close(net.node_pos(i), l.nodes[i]), "node {i} back home");
+            for (i, &p) in l.nodes.iter().enumerate().take(4) {
+                assert!(close(net.node_pos(i), p), "node {i} back home");
             }
         }
     }
