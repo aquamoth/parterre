@@ -8,6 +8,7 @@ use std::sync::Arc;
 use parterre_util::{CancelTree, StartError};
 
 use crate::git::{Config, Git, GitError, Listing};
+use crate::in_use;
 use crate::operation::{git_args, run, run_or_fail, verify_commit};
 use crate::repo::DEFAULT_ABBREV_LEN;
 use crate::text::capitalized;
@@ -1595,15 +1596,16 @@ impl Branches {
             if !registered {
                 if wt.path.exists() {
                     // Windows: a file in use stops the deletion halfway, after git has let go.
-                    return Err(Error::Failed(format!(
-                        "The worktree is gone from git, but its folder was left behind: {}. Delete it yourself.{}",
-                        wt.path.display(),
-                        if output.is_empty() {
-                            String::new()
-                        } else {
-                            format!("\n\n{output}")
-                        }
-                    )));
+                    // Git says only "Invalid argument"; the program holding it says why (#445).
+                    let left = format!(
+                        "The worktree is gone from git, but its folder was left behind: {}.",
+                        wt.path.display()
+                    );
+                    return Err(Error::Failed(match in_use::find(&wt.path) {
+                        Some(in_use) => format!("{left} {}", in_use.explain()),
+                        None if output.is_empty() => format!("{left} Delete it yourself."),
+                        None => format!("{left} Delete it yourself.\n\n{output}"),
+                    }));
                 }
                 if let Some(b) = approved.branch.as_ref().filter(|_| branches) {
                     gone.push(BranchTip {

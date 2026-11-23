@@ -16,6 +16,7 @@ pub mod find;
 pub mod git;
 pub mod glyphs;
 pub mod icon;
+mod in_use;
 pub mod layout;
 pub mod lenient;
 pub mod list_keys;
